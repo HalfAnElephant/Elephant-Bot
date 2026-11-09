@@ -101,6 +101,7 @@ class OneBotAdapter:
         self.account_online = False
         self.forward_task = None
         self.last_error = None
+        self.conversation_names = {}
 
     async def start(self):
         self.config.secret()
@@ -128,6 +129,38 @@ class OneBotAdapter:
             self.pending.pop(key, None)
             if not future.done():
                 future.cancel()
+
+    async def resolve_conversation_names(self, refs):
+        if self.websocket is None:
+            return dict(self.conversation_names)
+        semaphore = asyncio.Semaphore(4)
+
+        async def resolve(ref):
+            key = (ref.surface, ref.remote_conversation_id)
+            async with semaphore:
+                is_group = ref.surface == Surface.GROUP
+                try:
+                    response = await asyncio.wait_for(self._request(
+                        "get_group_info" if is_group else "get_stranger_info",
+                        {"group_id" if is_group else "user_id": ref.remote_conversation_id},
+                    ), 2)
+                    data = response.get("data") or {}
+                    name = data.get("group_name" if is_group else "nickname")
+                    if response.get("status") == "ok" and isinstance(name, str) and name.strip():
+                        self.conversation_names[key] = name.strip()
+                except (TimeoutError, ConnectionError, OSError, RuntimeError, AttributeError, TypeError):
+                    pass
+
+        pending = [asyncio.create_task(resolve(ref)) for ref in refs]
+        if pending:
+            try:
+                await asyncio.wait(pending, timeout=3)
+            finally:
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        return dict(self.conversation_names)
 
     async def _read_forward(self, connection, generation):
         async for raw in connection:

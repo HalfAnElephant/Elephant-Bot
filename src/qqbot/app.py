@@ -17,6 +17,7 @@ from qqbot.admin.api import router as admin_router
 from qqbot.cli import migrate
 from qqbot.clock import Clock
 from qqbot.configuration import ConfigurationStore
+from qqbot.domain import ConversationRef
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.api import internal_router
 from qqbot.observability import configure_logging
@@ -228,7 +229,24 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         )
         with db.engine.connect() as c:
             rows = [dict(r._mapping) for r in c.execute(select(conversations).limit(200))]
-        return [{**row, "policy": core.state(row["id"])} for row in rows]
+        refs = {row["id"]: ConversationRef.model_validate_json(row["ref_json"]) for row in rows}
+        names = {}
+
+        async def resolve_names(instance_id, adapter):
+            selected = [ref for ref in refs.values() if ref.adapter_instance_id == instance_id]
+            if selected and isinstance(adapter, OneBotAdapter):
+                names[instance_id] = await adapter.resolve_conversation_names(selected)
+
+        await asyncio.gather(*(resolve_names(key, adapter) for key, adapter in adapters.items()))
+        result = []
+        for row in rows:
+            ref = refs[row["id"]]
+            name = names.get(ref.adapter_instance_id, {}).get((ref.surface, ref.remote_conversation_id))
+            name = name or ("群聊" if ref.surface == "group" else "私聊")
+            result.append({**row, "policy": core.state(row["id"]), "display_name": name,
+                           "remote_id": ref.remote_conversation_id,
+                           "display_label": f"{name}（{ref.remote_conversation_id}）"})
+        return result
 
     @app.websocket("/onebot/{instance_id}")
     async def onebot(websocket: WebSocket, instance_id: str):

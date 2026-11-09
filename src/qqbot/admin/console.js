@@ -709,12 +709,12 @@ if (typeof document !== 'undefined') (() => {
   $('cid').addEventListener('change', () => selectConversation($('cid').value.trim()));
   async function loadConversations() {
     conversations = await request('/api/v1/conversations');
-    $('conversation-options').replaceChildren(); $('conversation-rows').replaceChildren();
+    const selected = $('cid').value; $('cid').replaceChildren(); $('conversation-rows').replaceChildren();
     for (const item of conversations) {
-      const option = document.createElement('option'); option.value = item.id; $('conversation-options').append(option);
-      const row = document.createElement('tr'); cell(row, item.id); cell(row, item.policy?.mode); cell(row, item.policy?.policy_version); button(cell(row, ''), '选择', () => selectConversation(item.id)); $('conversation-rows').append(row);
+      const option = document.createElement('option'); option.value = item.id; option.textContent = item.display_label; $('cid').append(option);
+      const row = document.createElement('tr'); cell(row, item.display_label); cell(row, item.policy?.mode); cell(row, item.policy?.policy_version); button(cell(row, ''), '选择', () => selectConversation(item.id)); $('conversation-rows').append(row);
     }
-    if (!$('cid').value && conversations.length) selectConversation(conversations[0].id); else selectConversation($('cid').value);
+    selectConversation(conversations.some(item => item.id === selected) ? selected : conversations[0]?.id || '');
     if (!conversations.length) { const row = element('tr'); const td = cell(row, '暂无会话。接入 QQ 后，收到的会话会出现在这里。'); td.colSpan = 4; $('conversation-rows').append(row); }
     notice('已读取 ' + conversations.length + ' 个会话');
   }
@@ -936,7 +936,7 @@ if (typeof document !== 'undefined') (() => {
     stopEvents(); authEpoch++; token = ''; conversations = []; configVersion = savedConfigVersion = personaVersion = permissionVersion = null;
     editors.forEach(state => state.clear()); configView = null; $('token').value = ''; $('token').type = 'password';
     document.querySelectorAll('pre').forEach(item => { item.textContent = ''; });
-    for (const id of ['conversation-rows', 'task-rows', 'memory-rows', 'conversation-options', 'versions', 'credentials', 'overview-metrics', 'overview-adapters']) $(id).replaceChildren();
+    for (const id of ['conversation-rows', 'task-rows', 'memory-rows', 'cid', 'versions', 'credentials', 'overview-metrics', 'overview-adapters']) $(id).replaceChildren();
     for (const id of ['cid', 'policy-version', 'task-id', 'task-goal', 'memory-id', 'source-event', 'memory-text']) $(id).value = '';
     $('persona').value = '{}'; show('auth-error', '');
     $('login-toggle-token').setAttribute('aria-pressed', 'false');
