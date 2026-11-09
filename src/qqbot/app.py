@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import secrets
 import socket
@@ -8,7 +7,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy import func, select
 
 from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
@@ -17,7 +16,7 @@ from qqbot.admin.api import ADMIN_HTML
 from qqbot.admin.api import router as admin_router
 from qqbot.cli import migrate
 from qqbot.clock import Clock
-from qqbot.config import Settings
+from qqbot.configuration import ConfigurationStore
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.api import internal_router
 from qqbot.observability import configure_logging
@@ -35,12 +34,8 @@ class InternalServer(uvicorn.Server):
 
 def create_app(settings, *, clock=None, run_background=True, official_client=None, model_client=None):
     configure_logging()
-    applied = Path(settings.database).parent / "runtime-config.json"
-    if applied.exists():
-        values = json.loads(applied.read_text())
-        if set(values) - {"model", "send_budget_per_minute"}:
-            raise ValueError("invalid persisted runtime configuration")
-        settings = Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}))
+    config_store = ConfigurationStore(settings)
+    settings = config_store.read()
     clock = clock or Clock()
     migrate(settings.database)
     db = Database(settings.database)
@@ -54,6 +49,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         for cfg in settings.adapters
     }
     core = Core(settings, db, clock, adapters, model_client)
+    core.config_store = config_store
 
     @asynccontextmanager
     async def lifespan(app):
@@ -113,6 +109,15 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     app = FastAPI(title="Elephant Bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.core, app.state.adapters, app.state.db, app.state.ready = core, adapters, db, False
 
+    @app.middleware("http")
+    async def private_console_responses(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith(("/admin", "/api/v1/")):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     @app.exception_handler(ValueError)
     async def invalid_request(request, exc):
         return JSONResponse({"detail": str(exc)[:240]}, status_code=422)
@@ -160,8 +165,20 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     @app.get("/admin", response_class=HTMLResponse)
     def management_page():
         return HTMLResponse(
-            ADMIN_HTML, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+            ADMIN_HTML,
+            headers={"Content-Security-Policy": (
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+                "frame-ancestors 'none'; form-action 'self'"
+            )},
         )
+
+    @app.get("/admin/assets/{name}")
+    def console_asset(name: str):
+        media_types = {"console.js": "text/javascript", "console.css": "text/css"}
+        if name not in media_types:
+            raise HTTPException(404)
+        return FileResponse(Path(__file__).parent / "admin" / name, media_type=media_types[name])
 
     @app.get("/api/v1/status")
     async def status(request: Request):

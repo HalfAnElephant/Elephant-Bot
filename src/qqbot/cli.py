@@ -11,7 +11,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from qqbot.config import Settings, load_settings
+from qqbot.config import Settings, load_runtime_settings, load_settings
 
 
 def migrate(path: str):
@@ -45,7 +45,8 @@ def main():
     parser.add_argument("--snapshot")
     parser.add_argument("--deletion-ledger")
     args = parser.parse_args()
-    settings = load_settings(args.config)
+    startup_settings = load_settings(args.config)
+    settings = load_runtime_settings(startup_settings)
     if args.command in {"backup", "restore", "export-deletions"}:
         from qqbot.storage.operations import backup, export_deletions, restore
 
@@ -95,7 +96,7 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if settings.tasks_enabled or settings.interactive_execution_enabled:
                 clean_stale_socket(settings.internal_socket)
-            uvicorn.run(create_app(settings), host="127.0.0.1", port=8080)
+            uvicorn.run(create_app(startup_settings), host="127.0.0.1", port=8080)
         finally:
             os.close(lock)
 

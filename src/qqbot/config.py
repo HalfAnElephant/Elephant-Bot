@@ -158,3 +158,16 @@ class Settings(DTO):
 
 def load_settings(path: str | Path) -> Settings:
     return Settings.model_validate_json(json.dumps(yaml.safe_load(Path(path).read_text()) or {}))
+
+
+def runtime_config_path(settings: Settings) -> Path:
+    # Anchor to the startup file's database, even when the saved database changes.
+    return Path(settings.database).resolve().parent / "runtime-config.json"
+
+
+def load_runtime_settings(settings: Settings) -> Settings:
+    path = runtime_config_path(settings)
+    if not path.exists():
+        return settings
+    values = json.loads(path.read_text())
+    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}))

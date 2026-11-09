@@ -58,6 +58,7 @@ class Core:
             PersonaStore(
                 settings.persona_path,
                 overrides_path=str(__import__("pathlib").Path(db.path).parent / "persona-overrides.json"),
+                global_path=str(__import__("pathlib").Path(db.path).parent / "persona-global.json"),
             ),
         )
         self.policy = SpeechPolicy(clock)

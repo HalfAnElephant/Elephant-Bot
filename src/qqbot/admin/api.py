@@ -4,7 +4,7 @@ import json
 import os
 import re
 import stat
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import quote
@@ -16,11 +16,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select
 
 from qqbot.config import Settings
+from qqbot.configuration import changes
+from qqbot.configuration import version as config_digest
+from qqbot.dialogue import PersonaSpec
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, TextSegment, stable_id
 from qqbot.domain.messages import SendReceipt
 from qqbot.domain.tasks import TaskResult
 from qqbot.memory import MemoryRecord
-from qqbot.permissions import PermissionRule, PermissionService, PermissionSubject, PolicyVersionConflict
+from qqbot.permissions import (
+    PermissionPolicy,
+    PermissionRule,
+    PermissionService,
+    PermissionSubject,
+    PolicyVersionConflict,
+)
 from qqbot.storage.schema import conversations, decisions, inbox, outbox
 from qqbot.storage.social_schema import social_records
 from qqbot.storage.task_schema import events, runs, tasks
@@ -88,6 +97,18 @@ class PermissionCheckRequest(BaseModel):
     resource: str = Field(min_length=1)
 
 
+class PermissionPolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    policy: PermissionPolicy
+
+
+class PersonaRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: str
+    persona: PersonaSpec
+
+
 def router(core, authenticate):
     permissions = getattr(core, "permissions", None) or PermissionService(core.db, core.clock)
     admin_subject = PermissionSubject(
@@ -109,10 +130,61 @@ def router(core, authenticate):
         if not permissions.check(admin_subject, "permission." + action, "permission:policy").allowed:
             raise HTTPException(403, "permission denied")
 
+    def preserve_console_access(policy):
+        proposed = PermissionService(policy=policy)
+        for action, resource in (
+            ("admin.get", "http:/api/v1/config"),
+            ("admin.get", "http:/api/v1/config/schema"),
+            ("admin.get", "http:/api/v1/permissions"),
+            ("admin.get", "http:/api/v1/permissions/schema"),
+            ("admin.put", "http:/api/v1/permissions"),
+            ("permission.list", "permission:policy"),
+            ("permission.set_policy", "permission:policy"),
+            ("service.status.read", "service:core"),
+        ):
+            if not proposed.check(admin_subject, action, resource).allowed:
+                raise HTTPException(422, "policy would lock the administrator out of the console")
+
     @router.get("/api/v1/permissions")
     def list_permissions():
         permission_management("list")
         return permissions.list()
+
+    @router.get("/api/v1/permissions/schema")
+    def permission_schema():
+        permission_management("list")
+        return PermissionPolicy.model_json_schema()
+
+    @router.put("/api/v1/permissions")
+    def replace_permissions(body: PermissionPolicyRequest):
+        permission_management("set_policy")
+        preserve_console_access(body.policy)
+        try:
+            return permissions.set_policy(
+                body.policy, expected_version=body.expected_version, actor="admin_api:owner"
+            )
+        except PolicyVersionConflict as error:
+            raise HTTPException(409, str(error)) from error
+
+    @router.get("/api/v1/persona")
+    def persona_view():
+        require_permission("persona.read", "persona:global")
+        persona = json.loads(core.personas.snapshot("")[0])["core"]
+        return {
+            "persona": persona,
+            "version": hashlib.sha256(PersonaSpec.model_validate(persona).model_dump_json().encode()).hexdigest(),
+            "schema": PersonaSpec.model_json_schema(),
+        }
+
+    @router.put("/api/v1/persona")
+    def save_persona(body: PersonaRequest):
+        require_permission("persona.manage", "persona:global")
+        with core.config_store.lock:
+            if body.expected_version != persona_view()["version"]:
+                raise HTTPException(409, "persona version changed")
+            core.personas.set_core(body.persona)
+            core.audit("persona.apply", body.expected_version, "admin_api:owner", "updated global persona")
+            return persona_view()
 
     @router.post("/api/v1/permissions/check")
     def check_permission(body: PermissionCheckRequest):
@@ -451,68 +523,89 @@ def router(core, authenticate):
 
     @router.get("/api/v1/config")
     def config_view():
-        encoded = core.settings.model_dump_json()
-        return {
-            "config": json.loads(encoded),
-            "version": hashlib.sha256(encoded.encode()).hexdigest(),
-            "model_key_configured": bool(os.environ.get(core.settings.model.api_key_env)),
-        }
+        with core.config_store.lock:
+            saved = core.config_store.read()
+            names = {
+                saved.admin_token_env, saved.internal_token_env, saved.model.api_key_env,
+                saved.judge.api_key_env, saved.memory.extractor_key_env, saved.memory.embedding_key_env,
+                *(adapter.secret_env for adapter in saved.adapters),
+            }
+            return {
+                "config": core.settings.model_dump(mode="json"),
+                "version": config_digest(core.settings),
+                "saved_config": saved.model_dump(mode="json"),
+                "saved_version": config_digest(saved),
+                "model_key_configured": bool(os.environ.get(core.settings.model.api_key_env)),
+                "credentials": [{"name": name, "configured": bool(os.environ.get(name))} for name in sorted(names)],
+                **changes(core.settings, saved),
+                "restart_required": saved != core.settings,
+            }
+
+    @router.get("/api/v1/config/schema")
+    def config_schema():
+        return Settings.model_json_schema()
 
     @router.post("/api/v1/config/validate")
     def validate_config(body: ConfigRequest):
-        return {"valid": True, "restart_required": body.config != core.settings}
+        return {"valid": True, **changes(core.settings, body.config)}
 
     @router.get("/api/v1/config/versions")
-    def config_versions():
-        directory = Path(core.db.path).parent / "config-versions"
-        return sorted(p.stem for p in directory.glob("*.json") if re.fullmatch(r"[a-f0-9]{64}", p.stem))
+    def config_versions(include_metadata: bool = False):
+        directory = core.config_store.directory
+        paths = [p for p in directory.glob("*.json") if re.fullmatch(r"[a-f0-9]{64}", p.stem)]
+        if include_metadata:
+            return [
+                {"version": path.stem, "saved_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()}
+                for path in sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True)
+            ]
+        return sorted(path.stem for path in paths)
 
     @router.get("/api/v1/config/versions/{version}")
     def config_version(version: str):
         if not re.fullmatch(r"[a-f0-9]{64}", version):
             raise HTTPException(400, "invalid config version")
-        path = Path(core.db.path).parent / "config-versions" / (version + ".json")
+        path = core.config_store.directory / (version + ".json")
         if not path.is_file():
             raise HTTPException(404, "config version unavailable")
         return Settings.model_validate_json(path.read_text()).model_dump(mode="json")
 
+    @router.post("/api/v1/config/save")
+    def save_config(body: ConfigRequest):
+        with core.config_store.lock:
+            previous = core.config_store.read()
+            if body.expected_version != config_digest(previous):
+                raise HTTPException(409, "saved config version changed; reload before saving")
+            if not permissions.policy_version and body.config.permissions != core.settings.permissions:
+                preserve_console_access(body.config.permissions)
+            core.config_store.save(previous, body.config)
+            version = config_digest(body.config)
+            core.audit("config.save", version, "admin_api:owner", "saved configuration for next Core startup")
+            return {
+                "version": version, "saved": True, "applied": False,
+                **changes(core.settings, body.config), "restart_required": body.config != core.settings,
+            }
+
     @router.post("/api/v1/config/apply")
     async def apply_config(body: ConfigRequest):
-        if body.expected_version != config_view()["version"]:
-            raise HTTPException(409, "config version changed")
-        # Connection/credential/process changes need an explicit restart, never a half-applied runtime.
-        current = core.settings.model_dump()
-        candidate = body.config.model_dump()
-        if candidate["model"] != current["model"] and (
-            core.settings.interactive_execution_enabled or core.settings.tasks_enabled
-        ):
-            raise HTTPException(
-                409, "model changes require restarting Core and Worker with matching startup configuration"
-            )
-        mutable = {"model", "send_budget_per_minute"}
-        if any(candidate[k] != current[k] for k in current if k not in mutable):
-            raise HTTPException(409, "connection, identity, judge or isolation changes require restart")
-        directory = Path(core.db.path).parent / "config-versions"
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        previous = directory / (config_view()["version"] + ".json")
-        if not previous.exists():
-            with previous.open("x") as saved:
-                os.fchmod(saved.fileno(), 0o600)
-                saved.write(core.settings.model_dump_json(indent=2))
-        version = hashlib.sha256(body.config.model_dump_json().encode()).hexdigest()
-        destination = directory / (version + ".json")
-        temporary = destination.with_suffix(".tmp")
-        temporary.write_text(body.config.model_dump_json(indent=2))
-        os.chmod(temporary, 0o600)
-        temporary.replace(destination)
-        active = Path(core.db.path).parent / "runtime-config.json"
-        active_tmp = active.with_suffix(".tmp")
-        active_tmp.write_text(json.dumps({k: candidate[k] for k in mutable}, ensure_ascii=False))
-        os.chmod(active_tmp, 0o600)
-        active_tmp.replace(active)
-        core.settings = body.config
-        core.audit("config.apply", version, "admin_api:owner", "validated model/budget config")
-        return {"version": version, "applied": True}
+        with core.config_store.lock:
+            if body.expected_version != config_digest(core.settings):
+                raise HTTPException(409, "config version changed")
+            if core.config_store.read() != core.settings:
+                raise HTTPException(409, "saved configuration pending; restart or restore it before hot apply")
+            # Connection/credential/process changes never produce a half-applied runtime.
+            if body.config.model != core.settings.model and (
+                core.settings.interactive_execution_enabled or core.settings.tasks_enabled
+            ):
+                raise HTTPException(
+                    409, "model changes require restarting Core and Worker with matching startup configuration"
+                )
+            if changes(core.settings, body.config)["restart_required"]:
+                raise HTTPException(409, "connection, identity, judge or isolation changes require restart")
+            core.config_store.save(core.settings, body.config, hot=True)
+            core.settings = body.config
+            version = config_digest(body.config)
+            core.audit("config.apply", version, "admin_api:owner", "validated model/budget config")
+            return {"version": version, "applied": True}
 
     @router.get("/api/v1/artifacts/{task_id}/{digest}/download")
     def artifact(task_id: str, digest: str):
