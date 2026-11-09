@@ -157,6 +157,7 @@ def test_A04_real_local_websocket(tmp_path, nap_config, clock, nap_event):
                 ws.send_json(nap_event)
             request = ws.receive_json()
             assert request["action"] == "send_group_msg"
+            assert [part["type"] for part in request["params"]["message"]] == ["text"]
             ws.send_json({"echo": request["echo"],"status":"ok","retcode":0,"data":{"message_id":999}})
         assert app.state.adapters["nap"].context_gap
         for _ in range(100):

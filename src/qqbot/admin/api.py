@@ -10,7 +10,7 @@ from typing import Literal
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from qqbot.configuration import version as config_digest
 from qqbot.dialogue import PersonaSpec
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, TextSegment, stable_id
 from qqbot.domain.messages import SendReceipt
+from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.domain.tasks import TaskResult
 from qqbot.expressions import ExpressionVersionConflict
 from qqbot.memory import MemoryRecord
@@ -31,8 +32,8 @@ from qqbot.permissions import (
     PermissionSubject,
     PolicyVersionConflict,
 )
-from qqbot.storage.schema import conversations, decisions, inbox, outbox
-from qqbot.storage.social_schema import social_records
+from qqbot.storage.schema import conversations, decision_logs, decisions, inbox, outbox
+from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
 from qqbot.storage.task_schema import events, runs, tasks
 
 
@@ -41,11 +42,20 @@ class PolicyPatch(BaseModel):
     expected_version: int
     mode: str | None = None
     persona: dict | None = None
+    speech_thresholds: SpeechThresholds | None = None
+    participation: ParticipationSettings | None = None
 
     @model_validator(mode="after")
     def one_change(self):
-        if (self.mode is None) == (self.persona is None):
-            raise ValueError("change exactly one of mode or persona per versioned request")
+        changed = self.model_fields_set & {"mode", "persona", "speech_thresholds", "participation"}
+        if len(changed) != 1 or ("mode" in changed and self.mode is None) or (
+            "persona" in changed and self.persona is None
+        ):
+            raise ValueError("change exactly one policy field per versioned request")
+        for field, model in (("speech_thresholds", SpeechThresholds), ("participation", ParticipationSettings)):
+            values = getattr(self, field)
+            if values is not None and values.model_fields_set != set(model.model_fields):
+                raise ValueError(field + " must include all fields; use null to inherit defaults")
         return self
 
 
@@ -339,12 +349,17 @@ def router(core, authenticate):
         try:
             if body.mode is not None:
                 await core.set_mode(ref, body.mode, owner(ref), expected_version=body.expected_version)
+            for field in ("speech_thresholds", "participation"):
+                if field in body.model_fields_set:
+                    require_permission("conversation.policy.set", "conversation:" + cid)
+                    core.set_policy_override(ref, field, getattr(body, field), owner(ref),
+                                             expected_version=body.expected_version)
             if body.persona is not None:
                 core.personas.set_override(cid, body.persona, authorized=True)
                 core.save_state(cid, mode=core.state(cid)["mode"], expected_version=body.expected_version)
         except (ValueError, PermissionError) as exc:
             raise HTTPException(422, str(exc)) from exc
-        return core.state(cid)
+        return core.policy_view(cid)
 
     @router.get("/api/v1/conversations/{cid}/decisions")
     def recent_decisions(cid: str):
@@ -360,6 +375,54 @@ def router(core, authenticate):
                     .limit(100)
                 ).scalars()
             ]
+
+    @router.get("/api/v1/conversations/{cid}/decision-logs")
+    def conversation_decision_logs(
+        cid: str,
+        before: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=50, ge=1, le=100),
+    ):
+        require_permission("history.read", "conversation:" + cid)
+        conversation(cid)
+        with core.db.engine.connect() as c:
+            query = (
+                select(decision_logs, inbox.c.event_json, inbox.c.state.label("inbox_state"), inbox.c.message_id)
+                .select_from(decision_logs.outerjoin(inbox, decision_logs.c.event_id == inbox.c.id))
+                .where(decision_logs.c.conversation_id == cid)
+                .order_by(decision_logs.c.id.desc())
+                .limit(limit + 1)
+            )
+            if before is not None:
+                query = query.where(decision_logs.c.id < before)
+            rows = c.execute(query).mappings().all()
+            page = rows[:limit]
+            source_ids = [row["event_id"] for row in page]
+            hidden_sources = set(c.execute(select(social_tombstones.c.source_id).where(
+                social_tombstones.c.conversation_id == cid,
+                social_tombstones.c.source_id.in_(source_ids),
+            )).scalars())
+            hidden_sources.update(c.execute(select(memory_source_retention.c.source_id).where(
+                memory_source_retention.c.conversation_id == cid,
+                memory_source_retention.c.source_id.in_(source_ids),
+            )).scalars())
+            recalled_messages = set(c.execute(select(inbox.c.message_id).where(
+                inbox.c.conversation_id == cid,
+                inbox.c.event_type == "message.recalled",
+                inbox.c.message_id.in_([row["message_id"] for row in page]),
+            )).scalars())
+            items = []
+            for row in page:
+                preview = ""
+                if row["event_json"] and row["event_id"] not in hidden_sources and row["message_id"] not in recalled_messages:
+                    event = json.loads(row["event_json"])
+                    preview = "".join(segment.get("text", "") for segment in event.get("segments", [])
+                        if segment.get("type") == "text")[:300]
+                items.append({
+                    "id": row["id"], "event_id": row["event_id"], "created_at": row["created_at"],
+                    "decision": json.loads(row["decision_json"]), "context": json.loads(row["context_json"]),
+                    "message_preview": preview, "inbox_state": row["inbox_state"],
+                })
+        return {"items": items, "next_before": items[-1]["id"] if len(rows) > limit else None}
 
     @router.post("/api/v1/tasks")
     def create_task(body: TaskRequest, idempotency_key: str = Header(default="")):

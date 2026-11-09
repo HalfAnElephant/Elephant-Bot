@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import re
+import time
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -15,6 +17,7 @@ from qqbot.dialogue import PersonaStore
 from qqbot.dialogue.planner import plan_turn, wants_background
 from qqbot.domain import AccessContext, InboundEvent, Surface, TextSegment, stable_id
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal
+from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.expressions import HTTPLearner
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.service import TaskService
@@ -26,7 +29,7 @@ from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
 from qqbot.policy.judge import JevJudge, RuleOnlyJudge, StructuredLLMJudge
-from qqbot.storage.schema import audit_events, decisions, inbox, outbox, runtime_state
+from qqbot.storage.schema import audit_events, decision_logs, decisions, inbox, outbox, runtime_state
 from qqbot.storage.social_schema import social_records, social_tombstones
 from qqbot.storage.task_schema import notifications, tasks
 
@@ -175,6 +178,42 @@ class Core:
             )
         return dict(row) if row else {"mode": "addressed_only", "policy_version": 1, "state_json": "{}"}
 
+    def policy_view(self, conversation_id):
+        state = self.state(conversation_id)
+        saved = json.loads(state["state_json"])
+        for field, defaults in (("speech_thresholds", self.settings.judge.thresholds),
+                                ("participation", self.settings.judge.participation)):
+            override = saved.get(field)
+            state[field] = override
+            state["effective_" + field] = override if override is not None else defaults.model_dump(mode="json")
+            state["default_" + field] = defaults.model_dump(mode="json")
+        return state
+
+    def participation_for(self, conversation, *, saved=None):
+        if saved is None:
+            saved = json.loads(self.state(conversation.key)["state_json"])
+        if conversation.surface == Surface.GROUP and saved.get("participation") is not None:
+            return ParticipationSettings.model_validate(saved["participation"])
+        return self.settings.judge.participation.model_copy()
+
+    def set_policy_override(self, conversation, field, values, access, *, expected_version):
+        model = {"speech_thresholds": SpeechThresholds, "participation": ParticipationSettings}[field]
+        if access.conversation != conversation:
+            raise PermissionError("conversation identity mismatch")
+        self.permissions.require(access, "conversation.policy.set", "conversation:" + conversation.key)
+        if conversation.surface != Surface.GROUP:
+            raise ValueError("发言判别覆盖仅支持群聊设置")
+        old = self.state(conversation.key)
+        saved = json.loads(old["state_json"])
+        if values is None:
+            saved.pop(field, None)
+        else:
+            saved[field] = model.model_validate(values).model_dump(mode="json")
+        self.save_state(
+            conversation.key, mode=old["mode"], state_json=json.dumps(saved), expected_version=expected_version
+        )
+        self.audit("policy." + field, conversation.key, access.principal.key, json.dumps(saved.get(field)))
+
     def save_state(self, conversation_id, *, mode=None, state_json=None, expected_version=None):
         with self.db.transaction() as c:
             old = (
@@ -216,8 +255,6 @@ class Core:
         cap = await self.adapters[conversation.adapter_instance_id].capabilities(conversation)
         if mode in {"shadow", "social"} and not cap.can_observe_unaddressed_messages:
             raise ValueError("该会话尚无经过确认的全量观察能力")
-        if mode == "social" and conversation.key not in self.settings.social_evaluated_conversations:
-            raise ValueError("该会话尚未登记通过回放评估")
         old = self.state(conversation.key)
         saved = json.loads(old["state_json"])
         resume_mode = (
@@ -249,10 +286,7 @@ class Core:
                     continue
                 mode = saved.pop("silent_resume_mode", "addressed_only")
                 saved.pop("silent_until", None)
-                if mode not in {"addressed_only", "shadow", "social"} or (
-                    mode == "social"
-                    and row["conversation_id"] not in self.settings.social_evaluated_conversations
-                ):
+                if mode not in {"addressed_only", "shadow", "social"}:
                     mode = "addressed_only"
                 c.execute(
                     update(runtime_state)
@@ -772,8 +806,9 @@ class Core:
                         ),
                     )
                 ).scalar_one()
+            participation_settings = self.participation_for(event.conversation, saved=saved)
             participation = ParticipationController()
-            cutoff = self.clock.now() - timedelta(seconds=60)
+            cutoff = self.clock.now() - timedelta(seconds=participation_settings.activity_window_seconds)
             with self.db.engine.connect() as c:
                 observed = c.execute(
                     select(inbox.c.seq, inbox.c.event_json)
@@ -848,14 +883,17 @@ class Core:
                     or observed_event.conversation.surface == Surface.PRIVATE
                     or (observed_event.reply_to is not None and observed_event.reply_to in bot_message_ids)
                 )
-                participation.observe(observed_event.event_id, addressed, now=observed_event.received_at)
+                participation.observe(
+                    observed_event.event_id, addressed, now=observed_event.received_at,
+                    window_seconds=participation_settings.activity_window_seconds,
+                )
                 human_events.append((seq, observed_event, addressed))
             for delivery in deliveries:
                 participation.reserve(
                     delivery["origin_id"], now=datetime.fromisoformat(delivery["created_at"])
                 )
                 participation.feedback(delivery["origin_id"], delivery["state"])
-            participation.prune(self.clock.now())
+            participation.prune(self.clock.now(), participation_settings.activity_window_seconds)
             last_chat_seq = last_chat.seq if last_chat else 0
             unanswered = bool(
                 last_chat
@@ -867,7 +905,7 @@ class Core:
             activity += [
                 (datetime.fromisoformat(row["sent_at"]), True) for row in deliveries if row["state"] == "SENT"
             ]
-            recent_activity = sorted(activity, key=lambda value: value[0])[-20:]
+            recent_activity = sorted(activity, key=lambda value: value[0])[-participation_settings.activity_max_events:]
             policy_state = PolicyState(
                 mode=state["mode"],
                 valid_bot_reply=self.valid_bot_reply(event),
@@ -883,11 +921,21 @@ class Core:
                 suppressed_until=datetime.fromisoformat(saved["suppressed_until"])
                 if saved.get("suppressed_until")
                 else None,
-                social_evaluated=event.conversation.key in self.settings.social_evaluated_conversations,
             )
             signals = None
-            decision = self.policy.decide(event, cap, policy_state)
-            if not invited and decision.reason_codes == ("JUDGE_ABSTAIN",) and not participation.available():
+            thresholds = (
+                SpeechThresholds.model_validate(saved["speech_thresholds"])
+                if event.conversation.surface == Surface.GROUP and saved.get("speech_thresholds") is not None
+                else self.settings.judge.thresholds.model_copy()
+            )
+            judge_status = "not_called"
+            judge_duration_ms = None
+            judged_event_ids = []
+            decision = self.policy.decide(
+                event, cap, policy_state, thresholds=thresholds, participation=participation_settings
+            )
+            if (not invited and decision.reason_codes == ("JUDGE_ABSTAIN",)
+                    and not participation.available(participation_settings.participation_budget_ratio)):
                 decision = decision.model_copy(
                     update={
                         "action": "IGNORE",
@@ -896,10 +944,20 @@ class Core:
                     }
                 )
             if decision.reason_codes == ("JUDGE_ABSTAIN",):
+                judge_events = list(window.events)[-12:]
+                judged_event_ids = [e.event_id for e in judge_events]
+                judge_started = time.monotonic()
                 signals = await self.judge.judge(
-                    {"messages": [e.text[:1000] for e in list(window.events)[-12:]]}
+                    {"messages": [e.text[:1000] for e in judge_events]}
                 )
-                decision = self.policy.decide(event, cap, policy_state, signals)
+                judge_duration_ms = round((time.monotonic() - judge_started) * 1000, 2)
+                if signals.abstain:
+                    judge_status = "rule_only" if isinstance(self.judge, RuleOnlyJudge) else "abstained"
+                else:
+                    judge_status = "success"
+                decision = self.policy.decide(
+                    event, cap, policy_state, signals, thresholds=thresholds, participation=participation_settings
+                )
             if window.events:
                 updates = {"snapshot_seq": window.events[-1].ingest_seq}
                 if decision.action == "WAIT":
@@ -907,6 +965,21 @@ class Core:
                 decision = decision.model_copy(update=updates)
             if decision.action != "WAIT":
                 self.clear_wait(event, window)
+            decision_at = self.clock.now().isoformat()
+            decision_context = {
+                "mode": state["mode"],
+                "policy_version": state["policy_version"],
+                "thresholds": thresholds.model_dump(mode="json"),
+                "policy_state": {
+                    key: value.isoformat() if isinstance(value, datetime) else value
+                    for key, value in asdict(policy_state).items()
+                },
+                "participation_rules": participation_settings.model_dump(mode="json"),
+                "capabilities": cap.model_dump(mode="json"),
+                "judge_status": judge_status,
+                "judge_duration_ms": judge_duration_ms,
+                "judged_event_ids": judged_event_ids,
+            }
             with self.db.transaction() as c:
                 c.execute(decisions.delete().where(decisions.c.event_id == event.event_id))
                 c.execute(
@@ -914,9 +987,22 @@ class Core:
                         event_id=event.event_id,
                         conversation_id=event.conversation.key,
                         decision_json=decision.model_dump_json(),
-                        created_at=self.clock.now().isoformat(),
+                        created_at=decision_at,
                     )
                 )
+                logged = c.execute(insert(decision_logs).values(
+                    event_id=event.event_id,
+                    conversation_id=event.conversation.key,
+                    created_at=decision_at,
+                    decision_json=decision.model_dump_json(),
+                    context_json=json.dumps(decision_context),
+                ))
+                decision_log_id = logged.inserted_primary_key[0]
+            logger.info("speech.decision", extra={"data": {
+                "log_id": decision_log_id, "conversation_id": event.conversation.key,
+                "event_id": event.event_id, "decision": decision.model_dump(mode="json"),
+                "context": decision_context,
+            }})
             if decision.action == "WAIT":
                 window.wait(decision)
                 saved_wait = json.loads(self.state(event.conversation.key)["state_json"])

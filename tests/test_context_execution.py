@@ -48,6 +48,7 @@ async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, n
     assert task["profile"] == "pi" and task["delivery"] == "ATTACHED"
     assert states[first.event_id] == states[second.event_id] == "DONE"
     context = json.loads(task["context_json"])
+    assert context["notify_before_tools"] is True
     assert context["turn"]["source_event_ids"] == [first.event_id, second.event_id]
     assert core.validate_context(core.access(first), context)
     await core.process(first)
@@ -57,6 +58,17 @@ async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, n
     core.tasks.detach_due()
     with core.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.delivery)).scalar_one() == "DETACHED"
+    await core.stop()
+    core.db.close()
+
+
+async def test_disabled_operation_notice_reaches_task_context(tmp_path, nap_config, nap_event, clock):
+    core = core_for(tmp_path, nap_config, clock, execution={"notify_before_tools": False})
+    value = event(core, nap_event, 899, "查询现在的 Issue")
+    await core.process(value)
+    with core.db.engine.connect() as conn:
+        context = json.loads(conn.execute(select(tasks.c.context_json)).scalar_one())
+    assert context["notify_before_tools"] is False
     await core.stop()
     core.db.close()
 

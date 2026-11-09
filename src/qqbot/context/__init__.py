@@ -562,6 +562,7 @@ class ContextService:
             "policy_version": speech_version,
             "anchor_message_id": turn.anchor_event_id,
             "invited": invited,
+            "notify_before_tools": self.settings.execution.notify_before_tools,
             "turn": turn.model_dump(mode="json"),
         }
 

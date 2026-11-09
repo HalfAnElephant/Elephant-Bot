@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, UniqueConstraint
+from sqlalchemy import Column, Index, Integer, MetaData, String, Table, Text, UniqueConstraint
 
 metadata = MetaData()
 conversations = Table(
@@ -67,6 +67,17 @@ decisions = Table(
     Column("decision_json", Text, nullable=False),
     Column("created_at", String, nullable=False),
 )
+decision_logs = Table(
+    "speech_decision_logs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_id", String, nullable=False),
+    Column("conversation_id", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("decision_json", Text, nullable=False),
+    Column("context_json", Text, nullable=False),
+)
+Index("ix_speech_decision_logs_conversation_id_id", decision_logs.c.conversation_id, decision_logs.c.id)
 audit_events = Table(
     "audit_events",
     metadata,

@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from qqbot.domain import DTO
 from qqbot.domain.execution import RunBudget
+from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.expressions.config import ExpressionConfig
 from qqbot.permissions import PermissionPolicy
 
@@ -60,6 +61,8 @@ class JudgeConfig(DTO):
     endpoint: str = "https://api.typesafe.ai/v1/systemone"
     model: str = "jev-1.14.0"
     api_key_env: str = "QQBOT_JUDGE_KEY"
+    thresholds: SpeechThresholds = SpeechThresholds()
+    participation: ParticipationSettings = ParticipationSettings()
 
 
 class MemoryConfig(DTO):
@@ -77,6 +80,7 @@ class MemoryConfig(DTO):
 
 
 class ExecutionConfig(DTO):
+    notify_before_tools: bool = True
     max_active: int = Field(default=4, ge=1, le=32)
     sustained_limit: int = Field(default=2, ge=1, le=31)
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)

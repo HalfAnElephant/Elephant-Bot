@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from qqbot.domain.messages import AdapterCapabilities, InboundEvent, ObservationMode, Surface
-from qqbot.domain.social import JudgmentSignals, SpeechDecision
+from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechDecision, SpeechThresholds
 
 
 @dataclass
@@ -34,14 +34,20 @@ class SpeechPolicy:
         capabilities: AdapterCapabilities,
         state: PolicyState,
         signals: JudgmentSignals | None = None,
+        *,
+        thresholds: SpeechThresholds | None = None,
+        participation: ParticipationSettings | None = None,
     ) -> SpeechDecision:
         now = self.clock.now()
+        thresholds = thresholds or SpeechThresholds()
+        participation = participation or ParticipationSettings()
 
-        def result(action, reason):
+        def result(action, reason, blocked_rules=()):
             return SpeechDecision(
                 action="IGNORE" if state.mode == "shadow" else action,
                 shadow_action=action if state.mode == "shadow" else None,
                 reason_codes=(reason,),
+                blocked_rules=blocked_rules,
                 anchor_message_ids=(event.platform_message_id,),
                 snapshot_seq=event.ingest_seq,
                 signals=signals,
@@ -49,6 +55,7 @@ class SpeechPolicy:
                 wake_at=now + timedelta(seconds=1) if action == "WAIT" else None,
                 resume_after_seq=event.ingest_seq if action == "WAIT" else None,
                 valid_until=now + timedelta(seconds=20),
+                max_rechecks=participation.max_rechecks,
             )
 
         if not state.authenticated or not state.allowed or state.muted:
@@ -65,30 +72,33 @@ class SpeechPolicy:
         if state.mode == "addressed_only":
             return result("IGNORE", "UNADDRESSED")
         if (
-            (not state.social_evaluated and state.mode != "shadow")
-            or event.observation_mode != ObservationMode.FULL
+            event.observation_mode != ObservationMode.FULL
             or not capabilities.can_observe_unaddressed_messages
         ):
             return result("IGNORE", "SOCIAL_NOT_READY")
-        if (
-            state.suppressed_until
-            and now < state.suppressed_until
-            or state.last_bot_at
-            and (now - state.last_bot_at).total_seconds() < 60
-            or state.new_human_messages < 3
-            or state.unanswered_proactive >= 1
-            or state.recent_bot_ratio >= 0.2
-        ):
-            return result("IGNORE", "PARTICIPATION_LIMIT")
+        blocked_rules = tuple(
+            name for name, blocked in (
+                ("SUPPRESSED", state.suppressed_until and now < state.suppressed_until),
+                ("COOLDOWN", state.last_bot_at and (now - state.last_bot_at).total_seconds()
+                 < participation.cooldown_seconds),
+                ("MIN_HUMAN_MESSAGES", state.new_human_messages < participation.min_human_messages),
+                ("UNANSWERED_PROACTIVE", participation.require_member_response and state.unanswered_proactive > 0),
+                ("RECENT_BOT_RATIO", state.recent_bot_ratio >= participation.max_recent_bot_ratio),
+            ) if blocked
+        )
+        if blocked_rules:
+            return result("IGNORE", "PARTICIPATION_LIMIT", blocked_rules)
         if not signals or signals.abstain:
             return result("IGNORE", "JUDGE_ABSTAIN")
         if (
-            max(signals.invites_participation / 0.8, signals.continues_bot_topic / 0.85) >= 1
-            and signals.useful_contribution >= 0.75
-            and signals.private_exchange <= 0.2
+            (signals.invites_participation >= thresholds.invites_participation
+             or signals.continues_bot_topic >= thresholds.continues_bot_topic)
+            and signals.useful_contribution >= thresholds.useful_contribution
+            and signals.private_exchange <= thresholds.private_exchange
         ):
             return result("SPEAK", "USEFUL_INVITATION")
-        if signals.useful_contribution >= 0.5 and state.rechecks < 2:
+        if (signals.useful_contribution >= thresholds.wait_useful_contribution
+                and state.rechecks < participation.max_rechecks):
             return result("WAIT", "OTHERS_ARE_FINISHING_TOPIC")
         return result("IGNORE", "LOW_RELEVANCE")
 
@@ -110,9 +120,9 @@ class ParticipationController:
             self.timestamps.pop(key, None)
         # UNKNOWN reservations persist until reconciliation, preventing retry floods.
 
-    def observe(self, event_id: str, invited: bool = False, now: datetime | None = None):
+    def observe(self, event_id: str, invited: bool = False, now: datetime | None = None, *, window_seconds=60):
         if now is not None:
-            self.prune(now)
+            self.prune(now, window_seconds)
             self.timestamps.setdefault(event_id, now)
         self.human_ids.add(event_id)
         if invited:

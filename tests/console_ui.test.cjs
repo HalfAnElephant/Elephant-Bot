@@ -147,3 +147,36 @@ test('permission explanation identifies matching rule or fallback without requir
   assert.match(text, /禁止此操作。命中规则：指定用户 · 用户 123；优先级 3/);
   assert.match(text, /策略版本 4/);
 });
+
+test('decision logs distinguish skipped model calls from model abstention', () => {
+  const {decisionJudgeStatus} = require('../src/qqbot/admin/console.js');
+  assert.equal(decisionJudgeStatus({decision: {signals: null}}), '未调用模型');
+  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: true}}}), '模型弃权');
+  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: false}}}), '模型正常返回');
+  assert.equal(decisionJudgeStatus({decision: {signals: null}, context: {judge_status: 'abstained'}}), '模型弃权');
+  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: true}}, context: {judge_status: 'rule_only'}}), '规则判别器弃权（未调用模型）');
+});
+
+test('decision score display preserves zero, precise scores and historical threshold gaps', () => {
+  const {decisionScoreRows} = require('../src/qqbot/admin/console.js');
+  const rows = decisionScoreRows({signals: {directed_to_bot: 0, useful_contribution: 0.74999, private_exchange: 0.1}}, {useful_contribution: 0.75, private_exchange: 0});
+  assert.deepEqual(rows[0], {label: '面向机器人', score: 0, threshold: '仅记录'});
+  assert.deepEqual(rows[3], {label: '有用贡献', score: 0.74999, threshold: '≥ 0.75'});
+  assert.deepEqual(rows[4], {label: '他人私人交流', score: 0.1, threshold: '≤ 0'});
+  assert.equal(rows[1].threshold, '历史未记录');
+  assert.equal(decisionScoreRows({signals: null})[0].score, '—');
+  assert.equal(decisionScoreRows({signals: {abstain: true, useful_contribution: 0}})[3].score, '—');
+});
+
+test('conversation search handles names, remote IDs, case, whitespace and empty lists', () => {
+  const {filterConversations, conversationModes} = require('../src/qqbot/admin/console.js');
+  const items = [{id: 'one:123', display_label: '学习群（123）', remote_id: '123'}, {id: 'two:456', display_label: 'Alice（456）', remote_id: '456'}];
+  assert.deepEqual(filterConversations(items, ' 学习 '), [items[0]]);
+  assert.deepEqual(filterConversations(items, 'ALICE'), [items[1]]);
+  assert.deepEqual(filterConversations(items, '456'), [items[1]]);
+  assert.deepEqual(filterConversations(items, 'one:'), [items[0]]);
+  assert.deepEqual(filterConversations(items, 'missing'), []);
+  assert.deepEqual(filterConversations(items, ''), items);
+  assert.deepEqual(filterConversations([], ''), []);
+  for (const mode of ['addressed_only', 'silent', 'shadow', 'social']) assert.equal(conversationModes[mode].length, 2);
+});

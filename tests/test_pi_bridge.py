@@ -318,3 +318,43 @@ async def test_locked_pi_refreshes_expression_material_without_reseeding_topic(c
         assert material not in system
         assert any(material in message for message in users)
     assert state.runner.quiescent_verified
+
+
+@pytest.mark.parametrize("use_tools", [True, False])
+async def test_locked_pi_reports_before_operation_and_answers_chat_directly(compaction_session, use_tools):
+    from qqbot.capabilities.types import Action, Capability
+
+    state = compaction_session
+    gateway = state.gateway
+    gateway.revoke()
+    gateway.bind({**state.claim, "context": {**state.claim["context"], "notify_before_tools": True}})
+    order, requests = [], []
+    original_call = gateway.call
+    async def host(operation, payload):
+        if operation == "notify":
+            order.append("notice")
+            assert payload["importance"] == "important"
+            return {"accepted": True}
+        return await original_call(operation, payload)
+    gateway.call = host
+    gateway.registry.register(Capability("fixture.read", "Read fixture"),
+        lambda a, c: order.append("read") or {"verified": True}, lambda a, c: Action("fixture.read", ()))
+    read = {"name": "capability_invoke", "arguments": {"name": "fixture.read", "arguments": {}}}
+    notice = {"name": "task_notify", "arguments": {"text": "我查一下，稍等。"}}
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        index = len(requests) - 1
+        message = {"role": "assistant", "content": "查好了。" if use_tools else "你好。"}
+        if use_tools and index < 3:
+            tool = [read, notice, read][index]
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": "call_" + str(index),
+                "type": "function", "function": {"name": tool["name"],
+                    "arguments": json.dumps(tool["arguments"])}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("Query current data" if use_tools else "Hello", keep_alive=True)
+    assert result.summary == ("查好了。" if use_tools else "你好。")
+    assert order == (["notice", "read"] if use_tools else [])
+    assert len(requests) == (4 if use_tools else 1)
+    if use_tools:
+        assert any("先单独调用 task_notify" in str(message) for message in requests[1]["messages"])

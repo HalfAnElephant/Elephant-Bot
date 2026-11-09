@@ -135,6 +135,33 @@
       "title": "AdapterConfig",
       "type": "object"
     },
+    "BlacklistedUser": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_instance_id": {
+          "minLength": 1,
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "identity_namespace": {
+          "minLength": 1,
+          "title": "Identity Namespace",
+          "type": "string"
+        },
+        "user_id": {
+          "minLength": 1,
+          "title": "User Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter_instance_id",
+        "identity_namespace",
+        "user_id"
+      ],
+      "title": "BlacklistedUser",
+      "type": "object"
+    },
     "ContextConfig": {
       "additionalProperties": false,
       "properties": {
@@ -208,6 +235,11 @@
     "ExecutionConfig": {
       "additionalProperties": false,
       "properties": {
+        "notify_before_tools": {
+          "default": true,
+          "title": "Notify Before Tools",
+          "type": "boolean"
+        },
         "max_active": {
           "default": 4,
           "maximum": 32,
@@ -276,6 +308,127 @@
       "title": "ExecutionConfig",
       "type": "object"
     },
+    "ExpressionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "expression_checked_only": {
+          "default": false,
+          "title": "Expression Checked Only",
+          "type": "boolean"
+        },
+        "expression_self_reflect": {
+          "default": true,
+          "title": "Expression Self Reflect",
+          "type": "boolean"
+        },
+        "learning_list": {
+          "default": [
+            {
+              "conversation_id": "",
+              "adapter_instance_id": "",
+              "type": "group",
+              "use": true,
+              "learn": true
+            }
+          ],
+          "items": {
+            "$ref": "#/$defs/LearningRule"
+          },
+          "title": "Learning List",
+          "type": "array"
+        },
+        "expression_groups": {
+          "default": [],
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Expression Groups",
+          "type": "array"
+        },
+        "learning_blacklist": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BlacklistedUser"
+          },
+          "title": "Learning Blacklist",
+          "type": "array"
+        },
+        "learner_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learner Endpoint"
+        },
+        "learner_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learner Model"
+        },
+        "learner_key_env": {
+          "default": "QQBOT_EXPRESSION_KEY",
+          "title": "Learner Key Env",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 300,
+          "maximum": 1800,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "min_messages": {
+          "default": 10,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Min Messages",
+          "type": "integer"
+        },
+        "max_messages": {
+          "default": 40,
+          "maximum": 100,
+          "minimum": 10,
+          "title": "Max Messages",
+          "type": "integer"
+        },
+        "learn_interval_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 30,
+          "title": "Learn Interval Seconds",
+          "type": "integer"
+        },
+        "max_expression_learner": {
+          "default": 3,
+          "maximum": 8,
+          "minimum": 1,
+          "title": "Max Expression Learner",
+          "type": "integer"
+        }
+      },
+      "title": "ExpressionConfig",
+      "type": "object"
+    },
     "JudgeConfig": {
       "additionalProperties": false,
       "properties": {
@@ -303,9 +456,68 @@
           "default": "QQBOT_JUDGE_KEY",
           "title": "Api Key Env",
           "type": "string"
+        },
+        "thresholds": {
+          "$ref": "#/$defs/SpeechThresholds",
+          "default": {
+            "invites_participation": 0.8,
+            "continues_bot_topic": 0.85,
+            "useful_contribution": 0.75,
+            "private_exchange": 0.2,
+            "wait_useful_contribution": 0.5
+          }
+        },
+        "participation": {
+          "$ref": "#/$defs/ParticipationSettings",
+          "default": {
+            "cooldown_seconds": 60,
+            "min_human_messages": 3,
+            "require_member_response": true,
+            "max_recent_bot_ratio": 0.2,
+            "max_rechecks": 2,
+            "activity_window_seconds": 60,
+            "activity_max_events": 20,
+            "participation_budget_ratio": 0.2
+          }
         }
       },
       "title": "JudgeConfig",
+      "type": "object"
+    },
+    "LearningRule": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_id": {
+          "default": "",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "adapter_instance_id": {
+          "default": "",
+          "title": "Adapter Instance Id",
+          "type": "string"
+        },
+        "type": {
+          "default": "group",
+          "enum": [
+            "group",
+            "private"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "use": {
+          "default": true,
+          "title": "Use",
+          "type": "boolean"
+        },
+        "learn": {
+          "default": true,
+          "title": "Learn",
+          "type": "boolean"
+        }
+      },
+      "title": "LearningRule",
       "type": "object"
     },
     "MemoryConfig": {
@@ -459,6 +671,62 @@
       "title": "ModelConfig",
       "type": "object"
     },
+    "ParticipationSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "cooldown_seconds": {
+          "default": 60,
+          "minimum": 0,
+          "title": "Cooldown Seconds",
+          "type": "integer"
+        },
+        "min_human_messages": {
+          "default": 3,
+          "minimum": 0,
+          "title": "Min Human Messages",
+          "type": "integer"
+        },
+        "require_member_response": {
+          "default": true,
+          "title": "Require Member Response",
+          "type": "boolean"
+        },
+        "max_recent_bot_ratio": {
+          "default": 0.2,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Max Recent Bot Ratio",
+          "type": "number"
+        },
+        "max_rechecks": {
+          "default": 2,
+          "minimum": 0,
+          "title": "Max Rechecks",
+          "type": "integer"
+        },
+        "activity_window_seconds": {
+          "default": 60,
+          "minimum": 1,
+          "title": "Activity Window Seconds",
+          "type": "integer"
+        },
+        "activity_max_events": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Activity Max Events",
+          "type": "integer"
+        },
+        "participation_budget_ratio": {
+          "default": 0.2,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Participation Budget Ratio",
+          "type": "number"
+        }
+      },
+      "title": "ParticipationSettings",
+      "type": "object"
+    },
     "PermissionPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -598,6 +866,48 @@
         }
       },
       "title": "RunBudget",
+      "type": "object"
+    },
+    "SpeechThresholds": {
+      "additionalProperties": false,
+      "properties": {
+        "invites_participation": {
+          "default": 0.8,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Invites Participation",
+          "type": "number"
+        },
+        "continues_bot_topic": {
+          "default": 0.85,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Continues Bot Topic",
+          "type": "number"
+        },
+        "useful_contribution": {
+          "default": 0.75,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Useful Contribution",
+          "type": "number"
+        },
+        "private_exchange": {
+          "default": 0.2,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Private Exchange",
+          "type": "number"
+        },
+        "wait_useful_contribution": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Wait Useful Contribution",
+          "type": "number"
+        }
+      },
+      "title": "SpeechThresholds",
       "type": "object"
     },
     "SubjectSelector": {
@@ -759,6 +1069,7 @@
     "execution": {
       "$ref": "#/$defs/ExecutionConfig",
       "default": {
+        "notify_before_tools": true,
         "max_active": 4,
         "sustained_limit": 2,
         "foreground_wait_ms": 5000,
@@ -811,7 +1122,24 @@
         "kind": "rule",
         "endpoint": "https://api.typesafe.ai/v1/systemone",
         "model": "jev-1.14.0",
-        "api_key_env": "QQBOT_JUDGE_KEY"
+        "api_key_env": "QQBOT_JUDGE_KEY",
+        "thresholds": {
+          "continues_bot_topic": 0.85,
+          "invites_participation": 0.8,
+          "private_exchange": 0.2,
+          "useful_contribution": 0.75,
+          "wait_useful_contribution": 0.5
+        },
+        "participation": {
+          "activity_max_events": 20,
+          "activity_window_seconds": 60,
+          "cooldown_seconds": 60,
+          "max_recent_bot_ratio": 0.2,
+          "max_rechecks": 2,
+          "min_human_messages": 3,
+          "participation_budget_ratio": 0.2,
+          "require_member_response": true
+        }
       }
     },
     "memory": {
@@ -828,6 +1156,33 @@
         "embedding_dimensions": null,
         "embedding_key_env": "QQBOT_EMBEDDING_KEY",
         "raw_retention_days": 30
+      }
+    },
+    "expression": {
+      "$ref": "#/$defs/ExpressionConfig",
+      "default": {
+        "enabled": true,
+        "expression_checked_only": false,
+        "expression_self_reflect": true,
+        "learning_list": [
+          {
+            "adapter_instance_id": "",
+            "conversation_id": "",
+            "learn": true,
+            "type": "group",
+            "use": true
+          }
+        ],
+        "expression_groups": [],
+        "learning_blacklist": [],
+        "learner_endpoint": null,
+        "learner_model": null,
+        "learner_key_env": "QQBOT_EXPRESSION_KEY",
+        "timeout_seconds": 300,
+        "min_messages": 10,
+        "max_messages": 40,
+        "learn_interval_seconds": 300,
+        "max_expression_learner": 3
       }
     },
     "social_evaluated_conversations": {

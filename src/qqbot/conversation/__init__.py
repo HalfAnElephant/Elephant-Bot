@@ -74,7 +74,7 @@ class ConversationWindow:
         if (
             decision.valid_until
             and now >= decision.valid_until
-            or self.rechecks >= min(decision.max_rechecks, 2)
+            or self.rechecks >= decision.max_rechecks
         ):
             self.waiting = None
             return False

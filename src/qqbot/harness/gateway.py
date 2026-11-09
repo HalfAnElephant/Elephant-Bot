@@ -93,11 +93,16 @@ class RunGateway:
         self.tool_token, self.model_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         self.revoked, self.waiting = False, False
         self.outcome, self.evidence, self.artifacts = None, [], []
+        # Previously accepted tasks retain their original notification policy.
+        self.notify_before_tools = claim.get("context", {}).get("notify_before_tools", False)
+        self.progress_announced = False
         self.observations, self.effects, self.content = {}, {}, {}
         self.business_exhausted = False
         seed = claim.get("context", {}).get("seed", {})
         persona = seed.get("persona") if isinstance(seed, dict) else None
         self.system_prompt = GENERAL_PROMPT
+        if self.notify_before_tools:
+            self.system_prompt += "\n需要调用工具、无法立即给出结果时，必须先单独调用 task_notify，用当前人格简短告诉用户准备做什么，再开始操作。首次提示用 importance=important，后续只报告重要进展。可以直接回答时直接回复。"
         if persona:
             self.system_prompt += "\n宿主可信人格配置（适用于所有对外发言）：\n" + render_persona(
                 persona, seed.get("surface", ""), temporary_style=select_temporary_reply_style(persona)
@@ -340,7 +345,13 @@ class RunGateway:
                 try:
                     await self.reserve(operation_id, "tool")
                     if name == "task_notify":
-                        return await self.call("notify", {**args, "notification_id": operation_id})
+                        notice = {**args, "notification_id": operation_id}
+                        if self.notify_before_tools and not self.progress_announced:
+                            notice["importance"] = "important"
+                        result = await self.call("notify", notice)
+                        if result.get("accepted"):
+                            self.progress_announced = True
+                        return result
                     if name in {"task_ask_user", "task_wait_external"}:
                         result = await self.call("ask", {**args, "question_id": operation_id,
                             "kind": "input" if name == "task_ask_user" else "external"})
@@ -359,6 +370,8 @@ class RunGateway:
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)
                         return {"accepted": True}
+                    if self.notify_before_tools and not self.progress_announced:
+                        raise ValueError("先单独调用 task_notify，简短告知用户准备做什么，提示被接受后再调用工具。")
                     if name == "content_read":
                         text = await self.read_content(self.context, args["reference"])
                         offset, limit = args.get("offset", 0), args.get("limit", 16000)

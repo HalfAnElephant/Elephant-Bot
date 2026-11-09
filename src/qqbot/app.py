@@ -243,7 +243,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             ref = refs[row["id"]]
             name = names.get(ref.adapter_instance_id, {}).get((ref.surface, ref.remote_conversation_id))
             name = name or ("群聊" if ref.surface == "group" else "私聊")
-            result.append({**row, "policy": core.state(row["id"]), "display_name": name,
+            result.append({**row, "policy": core.policy_view(row["id"]), "display_name": name,
                            "remote_id": ref.remote_conversation_id,
                            "display_label": f"{name}（{ref.remote_conversation_id}）"})
         return result

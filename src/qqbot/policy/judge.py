@@ -1,5 +1,6 @@
 import asyncio
 import time
+from uuid import uuid4
 
 import httpx
 
@@ -27,6 +28,8 @@ class RuleOnlyJudge:
 
 
 class JevJudge:
+    timeout_seconds = 1.5
+
     def __init__(
         self,
         api_key: str | None,
@@ -37,6 +40,7 @@ class JevJudge:
         if model != "jev-1.14.0":
             raise ValueError("unsupported Jev model version")
         self.key, self.model, self.endpoint = api_key, model, endpoint
+        self.headers = {"Authorization": f"Bearer {api_key}"}
         self.client = client
         self.failures = 0
         self.open_until = 0.0
@@ -62,21 +66,21 @@ class JevJudge:
         if not self.key or time.monotonic() < self.open_until:
             return JudgmentSignals(abstain=True, model_id=self.model)
         try:
-            async with asyncio.timeout(1.5):
+            async with asyncio.timeout(self.timeout_seconds):
                 if self.client is not None:
                     response = await self.client.post(
                         self.endpoint,
                         json=self.payload(context),
-                        headers={"Authorization": f"Bearer {self.key}"},
-                        timeout=1.5,
+                        headers=self.headers,
+                        timeout=self.timeout_seconds,
                     )
                 else:
                     async with httpx.AsyncClient() as client:
                         response = await client.post(
                             self.endpoint,
                             json=self.payload(context),
-                            headers={"Authorization": f"Bearer {self.key}"},
-                            timeout=1.5,
+                            headers=self.headers,
+                            timeout=self.timeout_seconds,
                         )
                 response.raise_for_status()
                 result = self.parse(response.json())
@@ -90,8 +94,15 @@ class JevJudge:
 
 
 class StructuredLLMJudge(JevJudge):
+    timeout_seconds = 30
+
     def __init__(self, api_key, model, endpoint, client=None):
         self.key, self.model, self.endpoint, self.client = api_key, model, endpoint, client
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "ElephantBot/0.1",
+            "x-opencode-session": str(uuid4()),
+        }
         self.failures, self.open_until = 0, 0.0
 
     def payload(self, context):

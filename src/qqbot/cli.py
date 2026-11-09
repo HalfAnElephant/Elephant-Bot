@@ -10,12 +10,16 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from qqbot.config import Settings, load_runtime_settings, load_settings
 
 
 def migrate(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
+    target_revision = ScriptDirectory.from_config(cfg).get_current_head()
     if Path(path).exists() and Path(path).stat().st_size:
         from datetime import UTC, datetime
         with sqlite3.connect(path) as source:
@@ -23,14 +27,12 @@ def migrate(path: str):
                 revision = source.execute("SELECT version_num FROM alembic_version").fetchone()
             except sqlite3.OperationalError:
                 revision = None
-            if not revision or revision[0] != "0008":
-                backup_path = str(path) + ".before-0008-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + ".db"
+            if not revision or revision[0] != target_revision:
+                backup_path = str(path) + f".before-{target_revision}-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + ".db"
                 descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(descriptor)
                 with sqlite3.connect(backup_path) as destination:
                     source.backup(destination)
-    cfg = Config("alembic.ini")
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
     command.upgrade(cfg, "head")
 
 

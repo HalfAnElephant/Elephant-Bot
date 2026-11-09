@@ -45,6 +45,7 @@
         <p class="sidebar-label">工作空间</p>
         <button data-panel="overview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span>运行总览</span></button>
         <button data-panel="conversations" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H9l-5 4V4Z"/><path d="M8 8h8M8 12h5"/></svg><span>会话管理</span></button>
+        <button data-panel="decision-history" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16v18H4zM8 7h8M8 12h8M8 17h5"/></svg><span>发言判别日志</span></button>
         <button data-panel="tasks" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg><span>后台任务</span></button>
         <button data-panel="memories" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H4V4Zm10 3a3 3 0 0 1 3-3h3v14h-2a4 4 0 0 0-4 3"/></svg><span>记忆与词典</span></button>
       </nav>
@@ -104,11 +105,44 @@
         </section>
 
         <section id="conversations" hidden aria-labelledby="conversations-title">
-          <div class="section-head"><div><h2 id="conversations-title">会话策略</h2><p class="section-description">为每个会话设置参与方式和人格覆盖。</p></div></div>
-          <div class="scroll"><table><thead><tr><th>会话</th><th>发言模式</th><th>策略版本</th><th>操作</th></tr></thead><tbody id="conversation-rows"></tbody></table></div>
-          <div class="form-card"><h3>发言方式</h3><div class="bar"><label for="policy-version">当前策略版本<input id="policy-version" type="number" min="1" step="1" required></label><label for="mode">发言模式<select id="mode"><option value="addressed_only">仅被提及时回复</option><option value="silent">静默</option><option value="shadow">观察模式</option><option value="social">主动参与</option></select></label><button id="save-mode" class="primary">保存模式</button></div><p class="hint">主动参与需要该会话已完成真实回放评估。策略版本用于防止覆盖其他管理员的修改。</p></div>
-          <div class="form-card"><h3>会话人格覆盖</h3><label for="persona">覆盖内容 JSON</label><textarea id="persona" rows="4" spellcheck="false">{}</textarea><p class="hint">支持 name、formality、reply_length、participation；空对象表示使用全局设置。</p><div class="actions"><button id="save-persona">保存人格覆盖</button><button id="load-decisions">查看最近判别</button></div></div>
+          <div class="section-head"><div><h2 id="conversations-title">会话工作空间</h2><p class="section-description">选择会话，调整参与方式，了解每一次发言的原因。</p></div><button id="reload-conversations" type="button">刷新会话</button></div>
+          <div class="conversation-layout">
+            <aside class="conversation-directory" aria-label="会话列表">
+              <label for="conversation-search">查找会话<input id="conversation-search" type="search" placeholder="搜索名称或会话 ID" autocomplete="off"></label>
+              <p id="conversation-count" class="hint" role="status"></p>
+              <div id="conversation-rows" class="conversation-list"></div>
+            </aside>
+            <div class="conversation-detail">
+              <div class="conversation-heading"><span class="eyebrow">当前编辑的会话</span><h3 id="selected-conversation">请选择会话</h3><p id="selected-conversation-id" class="hint mono"></p></div>
+              <fieldset id="conversation-controls" disabled>
+          <div class="form-card"><h3>发言方式</h3><div class="bar"><label for="policy-version">策略版本 · 自动校验<input id="policy-version" type="number" min="1" step="1" required readonly></label><label for="mode">发言模式<select id="mode" aria-describedby="mode-description"><option value="addressed_only">仅被提及时回复</option><option value="silent">静默</option><option value="shadow">观察模式</option><option value="social">主动参与</option></select></label><button id="save-mode" class="primary">保存模式</button></div><p id="mode-description" class="mode-description" role="status"></p><p class="hint">主动参与由管理员开启，需要全量消息能力和模型发言判别；默认规则判别器不会主动接话。策略版本用于防止覆盖其他管理员的修改。</p></div>
+          <details class="form-card"><summary>会话人格覆盖<span>高级设置</span></summary><label for="persona">新的覆盖内容 JSON</label><textarea id="persona" rows="4" spellcheck="false">{}</textarea><p class="hint">此处用于提交新的覆盖内容，不展示已保存的覆盖。支持 name、formality、reply_length、participation；保存空对象将恢复全局设置。</p><div class="actions"><button id="save-persona">保存人格覆盖</button></div></details>
+          <div class="form-card" id="conversation-policy-card">
+            <div class="section-head"><div><h3>主动参与设置</h3><p>每个群可沿用默认值，或保存独立设置。修改后立即用于后续判断。</p></div></div>
+            <p class="hint">主动接话需开启“主动参与”，且接入能完整观察群消息。权限、禁言和发送能力检查始终生效。观察模式只记录判断。</p>
+            <div id="conversation-policy-form"></div>
+          </div>
+          <div class="actions"><button id="open-decision-history" type="button">查看此会话的判别日志 →</button></div>
           <details class="technical-details"><summary>策略与判别详情</summary><pre id="decision-output">尚未读取</pre></details>
+              </fieldset>
+            </div>
+          </div>
+          <details id="default-policy-settings" class="form-card">
+            <summary>默认发言设置<span>供所有未单独设置的群使用</span></summary>
+            <p class="hint">使用默认值的群会随这里的修改同步更新，已单独设置的群不受影响。与配置中心共用草稿，保存前会展示全部待提交变更。</p>
+            <div id="default-policy-fields" class="settings-form"></div>
+            <p id="default-policy-state" class="hint" role="status"></p>
+            <div class="actions"><button id="save-default-policy" class="primary" type="button" disabled>预览并保存默认设置</button></div>
+          </details>
+        </section>
+
+        <section id="decision-history" hidden aria-labelledby="decision-logs-title">
+          <div class="form-card" aria-labelledby="decision-logs-title">
+            <div class="section-head"><div><h3 id="decision-logs-title">发言判别日志</h3><p>逐次记录发言、等待和跳过的原因，包括重评估及当时的分数、阈值和规则输入。</p></div><button id="load-decisions" type="button">刷新判别日志</button></div>
+            <p class="hint">评分阈值和主动参与条件在“会话管理”中设置。展开记录可查看详细分数。消息摘要随来源撤回或清理而隐藏。</p>
+            <p id="decision-log-state" class="hint" role="status"></p><div id="decision-logs" class="decision-logs" aria-live="polite"><p class="empty-state">选择会话后读取发言判别日志。</p></div>
+            <div class="actions"><button id="older-decisions" type="button" hidden>加载更早记录</button></div>
+          </div>
         </section>
 
         <section id="tasks" hidden aria-labelledby="tasks-title">

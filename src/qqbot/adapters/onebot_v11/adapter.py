@@ -362,8 +362,6 @@ class OneBotAdapter:
         self.pending[key] = future
         is_group = envelope.target.surface == Surface.GROUP
         chain = [{"type": "text", "data": {"text": envelope.text}}]
-        if envelope.reply_context:
-            chain.insert(0, {"type": "reply", "data": {"id": envelope.reply_context.platform_message_id}})
         payload = {
             "action": "send_group_msg" if is_group else "send_private_msg",
             "echo": echo,

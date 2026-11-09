@@ -11,6 +11,55 @@ from qqbot.domain import AccessContext
 from qqbot.storage.task_schema import tasks
 
 
+def test_social_mode_save_restart_and_timed_silence_without_replay_registration(
+    tmp_path, nap_config, nap_event, clock, monkeypatch
+):
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    settings = Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,))
+    auth = {"Authorization": "Bearer admin-test-token"}
+    app = create_app(settings, clock=clock, run_background=False)
+    core = app.state.core
+    event = core.inbox.accept(core.adapters["nap"].normalize(nap_event))[0]
+    cid = event.conversation.key
+    url = "/api/v1/conversations/" + cid + "/policy"
+    with TestClient(app) as client:
+        body = {"expected_version": 1, "mode": "social"}
+        assert client.patch(url, json=body).status_code == 401
+        response = client.patch(url, headers=auth, json=body)
+        assert response.status_code == 200
+        assert response.json()["mode"] == "social" and response.json()["policy_version"] == 2
+        assert core.settings.social_evaluated_conversations == ()
+        assert client.patch(url, headers=auth, json=body).status_code == 409
+        assert client.patch(url, headers=auth, json={
+            "expected_version": 2, "mode": "unknown",
+        }).status_code == 422
+        assert core.state(cid)["mode"] == "social" and core.state(cid)["policy_version"] == 2
+
+    app = create_app(settings, clock=clock, run_background=False)
+    with TestClient(app) as client:
+        core = app.state.core
+        saved = next(row for row in client.get("/api/v1/conversations", headers=auth).json() if row["id"] == cid)
+        assert saved["policy"]["mode"] == "social" and saved["policy"]["policy_version"] == 2
+        silence = {"silent_until": clock.now().isoformat(), "silent_resume_mode": "social"}
+        core.save_state(cid, mode="silent", state_json=json.dumps(silence), expected_version=2)
+        core.restore_silences()
+        assert core.state(cid)["mode"] == "social" and core.state(cid)["policy_version"] == 4
+
+
+def test_social_mode_still_requires_full_observation(tmp_path, official_config, official_event, clock, monkeypatch):
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
+        clock=clock, run_background=False)
+    core = app.state.core
+    event = core.inbox.accept(core.adapters["qq"].normalize(official_event))[0]
+    with TestClient(app) as client:
+        response = client.patch("/api/v1/conversations/" + event.conversation.key + "/policy",
+            headers={"Authorization": "Bearer admin-test-token"}, json={"expected_version": 1, "mode": "social"})
+        assert response.status_code == 422 and "全量观察能力" in response.json()["detail"]
+        assert core.state(event.conversation.key)["mode"] == "addressed_only"
+        assert core.state(event.conversation.key)["policy_version"] == 1
+
+
 def test_config_rollback_and_artifact_download_boundary(tmp_path, nap_config, nap_event, clock, monkeypatch):
     monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
     app = create_app(Settings(database=str(tmp_path/'core.db'), adapters=(nap_config,)), clock=clock, run_background=False)

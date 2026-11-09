@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -15,7 +16,7 @@ from qqbot.domain.messages import (
     Surface,
     TextSegment,
 )
-from qqbot.domain.social import JudgmentSignals
+from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechThresholds
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
 from qqbot.policy.judge import JevJudge, StructuredLLMJudge
 
@@ -63,11 +64,12 @@ def test_invited_metadata_hard_gates_shadow():
     )
 
 
-def test_social_cooldown_and_bounded_wait():
+@pytest.mark.parametrize("max_rechecks", [0, 2, 3])
+def test_social_cooldown_and_bounded_wait(max_rechecks):
     clock = FakeClock()
     policy = SpeechPolicy(clock)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
-    state = PolicyState(mode="social", social_evaluated=True, new_human_messages=3)
+    state = PolicyState(mode="social", new_human_messages=3)
     signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
     e = event(clock)
     assert policy.decide(e, cap, state, signals).action == "SPEAK"
@@ -77,16 +79,56 @@ def test_social_cooldown_and_bounded_wait():
     signals = JudgmentSignals(useful_contribution=0.6)
     actor = ConversationWindow(clock)
     actor.accept(e)
-    for _ in range(2):
-        decision = policy.decide(e, cap, state, signals)
+    for _ in range(max_rechecks):
+        decision = policy.decide(e, cap, state, signals, participation=ParticipationSettings(max_rechecks=max_rechecks))
         actor.wait(decision)
         saved = actor.dump_wait()
         actor.restore_wait(saved)
         clock.advance(1)
         assert actor.wake()
         state.rechecks = actor.rechecks
-    assert policy.decide(e, cap, state, signals).action == "IGNORE"
+    assert policy.decide(e, cap, state, signals, participation=ParticipationSettings(max_rechecks=max_rechecks)).action == "IGNORE"
     assert not actor.wake()
+
+
+@pytest.mark.parametrize("scores,field,value,before,after", [
+    ({"invites_participation": 0.7, "useful_contribution": 0.8}, "invites_participation", 0.7, "WAIT", "SPEAK"),
+    ({"continues_bot_topic": 0.8, "useful_contribution": 0.8}, "continues_bot_topic", 0.8, "WAIT", "SPEAK"),
+    ({"invites_participation": 0.9, "useful_contribution": 0.7}, "useful_contribution", 0.7, "WAIT", "SPEAK"),
+    ({"invites_participation": 0.9, "useful_contribution": 0.8, "private_exchange": 0.25},
+     "private_exchange", 0.25, "WAIT", "SPEAK"),
+    ({"useful_contribution": 0.45}, "wait_useful_contribution", 0.45, "IGNORE", "WAIT"),
+])
+def test_each_score_threshold_controls_its_decision(scores, field, value, before, after):
+    clock = FakeClock()
+    policy = SpeechPolicy(clock)
+    state = PolicyState(mode="social", new_human_messages=3)
+    cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
+    signals = JudgmentSignals(**{"private_exchange": 0.1, **scores})
+    assert policy.decide(event(clock), cap, state, signals).action == before
+    thresholds = SpeechThresholds(**{field: value})
+    assert policy.decide(event(clock), cap, state, signals, thresholds=thresholds).action == after
+
+
+def test_zero_threshold_and_precise_participation_blocks():
+    clock = FakeClock()
+    policy = SpeechPolicy(clock)
+    state = PolicyState(mode="social", new_human_messages=3)
+    cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
+    thresholds = SpeechThresholds(invites_participation=0, useful_contribution=0, private_exchange=1)
+    assert policy.decide(event(clock), cap, state, JudgmentSignals(), thresholds=thresholds).action == "SPEAK"
+    state.new_human_messages = 2
+    state.last_bot_at = clock.now()
+    decision = policy.decide(event(clock), cap, state, JudgmentSignals(), thresholds=thresholds)
+    assert decision.reason_codes == ("PARTICIPATION_LIMIT",)
+    assert decision.blocked_rules == ("COOLDOWN", "MIN_HUMAN_MESSAGES")
+
+
+@pytest.mark.parametrize("invalid", [-0.01, 1.01, float("nan"), float("inf")])
+def test_score_threshold_rejects_out_of_range_values(invalid):
+    for field in SpeechThresholds.model_fields:
+        with pytest.raises(ValueError):
+            SpeechThresholds(**{field: invalid})
 
 
 def test_debounce_snapshot_and_delivery_recheck():
@@ -145,6 +187,33 @@ async def test_judges_abstain_on_malformed_and_missing_key():
     }
     structured = StructuredLLMJudge("key", "model", "https://example.invalid")
     assert structured.parse({"choices": [{"message": {"content": json.dumps(values)}}]}).model_id == "model"
+
+
+async def test_general_llm_judge_allows_normal_model_latency():
+    import asyncio
+    from uuid import UUID
+
+    from qqbot.policy.judge import SIGNALS
+
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["model"] == "chat-model"
+        assert body["response_format"] == {"type": "json_object"}
+        assert request.headers["authorization"] == "Bearer chat-key"
+        assert request.headers["user-agent"] == "ElephantBot/0.1"
+        assert UUID(request.headers["x-opencode-session"]).version == 4
+        assert request.extensions["timeout"]["read"] == 30
+        await asyncio.sleep(1.6)
+        return httpx.Response(200, json={"choices": [{
+            "message": {"content": json.dumps(dict.fromkeys(SIGNALS, 0.8))},
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        judge = StructuredLLMJudge("chat-key", "chat-model", "https://example.invalid", client=client)
+        result = await judge.judge({"messages": ["大家有什么建议？"]})
+        assert not result.abstain and result.model_id == "chat-model"
+        assert result.useful_contribution == 0.8
+    assert JevJudge.timeout_seconds == 1.5
 
 
 def test_persona_atomic_reload_and_untrusted_memory(tmp_path):
@@ -216,7 +285,7 @@ def test_persona_override_restart_and_failed_write(tmp_path, monkeypatch):
     assert PersonaStore(path).snapshot("g") == saved
 
 
-def test_shadow_calibrates_before_social_approval():
+def test_social_needs_full_observation_but_no_replay_registration():
     clock = FakeClock()
     state = PolicyState(mode="shadow", new_human_messages=3)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
@@ -224,7 +293,12 @@ def test_shadow_calibrates_before_social_approval():
     decision = SpeechPolicy(clock).decide(event(clock), cap, state, signals)
     assert decision.action == "IGNORE" and decision.shadow_action == "SPEAK"
     state.mode = "social"
+    assert SpeechPolicy(clock).decide(event(clock), cap, state, signals).action == "SPEAK"
+    cap = cap.model_copy(update={"can_observe_unaddressed_messages": False})
     assert SpeechPolicy(clock).decide(event(clock), cap, state, signals).action == "IGNORE"
+    cap = cap.model_copy(update={"can_observe_unaddressed_messages": True})
+    partial = event(clock, observation_mode=ObservationMode.MENTIONS_ONLY)
+    assert SpeechPolicy(clock).decide(partial, cap, state, signals).reason_codes == ("SOCIAL_NOT_READY",)
 
 
 def test_replay_reports_denominators_and_rejects_split_leakage():
@@ -259,3 +333,82 @@ async def test_judges_malformed_top_level_abstain():
             structured = StructuredLLMJudge("key", "m", "https://example.invalid", client=client)
             assert (await jev.judge({})).abstain
             assert (await structured.judge({})).abstain
+
+
+@pytest.mark.parametrize("state_update,settings,blocked", [
+    ({"new_human_messages": 2}, {"min_human_messages": 2}, "MIN_HUMAN_MESSAGES"),
+    ({"unanswered_proactive": 1}, {"require_member_response": False}, "UNANSWERED_PROACTIVE"),
+    ({"recent_bot_ratio": 0.2}, {"max_recent_bot_ratio": 0.3}, "RECENT_BOT_RATIO"),
+    ({"recent_bot_ratio": 0.3}, {"max_recent_bot_ratio": 0.3}, "RECENT_BOT_RATIO"),
+])
+def test_participation_settings_control_gates(state_update, settings, blocked):
+    clock = FakeClock()
+    policy = SpeechPolicy(clock)
+    state = PolicyState(mode="social", new_human_messages=3)
+    for field, value in state_update.items():
+        setattr(state, field, value)
+    cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
+    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    assert blocked in policy.decide(event(clock), cap, state, signals).blocked_rules
+    decision = policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(**settings))
+    if state_update.get("recent_bot_ratio") == 0.3:
+        assert decision.blocked_rules == (blocked,)
+    else:
+        assert decision.action == "SPEAK"
+
+
+def test_participation_cooldown_boundary_and_wait_limit():
+    clock = FakeClock()
+    policy = SpeechPolicy(clock)
+    cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
+    state = PolicyState(mode="social", new_human_messages=3, last_bot_at=clock.now() - timedelta(seconds=30))
+    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    assert policy.decide(event(clock), cap, state, signals).blocked_rules == ("COOLDOWN",)
+    assert policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(cooldown_seconds=30)).action == "SPEAK"
+    state.last_bot_at = None
+    state.rechecks = 2
+    signals = JudgmentSignals(useful_contribution=0.6)
+    assert policy.decide(event(clock), cap, state, signals).action == "IGNORE"
+    decision = policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(max_rechecks=3))
+    assert decision.action == "WAIT" and decision.max_rechecks == 3
+    state.rechecks = 3
+    assert policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(max_rechecks=3)).action == "IGNORE"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("cooldown_seconds", -1), ("min_human_messages", -1), ("max_rechecks", -1),
+    ("activity_window_seconds", 0), ("activity_max_events", 0),
+    ("max_recent_bot_ratio", 1.01), ("participation_budget_ratio", -0.01),
+    ("participation_budget_ratio", float("nan")), ("max_recent_bot_ratio", float("inf")),
+    ("require_member_response", "false"), ("min_human_messages", True),
+])
+def test_participation_settings_reject_invalid_values(field, value):
+    with pytest.raises(ValueError):
+        ParticipationSettings(**{field: value})
+
+
+def test_custom_activity_window_and_budget_ratio():
+    clock = FakeClock()
+    controller = ParticipationController()
+    controller.observe("old", now=clock.now(), window_seconds=120)
+    clock.advance(90)
+    controller.observe("new", now=clock.now(), window_seconds=120)
+    assert controller.human_ids == {"old", "new"}
+    controller.reserve("delivery", now=clock.now())
+    assert not controller.available(0.5)
+    assert controller.available(0.6)
+    assert not controller.available(0)
+    controller.prune(clock.now(), 60)
+    assert controller.human_ids == {"new"}
+
+
+def test_participation_defaults_are_in_config_schema_and_round_trip():
+    from qqbot.config import Settings
+    settings = Settings()
+    assert settings.judge.participation == ParticipationSettings()
+    restored = Settings.model_validate_json(settings.model_dump_json())
+    assert restored.judge.participation == settings.judge.participation
+    fields = Settings.model_json_schema()["$defs"]["ParticipationSettings"]["properties"]
+    assert fields["require_member_response"]["type"] == "boolean"
+    assert fields["activity_window_seconds"]["minimum"] == 1
+    assert fields["participation_budget_ratio"]["maximum"] == 1

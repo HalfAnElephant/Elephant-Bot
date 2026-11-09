@@ -299,6 +299,51 @@ async def test_old_binding_and_tokens_are_revoked(gateway):
         assert current.status_code == 200 and current.json()["generation"] == 2
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_operation_notice_gates_tools_and_resets_on_rebind(gateway, enabled):
+    instance, core, claim = gateway
+    instance.revoke()
+    claim = {**claim, "context": {"notify_before_tools": enabled}}
+    instance.bind(claim)
+    invoked = []
+    instance.registry.register(Capability("fixture.read", "read"), lambda a, c: invoked.append(1) or {},
+                               lambda a, c: Action("fixture.read", ()))
+    packet = {"call_id": "read", "arguments": {"name": "fixture.read", "arguments": {}}}
+    original_call = instance.call
+    accepted = False
+    async def notify(operation, payload):
+        if operation == "notify":
+            core.calls.append((operation, payload))
+            return {"accepted": accepted}
+        return await original_call(operation, payload)
+    instance.call = notify
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://gateway") as client:
+        first = await client.post("/tools/capability_invoke", json=packet, headers=auth(instance.tool_token))
+        if enabled:
+            assert first.status_code == 422 and "task_notify" in first.json()["detail"]
+            assert not invoked
+            assert "必须先单独调用 task_notify" in instance.system_prompt
+        else:
+            assert first.status_code == 200 and invoked == [1]
+            assert "必须先单独调用 task_notify" not in instance.system_prompt
+        notice = {"call_id": "notice", "arguments": {"text": "我查一下现在的 Issue。"}}
+        await client.post("/tools/task_notify", json=notice, headers=auth(instance.tool_token))
+        assert not instance.progress_announced
+        accepted = True
+        response = await client.post("/tools/task_notify", json=notice, headers=auth(instance.tool_token))
+        assert response.json()["accepted"] and instance.progress_announced
+        if enabled:
+            assert core.calls[-1][1]["importance"] == "important"
+        assert (await client.post("/tools/capability_invoke", json=packet,
+                                  headers=auth(instance.tool_token))).status_code == 200
+        instance.revoke()
+        instance.bind({**claim, "run_id": "next"})
+        assert not instance.progress_announced
+        response = await client.post("/tools/capability_search", json={"call_id": "search", "arguments": {}},
+                                     headers=auth(instance.tool_token))
+        assert response.status_code == (422 if enabled else 200)
+
+
 @pytest.mark.parametrize("packet", [[], None, {"call_id": "", "arguments": {}},
                                      {"call_id": 9, "arguments": {}}, {"call_id": "x", "arguments": []}])
 async def test_malformed_bridge_packet_rejected(gateway, packet):

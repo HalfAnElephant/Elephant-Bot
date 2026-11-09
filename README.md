@@ -203,12 +203,32 @@ adapters:
 | `execution.foreground_wait_ms` | `5000` | 等待预算到期只改变交付方式 |
 | `execution.max_active` / `execution.sustained_limit` | `4` / `2` | Core 总执行与持续任务容量 |
 | `internal_socket` | `var/internal.sock` | Core 内部 Unix socket |
-| `judge.kind` | `rule` | 可选 `rule`、`jev`、`structured` |
+| `judge.kind` | `rule` | 可选规则判断 `rule`、Jev `jev`、通用大模型（OpenAI 兼容）`structured` |
 | `memory.maintenance_enabled` | `false` | 增量摘要、保留期清理与索引维护 |
 | `memory.auto_extract` | `false` | 模型提取记忆候选，需配置提取 endpoint、model 与密钥 |
 | `expression.enabled` | `true` | 群聊表达学习与使用；实际学习需可用模型凭据，私聊需显式规则 |
 
-完整配置与限制见 [示例配置](configs/example.yaml)、[JSON Schema](configs/schema.json) 和 [发言与记忆说明](docs/social-implementation.md)。默认保持 `addressed_only`，启用 social 模式前需要真实标注回放评估。
+完整配置与限制见 [示例配置](configs/example.yaml)、[JSON Schema](configs/schema.json) 和 [发言与记忆说明](docs/social-implementation.md)。默认保持 `addressed_only`；管理员可为具备全量消息能力的会话启用 `social`，无需登记回放评估。主动接话还需配置 `jev` 或 `structured` 发言判别器；默认 `rule` 判别器不主动接话。旧字段 `social_evaluated_conversations` 保留兼容，不再控制准入。
+
+后台“全部配置 → 发言 → 发言判断”可选择“通用大模型（OpenAI 兼容）”。与聊天模型共用时，将 `model` 配置中的完整请求地址、模型名称和密钥环境变量填入 `judge` 对应字段。通用大模型请求超时为 30 秒，失败或返回无效 JSON 时放弃本次主动接话。
+
+```yaml
+judge:
+  kind: structured
+  endpoint: https://YOUR_PROVIDER/v1/chat/completions
+  model: your-chat-model
+  api_key_env: QQBOT_MODEL_KEY
+  thresholds:
+    invites_participation: 0.8
+    continues_bot_topic: 0.85
+    useful_contribution: 0.75
+    private_exchange: 0.2
+    wait_useful_contribution: 0.5
+```
+
+五项评分阈值在“会话管理”修改，范围为 0–1。每个群可分别为评分阈值、主动参与条件选择默认设置或独立覆盖；群级设置保存后立即用于后续判断，恢复默认后随全局配置生效值变化。页面底部的默认设置复用配置版本与保存流程，保存后重启生效。冷却时间、人类消息最低数、等待成员回应、机器人占比、统计窗口、活动条数、参与预算比例和重评估次数均可配置；完整观察群消息、权限与禁言仍是硬前提。主动接话要求邀请参与或延续机器人话题达到各自下限，同时有用贡献达到下限、他人私聊程度不高于上限。有用贡献达到等待下限时可以先等待重评估。
+
+侧边栏“发言判别日志”逐次记录结果、五项分数、当时阈值、具体参与限制、判别耗时和重评估次数。新记录同步写入服务日志的 `speech.decision` 事件。历史记录升级时保留已有结果和分数，无法还原的旧阈值与输入会标为缺失。消息摘要按当前消息的撤回、清理状态读取。
 
 ## 常用 QQ 命令
 

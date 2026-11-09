@@ -118,6 +118,16 @@ section { min-width: 0; }
 
 .form-card { margin: 18px 0; padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .form-card > h3 { margin-bottom: 13px; }
+.decision-logs { margin-top: 16px; }
+.decision-log { margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
+.decision-log > summary { padding: 12px 14px; cursor: pointer; }
+.decision-log-header { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 12px; font-size: 12px; }
+.decision-log-message { display: block; margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.decision-log-content { padding: 0 14px 14px; }
+.decision-log-content > p { margin: 8px 0; }
+.decision-reason { color: var(--ink); font-weight: 550; }
+.decision-scores { width: 100%; margin: 12px 0; table-layout: fixed; }
+.decision-scores th, .decision-scores td { white-space: normal; overflow-wrap: anywhere; }
 .form-card > label { margin: 12px 0 7px; }
 .form-card > .hint { margin: 10px 0; }
 
@@ -517,3 +527,42 @@ dialog::backdrop { background: #162b2259; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* Keep the selected conversation visible alongside its settings. */
+.conversation-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.conversation-directory { position: sticky; top: 100px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.conversation-directory > .hint { margin: 12px 0; }
+.conversation-list { display: grid; gap: 8px; max-height: 65vh; overflow-y: auto; padding: 3px; }
+.conversation-item { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; width: 100%; text-align: left; padding: 13px; border-color: transparent; }
+.conversation-item strong { font-size: 13px; overflow-wrap: anywhere; }
+.conversation-item[aria-pressed=true] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+.conversation-item .badge { font-size: 11px; font-weight: 400; }
+.conversation-detail { min-width: 0; }
+.conversation-heading { padding: 18px 20px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.conversation-heading h3 { font-size: 20px; margin-bottom: 6px; }
+#conversation-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+#conversation-controls > .form-card { margin: 16px 0; }
+#conversation-controls .mode-description { padding: 12px 14px; background: var(--accent-soft); border-radius: 7px; color: var(--accent); font-size: 13px; }
+#conversation-controls label:has(#policy-version) { flex: 0 1 150px; }
+#policy-version { background: var(--surface-soft); color: var(--muted); }
+@media (max-width: 1100px) {
+  .conversation-layout { grid-template-columns: minmax(180px, 230px) minmax(0, 1fr); gap: 16px; }
+}
+@media (max-width: 760px) {
+  .conversation-layout { grid-template-columns: minmax(0, 1fr); }
+  .conversation-directory { position: static; }
+  .conversation-list { max-height: 240px; }
+  .conversation-heading { padding: 14px 0; }
+  #conversation-controls .bar > label, #conversation-controls label:has(#policy-version) { flex-basis: 100%; }
+  #conversation-controls .bar > button { width: 100%; }
+}
+.conversation-policy-section { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 20px; }
+.conversation-policy-section h4 { margin-bottom: 12px; }
+.conversation-policy-section > label { margin-bottom: 18px; }
+.conversation-policy-section > .hint { margin: 14px 0; }
+.conversation-policy-section .nested-fields { gap: 18px; }
+.conversation-policy-section label { font-size: 13px; }
+.conversation-policy-section label .hint { font-weight: 400; }
+.conversation-policy-section input[type=checkbox] { margin: 10px 0; }
+#default-policy-fields > .field { grid-column: 1 / -1; }
+#default-policy-settings > .hint { margin-top: 12px; }

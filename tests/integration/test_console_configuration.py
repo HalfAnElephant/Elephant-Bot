@@ -73,6 +73,7 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
         assert data["config"] == data["saved_config"] == console_settings.model_dump(mode="json")
         assert data["version"] == data["saved_version"]
         assert data["restart_required"] is False and data["changed_fields"] == []
+        assert data["config"]["execution"]["notify_before_tools"] is True
         assert "send_budget_per_minute" in data["hot_fields"]
         credentials = {item["name"]: item["configured"] for item in data["credentials"]}
         assert credentials["QQBOT_ADMIN_TOKEN"] and credentials["QQBOT_MODEL_KEY"]
@@ -80,6 +81,7 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
         assert "console-model-secret" not in response.text
         schema = client.get("/api/v1/config/schema", headers=AUTH).json()
         assert set(schema["properties"]) == set(Settings.model_fields)
+        assert schema["$defs"]["ExecutionConfig"]["properties"]["notify_before_tools"]["default"] is True
 
 
 def test_save_all_settings_restart_and_restore_history(console_settings, tmp_path, clock):
@@ -90,7 +92,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
             **first["config"],
             "timezone": "UTC",
             "tasks_enabled": True,
-            "execution": {**first["config"]["execution"], "max_active": 5},
+            "execution": {**first["config"]["execution"], "max_active": 5, "notify_before_tools": False},
             "context": {**first["config"]["context"], "recent_messages": 20},
             "memory": {**first["config"]["memory"], "raw_retention_days": 45},
             "model": {**first["config"]["model"], "model": "console-model"},
@@ -212,6 +214,42 @@ def test_failed_config_replace_preserves_saved_and_active_configuration(console_
             assert response.status_code == 500
             assert client.get("/api/v1/config", headers=AUTH).json() == before
             assert (tmp_path / "runtime-config.json").read_bytes() == original_file
+
+
+def test_general_llm_judge_config_save_and_restart(console_settings, clock):
+    from qqbot.config import ModelConfig
+    from qqbot.policy.judge import RuleOnlyJudge, StructuredLLMJudge
+
+    settings = console_settings.model_copy(update={"model": ModelConfig(
+        endpoint="https://example.invalid/v1/chat/completions", model="chat-model",
+    )})
+    app = create_app(settings, clock=clock, run_background=False)
+    with TestClient(app) as client:
+        schema = client.get("/api/v1/config/schema", headers=AUTH).json()
+        assert "structured" in schema["$defs"]["JudgeConfig"]["properties"]["kind"]["enum"]
+        first = client.get("/api/v1/config", headers=AUTH).json()
+        model = first["config"]["model"]
+        judge = {
+            **first["config"]["judge"], "kind": "structured",
+            **{key: model[key] for key in ("endpoint", "model", "api_key_env")},
+            "thresholds": {**first["config"]["judge"]["thresholds"], "useful_contribution": 0.6},
+        }
+        response = client.post("/api/v1/config/save", headers=AUTH, json={
+            "expected_version": first["saved_version"], "config": {**first["config"], "judge": judge},
+        })
+        assert response.status_code == 200 and response.json()["restart_required"] is True
+        assert isinstance(app.state.core.judge, RuleOnlyJudge)
+
+    app = create_app(settings, clock=clock, run_background=False)
+    with TestClient(app) as client:
+        data = client.get("/api/v1/config", headers=AUTH).json()
+        assert data["config"]["judge"] == judge and data["restart_required"] is False
+        provider = app.state.core.judge
+        assert isinstance(provider, StructuredLLMJudge)
+        assert app.state.core.settings.judge.thresholds.useful_contribution == 0.6
+        assert (provider.model, provider.endpoint, provider.key) == (
+            model["model"], model["endpoint"], "console-model-secret",
+        )
 
 
 def test_model_metadata_hot_apply_when_execution_disabled(console_settings, clock):

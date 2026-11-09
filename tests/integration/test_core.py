@@ -254,9 +254,6 @@ def social_event(core, payload, message_id, text):
 def enable_social(core, event):
     from qqbot.domain import AdapterCapabilities, ObservationMode
 
-    core.settings = core.settings.model_copy(
-        update={"social_evaluated_conversations": (event.conversation.key,)}
-    )
     core.save_state(event.conversation.key, mode="social")
 
     async def capabilities(target):
@@ -287,6 +284,8 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
             return JudgmentSignals(useful_contribution=0.6)
 
     core.judge = Judge()
+    logged = []
+    monkeypatch.setattr("qqbot.runtime.logger.info", lambda message, **kwargs: logged.append((message, kwargs)))
     await core.process(event)
     assert core.window(event).waiting is not None
     for _ in range(2):
@@ -297,12 +296,64 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
     assert core.window(event).waiting is None and core.window(event).rechecks == 0
     with core.db.engine.connect() as c:
         assert c.execute(select(inbox.c.state).where(inbox.c.id == event.event_id)).scalar_one() == "DONE"
+        from qqbot.storage.schema import decision_logs, decisions
+
+        history = c.execute(select(decision_logs).where(
+            decision_logs.c.event_id == event.event_id,
+        ).order_by(decision_logs.c.id)).mappings().all()
+        assert len(history) == 3
+        assert [json.loads(row["decision_json"])["action"] for row in history] == ["WAIT", "WAIT", "IGNORE"]
+        assert len(c.execute(select(decisions).where(decisions.c.event_id == event.event_id)).all()) == 1
+        contexts = [json.loads(row["context_json"]) for row in history]
+        assert [context["policy_state"]["rechecks"] for context in contexts] == [0, 1, 2]
+        assert all(context["thresholds"]["wait_useful_contribution"] == 0.5 for context in contexts)
+        assert all(context["judge_status"] == "success" and context["judge_duration_ms"] >= 0 for context in contexts)
+        assert all(context["policy_state"]["new_human_messages"] == 3 for context in contexts)
+        assert "maybe useful" not in history[0]["context_json"]
+    import logging
+
+    from qqbot.observability import JSONFormatter
+
+    assert len(logged) == 3 and logged[0][0] == "speech.decision"
+    journal = json.loads(JSONFormatter().format(logging.makeLogRecord({
+        "name": "qqbot.runtime", "levelname": "INFO", "msg": logged[0][0],
+        **logged[0][1]["extra"],
+    })))
+    assert journal["data"]["decision"]["signals"]["useful_contribution"] == 0.6
+    assert journal["data"]["context"] == contexts[0]
     clock.advance(5)
     core.resume_waits()
     assert len(calls) == 3
     next_event = social_event(core, nap_event, 533, "new independent chance")
     await core.process(next_event)
     assert core.window(next_event).waiting is not None
+    await core.stop()
+    core.db.close()
+
+
+async def test_decision_logs_distinguish_rule_abstention_and_participation_prefilter(
+    tmp_path, nap_config, nap_event, clock, monkeypatch
+):
+    from qqbot.storage.schema import decision_logs
+
+    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    core = app.state.core
+    first = social_event(core, nap_event, 610, "first unaddressed message")
+    enable_social(core, first)
+    await core.process(first)
+    second = social_event(core, nap_event, 611, "second unaddressed message")
+    core.inbox.finish(second.event_id)
+    third = social_event(core, nap_event, 612, "third unaddressed message")
+    await core.process(third)
+    with core.db.engine.connect() as c:
+        rows = c.execute(select(decision_logs).order_by(decision_logs.c.id)).mappings().all()
+    assert len(rows) == 2
+    contexts = [json.loads(row["context_json"]) for row in rows]
+    choices = [json.loads(row["decision_json"]) for row in rows]
+    assert contexts[0]["judge_status"] == "not_called" and contexts[0]["judge_duration_ms"] is None
+    assert choices[0]["signals"] is None and choices[0]["blocked_rules"] == ["MIN_HUMAN_MESSAGES"]
+    assert contexts[1]["judge_status"] == "rule_only"
+    assert choices[1]["reason_codes"] == ["JUDGE_ABSTAIN"] and choices[1]["signals"]["abstain"]
     await core.stop()
     core.db.close()
 
