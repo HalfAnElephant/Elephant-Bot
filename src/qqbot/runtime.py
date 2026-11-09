@@ -29,10 +29,10 @@ from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
 from qqbot.policy.judge import Jev1Judge, JevJudge, RuleOnlyJudge, StructuredLLMJudge
+from qqbot.speakup import SpeakUp
 from qqbot.storage.schema import audit_events, decision_logs, decisions, inbox, outbox, runtime_state
 from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
 from qqbot.storage.task_schema import notifications, tasks
-from qqbot.speakup import SpeakUp
 
 logger = logging.getLogger(__name__)
 CONTROL_COMMANDS = {
@@ -881,10 +881,10 @@ class Core:
                         and event.received_at
                         <= fragment.received_at
                         <= event.received_at + timedelta(milliseconds=200)
-                        and fragment.text.strip()
+                        and (fragment.text.strip() or any(s.type == "image" for s in fragment.segments))
                         and not fragment.text.lstrip().startswith("/")
                         and all(
-                            segment.type in {"text", "mention"}
+                            segment.type in {"text", "mention", "image"}
                             for segment in (*event.segments, *fragment.segments)
                         )
                         and not self.recalled(fragment)

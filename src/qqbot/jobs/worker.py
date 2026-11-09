@@ -339,6 +339,13 @@ class Worker:
                         last_reminder = time.monotonic()
                     for extra in await self.call("inputs", **identity):
                         try:
+                            if extra.get("images"):
+                                context = harness.gateway.claim.setdefault("context", {})
+                                known = context.setdefault("images", [])
+                                for image in extra["images"]:
+                                    if image not in known:
+                                        known.append(image)
+                                        harness.gateway.image_content = None
                             await harness.append_input(extra["id"], extra["text"])
                         except RuntimeError:
                             if not execution.done() and getattr(harness, "accepting_input", True):

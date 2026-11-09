@@ -32,6 +32,129 @@ def core_for(tmp_path, nap_config, clock, **settings):
     return core
 
 
+def image_event(core, payload, message_id, url=None):
+    value = core.adapters["nap"].normalize({
+        **payload, "message_id": message_id,
+        "message": [{"type": "image", "data": {"file": "image.png", "url": url}}],
+    })
+    return core.inbox.accept(value)[0]
+
+
+async def test_images_survive_image_only_and_merged_turns_without_leaking_urls_to_seed(
+    tmp_path, nap_config, nap_event, clock
+):
+    core = core_for(tmp_path, nap_config, clock)
+    picture = image_event(core, nap_event, 1800, "https://example.com/secret-image.png")
+    turn = core.contexts.turn(picture)
+    assert turn.text == "[图片]"
+    context = core.contexts.build(core.access(picture), turn)
+    assert context["images"] == [{
+        "source": picture.event_id, "message_id": "1800", "url": "https://example.com/secret-image.png",
+    }]
+    assert "secret-image" not in json.dumps(context["seed"])
+    assert core.validate_context(core.access(picture), context)
+    text = event(core, nap_event, 1801, "这张图写了什么")
+    unresolved = image_event(core, nap_event, 1802)
+    merged = core.contexts.turn(picture, (text, unresolved))
+    assert merged.text == "[图片]\n这张图写了什么\n[图片]"
+    context = core.contexts.build(core.access(picture), merged)
+    assert [item["source"] for item in context["images"]] == [picture.event_id, unresolved.event_id]
+    assert context["images"][1]["url"] is None
+    assert {item["source"] for item in context["images"]}.issubset(
+        {item["id"] for item in context["source_manifest"]}
+    )
+    await core.stop()
+    core.db.close()
+
+
+async def test_reply_restores_image_outside_recent_history_and_respects_revocation(
+    tmp_path, nap_config, nap_event, clock
+):
+    core = core_for(tmp_path, nap_config, clock, context={"recent_messages": 1})
+    picture = image_event(core, nap_event, 1810, "https://example.com/old.png")
+    later = event(core, nap_event, 1811, "https://github.com/org/repo 的 PR")
+    without_reply = core.contexts.build(core.access(later), core.contexts.turn(later))
+    assert without_reply["images"] == []
+    reply = later.model_copy(update={"reply_to": picture.platform_message_id})
+    restored = core.contexts.build(core.access(reply), core.contexts.turn(reply))
+    assert restored["images"][0]["source"] == picture.event_id
+    assert picture.event_id in {item["source"] for item in restored["seed"]["history"]}
+    assert core.validate_context(core.access(reply), restored)
+    core.social.revoke_source(core.access(picture), picture.event_id)
+    assert not core.validate_context(core.access(reply), restored)
+    fresh = core.contexts.build(core.access(reply), core.contexts.turn(reply))
+    assert fresh["images"] == []
+    await core.stop()
+    core.db.close()
+
+
+async def test_image_history_obeys_source_permissions_and_notice_only(
+    tmp_path, nap_config, nap_event, clock
+):
+    core = core_for(tmp_path, nap_config, clock)
+    picture = image_event(core, nap_event, 1820, "https://example.com/denied.png")
+    text = event(core, nap_event, 1821, "看看上面的图片")
+    context = core.contexts.build(core.access(text), core.contexts.turn(text))
+    assert context["images"][0]["source"] == picture.event_id
+    notice = core.contexts.build(core.access(text), core.contexts.turn(text), notice_only=True)
+    assert notice["images"] == []
+    core.permissions.upsert(PermissionRule(
+        id="deny-image", effect="deny", actions=("history.source.read",),
+        resources=("event:" + picture.event_id,),
+    ), expected_version=0, actor="test")
+    denied = core.contexts.build(core.access(text), core.contexts.turn(text))
+    assert denied["images"] == []
+    await core.stop()
+    core.db.close()
+
+
+async def test_process_image_only_private_message_creates_image_task(
+    tmp_path, nap_config, nap_event, clock
+):
+    core = core_for(tmp_path, nap_config, clock)
+    payload = {key: value for key, value in nap_event.items() if key != "group_id"}
+    payload["message_type"] = "private"
+    picture = image_event(core, payload, 1830, "https://example.com/private.png")
+    await core.process(picture)
+    with core.db.engine.connect() as conn:
+        task = conn.execute(select(tasks)).mappings().one()
+        received = conn.execute(select(inbox.c.state, inbox.c.error)).one()
+    assert task["goal"] == "[图片]"
+    assert task["source"] == picture.event_id
+    assert received == ("DONE", None)
+    context = json.loads(task["context_json"])
+    assert context["images"] == [{
+        "source": picture.event_id, "message_id": "1830", "url": "https://example.com/private.png",
+    }]
+    assert core.validate_context(core.access(picture), context)
+    await core.stop()
+    core.db.close()
+
+
+async def test_process_coalesces_invited_text_and_image_into_one_task(
+    tmp_path, nap_config, nap_event, clock
+):
+    core = core_for(tmp_path, nap_config, clock)
+    text = event(core, nap_event, 1831, "帮我读一下这张截图")
+    processing = asyncio.create_task(core.process(text))
+    await asyncio.sleep(0.02)
+    picture = image_event(core, nap_event, 1832, "https://example.com/screenshot.png")
+    await processing
+    with core.db.engine.connect() as conn:
+        task = conn.execute(select(tasks)).mappings().one()
+        received = conn.execute(select(inbox.c.state, inbox.c.error)).all()
+    assert task["goal"] == "帮我读一下这张截图\n[图片]"
+    assert received == [("DONE", None), ("DONE", None)]
+    context = json.loads(task["context_json"])
+    assert context["turn"]["source_event_ids"] == [text.event_id, picture.event_id]
+    assert context["images"] == [{
+        "source": picture.event_id, "message_id": "1832", "url": "https://example.com/screenshot.png",
+    }]
+    assert core.validate_context(core.access(text), context)
+    await core.stop()
+    core.db.close()
+
+
 async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, nap_config, nap_event, clock):
     core = core_for(tmp_path, nap_config.model_copy(update={"allowed_groups": ()}), clock)
     assert not hasattr(core, "generate")

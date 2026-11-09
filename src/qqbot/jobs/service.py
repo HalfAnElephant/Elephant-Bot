@@ -730,6 +730,8 @@ class TaskService:
             return {"accepted": True, "question_id": question_id, "waiting": True}
 
     def add_input(self, public_id, event, access, text, question_id=None):
+        if isinstance(text, str) and not text.strip() and any(s.type == "image" for s in event.segments):
+            text = "[图片]"
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
             raise ValueError("input must contain 1..16000 characters")
         if access.principal != event.principal or access.conversation != event.conversation:
@@ -752,12 +754,21 @@ class TaskService:
             c.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=wait["id"] if wait else None,
                 source_id=event.event_id, text=text, state="PENDING", created_at=self.clock.now().isoformat()))
             from qqbot.storage.schema import inbox as inbox_table
-            raw = c.execute(select(inbox_table.c.event_json).where(inbox_table.c.id == event.event_id)).scalar_one_or_none()
+            raw = c.execute(select(inbox_table.c.event_json).where(
+                inbox_table.c.id == event.event_id,
+                inbox_table.c.conversation_id == access.conversation.key,
+                inbox_table.c.principal_id == access.principal.key,
+            )).scalar_one_or_none()
             if raw:
                 context = json.loads(task["context_json"])
                 if context:
                     context.setdefault("source_manifest", []).append({"kind": "inbox", "id": event.event_id,
                         "digest": hashlib.sha256(raw.encode()).hexdigest()})
+                    source = InboundEvent.model_validate_json(raw)
+                    images = [{"source": source.event_id, "message_id": source.platform_message_id,
+                               "url": segment.image_url} for segment in source.segments if segment.type == "image"]
+                    if images:
+                        context.setdefault("images", []).extend(images)
                     c.execute(update(tasks).where(tasks.c.id == task["id"]).values(context_json=json.dumps(context, ensure_ascii=False)))
             if wait:
                 self._wake(c, task["id"], wait["id"])
@@ -821,7 +832,15 @@ class TaskService:
                 return []
             rows = c.execute(select(inputs).where(inputs.c.task_id == task["id"],
                 inputs.c.state == "PENDING", inputs.c.question_id.is_(None))).mappings().all()
-            return [{"id": r["id"], "text": r["text"]} for r in rows]
+            images = json.loads(task["context_json"]).get("images", ())
+            result = []
+            for row in rows:
+                item = {"id": row["id"], "text": row["text"]}
+                source_images = [image for image in images if image["source"] == row["source_id"]]
+                if source_images:
+                    item["images"] = source_images
+                result.append(item)
+            return result
 
     def reserve_budget(self, run_id, fencing_token, worker_id, payload):
         with self.db.transaction() as c:

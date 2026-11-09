@@ -63,6 +63,7 @@ class MentionSegment(DTO):
 class MediaSegment(DTO):
     type: Literal["image", "audio", "file"]
     attachment_ref: str
+    image_url: str | None = Field(default=None, max_length=8192)
     mime_type: str | None = None
     size: int | None = Field(default=None, ge=0)
     sha256: str | None = None

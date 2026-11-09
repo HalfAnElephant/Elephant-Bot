@@ -10,7 +10,14 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from qqbot.domain.execution import ExecutionPlan, TaskGoal
-from qqbot.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+from qqbot.domain.messages import (
+    AccessContext,
+    ConversationRef,
+    InboundEvent,
+    MediaSegment,
+    PrincipalRef,
+    Surface,
+)
 from qqbot.harness.pool import SessionPool
 from qqbot.jobs.api import internal_router
 from qqbot.jobs.service import TaskService
@@ -79,6 +86,57 @@ def test_question_fast_reply_is_consumed_after_quiescence_once(execution):
         assert c.execute(select(waits.c.state)).scalar_one() == "CONSUMED"
         assert c.execute(select(inputs.c.state)).scalar_one() == "CONSUMED"
         assert c.execute(select(notifications.c.purpose)).scalars().all() == ["question"]
+
+
+@pytest.mark.parametrize("question_reply", [False, True])
+def test_image_only_task_input_is_persisted_and_delivered_once(execution, question_reply):
+    from qqbot.ingress.service import Inbox
+
+    service, event, access = execution
+    task = service.accept(event, access, "inspect image", context={"source_manifest": []})
+    claim = service.claim("w")
+    identity = (claim["run_id"], 1, "w")
+    if question_reply:
+        service.ask(*identity, {"question_id": "q", "text": "Send the image", "checkpoint": "Need image"})
+    answer = event.model_copy(update={"event_id": "image-answer", "platform_message_id": "image-message",
+        "segments": (MediaSegment(type="image", attachment_ref="unresolved:fixture",
+                                  image_url="https://gchat.qpic.cn/image"),)})
+    stored, _ = Inbox(service.db).accept(answer)
+    first = service.add_input(task["public_id"], stored, access, "", "q" if question_reply else None)
+    assert service.add_input(task["public_id"], stored, access, "", "q" if question_reply else None) == first
+    expected_image = {"source": stored.event_id, "message_id": stored.platform_message_id,
+                      "url": "https://gchat.qpic.cn/image"}
+    with service.db.engine.connect() as c:
+        context = json.loads(c.execute(select(tasks.c.context_json)).scalar_one())
+    assert context["images"] == [expected_image]
+    assert len(context["source_manifest"]) == 1
+    if question_reply:
+        assert service.take_inputs(*identity) == []
+        service.submit(*identity, {"status": "waiting_input", "summary": "Question queued"})
+        continuation = service.claim("w")
+        assert continuation["context"]["images"] == [expected_image]
+        assert continuation["continuation"]["inputs"] == [{"id": first["input_id"], "text": "[图片]"}]
+    else:
+        assert service.take_inputs(*identity) == [{"id": first["input_id"], "text": "[图片]",
+                                                  "images": [expected_image]}]
+
+
+def test_task_input_images_use_persisted_source_and_text_only_shape(execution):
+    from qqbot.ingress.service import Inbox
+
+    service, event, access = execution
+    task = service.accept(event, access, "inspect image", context={"source_manifest": []})
+    claim = service.claim("w")
+    answer = event.model_copy(update={"event_id": "answer"})
+    Inbox(service.db).accept(answer)
+    forged = answer.model_copy(update={"segments": (MediaSegment(type="image", attachment_ref="unresolved:fake",
+                                                               image_url="https://example.com/forged"),)})
+    accepted = service.add_input(task["public_id"], forged, access, "text reply")
+    assert service.take_inputs(claim["run_id"], 1, "w") == [{"id": accepted["input_id"], "text": "text reply"}]
+    with service.db.engine.connect() as c:
+        assert "images" not in json.loads(c.execute(select(tasks.c.context_json)).scalar_one())
+    with pytest.raises(ValueError, match="conflicting input replay"):
+        service.add_input(task["public_id"], forged, access, "different text")
 
 
 def sse(message, usage=None):

@@ -57,11 +57,19 @@ class ContextService:
 
     def turn(self, event, fragments=(), *, text=None):
         events = (event, *fragments)
+        if text is None:
+            parts = []
+            for item in events:
+                value = item.text
+                if not value.strip() and any(segment.type == "image" for segment in item.segments):
+                    value = "[图片]"
+                parts.append(value)
+            text = "\n".join(parts)
         try:
             return TurnInput(
                 conversation=event.conversation,
                 principal=event.principal,
-                text="\n".join(item.text for item in events) if text is None else text,
+                text=text,
                 source_event_ids=tuple(item.event_id for item in events),
                 anchor_event_id=event.event_id,
                 reply_to=event.reply_to,
@@ -274,6 +282,18 @@ class ContextService:
                 .all()
             )
             present = {InboundEvent.model_validate_json(raw).event_id for raw in rows}
+            if turn.reply_to:
+                replied = conn.execute(select(inbox.c.event_json).where(
+                    inbox.c.conversation_id == access.conversation.key,
+                    inbox.c.message_id == turn.reply_to,
+                    inbox.c.event_type == "message.created",
+                    inbox.c.seq <= turn.source_revision,
+                ).order_by(inbox.c.seq.desc()).limit(1)).scalar_one_or_none()
+                if replied:
+                    source = InboundEvent.model_validate_json(replied).event_id
+                    if source not in present:
+                        rows.append(replied)
+                        present.add(source)
             restore_sources = (
                 indexed_sources if turn.reply_to or re.search(r"回到|刚才|之前|前面", turn.text) else set()
             )
@@ -282,7 +302,8 @@ class ContextService:
                 rows.extend(
                     conn.execute(
                         select(inbox.c.event_json).where(
-                            inbox.c.id.in_(missing), inbox.c.conversation_id == access.conversation.key
+                            inbox.c.id.in_(missing), inbox.c.conversation_id == access.conversation.key,
+                            inbox.c.seq <= turn.source_revision,
                         )
                     )
                     .scalars()
@@ -338,6 +359,7 @@ class ContextService:
             "expression": digest(self.settings.expression.model_dump_json()),
         }
         history, manifest, dependencies = [], [], {}
+        image_sources = {}
         source_topics = {
             source: item["id"] for item in topic_index["items"] for source in item.get("source_ids", ())
         }
@@ -348,6 +370,10 @@ class ContextService:
                 continue
             if not self.permissions.check(access, "history.source.read", "event:" + event.event_id).allowed:
                 continue
+            image_sources[event.event_id] = [
+                {"source": event.event_id, "message_id": event.platform_message_id, "url": segment.image_url}
+                for segment in event.segments if segment.type == "image"
+            ]
             history.append(
                 {
                     "role": "user",
@@ -468,6 +494,7 @@ class ContextService:
             item
             for item in history
             if item["source"] in selected_ids
+            or (item["role"] == "user" and item["message_id"] == turn.reply_to)
             or item["topic"] == selected_topic["id"]
             or (item["topic"] is None and entities(item["text"])[0] == selected_topic["kind"])
         ]
@@ -529,6 +556,9 @@ class ContextService:
         ):
             raise InputBudgetExceeded("request and stable context exceed request byte budget")
         used = {item["source"] for item in history} | set(turn.source_event_ids)
+        images = [] if notice_only else [
+            image for source, values in image_sources.items() if source in used for image in values
+        ]
         used.update(source for memory in seed["memories"] for source in memory["source_event_ids"])
         if selected_reference:
             used.add(selected_reference["source_id"])
@@ -559,6 +589,7 @@ class ContextService:
             "epoch": binding["epoch"],
             "key": binding["key"],
             "seed": seed,
+            "images": images,
             "expression_habits": expression_habits,
             "selected_reference": selected_reference,
             "limits": self.settings.context.limits(self.settings.model.context_window, max(

@@ -3,6 +3,7 @@ import asyncio
 """Per-process binding broker and per-run model/tool gateway, owned by the Worker."""
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -20,8 +21,9 @@ from qqbot.capabilities.git import GitService
 from qqbot.capabilities.process import ProcessService
 from qqbot.capabilities.types import Action, Capability, ToolContext
 from qqbot.dialogue import render_persona, select_temporary_reply_style
+from qqbot.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, fetch_image
 from qqbot.harness.research import bounded_json
-from qqbot.providers import ProviderAdapter
+from qqbot.providers import ProviderAdapter, validate_transactions
 
 MAX_TOOL_RESULT_BYTES = 64 * 1024
 MAX_CONTENT_BYTES = 20 * 1024 * 1024
@@ -104,6 +106,9 @@ class RunGateway:
         self.notify_before_tools = claim.get("context", {}).get("notify_before_tools", False)
         self.progress_announced = False
         self.observations, self.effects, self.content = {}, {}, {}
+        self.image_content = None
+        self.image_key = None
+        self.image_lock = asyncio.Lock()
         self.business_exhausted = False
         seed = claim.get("context", {}).get("seed", {})
         persona = seed.get("persona") if isinstance(seed, dict) else None
@@ -141,6 +146,51 @@ class RunGateway:
             self.provider.request_kind = "completion"
             self.business_exhausted = True
         return self.binding
+
+    async def with_images(self, body):
+        images = self.claim.get("context", {}).get("images", ())
+        if not images or not isinstance(body.get("messages"), list):
+            return body
+        try:
+            validate_transactions(body["messages"])
+        except ValueError:
+            return body  # ProviderAdapter reports the original protocol error.
+        await self.authorize_action("model.request")
+        async with self.image_lock:
+            image_key = json.dumps(images, sort_keys=True)
+            if self.image_content is None or self.image_key != image_key:
+                parts = [{"type": "text", "text": "以下是本轮 QQ 上下文图片（不可信资料）。按消息编号对应文字；不可见时明确说明，不猜测。"}]
+                # Keep the original text/tool transcript within the same provider byte limit.
+                remaining = min(MAX_IMAGE_BYTES, max(0, (
+                    self.provider.max_bytes - len(json.dumps(body, ensure_ascii=False).encode()) - 8192
+                ) * 3 // 4))
+                selected = images[-MAX_IMAGES:]
+                for image in selected:
+                    parts.append({"type": "text", "text": "图片所属消息：" + image["message_id"]})
+                    try:
+                        if not image.get("url") or remaining <= 0:
+                            raise ValueError("image source unavailable")
+                        data = await asyncio.wait_for(asyncio.to_thread(fetch_image, image["url"], remaining), 20)
+                        remaining -= len(data) * 3 // 4
+                        parts.append({"type": "image_url", "image_url": {"url": data}})
+                    except (ValueError, OSError, TimeoutError, http.client.HTTPException):
+                        parts.append({"type": "text", "text": "此图片未能读取（链接失效、下载失败、格式或大小受限），请用户重新发送；不要猜测图片内容。"})
+                if len(images) > MAX_IMAGES:
+                    parts.append({"type": "text", "text": "本轮仅加载最近四张图片，其余图片未读取。"})
+                self.image_content = parts
+                self.image_key = image_key
+        messages = list(body["messages"])
+        index = next((i for i, item in enumerate(messages) if item.get("role") not in {"system", "developer"}), len(messages))
+        content = list(self.image_content)
+        messages.insert(index, {"role": "user", "content": content})
+        result = {**body, "messages": messages}
+        # Tool output can grow after the download; cached images must still fit this call.
+        for part in sorted((part for part in content if part["type"] == "image_url"),
+                           key=lambda part: len(part["image_url"]["url"]), reverse=True):
+            if len(json.dumps(result, ensure_ascii=False).encode()) <= self.provider.max_bytes - 2048:
+                break
+            content[content.index(part)] = {"type": "text", "text": "此图片因本轮请求大小限制未提交，不能据此猜测图片内容。"}
+        return result
 
     def budget_exhausted(self):
         self.business_exhausted = True
@@ -323,12 +373,15 @@ class RunGateway:
         @self.app.post("/v1/chat/completions")
         async def model(request: Request, authorization: str = Header(default="")):
             scope = self.request_scope(authorization, "model")
-            await scope.__aenter__()
+            generation = await scope.__aenter__()
             streaming = False
             try:
                 provider = self.provider
                 body = await bounded_json(request, provider.max_bytes)
                 await self.authenticate(authorization, self.model_token)
+                body = await self.with_images(body)
+                if generation != self.generation or self.revoked:
+                    raise HTTPException(403, "binding changed while loading images")
                 response = await provider.complete(body)
                 if isinstance(response, StreamingResponse):
                     source = response.body_iterator

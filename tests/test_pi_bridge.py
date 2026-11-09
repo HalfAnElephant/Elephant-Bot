@@ -358,3 +358,18 @@ async def test_locked_pi_reports_before_operation_and_answers_chat_directly(comp
     assert len(requests) == (4 if use_tools else 1)
     if use_tools:
         assert any("先单独调用 task_notify" in str(message) for message in requests[1]["messages"])
+
+
+async def test_locked_pi_image_reaches_upstream_without_entering_session(compaction_session, monkeypatch):
+    state = compaction_session
+    data = "data:image/png;base64,iVBORw0KGgo="
+    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", lambda url, limit: data)
+    state.gateway.claim["context"]["images"] = [
+        {"source": "image-event", "message_id": "42", "url": "https://cdn.example/signed-image"}]
+    result = await state.runner.run("看看图片", keep_alive=True)
+    assert result.summary
+    messages = state.requests[0]["payload"]["messages"]
+    assert any(part.get("type") == "image_url" and part["image_url"]["url"] == data
+               for message in messages if isinstance(message.get("content"), list) for part in message["content"])
+    session = state.runner.session_path.read_text()
+    assert data not in session and "https://cdn.example/signed-image" not in session

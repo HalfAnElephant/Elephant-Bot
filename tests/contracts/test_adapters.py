@@ -53,6 +53,31 @@ def test_A01_A03_A06(nap_config, official_config, incoming, clock, nap_event, of
         assert c.execute(select(func.count()).select_from(inbox)).scalar() == 1
 
 
+@pytest.mark.parametrize("data, expected", [
+    ({"file": "local.jpg", "url": "https://gchat.qpic.cn/pic?token=one&size=2"},
+     "https://gchat.qpic.cn/pic?token=one&size=2"),
+    ({"file": "https://gchat.qpic.cn/fallback"}, "https://gchat.qpic.cn/fallback"),
+    ({"file": "base64://large-image"}, None),
+    ({"file": "file:///tmp/local.jpg"}, None),
+    ({"url": "https://example.com/" + "x" * 8192}, None),
+    ({"url": {"invalid": "value"}}, None),
+])
+def test_onebot_image_source_survives_inbox_recovery(nap_config, incoming, clock, nap_event, data, expected):
+    nap = OneBotAdapter(nap_config, "d", incoming, clock)
+    event = nap.normalize({**nap_event, "message": [{"type": "image", "data": data}]})
+    assert event.segments[0].image_url == expected
+    assert event.segments[0].attachment_ref.startswith("unresolved:")
+    incoming.accept(event)
+    assert incoming.pending()[0].segments[0].image_url == expected
+
+
+def test_onebot_cq_image_url_decodes_and_non_images_keep_no_source():
+    chain = segments("[CQ:image,file=local.jpg,url=https://gchat.qpic.cn/pic?a=1&amp;b=2&#44;3]")
+    assert chain[0].image_url == "https://gchat.qpic.cn/pic?a=1&b=2,3"
+    chain = segments([{"type": "record", "data": {"url": "https://example.com/audio"}}])
+    assert chain[0].type == "audio" and chain[0].image_url is None
+
+
 async def test_A02_signature_replay_and_challenge(official_config, incoming, clock, official_event, db):
     qq = OfficialAdapter(official_config, "d", incoming, clock)
     body, headers = signed(qq, official_event, clock)

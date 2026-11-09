@@ -63,10 +63,13 @@ def segments(raw):
         elif kind == "face":
             result.append(FaceSegment(face_id=str(data["id"])))
         elif kind in {"image", "record", "file"}:
-            # Temporary URLs stay outside the business layer; no automatic download.
             ref = stable_id(json.dumps(data, sort_keys=True, ensure_ascii=False))
+            image_url = next((value for value in (data.get("url"), data.get("file"))
+                              if isinstance(value, str) and len(value) <= 8192
+                              and value.startswith(("https://", "http://"))), None) if kind == "image" else None
             result.append(
-                MediaSegment(type="audio" if kind == "record" else kind, attachment_ref="unresolved:" + ref)
+                MediaSegment(type="audio" if kind == "record" else kind, attachment_ref="unresolved:" + ref,
+                             image_url=image_url)
             )
         else:
             result.append(
