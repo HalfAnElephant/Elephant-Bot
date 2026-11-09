@@ -1,5 +1,7 @@
+import json
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from qqbot.clock import FakeClock
 from qqbot.domain.execution import TaskGoal
@@ -10,7 +12,7 @@ from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionRule
 from qqbot.storage.db import Database
 from qqbot.storage.schema import metadata, outbox
-from qqbot.storage.task_schema import inputs, notifications, runs, waits
+from qqbot.storage.task_schema import inputs, notifications, runs, tasks, waits
 
 
 @pytest.fixture
@@ -490,3 +492,36 @@ def test_notification_rejects_tool_protocol_but_allows_ordinary_mentions(setup):
     service.notify(claim["run_id"], claim["fencing_token"], "worker", {"notification_id": "protocol-test", "text": "DSML 是一种工具调用协议，当前查询已完成。"})
     with service.db.engine.connect() as conn:
         assert len(conn.execute(select(outbox)).all()) == 1
+
+
+@pytest.mark.parametrize('invited,tool_calls,valid,notice_expected', [
+    (False, 0, False, False),
+    (True, 0, False, True),
+    (False, 1, False, True),
+    (False, 0, True, True),
+])
+def test_stale_proactive_draft_without_tools_ends_without_failure_notice(
+    setup, invited, tool_calls, valid, notice_expected,
+):
+    service, event, access, _clock = setup
+    task = service.accept(event, access, '普通群聊', context={'invited': invited})
+    claim = service.claim('worker')
+    service.context_validator = lambda _access, _context: valid
+    with service.db.transaction() as c:
+        c.execute(update(tasks).where(tasks.c.id == task['id']).values(
+            budget_json=json.dumps({'tool_calls': tool_calls}),
+        ))
+    service.submit(claim['run_id'], claim['fencing_token'], 'worker', {
+        'status': 'failed', 'agent_authored': False,
+        'summary': '403 run capability expired or revoked',
+    })
+    with service.db.engine.connect() as c:
+        row = c.execute(select(tasks).where(tasks.c.id == task['id'])).mappings().one()
+        assert bool(row['failure_notice_json']) is notice_expected
+        assert row['state'] == ('QUEUED' if notice_expected else 'FAILED')
+        assert c.execute(select(outbox.c.id)).first() is None
+    if notice_expected:
+        explanation = service.claim('explainer')
+        assert '不得编造' in explanation['goal'] and '403' in explanation['goal']
+    else:
+        assert service.claim('explainer') is None

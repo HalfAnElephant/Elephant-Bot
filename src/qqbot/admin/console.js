@@ -122,13 +122,15 @@ const ConsoleModel = (() => {
     return {not_called: '未调用模型', rule_only: '规则判别器弃权（未调用模型）', success: '模型正常返回', abstained: '模型弃权'}[status] || status;
   }
   function decisionScoreRows(decision, thresholds = {}) {
+    thresholds = {proactive_allowed: 0.5, ...thresholds};
     const signals = decision.signals?.abstain ? null : decision.signals;
     const specs = [
       ['directed_to_bot', '面向机器人', '仅记录'],
       ['continues_bot_topic', '延续机器人话题', '≥'],
-      ['invites_participation', '邀请参与', '≥'],
+      ['invites_participation', '邀请或适合参与', '≥'],
       ['useful_contribution', '有用贡献', '≥'],
-      ['private_exchange', '他人私人交流', '≤']
+      ['private_exchange', '他人私人交流', '≤'],
+      ['proactive_allowed', '主动参与偏好允许', '≥']
     ];
     return specs.map(([key, label, comparison]) => ({
       label, score: signals?.[key] ?? '—',
@@ -296,9 +298,11 @@ if (typeof document !== 'undefined') (() => {
   const groups = [
     ['接入', ['adapters', 'deployment_id']], ['模型', ['model']],
     ['执行', ['tasks_enabled', 'interactive_execution_enabled', 'execution']], ['上下文', ['context']],
-    ['发言', ['send_budget_per_minute', 'judge', 'social_evaluated_conversations']], ['记忆与表达', ['memory', 'expression']],
+    ['主动搭话', ['speak_up']], ['发言', ['send_budget_per_minute', 'judge', 'social_evaluated_conversations']], ['记忆与表达', ['memory', 'expression']],
     ['系统', ['database', 'internal_socket', 'timezone', 'source_url', 'persona_path', 'admin_token_env', 'internal_token_env']], ['初始权限', ['permissions']]
   ];
+  Object.assign(labels, {speak_up: '私聊主动搭话', idle_minutes: '空闲多久后搭话（分钟）', min_interval_minutes: '最短搭话间隔（分钟）', max_interval_minutes: '最长搭话间隔（分钟）', max_per_day: '每人每日搭话次数', awake_from: '清醒开始时间（小时）', awake_to: '清醒结束时间（小时）', nudge: '未回复时轻轻追问', allow: '额外搭话会话'});
+  Object.assign(helps, {speak_up: '默认主动找各 QQ 接入中管理员的已知私聊；额外对象填写会话管理里的完整会话 ID。只在有主动发送能力、权限允许且未静默时搭话。保存后重启生效。', idle_minutes: '从双方最近一次私聊开始计算；空闲时间和随机间隔都满足才触发。', min_interval_minutes: '每轮在最短与最长间隔之间随机安排下一次。', max_interval_minutes: '不能小于最短间隔。', max_per_day: '每人单独计数；生成沉默或失败也计一次，避免频繁重试。', awake_from: '使用系统设置的时区，包含开始小时。', awake_to: '不包含结束小时；24 表示到午夜。', nudge: '最后一句是问句、对方 15～40 分钟没回时，有 50% 概率轻问一次；每句只判断一次，不占每日次数。', allow: '每行一个完整私聊会话 ID；仍需该会话的接收、模型和发送权限。'});
   let category = 0;
   function field(raw, initial, key, root, state, path) {
     const schema = resolve(raw, root), wrap = element('div', undefined, 'field');
@@ -933,6 +937,7 @@ if (typeof document !== 'undefined') (() => {
     INVITED: '私聊、被提及或收到有效引用', UNADDRESSED: '仅回应被提及的消息',
     SOCIAL_NOT_READY: '缺少全量消息能力', PARTICIPATION_LIMIT: '参与限制',
     JUDGE_ABSTAIN: '判别器弃权', USEFUL_INVITATION: '邀请或话题相关，且能够提供有用贡献',
+    PARTICIPATION_PREFERENCE: '主动参与偏好禁止在此场景接话',
     OTHERS_ARE_FINISHING_TOPIC: '等待话题发展后重新评估', LOW_RELEVANCE: '未满足发言条件，且未进入等待或重评估次数已用尽',
     SOFT_PARTICIPATION_BUDGET: '主动参与比例预算已用尽'
   };

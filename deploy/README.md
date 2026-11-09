@@ -50,3 +50,30 @@ Replace the source path with the existing `gh` configuration. systemd supplies a
 read-only private copy at service startup; include `config.yml` so gh does not attempt
 a configuration migration in that read-only directory; restart the Worker after changing that
 login. The runner sandbox receives neither this file nor the user's home directory.
+
+## iCloud Calendar
+
+The optional `icloud.calendar` capability reads and manages events through the Worker.
+Set `ICLOUD_CALENDAR_CONFIG` to a private JSON file containing `apple_id`,
+`app_password` (an Apple app-specific password), `timezone`, `default_calendar`,
+and an `owner` object with the exact `adapter_instance_id`, `identity_namespace`,
+and `remote_user_id`. Every invocation and readback checks this owner binding.
+Keep this file outside the repository and task workspaces, mode `0600`.
+
+For systemd, provision `/etc/qqbot/icloud-calendar.json` as root and add a Worker drop-in:
+
+```ini
+[Service]
+LoadCredential=icloud-calendar.json:/etc/qqbot/icloud-calendar.json
+Environment=ICLOUD_CALENDAR_CONFIG=%d/icloud-calendar.json
+```
+
+Reload systemd and restart the Worker after provisioning. The Pi sandbox receives
+neither the file nor its environment variable. No configuration means the
+capability is absent. Calendar discovery and event reads are safe deployment
+checks. Event create, update and delete use the durable operation journal and
+remote readback. An uncertain write must be reconciled before any retry.
+`list` requires a bounded date window. Preserve returned calendar/event IDs for
+later edits. Recurrence edits apply to the full resource, including its series.
+The legacy VTODO/Reminders scripts are reference material and have no capability
+entry point.

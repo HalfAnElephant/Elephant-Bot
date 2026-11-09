@@ -232,3 +232,23 @@ async def test_budget_zero_keeps_all_messages_deliverable(db, clock, target):
         clock.advance(3)
     assert len(adapter.sent) == 8
     assert all(row["state"] == "SENT" and row["attempts"] == 1 for row in rows(db))
+
+
+def test_persona_controls_split_without_losing_content_or_exposing_tags(db, clock, target):
+    from qqbot.outbox.presentation import chat_bubbles
+
+    assert chat_bubbles('在呢|||吃饭了吗\n今天吃白米饭') == ['在呢', '吃饭了吗', '今天吃白米饭']
+    assert chat_bubbles('<voice>在呢</voice><sticker:开心>') == ['在呢']
+    assert chat_bubbles('```text\na|||b\n<voice>literal</voice>\n```') == ['```text\na|||b\n<voice>literal</voice>\n```']
+    assert chat_bubbles('1. 第一步\n2. 第二步') == ['1. 第一步\n2. 第二步']
+    assert chat_bubbles('1|||2|||3|||4|||5|||6') == ['1', '2', '3', '4', '5\n6']
+    service = Outbox(db, clock)
+    assert enqueue(service, db, target, '[沉默]') == []
+    assert enqueue(service, db, target, '<sticker:开心>') == []
+    first = enqueue(service, db, target, '在呢|||吃饭了吗', 'bubbles')
+    assert enqueue(service, db, target, '在呢|||吃饭了吗', 'bubbles') == first
+    assert [row['part_no'] for row in rows(db)] == [0, 1]
+    with db.transaction() as connection:
+        question = service.enqueue_text(connection, target=target, text='[沉默]', origin_kind='task',
+                                       origin_id='question', purpose='question')
+    assert len(question) == 1  # A required user question must never disappear into a silence control.

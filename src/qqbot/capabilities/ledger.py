@@ -19,7 +19,8 @@ class SQLiteActionLedger:
                 if existing["task_id"] != context.task_id or existing["arguments_hash"] != arguments_hash:
                     raise ValueError("operation id conflicts with persisted target or arguments")
                 return {"state": existing["state"], "operation_id": existing["id"], "result": json.loads(existing["result_json"])}
-            unsafe_remote = (action.name.startswith("github.") and action.effect in {"write", "unknown"}) or action.name == "git.push"
+            unsafe_remote = (action.name.startswith(("github.", "icloud."))
+                             and action.effect in {"write", "unknown"}) or action.name == "git.push"
             if unsafe_remote:
                 previous = connection.execute(select(operations).where(operations.c.task_id == context.task_id,
                     operations.c.arguments_hash == arguments_hash, operations.c.state != "FAILED")

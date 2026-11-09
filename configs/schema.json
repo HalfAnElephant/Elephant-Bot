@@ -868,6 +868,73 @@
       "title": "RunBudget",
       "type": "object"
     },
+    "SpeakUpConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "idle_minutes": {
+          "default": 40,
+          "maximum": 10080,
+          "minimum": 1,
+          "title": "Idle Minutes",
+          "type": "integer"
+        },
+        "min_interval_minutes": {
+          "default": 60,
+          "maximum": 10080,
+          "minimum": 1,
+          "title": "Min Interval Minutes",
+          "type": "integer"
+        },
+        "max_interval_minutes": {
+          "default": 180,
+          "maximum": 10080,
+          "minimum": 1,
+          "title": "Max Interval Minutes",
+          "type": "integer"
+        },
+        "max_per_day": {
+          "default": 20,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Max Per Day",
+          "type": "integer"
+        },
+        "awake_from": {
+          "default": 8,
+          "maximum": 23,
+          "minimum": 0,
+          "title": "Awake From",
+          "type": "integer"
+        },
+        "awake_to": {
+          "default": 23,
+          "maximum": 24,
+          "minimum": 1,
+          "title": "Awake To",
+          "type": "integer"
+        },
+        "nudge": {
+          "default": true,
+          "title": "Nudge",
+          "type": "boolean"
+        },
+        "allow": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allow",
+          "type": "array"
+        }
+      },
+      "title": "SpeakUpConfig",
+      "type": "object"
+    },
     "SpeechThresholds": {
       "additionalProperties": false,
       "properties": {
@@ -1156,6 +1223,20 @@
         "embedding_dimensions": null,
         "embedding_key_env": "QQBOT_EMBEDDING_KEY",
         "raw_retention_days": 30
+      }
+    },
+    "speak_up": {
+      "$ref": "#/$defs/SpeakUpConfig",
+      "default": {
+        "enabled": true,
+        "idle_minutes": 40,
+        "min_interval_minutes": 60,
+        "max_interval_minutes": 180,
+        "max_per_day": 20,
+        "awake_from": 8,
+        "awake_to": 23,
+        "nudge": true,
+        "allow": []
       }
     },
     "expression": {

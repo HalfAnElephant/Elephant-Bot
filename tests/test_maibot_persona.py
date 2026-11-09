@@ -21,6 +21,7 @@ def test_maibot_fields_preserve_legacy_config_and_personality_import():
               "style": {"tone": "旧风格"}, "boundaries": ["隐私边界"]}
     persona = PersonaSpec.model_validate(legacy)
     assert persona.multiple_probability == 0 and persona.reply_style == ""
+    assert select_temporary_reply_style(persona.model_dump()) == ""
     assert "旧风格" in render_persona({"core": persona.model_dump(), "group": {}})
     imported = {**legacy, "personality": legacy["identity"]}
     del imported["identity"]
@@ -31,31 +32,18 @@ def test_maibot_fields_preserve_legacy_config_and_personality_import():
             PersonaSpec.model_validate({**legacy, "multiple_probability": probability})
 
 
-def test_default_persona_surfaces_and_conversation_overrides():
+def test_aurabot_persona_renders_in_both_surfaces_with_boundaries():
     persona = default_persona()
-    assert persona.name == "大象" and "女大学生" in persona.identity
-    assert "省略主语" in persona.reply_style and len(persona.multiple_reply_style) == 5
-    assert persona.multiple_probability == 0
+    assert persona.name == "大象" and persona.identity.startswith("你是大象，")
+    assert "大肥鱼" not in persona.identity and "鲸鱼耳朵" in persona.identity
+    assert "【最后自检】" in persona.identity and "白米饭" in persona.identity
+    assert not persona.behavior_style and not persona.reply_style and not persona.multiple_reply_style
     snapshot = {"core": persona.model_dump(), "group": {"name": "小象", "reply_length": "简短"}}
     group = render_persona(snapshot, "group")
     private = render_persona(snapshot, "private")
     assert group.startswith("你是小象。") and private.startswith("你是小象。")
-    assert persona.group_chat_prompt in group and persona.group_chat_prompt not in private
-    assert persona.private_chat_prompts in private and persona.private_chat_prompts not in group
+    assert persona.identity in group and persona.identity in private
     assert "简短" in group and "不虚构事实" in private
-
-
-def test_temporary_style_is_optional_and_does_not_replace_base_style(monkeypatch):
-    persona = default_persona().model_dump()
-    assert select_temporary_reply_style(persona) == ""
-    persona.update(multiple_probability=1, multiple_reply_style=["", "  偶尔吐槽  "])
-    monkeypatch.setattr(dialogue.random, "random", lambda: 0.5)
-    temporary = select_temporary_reply_style(persona)
-    assert temporary == "偶尔吐槽"
-    prompt = render_persona(persona, "private", temporary_style=temporary)
-    assert persona["reply_style"] in prompt and "偶尔吐槽" in prompt
-    persona["multiple_probability"] = 0.1
-    assert select_temporary_reply_style(persona) == ""
 
 
 def test_new_persona_persists_and_invalid_reload_keeps_last_good(tmp_path):
@@ -105,7 +93,7 @@ async def test_gateway_binds_persona_once_and_keeps_material_out_of_system(tmp_p
         first, second = await read(), await read()
         assert first["system_prompt"] == second["system_prompt"] and len(calls) == 1
         assert "你是大象" in first["system_prompt"]
-        assert persona["private_chat_prompts"] in first["system_prompt"]
+        assert persona["identity"] in first["system_prompt"]
         assert "UNTRUSTED_EXPRESSION" not in first["system_prompt"]
         assert "UNTRUSTED_HISTORY" not in first["system_prompt"]
         assert first["expression_habits"] == "UNTRUSTED_EXPRESSION"

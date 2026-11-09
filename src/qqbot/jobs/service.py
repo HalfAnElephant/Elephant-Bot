@@ -160,6 +160,10 @@ class TaskService:
         if task["failure_notice_json"] or state == "CANCELLED":
             return state
         context = json.loads(task["context_json"])
+        # 过期且未调用工具的主动接话直接结束，避免生成多余的失败说明。
+        if (context.get("invited") is False and not json.loads(task["budget_json"]).get("tool_calls", 0)
+                and self.context_validator and not self.context_validator(self._access_for(task), context)):
+            return state
         context.update(control_response=True, allowed_actions=[], failure_state=state)
         conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(
             state="QUEUED", failure_notice_json=result.model_dump_json(), context_json=json.dumps(context)))
@@ -291,7 +295,9 @@ class TaskService:
                 "task_id": row["id"],
                 "run_id": run_id,
                 "fencing_token": fencing,
-                "goal": ("请依据以下冻结事实向用户解释任务未完成；禁止继续执行任何业务操作：\n" + row["failure_notice_json"])
+                "goal": ("请依据以下冻结事实向用户解释任务未完成；禁止继续执行任何业务操作。"
+                         "不得编造曾经查询资料或执行了未记录的动作。原目标若只是日常聊天，"
+                         "最多用一句短话说明这次暂时没接上，不引入额外的查询任务：\n" + row["failure_notice_json"])
                     if row["failure_notice_json"] else row["goal"],
                 "notification_status": "failed" if row["failure_notice_json"] else None,
                 "goal_spec": json.loads(row["goal_json"]),

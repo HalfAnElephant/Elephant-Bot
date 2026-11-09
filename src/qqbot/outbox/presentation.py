@@ -10,6 +10,30 @@ URL = re.compile(r"https?://[^\s<>]+")
 PATH = re.compile(r"(?:[A-Za-z]:\\|~?/|\.\.?/)[^\s<>]+|(?<!\w)(?:[\w.-]+/)+[^\s<>]+")
 
 
+def chat_bubbles(text):
+    """Interpret persona chat controls, retaining long answers and literal code."""
+    if not text.strip():
+        return [text]
+    if text.strip() in {"[沉默]", "［沉默］", "(沉默)", "（沉默）"}:
+        return []
+    if "```" in text or "~~~" in text or "`" in text:
+        return [text]
+    # No voice/sticker transport exists yet: retain speech as text, omit sticker requests.
+    text = re.sub(r"</?voice>", "", text)
+    text = re.sub(r"<sticker:[^>]+>(?:\s*</sticker>)?", "", text)
+    if not text.strip():
+        return []
+    bubbles = []
+    for part in text.split("|||"):
+        lines = part.strip().splitlines()
+        listy = sum(bool(re.match(r"^\s*(?:\d+[.、)]|[-*•·])", line)) for line in lines)
+        if len(part) <= 240 and len(lines) > 1 and listy < (len(lines) + 1) // 2:
+            bubbles.extend(line.strip() for line in lines if line.strip())
+        elif part.strip():
+            bubbles.append(part.strip())
+    return bubbles[:4] + ["\n".join(bubbles[4:])] if len(bubbles) > 5 else bubbles
+
+
 def _inline(text, references):
     marker = "\ufff0" + uuid4().hex + ":"
     literals = []

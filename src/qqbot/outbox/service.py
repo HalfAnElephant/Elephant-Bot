@@ -8,7 +8,7 @@ from sqlalchemy import and_, func, insert, or_, select, update
 from qqbot.domain import OutboundEnvelope, SendReceipt, stable_id
 from qqbot.storage.schema import outbox, reply_counters
 
-from .presentation import plain_text, split_text
+from .presentation import chat_bubbles, plain_text, split_text
 
 
 class Outbox:
@@ -89,7 +89,9 @@ class Outbox:
         purpose=None,
     ):
         ids = []
-        for part_no, part in enumerate(split_text(plain_text(text))):
+        bubbles = [text] if origin_kind == "command" or purpose == "question" else chat_bubbles(text)
+        parts = [part for bubble in bubbles for part in split_text(plain_text(bubble))]
+        for part_no, part in enumerate(parts):
             ids.append(
                 self.enqueue(
                     c,

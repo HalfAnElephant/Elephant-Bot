@@ -90,6 +90,8 @@ class SpeechPolicy:
             return result("IGNORE", "PARTICIPATION_LIMIT", blocked_rules)
         if not signals or signals.abstain:
             return result("IGNORE", "JUDGE_ABSTAIN")
+        if signals.proactive_allowed < 0.5:
+            return result("IGNORE", "PARTICIPATION_PREFERENCE")
         if (
             (signals.invites_participation >= thresholds.invites_participation
              or signals.continues_bot_topic >= thresholds.continues_bot_topic)
@@ -98,6 +100,7 @@ class SpeechPolicy:
         ):
             return result("SPEAK", "USEFUL_INVITATION")
         if (signals.useful_contribution >= thresholds.wait_useful_contribution
+                and signals.private_exchange <= thresholds.private_exchange
                 and state.rechecks < participation.max_rechecks):
             return result("WAIT", "OTHERS_ARE_FINISHING_TOPIC")
         return result("IGNORE", "LOW_RELEVANCE")

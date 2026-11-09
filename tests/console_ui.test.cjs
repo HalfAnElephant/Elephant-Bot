@@ -163,6 +163,7 @@ test('decision score display preserves zero, precise scores and historical thres
   assert.deepEqual(rows[0], {label: '面向机器人', score: 0, threshold: '仅记录'});
   assert.deepEqual(rows[3], {label: '有用贡献', score: 0.74999, threshold: '≥ 0.75'});
   assert.deepEqual(rows[4], {label: '他人私人交流', score: 0.1, threshold: '≤ 0'});
+  assert.deepEqual(decisionScoreRows({signals: {proactive_allowed: 0.1}})[5], {label: '主动参与偏好允许', score: 0.1, threshold: '≥ 0.5'});
   assert.equal(rows[1].threshold, '历史未记录');
   assert.equal(decisionScoreRows({signals: null})[0].score, '—');
   assert.equal(decisionScoreRows({signals: {abstain: true, useful_contribution: 0}})[3].score, '—');

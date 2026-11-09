@@ -18,7 +18,7 @@ from qqbot.domain.messages import (
 )
 from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechThresholds
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
-from qqbot.policy.judge import JevJudge, StructuredLLMJudge
+from qqbot.policy.judge import Jev1Judge, JevJudge, StructuredLLMJudge
 
 
 def event(clock, **changes):
@@ -76,7 +76,7 @@ def test_social_cooldown_and_bounded_wait(max_rechecks):
     state.last_bot_at = clock.now()
     assert policy.decide(e, cap, state, signals).action == "IGNORE"
     state.last_bot_at = None
-    signals = JudgmentSignals(useful_contribution=0.6)
+    signals = JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
     actor = ConversationWindow(clock)
     actor.accept(e)
     for _ in range(max_rechecks):
@@ -96,7 +96,7 @@ def test_social_cooldown_and_bounded_wait(max_rechecks):
     ({"continues_bot_topic": 0.8, "useful_contribution": 0.8}, "continues_bot_topic", 0.8, "WAIT", "SPEAK"),
     ({"invites_participation": 0.9, "useful_contribution": 0.7}, "useful_contribution", 0.7, "WAIT", "SPEAK"),
     ({"invites_participation": 0.9, "useful_contribution": 0.8, "private_exchange": 0.25},
-     "private_exchange", 0.25, "WAIT", "SPEAK"),
+     "private_exchange", 0.25, "IGNORE", "SPEAK"),
     ({"useful_contribution": 0.45}, "wait_useful_contribution", 0.45, "IGNORE", "WAIT"),
 ])
 def test_each_score_threshold_controls_its_decision(scores, field, value, before, after):
@@ -108,6 +108,22 @@ def test_each_score_threshold_controls_its_decision(scores, field, value, before
     assert policy.decide(event(clock), cap, state, signals).action == before
     thresholds = SpeechThresholds(**{field: value})
     assert policy.decide(event(clock), cap, state, signals, thresholds=thresholds).action == after
+
+
+@pytest.mark.parametrize("useful", [0.7, 0.9])
+def test_private_exchange_and_participation_preferences_block_speak_and_wait(useful):
+    clock = FakeClock()
+    policy = SpeechPolicy(clock)
+    cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
+    state = PolicyState(mode="social", new_human_messages=3)
+    scores = {"invites_participation": 0.99, "useful_contribution": useful, "private_exchange": 0.1}
+    blocked = policy.decide(event(clock), cap, state, JudgmentSignals(**scores, proactive_allowed=0.1))
+    assert blocked.action == "IGNORE" and blocked.reason_codes == ("PARTICIPATION_PREFERENCE",)
+    private = policy.decide(event(clock), cap, state, JudgmentSignals(**{**scores, "private_exchange": 0.8}))
+    assert private.action == "IGNORE"
+    # Explicit invitations retain their separate response path.
+    assert policy.decide(event(clock, mentions_bot=True), cap, state,
+                         JudgmentSignals(**scores, proactive_allowed=0.1)).action == "SPEAK"
 
 
 def test_zero_threshold_and_precise_participation_blocks():
@@ -214,6 +230,52 @@ async def test_general_llm_judge_allows_normal_model_latency():
         assert not result.abstain and result.model_id == "chat-model"
         assert result.useful_contribution == 0.8
     assert JevJudge.timeout_seconds == 1.5
+
+
+@pytest.mark.parametrize("bad", [None, "http", "abstained", "missing", True, "0.9", 1.1, float("nan")])
+async def test_jev1_decisions_use_yes_probability_and_fail_closed(bad):
+    from qqbot.policy.judge import JEV1_QUESTIONS
+
+    seen = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        assert set(body) == {"model", "messages"} and body["model"] == "jev1"
+        assert body["messages"][0]["role"] == "user"
+        payload = json.loads(body["messages"][0]["content"])
+        assert json.loads(payload["state"]) == {"messages": ["大家有什么建议？"]}
+        assert request.headers["authorization"] == "Bearer jev-key"
+        assert request.extensions["timeout"]["read"] == 30
+        question = next(q for q in JEV1_QUESTIONS.values() if payload["question"].endswith(q))
+        seen.append(question)
+        result = {
+            "type": "boolean", "value": "no", "probability": 0.9,
+            "distribution": {"yes": 0.1, "no": 0.9}, "status": "answered", "abstain": False,
+        }
+        if question == JEV1_QUESTIONS["proactive_allowed"]:
+            result.update(value="yes", probability=0.9, distribution={"yes": 0.9, "no": 0.1})
+        if question == JEV1_QUESTIONS["private_exchange"]:
+            if bad == "http":
+                return httpx.Response(429)
+            if bad == "abstained":
+                result.update(status="abstained", abstain=True)
+            elif bad == "missing":
+                result["distribution"].pop("yes")
+            elif bad is not None:
+                result["distribution"]["yes"] = bad
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        judge = Jev1Judge("jev-key", "jev1", "https://example.invalid", client=client)
+        signals = await judge.judge({"messages": ["大家有什么建议？"]})
+        assert signals.abstain is (bad is not None)
+        assert signals.model_id == "jev1"
+        assert judge.failures == (1 if bad is not None else 0)
+        if bad is None:
+            assert signals.private_exchange == 0.1
+            assert signals.proactive_allowed == 0.9
+    assert set(seen) == set(JEV1_QUESTIONS.values())
+    assert (await Jev1Judge(None, "jev1", "https://example.invalid").judge({})).abstain
 
 
 def test_persona_atomic_reload_and_untrusted_memory(tmp_path):
@@ -367,7 +429,7 @@ def test_participation_cooldown_boundary_and_wait_limit():
     assert policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(cooldown_seconds=30)).action == "SPEAK"
     state.last_bot_at = None
     state.rechecks = 2
-    signals = JudgmentSignals(useful_contribution=0.6)
+    signals = JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
     assert policy.decide(event(clock), cap, state, signals).action == "IGNORE"
     decision = policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(max_rechecks=3))
     assert decision.action == "WAIT" and decision.max_rechecks == 3

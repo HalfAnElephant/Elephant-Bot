@@ -350,6 +350,7 @@ async def test_local_process_same_command_distinct_ids_dispatch_twice_same_id_on
 @pytest.mark.parametrize("state", ["PREPARED", "DISPATCHED", "UNKNOWN", "PARTIAL", "VERIFIED"])
 @pytest.mark.parametrize(("action_name", "effect"), [
     ("github.issue.create", "write"), ("github.unclassified", "unknown"), ("git.push", "write"),
+    ("icloud.event.create", "write"), ("icloud.event.update", "write"), ("icloud.event.delete", "write"),
 ])
 async def test_unsafe_github_same_hash_distinct_id_never_dispatches(context, ledger, state, action_name, effect):
     import hashlib

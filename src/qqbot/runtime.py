@@ -17,7 +17,7 @@ from qqbot.dialogue import PersonaStore
 from qqbot.dialogue.planner import plan_turn, wants_background
 from qqbot.domain import AccessContext, InboundEvent, Surface, TextSegment, stable_id
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal
-from qqbot.domain.social import ParticipationSettings, SpeechThresholds
+from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechThresholds
 from qqbot.expressions import HTTPLearner
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.service import TaskService
@@ -28,10 +28,11 @@ from qqbot.memory.maintenance import MemoryMaintenance
 from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
-from qqbot.policy.judge import JevJudge, RuleOnlyJudge, StructuredLLMJudge
+from qqbot.policy.judge import Jev1Judge, JevJudge, RuleOnlyJudge, StructuredLLMJudge
 from qqbot.storage.schema import audit_events, decision_logs, decisions, inbox, outbox, runtime_state
-from qqbot.storage.social_schema import social_records, social_tombstones
+from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
 from qqbot.storage.task_schema import notifications, tasks
+from qqbot.speakup import SpeakUp
 
 logger = logging.getLogger(__name__)
 CONTROL_COMMANDS = {
@@ -98,6 +99,8 @@ class Core:
             self.judge = RuleOnlyJudge()
         else:
             provider = JevJudge if judge.kind == "jev" else StructuredLLMJudge
+            if judge.kind == "jev" and judge.model == "jev1":
+                provider = Jev1Judge
             self.judge = provider(
                 os.environ.get(judge.api_key_env), judge.model, judge.endpoint, self.model_client
             )
@@ -136,6 +139,7 @@ class Core:
         self.active_ids = set()
         self.windows = {}
         self.stopping = False
+        self.speak_up = SpeakUp(self)
 
     def access(self, event):
         config = self.adapters[event.conversation.adapter_instance_id].config
@@ -505,6 +509,108 @@ class Core:
         retained = [event for event in window.events if event.event_id not in revoked]
         window.events.clear()
         window.events.extend(retained)
+
+    def judge_context(self, event):
+        access, cid = self.access(event), event.conversation.key
+        persona_json, persona_version = self.personas.snapshot(cid)
+        persona = json.loads(persona_json)
+        core, group = persona["core"], persona["group"]
+        context = {
+            "version": "speech-context-v2",
+            "persona_version": persona_version,
+            "bot": {
+                "speaker": "bot",
+                "name": group.get("name") or core["name"],
+                "aliases": list(dict.fromkeys([core["name"], group.get("name") or core["name"]])),
+            },
+            "participation_policy": core.get("group_chat_prompt", ""),
+            "group_participation": group.get("participation", ""),
+            "target_message_id": event.platform_message_id,
+            "evaluated_at": self.clock.now().isoformat(),
+            "messages": [],
+            "recent_bot_messages": [],
+        }
+        if not self.permissions.check(access, "history.read", "conversation:" + cid).allowed:
+            return context
+        with self.db.engine.connect() as c:
+            hidden = set(c.execute(select(social_tombstones.c.source_id).where(
+                social_tombstones.c.conversation_id == cid,
+            )).scalars())
+            hidden.update(c.execute(select(memory_source_retention.c.source_id).where(
+                memory_source_retention.c.conversation_id == cid,
+            )).scalars())
+            recalled = set(c.execute(select(inbox.c.message_id).where(
+                inbox.c.conversation_id == cid, inbox.c.event_type == "message.recalled",
+            )).scalars())
+            rows = c.execute(select(inbox.c.event_json).where(
+                inbox.c.conversation_id == cid, inbox.c.event_type == "message.created",
+                inbox.c.seq <= event.ingest_seq,
+            ).order_by(inbox.c.seq.desc()).limit(12)).scalars().all()
+            source_id = func.coalesce(tasks.c.source, outbox.c.origin_id)
+            deliveries = c.execute(select(
+                outbox, tasks.c.context_json.label("task_context"),
+                inbox.c.event_json.label("source_json"), source_id.label("source_id"),
+            ).select_from(outbox).outerjoin(notifications, and_(
+                outbox.c.origin_kind == "task", notifications.c.id == outbox.c.origin_id,
+            )).outerjoin(tasks, tasks.c.id == notifications.c.task_id)
+                .outerjoin(inbox, inbox.c.id == source_id).where(
+                    outbox.c.conversation_id == cid, outbox.c.state == "SENT",
+                    outbox.c.origin_kind.in_(("chat", "task")),
+                    outbox.c.sent_at <= event.received_at.isoformat(),
+                    outbox.c.sent_at >= (event.received_at - timedelta(minutes=15)).isoformat(),
+                ).order_by(outbox.c.sent_at.desc()).limit(8)).mappings().all()
+        members = {}
+
+        def speaker(remote_id):
+            if remote_id == event.conversation.bot_identity_id:
+                return "bot"
+            if remote_id not in members:
+                members[remote_id] = "member_" + str(len(members) + 1)
+            return members[remote_id]
+
+        for raw in reversed(rows):
+            source = InboundEvent.model_validate_json(raw)
+            if (source.event_id in hidden or source.platform_message_id in recalled
+                    or not self.permissions.check(access, "history.source.read", "event:" + source.event_id).allowed):
+                continue
+            context["messages"].append({
+                "id": source.platform_message_id,
+                "source": source.event_id,
+                "speaker": speaker(source.principal.remote_user_id),
+                "is_bot": source.sender_is_bot,
+                "is_self": source.principal.remote_user_id == event.conversation.bot_identity_id,
+                "at": source.received_at.isoformat(),
+                "text": source.text[:1000],
+                "mentions": [speaker(segment.remote_user_id) for segment in source.segments
+                             if segment.type == "mention"],
+                "reply_to": source.reply_to,
+                "non_text_types": sorted({segment.type for segment in source.segments if segment.type != "text"}),
+            })
+        context_version = self.social.version(access)
+        for row in deliveries:
+            if row["source_id"] in hidden or row["platform_message_id"] in recalled or not row["source_json"]:
+                continue
+            source = InboundEvent.model_validate_json(row["source_json"])
+            if (source.platform_message_id in recalled or not self.permissions.check(
+                    access, "history.source.read", "event:" + source.event_id,
+            ).allowed):
+                continue
+            envelope = json.loads(row["envelope_json"])
+            if envelope.get("context_version") not in (None, context_version):
+                continue
+            if row["task_context"] and not self.contexts.validate(access, {
+                **json.loads(row["task_context"]), "invited": True, "control_response": True,
+            }):
+                continue
+            context["recent_bot_messages"].append({
+                "id": row["platform_message_id"], "source": row["id"], "speaker": "bot", "is_self": True,
+                "at": row["sent_at"], "text": envelope["text"][:1000],
+                "reply_to": envelope.get("anchor_message_id") or source.platform_message_id,
+            })
+            if len(context["recent_bot_messages"]) == 4:
+                break
+        context["recent_bot_messages"].reverse()
+        return context
 
     def clear_wait(self, event, window):
         state = self.state(event.conversation.key)
@@ -931,6 +1037,8 @@ class Core:
             judge_status = "not_called"
             judge_duration_ms = None
             judged_event_ids = []
+            judged_delivery_ids = []
+            judge_persona_version = None
             decision = self.policy.decide(
                 event, cap, policy_state, thresholds=thresholds, participation=participation_settings
             )
@@ -944,12 +1052,13 @@ class Core:
                     }
                 )
             if decision.reason_codes == ("JUDGE_ABSTAIN",):
-                judge_events = list(window.events)[-12:]
-                judged_event_ids = [e.event_id for e in judge_events]
+                context = self.judge_context(event)
+                judged_event_ids = [message["source"] for message in context["messages"]]
+                judged_delivery_ids = [message["source"] for message in context["recent_bot_messages"]]
+                judge_persona_version = context["persona_version"]
                 judge_started = time.monotonic()
-                signals = await self.judge.judge(
-                    {"messages": [e.text[:1000] for e in judge_events]}
-                )
+                signals = (await self.judge.judge(context) if event.event_id in judged_event_ids
+                           else JudgmentSignals(abstain=True))
                 judge_duration_ms = round((time.monotonic() - judge_started) * 1000, 2)
                 if signals.abstain:
                     judge_status = "rule_only" if isinstance(self.judge, RuleOnlyJudge) else "abstained"
@@ -979,6 +1088,10 @@ class Core:
                 "judge_status": judge_status,
                 "judge_duration_ms": judge_duration_ms,
                 "judged_event_ids": judged_event_ids,
+                "judged_delivery_ids": judged_delivery_ids,
+                "judged_target_message_id": event.platform_message_id,
+                "judge_context_version": "speech-context-v2",
+                "judge_persona_version": judge_persona_version,
             }
             with self.db.transaction() as c:
                 c.execute(decisions.delete().where(decisions.c.event_id == event.event_id))
@@ -1055,6 +1168,8 @@ class Core:
         return self.contexts.validate(access, context)
 
     def pre_send(self, envelope):
+        if envelope.origin_id.startswith("speakup:") and not self.speak_up.valid(envelope):
+            return False
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(
             subject, "notification.send", "conversation:" + envelope.target.key
@@ -1221,6 +1336,7 @@ class Core:
         self.tasks.recover()
         delivery = asyncio.create_task(self.delivery_loop())
         maintenance = asyncio.create_task(self.maintenance_loop())
+        speak_up = asyncio.create_task(self.speak_up.run())
         try:
             while not self.stopping:
                 await self.tick(dispatch=False)
@@ -1228,7 +1344,8 @@ class Core:
         finally:
             delivery.cancel()
             maintenance.cancel()
-            await asyncio.gather(delivery, maintenance, return_exceptions=True)
+            speak_up.cancel()
+            await asyncio.gather(delivery, maintenance, speak_up, return_exceptions=True)
 
     async def stop(self):
         self.stopping = True

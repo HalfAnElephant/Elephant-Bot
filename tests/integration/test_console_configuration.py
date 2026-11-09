@@ -91,6 +91,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
         candidate = {
             **first["config"],
             "timezone": "UTC",
+            "speak_up": {**first["config"]["speak_up"], "enabled": False, "idle_minutes": 55},
             "tasks_enabled": True,
             "execution": {**first["config"]["execution"], "max_active": 5, "notify_before_tools": False},
             "context": {**first["config"]["context"], "recent_messages": 20},
@@ -106,7 +107,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
         pending = client.get("/api/v1/config", headers=AUTH).json()
         assert pending["config"] == first["config"] and pending["saved_config"] == candidate
         assert pending["restart_required"] is True
-        assert set(pending["changed_fields"]) == {"timezone", "tasks_enabled", "execution", "context", "memory", "model"}
+        assert set(pending["changed_fields"]) == {"timezone", "speak_up", "tasks_enabled", "execution", "context", "memory", "model"}
         assert client.post("/api/v1/config/save", headers=AUTH, json=body).status_code == 409
         assert client.post("/api/v1/config/apply", headers=AUTH, json={
             "expected_version": first["version"],
@@ -250,6 +251,17 @@ def test_general_llm_judge_config_save_and_restart(console_settings, clock):
         assert (provider.model, provider.endpoint, provider.key) == (
             model["model"], model["endpoint"], "console-model-secret",
         )
+
+
+def test_jev1_provider_selected(console_settings, clock):
+    from qqbot.policy.judge import Jev1Judge
+
+    settings = console_settings.model_copy(update={"judge": console_settings.judge.model_copy(update={
+        "kind": "jev", "model": "jev1", "endpoint": "https://example.invalid/v1/chat/completions",
+    })})
+    app = create_app(settings, clock=clock, run_background=False)
+    with TestClient(app):
+        assert isinstance(app.state.core.judge, Jev1Judge)
 
 
 def test_model_metadata_hot_apply_when_execution_disabled(console_settings, clock):

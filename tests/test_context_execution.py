@@ -105,6 +105,13 @@ async def test_context_delivered_assistant_scope_and_permission_revocation(
     context = core.contexts.build(access, core.contexts.turn(second))
     texts = [item["text"] for item in context["seed"]["history"]]
     assert "已送达的回答" in texts and "未送达的草稿" not in texts
+    history = context["seed"]["history"]
+    bot_reply = next(item for item in history if item["text"] == "已送达的回答")
+    member_message = next(item for item in history if item["source"] == second.event_id)
+    assert bot_reply["speaker"] == "bot"
+    assert member_message["speaker"].startswith("member_") and member_message["speaker"] != "bot"
+    assert member_message["message_id"] == second.platform_message_id
+    assert member_message["reply_to"] == second.reply_to
     assert core.validate_context(access, context)
     core.permissions.upsert(
         PermissionRule(
@@ -462,6 +469,13 @@ async def test_oversized_input_queues_bounded_pi_explanation_and_delivers(
     assert context["control_facts"]["received_characters"] == len(request.text)
     assert context["allowed_actions"] == [] and context["control_response"] is True
     assert context["seed"]["history"] == context["seed"]["memories"] == []
+    original_persona = json.loads(core.personas.snapshot(request.conversation.key)[0])
+    assert context["seed"]["persona"]["core"] == {
+        key: original_persona["core"][key] for key in ("name", "boundaries")
+    }
+    assert len(json.dumps(context["seed"], ensure_ascii=False).encode()) + len(
+        context["turn"]["text"].encode()
+    ) <= core.settings.context.max_request_bytes // 2
     assert [item["id"] for item in context["source_manifest"]] == [request.event_id]
     assert marker in InboundEvent.model_validate_json(raw_source).text
     assert marker not in task["event_json"] + task["goal"] + task["context_json"]

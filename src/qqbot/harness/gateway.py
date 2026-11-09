@@ -51,7 +51,8 @@ class RemoteLedger:
 
 class RunGateway:
     def __init__(self, workspace, model, key, endpoint, *, call, capacity=None, transport=None,
-                 github=None, processes=None, model_window=32768, content_root=None, github_host="github.com"):
+                 github=None, processes=None, model_window=32768, content_root=None, github_host="github.com",
+                 icloud=None):
         self.workspace = Path(workspace)
         self.model, self.key, self.endpoint = model, key, endpoint
         self.upstream_session = str(uuid4())
@@ -60,6 +61,12 @@ class RunGateway:
         self.github_host = github_host
         self.content_root = Path(content_root) if content_root else self.workspace.parent / ".tool-content"
         self.registry = standard_registry(github=github)
+        self.icloud = icloud
+        if self.icloud is None and os.environ.get("ICLOUD_CALENDAR_CONFIG"):
+            from qqbot.capabilities.icloud import ICloudCalendarService
+            self.icloud = ICloudCalendarService.from_file(os.environ["ICLOUD_CALENDAR_CONFIG"])
+        if self.icloud:
+            self.icloud.register(self.registry)
         GitService(credentials=getattr(github, "credentials", None) or (lambda _host: {})).register(self.registry)
         self.processes = processes or ProcessService()
         self.processes.register(self.registry)
@@ -120,7 +127,7 @@ class RunGateway:
             requested_actions=tuple(claim.get("goal_spec", {}).get("requested_actions", ())))
         self.tools = ToolGateway(self.registry, authority=lambda _context: self.authority(),
             permission=self.permission, ledger=RemoteLedger(self.call), verify=self.verify,
-            prepare=getattr(getattr(self.registry, "verify", None), "prepare", None),
+            prepare=self.prepare,
             content_store=self.store_content, content_read=self.read_content, max_calls=budget.get("tool_calls", 60))
         self.provider = ProviderAdapter(self.model, self.endpoint, self.key,
             authorize=self.authorize_action, reserve=self.reserve, record=self.record,
@@ -165,7 +172,15 @@ class RunGateway:
     async def record(self, request_id, usage):
         await self.call("usage", {"request_id": request_id, "usage": usage})
 
+    async def prepare(self, context, action, arguments):
+        if self.icloud and action.name.startswith("icloud."):
+            return await self.icloud.prepare(context, action, arguments)
+        prepare = getattr(getattr(self.registry, "verify", None), "prepare", None)
+        return await prepare(context, action, arguments) if prepare else {}
+
     async def verify(self, context, action, arguments, data):
+        if self.icloud and action.name.startswith("icloud."):
+            return await self.icloud.verify(context, action, arguments, data)
         if action.name == "task.budget.extend" and data.get("accepted"):
             return "VERIFIED", data
         if action.name.startswith("workspace.") and isinstance(data, dict) and data.get("path"):

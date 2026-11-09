@@ -128,6 +128,28 @@ class ContextConfig(DTO):
                 "keep_recent_tokens": recent, "compaction_output_tokens": self.compaction_output_tokens}
 
 
+class SpeakUpConfig(DTO):
+    enabled: bool = True
+    idle_minutes: int = Field(default=40, ge=1, le=10080)
+    min_interval_minutes: int = Field(default=60, ge=1, le=10080)
+    max_interval_minutes: int = Field(default=180, ge=1, le=10080)
+    max_per_day: int = Field(default=20, ge=0, le=100)
+    awake_from: int = Field(default=8, ge=0, le=23)
+    awake_to: int = Field(default=23, ge=1, le=24)
+    nudge: bool = True
+    allow: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def valid_window(self):
+        if self.min_interval_minutes > self.max_interval_minutes:
+            raise ValueError("主动搭话最小间隔不能超过最大间隔")
+        if self.awake_from >= self.awake_to:
+            raise ValueError("主动搭话清醒时间必须从早到晚；全天请设为 0–24")
+        if any(not value.strip() for value in self.allow):
+            raise ValueError("主动搭话白名单会话 ID 不能为空")
+        return self
+
+
 class Settings(DTO):
     deployment_id: str = "elephant-local"
     database: str = "var/core.db"
@@ -147,6 +169,7 @@ class Settings(DTO):
     persona_path: str = "personas/elephant_default.yaml"
     judge: JudgeConfig = JudgeConfig()
     memory: MemoryConfig = MemoryConfig()
+    speak_up: SpeakUpConfig = SpeakUpConfig()
     expression: ExpressionConfig = ExpressionConfig()
     social_evaluated_conversations: tuple[str, ...] = ()
 

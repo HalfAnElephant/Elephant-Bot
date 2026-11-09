@@ -1,6 +1,23 @@
 schema_version: 1
 inspected_on: '2026-11-09'
 references:
+  aurabot:
+    repository: https://github.com/aureth-labs/dsh-aurabot-qq
+    commit: 1057a861e4e96aa2fe050000d238280a7901b9dc
+    license: MIT
+    license_evidence: [THIRD_PARTY_NOTICES.md]
+    inspected_paths: [LICENSE, personas/dafeiyu.md, src/features/companion.js, src/chat/reply.js]
+    copied_paths: [personas/dafeiyu.md]
+    use: copied_persona_and_adapted_private_speakup_and_chat_bubbles
+    imported_files:
+      - source: personas/dafeiyu.md
+        destination: personas/elephant_default.yaml
+        source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
+        modifications: Only rename 大肥鱼 to 大象 in the complete body; store as YAML identity with host boundaries.
+      - source: src/features/companion.js
+        destination: src/qqbot/speakup.py
+        source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d
+        modifications: Port private timing and nudge policy to existing permissions, SQLite state and durable outbox; no mood port.
   maibot:
     repository: https://github.com/Mai-with-u/MaiBot
     commit: e5391507531706a8bfce011d55ed94628039f2de
@@ -40,17 +57,29 @@ references:
         source_sha256: 48814c885c6ca06325d89a3bfbc564bbc0bd7a3b43cd6a721b12b79ca82d66bd
         mode: adapted
         modifications: Reused four expression suitability criteria; HTTP transport, DTO parsing, deadlines and source IDs use project interfaces.
-      - source: src/config/official_configs.py
-        destination: personas/elephant_default.yaml
-        source_sha256: 10fb3070ed508e6eca7be734a294561fd9845e93baec624bf193ae676a2bb371
-        mode: adapted
-        modifications: Copied personality/behavior/reply/group/private/alternate-style defaults into YAML; retained Elephant name and ID, mapped personality to identity, retained host fact/permission/privacy boundaries.
       - source: src/chat/replyer/maisaka_generator_base.py
         destination: src/qqbot/dialogue/__init__.py
         source_sha256: 7005c723691da69ffd3523f782e7883b2cadd2c8f6aef5c1eee1f5fb004c5e5b
         mode: adapted
         modifications: Adapted optional probabilistic alternate-style choice and persona composition; gateway fixes one choice per run with legacy configuration compatibility.
     mechanism_references:
+  aurabot:
+    repository: https://github.com/aureth-labs/dsh-aurabot-qq
+    commit: 1057a861e4e96aa2fe050000d238280a7901b9dc
+    license: MIT
+    license_evidence: [THIRD_PARTY_NOTICES.md]
+    inspected_paths: [LICENSE, personas/dafeiyu.md, src/features/companion.js, src/chat/reply.js]
+    copied_paths: [personas/dafeiyu.md]
+    use: copied_persona_and_adapted_private_speakup_and_chat_bubbles
+    imported_files:
+      - source: personas/dafeiyu.md
+        destination: personas/elephant_default.yaml
+        source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
+        modifications: Only rename 大肥鱼 to 大象 in the complete body; store as YAML identity with host boundaries.
+      - source: src/features/companion.js
+        destination: src/qqbot/speakup.py
+        source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d
+        modifications: Port private timing and nudge policy to existing permissions, SQLite state and durable outbox; no mood port.
       - source: src/learners/expression_learner.py
         source_sha256: 53a168187485581aadc9bdd8c9dd880b521a38c1f66fdcb9af89924432c1fb37
         use: Learning flow and exact situation/style deduplication reference; module not copied.

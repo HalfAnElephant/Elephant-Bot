@@ -351,6 +351,11 @@ class ContextService:
             history.append(
                 {
                     "role": "user",
+                    "speaker": "member_" + event.principal.key[:12],
+                    "message_id": event.platform_message_id,
+                    "reply_to": event.reply_to,
+                    "mentions_bot": event.mentions_bot,
+                    "non_text_types": sorted({segment.type for segment in event.segments if segment.type != "text"}),
                     "text": event.text,
                     "at": event.received_at.isoformat(),
                     "source": event.event_id,
@@ -433,6 +438,9 @@ class ContextService:
             history.append(
                 {
                     "role": "assistant",
+                    "speaker": "bot",
+                    "message_id": row["platform_message_id"],
+                    "reply_to": envelope.get("anchor_message_id"),
                     "text": envelope["text"],
                     "at": row["sent_at"],
                     "source": row["id"],
@@ -508,6 +516,13 @@ class ContextService:
             seed["memories"] and len(json.dumps(seed, ensure_ascii=False).encode()) + request_bytes > budget
         ):
             seed["memories"].pop()
+        if notice_only and len(json.dumps(seed, ensure_ascii=False).encode()) + request_bytes > budget:
+            # A long persona must not prevent the bounded input-error explanation itself.
+            full_persona = seed["persona"]
+            seed["persona"] = {
+                "core": {key: full_persona["core"][key] for key in ("name", "boundaries")},
+                "group": {key: value for key, value in full_persona.get("group", {}).items() if key == "name"},
+            }
         if (
             len(json.dumps(seed, ensure_ascii=False).encode()) + request_bytes
             > self.settings.context.max_request_bytes // 2

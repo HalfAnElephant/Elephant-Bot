@@ -281,7 +281,7 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
     class Judge:
         async def judge(self, context):
             calls.append(context)
-            return JudgmentSignals(useful_contribution=0.6)
+            return JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
 
     core.judge = Judge()
     logged = []
