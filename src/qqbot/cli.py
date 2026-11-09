@@ -23,8 +23,8 @@ def migrate(path: str):
                 revision = source.execute("SELECT version_num FROM alembic_version").fetchone()
             except sqlite3.OperationalError:
                 revision = None
-            if not revision or revision[0] != "0007":
-                backup_path = str(path) + ".before-0007-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + ".db"
+            if not revision or revision[0] != "0008":
+                backup_path = str(path) + ".before-0008-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + ".db"
                 descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 os.close(descriptor)
                 with sqlite3.connect(backup_path) as destination:

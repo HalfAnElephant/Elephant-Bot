@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 
 COMPLETION_INSTRUCTION = (
     "执行预算已到收尾边界。停止调用业务工具，仅根据已有工具观察和已核实效果，"
-    "沿用大象的人格，用 QQ 纯文本自然说清你做了什么、哪里还没弄清，不要机械汇报。"
+    "沿用当前宿主人格和表达风格，用 QQ 纯文本自然说清你做了什么、哪里还没弄清。"
     "不要宣称未验证的操作成功，也不要编造结果。"
 )
 logger = logging.getLogger(__name__)

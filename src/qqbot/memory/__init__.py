@@ -169,6 +169,10 @@ class SocialService:
         return MemoryRecord.model_validate_json(row)
 
     def _invalidate_summaries(self, conn, cid, source_ids):
+        from qqbot.expressions import invalidate_source
+
+        for source_id in source_ids:
+            invalidate_source(conn, source_id, now=self.clock.now())
         row = conn.execute(
             select(conversation_summaries.c.source_ids_json).where(
                 conversation_summaries.c.conversation_id == cid

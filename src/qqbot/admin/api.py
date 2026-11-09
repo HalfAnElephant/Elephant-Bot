@@ -22,6 +22,7 @@ from qqbot.dialogue import PersonaSpec
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, TextSegment, stable_id
 from qqbot.domain.messages import SendReceipt
 from qqbot.domain.tasks import TaskResult
+from qqbot.expressions import ExpressionVersionConflict
 from qqbot.memory import MemoryRecord
 from qqbot.permissions import (
     PermissionPolicy,
@@ -107,6 +108,14 @@ class PersonaRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: str
     persona: PersonaSpec
+
+
+class ExpressionPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    checked: bool
+    situation: str | None = Field(default=None, min_length=1, max_length=20)
+    style: str | None = Field(default=None, min_length=1, max_length=20)
 
 
 def router(core, authenticate):
@@ -521,6 +530,37 @@ def router(core, authenticate):
             raise HTTPException(409, "insufficient independent evidence")
         return core.social.commit(access, memory_id, authorized=True).model_dump(mode="json")
 
+    @router.get("/api/v1/expressions")
+    def expressions(conversation_id: str):
+        require_permission("expression.read", "conversation:" + conversation_id)
+        access = owner(conversation(conversation_id))
+        return {
+            "records": core.expressions.list(access),
+            "learning": core.expressions.status(access),
+            "learner_configured": core.expression_learner.configured,
+        }
+
+    @router.patch("/api/v1/expressions/{expression_id}")
+    def review_expression(expression_id: str, conversation_id: str, body: ExpressionPatch):
+        require_permission("expression.manage", "conversation:" + conversation_id)
+        require_permission("expression.manage", "expression:" + expression_id)
+        access = owner(conversation(conversation_id))
+        try:
+            return core.expressions.review(access, expression_id, **body.model_dump())
+        except ExpressionVersionConflict as error:
+            raise HTTPException(409, str(error)) from error
+
+    @router.delete("/api/v1/expressions/{expression_id}")
+    def delete_expression(expression_id: str, conversation_id: str, expected_revision: int):
+        require_permission("expression.manage", "conversation:" + conversation_id)
+        require_permission("expression.manage", "expression:" + expression_id)
+        access = owner(conversation(conversation_id))
+        try:
+            core.expressions.delete(access, expression_id, expected_revision=expected_revision)
+        except ExpressionVersionConflict as error:
+            raise HTTPException(409, str(error)) from error
+        return {"deleted": True}
+
     @router.get("/api/v1/config")
     def config_view():
         with core.config_store.lock:
@@ -528,6 +568,7 @@ def router(core, authenticate):
             names = {
                 saved.admin_token_env, saved.internal_token_env, saved.model.api_key_env,
                 saved.judge.api_key_env, saved.memory.extractor_key_env, saved.memory.embedding_key_env,
+                saved.expression.learner_key_env,
                 *(adapter.secret_env for adapter in saved.adapters),
             }
             return {

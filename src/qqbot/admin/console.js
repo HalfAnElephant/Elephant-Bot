@@ -63,7 +63,8 @@ const ConsoleModel = (() => {
     '*': '全部操作', 'conversation.receive': '接收消息', 'notification.send': '发送回复与通知',
     'model.request': '调用模型', 'conversation.policy.set': '调整发言模式', 'conversation.persona.set': '调整会话人格',
     'task.create': '创建任务', 'task.read': '查看任务', 'task.cancel': '取消任务', 'task.*': '全部任务操作',
-    'memory.read': '读取记忆', 'memory.*': '全部记忆与词典操作', 'history.*': '读取历史与来源'
+    'memory.read': '读取记忆', 'memory.*': '全部记忆与词典操作', 'history.*': '读取历史与来源',
+    'expression.read': '读取表达素材', 'expression.learn': '学习表达', 'expression.manage': '管理表达素材', 'expression.*': '全部表达素材操作'
   };
   function updateAction(actions, action, enabled) {
     if (!enabled) return actions.filter(value => value !== action);
@@ -225,7 +226,10 @@ if (typeof document !== 'undefined') (() => {
     max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', keep_recent_tokens: '近期消息保留 Token', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
     maintenance_enabled: '启用记忆维护', auto_extract: '自动提取记忆', extractor_endpoint: '提取服务地址', extractor_model: '提取模型', extractor_key_env: '提取密钥变量', embedding_endpoint: '向量服务地址', embedding_model: '向量模型', embedding_version: '向量版本', embedding_dimensions: '向量维度', embedding_key_env: '向量密钥变量', raw_retention_days: '原始记录保留（天）',
     preset: '预设', default_effect: '默认行为', rules: '权限规则', id: '规则 ID', enabled: '启用', priority: '优先级', subject: '主体范围', actions: '操作匹配', resources: '资源匹配', effect: '行为', adapter_instance_id: '接入实例 ID', bot_identity_id: '机器人身份 ID', identity_namespace: '身份命名空间', group_id: '群 ID', user_id: '用户 ID',
-    persona_id: '人格标识', name: '名称', identity: '身份说明', traits: '性格特征', style: '表达风格', boundaries: '行为边界', model_calls: '模型调用次数', tool_calls: '工具调用次数', active_seconds: '活跃执行（秒）', total_wall_seconds: '总时长（秒）', output_tokens_per_call: '每次输出 Token', input_tokens: '输入 Token 预算', output_tokens: '输出 Token 预算', completion_reserve: '完成阶段预留模型调用'
+    persona_id: '人格标识', name: '名称', identity: '人格与身份', traits: '性格特征', style: '表达风格', boundaries: '行为边界', model_calls: '模型调用次数', tool_calls: '工具调用次数', active_seconds: '活跃执行（秒）', total_wall_seconds: '总时长（秒）', output_tokens_per_call: '每次输出 Token', input_tokens: '输入 Token 预算', output_tokens: '输出 Token 预算', completion_reserve: '完成阶段预留模型调用',
+    behavior_style: '参与聊天的方式', reply_style: '说话习惯', group_chat_prompt: '群聊提示', private_chat_prompts: '私聊提示', multiple_reply_style: '备用语气', multiple_probability: '备用语气概率',
+    expression: '表达素材', expression_checked_only: '仅使用人工精选', expression_self_reflect: '学习后自动审核', learning_list: '学习与使用范围', expression_groups: '表达共享组', learning_blacklist: '学习黑名单',
+    learner_endpoint: '表达学习服务地址', learner_model: '表达学习模型', learner_key_env: '表达学习密钥变量', min_messages: '每批最少消息', max_messages: '每批最多消息', learn_interval_seconds: '学习间隔（秒）', max_expression_learner: '最多同时学习数', timeout_seconds: '请求超时（秒）', use: '使用表达', learn: '学习表达', conversation_id: '会话 ID', type: '会话类型'
   };
   const enumLabels = {
     kind: {onebot: 'OneBot / NapCat', official: 'QQ 官方机器人', rule: '规则判断', jev: 'Jev', structured: '结构化模型', global: '全局', adapter: '接入实例', bot: '机器人', group: '群组', person: '个人', group_member: '群内成员'},
@@ -241,12 +245,17 @@ if (typeof document !== 'undefined') (() => {
     allowed_groups: '兼容字段；实际访问控制由统一权限策略决定。', allowed_users: '兼容字段；实际访问控制由统一权限策略决定。',
     context: '保留近期 Token < 软上限 < 硬上限；输入与输出总预算不能超过模型窗口。',
     execution: '持续任务上限应小于最大活跃执行数，给新交互保留容量。',
+    expression: '采用 MaiBot 快速表达选择。积累至少 10 条可用素材后开始抽取；群聊默认学习和使用，私聊需添加规则。',
+    learner_endpoint: '留空使用主模型地址；使用不同地址时请配置独立的表达学习密钥。',
+    learner_model: '留空使用主模型。学习在后台执行，不增加每次回复的模型调用。',
+    multiple_probability: '0 表示始终使用基础语气；触发时仅影响本轮。',
+    expression_groups: '仅在显式加入的会话间共享表达；私聊来源不会流入群聊。',
     social_evaluated_conversations: '每行一个会话 ID；启用 social 模式前应完成真实回放评估。'
   };
   const groups = [
     ['接入', ['adapters', 'deployment_id']], ['模型', ['model']],
     ['执行', ['tasks_enabled', 'interactive_execution_enabled', 'execution']], ['上下文', ['context']],
-    ['发言', ['send_budget_per_minute', 'judge', 'social_evaluated_conversations']], ['记忆', ['memory']],
+    ['发言', ['send_budget_per_minute', 'judge', 'social_evaluated_conversations']], ['记忆与表达', ['memory', 'expression']],
     ['系统', ['database', 'internal_socket', 'timezone', 'source_url', 'persona_path', 'admin_token_env', 'internal_token_env']], ['初始权限', ['permissions']]
   ];
   let category = 0;
@@ -302,7 +311,7 @@ if (typeof document !== 'undefined') (() => {
       read = () => { if (!control.checkValidity() || !Number.isFinite(control.valueAsNumber)) throw new Error('请填写允许范围内的数值。'); return control.valueAsNumber; };
       wrap.append(element('small', '范围：' + (schema.minimum ?? '不限') + ' – ' + (schema.maximum ?? '不限') + (schema.type === 'integer' ? '，整数' : ''), 'field-help'));
     } else if (schema.type === 'string') {
-      control = element(key === 'identity' || raw.uiMultiline ? 'textarea' : 'input'); control.value = initial ?? '';
+      control = element(['identity', 'behavior_style', 'reply_style', 'group_chat_prompt', 'private_chat_prompts'].includes(key) || raw.uiMultiline ? 'textarea' : 'input'); control.value = initial ?? '';
       if (schema.minLength !== undefined) { control.minLength = schema.minLength; control.required = schema.minLength > 0; }
       if (schema.maxLength !== undefined) control.maxLength = schema.maxLength;
       read = () => { if (!control.checkValidity()) throw new Error('请检查必填内容和长度限制。'); return control.value; };
@@ -512,7 +521,9 @@ if (typeof document !== 'undefined') (() => {
       for (const key of keys) { const item = appendField(fields, schema.properties[key], value[key], key, schema, state, key); reads.push([key, item.read]); }
       return section;
     }
-    section('基本信息', ['name', 'identity']); section('性格与边界', ['traits', 'boundaries']);
+    section('基本信息', ['name', 'identity']);
+    section('聊天方式', ['behavior_style', 'reply_style', 'group_chat_prompt', 'private_chat_prompts', 'multiple_reply_style', 'multiple_probability'].filter(key => schema.properties[key]));
+    section('性格与边界', ['traits', 'boundaries']);
     const expression = section('表达方式', []), style = styleForm(value.style || {}, state, schema); expression.append(style.node); reads.push(['style', style.read]);
     const advanced = element('details', undefined, 'persona-advanced'); advanced.append(element('summary', '人格标识与版本')); const content = element('div', undefined, 'nested-fields'); advanced.append(content); form.append(advanced);
     for (const key of Object.keys(schema.properties).filter(key => !reads.some(([name]) => name === key))) {
@@ -795,6 +806,43 @@ if (typeof document !== 'undefined') (() => {
     show('memory-output', result); $('memory-output').closest('details')?.setAttribute('open', ''); $('memory-id').value = result.memory_id; notice('记忆已纠正');
   });
   action('delete-memory', async () => { if (!await confirmDialog('删除这条记忆？', '此操作会撤销这条已保存的记忆。', [], '删除记忆')) return; const result = await request('/api/v1/memories/' + encode(required('memory-id', '记忆 ID')), {method: 'DELETE'}); show('memory-output', result); $('memory-text').value = ''; await loadMemories(); notice('记忆已删除'); });
+  async function loadExpressions() {
+    const result = await request('/api/v1/expressions?conversation_id=' + encode(cid()));
+    $('expression-rows').replaceChildren();
+    const states = {PENDING: '等待积累消息', RUNNING: '正在学习', DONE: '上批学习完成', FAILED: '上批失败，稍后重试', SKIPPED: '暂未执行'};
+    const status = result.learning.learn ? states[result.learning.state] || '等待积累消息' : '未启用学习';
+    show('expression-status', (result.learner_configured ? '' : '尚未配置学习模型或密钥。') + '当前有 ' + result.records.length + ' 条素材，积累了 ' + result.learning.pending_count + ' 条消息。' + status + '；' + (result.learning.use ? '允许使用素材。' : '暂不使用素材。'));
+    for (const record of result.records) {
+      const row = document.createElement('tr');
+      cell(row, record.situation); cell(row, record.style); cell(row, record.count + ' / ' + (record.checked ? '已精选' : '未精选'));
+      const controls = cell(row, '');
+      button(controls, '编辑', () => {
+        $('expression-id').value = record.id; $('expression-revision').value = record.revision;
+        $('expression-situation').value = record.situation; $('expression-style').value = record.style;
+        $('expression-checked').checked = record.checked; $('expression-id').closest('details').open = true;
+      });
+      button(controls, record.checked ? '取消精选' : '精选', async () => {
+        await request('/api/v1/expressions/' + encode(record.id) + '?conversation_id=' + encode(cid()), {method: 'PATCH', body: {expected_revision: record.revision, checked: !record.checked}});
+        await loadExpressions();
+      });
+      button(controls, '删除', async () => {
+        if (!await confirmDialog('删除这条表达？', '同一条表达不会被重新学习或从旧备份恢复。', [], '删除表达')) return;
+        await request('/api/v1/expressions/' + encode(record.id) + '?conversation_id=' + encode(cid()) + '&expected_revision=' + record.revision, {method: 'DELETE'});
+        await loadExpressions();
+      });
+      $('expression-rows').append(row);
+    }
+    if (!result.records.length) { const row = document.createElement('tr'), message = cell(row, '尚无表达素材。积累足够的有效聊天后会自动学习。'); message.colSpan = 4; $('expression-rows').append(row); }
+  }
+  action('load-expressions', loadExpressions);
+  action('save-expression', async () => {
+    await request('/api/v1/expressions/' + encode(required('expression-id', '请先选择表达')) + '?conversation_id=' + encode(cid()), {method: 'PATCH', body: {
+      expected_revision: Number($('expression-revision').value), checked: $('expression-checked').checked,
+      situation: required('expression-situation', '使用情境'), style: required('expression-style', '表达方式')
+    }});
+    $('expression-id').value = ''; $('expression-id').closest('details').open = false;
+    await loadExpressions(); notice('表达已保存');
+  });
   function configMetadata(result) {
     configView = result; configVersion = result.version; savedConfigVersion = result.saved_version;
     show('config-version', result.version); show('saved-config-version', result.saved_version);

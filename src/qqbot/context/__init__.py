@@ -11,6 +11,7 @@ from sqlalchemy import func, insert, select, update
 from qqbot.context.topics import displayed_references, entities, select_topic
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.execution import TurnInput
+from qqbot.expressions import ExpressionService, build_habits
 from qqbot.storage.schema import inbox, outbox, runtime_state
 from qqbot.storage.social_schema import social_tombstones
 from qqbot.storage.task_schema import notifications, runs, tasks
@@ -43,6 +44,7 @@ class ContextService:
     def __init__(self, db, clock, settings, permissions, social, personas):
         self.db, self.clock, self.settings = db, clock, settings
         self.permissions, self.social, self.personas = permissions, social, personas
+        self.expressions = ExpressionService(db, clock, settings.expression, permissions=permissions)
 
     @property
     def pool_limits(self):
@@ -333,6 +335,7 @@ class ContextService:
             "speech": speech_version,
             "memory": context_version,
             "permission": self.permissions.policy_version,
+            "expression": digest(self.settings.expression.model_dump_json()),
         }
         history, manifest, dependencies = [], [], {}
         source_topics = {
@@ -484,6 +487,7 @@ class ContextService:
         seed = {
             "now": self.clock.now().isoformat(),
             "timezone": self.settings.timezone,
+            "surface": access.conversation.surface.value,
             "topic": {
                 "kind": selected_topic["kind"],
                 "entities": selected_topic["entities"],
@@ -516,6 +520,18 @@ class ContextService:
         manifest = [item for item in manifest if item["id"] in used]
         for source in tuple(used):
             manifest.extend(dependencies.get(source, ()))
+        expression_records = [] if notice_only else self.expressions.select(access)
+        expression_habits = build_habits(expression_records)
+        while expression_records and (
+            len(json.dumps(seed, ensure_ascii=False).encode()) + request_bytes
+            + len(expression_habits.encode()) > budget
+        ):
+            expression_records.pop()
+            expression_habits = build_habits(expression_records)
+        manifest.extend(
+            {"kind": "expression", "id": item["id"], "revision": item["revision"]}
+            for item in expression_records
+        )
         manifest = merge_manifest(manifest)
         if not set(turn.source_event_ids).issubset({item["id"] for item in manifest}):
             raise ValueError("turn contains unavailable or revoked source")
@@ -528,6 +544,7 @@ class ContextService:
             "epoch": binding["epoch"],
             "key": binding["key"],
             "seed": seed,
+            "expression_habits": expression_habits,
             "selected_reference": selected_reference,
             "limits": self.settings.context.limits(self.settings.model.context_window, max(
                 self.settings.execution.interactive_budget.output_tokens_per_call,
@@ -557,6 +574,8 @@ class ContextService:
         if (
             versions.get("model") != digest(self.settings.model.model_dump_json())
             or versions.get("context") != self.settings.context.version
+            or versions.get("expression", digest(self.settings.expression.model_dump_json()))
+            != digest(self.settings.expression.model_dump_json())
         ):
             return False
         if not self.permissions.check(
@@ -591,6 +610,10 @@ class ContextService:
                 if any(not InboundEvent.model_validate_json(raw).sender_is_bot for raw in later):
                     return False
             for source in context.get("source_manifest", ()):
+                if source["kind"] == "expression":
+                    if not self.expressions.validate_record(access, source["id"], source["revision"]):
+                        return False
+                    continue
                 table = inbox if source["kind"] == "inbox" else outbox
                 column = table.c.event_json if source["kind"] == "inbox" else table.c.envelope_json
                 row = (

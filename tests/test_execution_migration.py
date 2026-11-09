@@ -31,17 +31,17 @@ def test_execution_upgrade_backs_up_and_preserves_legacy_reservations(tmp_path):
         db.execute("INSERT INTO task_runs (id,task_id,worker,fencing,lease,slot_reserved,session,last_seq) VALUES (?,?,?,?,?,?,?,?)",
             ("legacy-run", "legacy", "old-worker", 7, "2026-01-01", 1, "old-session", 2))
     migrate(str(path))
-    backups = list(tmp_path.glob("legacy.sqlite.before-0007-*.db"))
+    backups = list(tmp_path.glob("legacy.sqlite.before-0008-*.db"))
     assert len(backups) == 1 and stat.S_IMODE(backups[0].stat().st_mode) == 0o600
     with sqlite3.connect(backups[0]) as old:
         assert old.execute("SELECT version_num FROM alembic_version").fetchone() == ("0005",)
         assert "protocol_version" not in {row[1] for row in old.execute("PRAGMA table_info(tasks)")}
         assert old.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     with sqlite3.connect(path) as upgraded:
-        assert upgraded.execute("SELECT version_num FROM alembic_version").fetchone() == ("0007",)
+        assert upgraded.execute("SELECT version_num FROM alembic_version").fetchone() == ("0008",)
         assert upgraded.execute("SELECT protocol_version,goal,state,fencing FROM tasks").fetchone() == (
             1, "original goal", "NEEDS_RECONCILIATION", 7)
         assert upgraded.execute("SELECT slot_reserved,last_seq,session FROM task_runs").fetchone() == (1, 2, "old-session")
         assert upgraded.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     migrate(str(path))
-    assert list(tmp_path.glob("legacy.sqlite.before-0007-*.db")) == backups
+    assert list(tmp_path.glob("legacy.sqlite.before-0008-*.db")) == backups

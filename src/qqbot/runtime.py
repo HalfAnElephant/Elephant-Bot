@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ from qqbot.dialogue import PersonaStore
 from qqbot.dialogue.planner import plan_turn, wants_background
 from qqbot.domain import AccessContext, InboundEvent, Surface, TextSegment, stable_id
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal
+from qqbot.expressions import HTTPLearner
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.service import TaskService
 from qqbot.memory import MemoryRecord, SocialService
@@ -28,6 +30,7 @@ from qqbot.storage.schema import audit_events, decisions, inbox, outbox, runtime
 from qqbot.storage.social_schema import social_records, social_tombstones
 from qqbot.storage.task_schema import notifications, tasks
 
+logger = logging.getLogger(__name__)
 CONTROL_COMMANDS = {
     "/帮助",
     "/状态",
@@ -75,6 +78,18 @@ class Core:
             context_validator=self.validate_context,
         )
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
+        self.expressions = self.contexts.expressions
+        expression = settings.expression
+        expression_key = os.environ.get(expression.learner_key_env)
+        if not expression.learner_endpoint or expression.learner_endpoint == settings.model.endpoint:
+            expression_key = expression_key or os.environ.get(settings.model.api_key_env)
+        self.expression_learner = HTTPLearner(
+            expression.learner_endpoint or settings.model.endpoint,
+            expression.learner_model or settings.model.model,
+            expression_key,
+            client=self.model_client,
+            timeout_seconds=expression.timeout_seconds,
+        )
         judge = settings.judge
         if judge.kind == "rule":
             self.judge = RuleOnlyJudge()
@@ -1075,7 +1090,7 @@ class Core:
 
     async def maintenance_loop(self):
         while not self.stopping:
-            if self.settings.memory.maintenance_enabled:
+            if self.settings.memory.maintenance_enabled or self.settings.expression.enabled:
                 with self.db.engine.connect() as c:
                     latest = (
                         select(
@@ -1095,9 +1110,16 @@ class Core:
                 for raw in rows:
                     event = InboundEvent.model_validate_json(raw)
                     if self.allowed(event):
-                        await self.maintenance.maintenance_once(
-                            self.access(event), auto_extract=self.settings.memory.auto_extract
-                        )
+                        access = self.access(event)
+                        if self.settings.memory.maintenance_enabled:
+                            await self.maintenance.maintenance_once(
+                                access, auto_extract=self.settings.memory.auto_extract
+                            )
+                        if self.settings.expression.enabled:
+                            try:
+                                await self.expressions.maintenance_once(access, self.expression_learner)
+                            except (PermissionError, LookupError, ValueError):
+                                logger.warning("Expression maintenance skipped", extra={"conversation": event.conversation.key})
                     await asyncio.sleep(0)
             await asyncio.sleep(30)
 

@@ -302,3 +302,19 @@ async def test_locked_pi_receives_trusted_elephant_persona_for_every_speech_path
     assert "TRUSTED_PERSONA_SENTINEL" in system
     assert "UNTRUSTED_HISTORY_SENTINEL" not in system
     assert state.requests[0]["kind"] == ("completion" if notification else "business")
+
+
+async def test_locked_pi_refreshes_expression_material_without_reseeding_topic(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    state.gateway.revoke()
+    for index, material in enumerate(("EXPRESSION_FIRST_SENTINEL", "EXPRESSION_SECOND_SENTINEL")):
+        state.gateway.bind({**state.claim, "run_id": "expression-run-" + str(index),
+            "context": {**state.claim["context"], "expression_habits": material}})
+        await state.runner.run("Respond naturally", keep_alive=True)
+        messages = state.requests[-1]["payload"]["messages"]
+        system = "\n".join(str(message["content"]) for message in messages if message["role"] == "system")
+        users = [str(message["content"]) for message in messages if message["role"] == "user"]
+        assert material not in system
+        assert any(material in message for message in users)
+    assert state.runner.quiescent_verified

@@ -311,6 +311,9 @@ class MemoryMaintenance:
                     self.service.revoke_source(access, source_id)
                 segments = (TextSegment(text=event.text[:300]),) if source_id in retained_sources else ()
                 with self.db.transaction() as conn:
+                    from qqbot.expressions import invalidate_source
+
+                    invalidate_source(conn, source_id, now=self.clock.now())
                     conn.execute(
                         update(inbox)
                         .where(inbox.c.id == source_id)

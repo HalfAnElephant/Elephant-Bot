@@ -133,6 +133,8 @@ model:
 
 普通问题和自然语言状态说明需要可用 Worker。签名校验、Inbox 与管理接口独立运行。默认人格位于 `personas/elephant_default.yaml`，可通过 `persona_path` 指向自己的文件。
 
+默认名称仍为“大象”，身份、性格与语气采用 MaiBot 固定版本的默认配置，并接入其默认快速表达素材机制：从群聊学习、写入前审核、去重计数、加权抽样，再作为每轮措辞参考。表达学习独立于事实记忆，默认不学习或使用私聊素材。配置、冷启动门槛、审核删除及实现范围见 [MaiBot 人格与表达机制](docs/maibot-expression.md)。
+
 先在另一个终端启动本地协议开发 Worker，并加载同一份环境变量。创建受限内部令牌文件后，指定实际模型与地址。
 
 ```sh
@@ -204,6 +206,7 @@ adapters:
 | `judge.kind` | `rule` | 可选 `rule`、`jev`、`structured` |
 | `memory.maintenance_enabled` | `false` | 增量摘要、保留期清理与索引维护 |
 | `memory.auto_extract` | `false` | 模型提取记忆候选，需配置提取 endpoint、model 与密钥 |
+| `expression.enabled` | `true` | 群聊表达学习与使用；实际学习需可用模型凭据，私聊需显式规则 |
 
 完整配置与限制见 [示例配置](configs/example.yaml)、[JSON Schema](configs/schema.json) 和 [发言与记忆说明](docs/social-implementation.md)。默认保持 `addressed_only`，启用 social 模式前需要真实标注回放评估。
 

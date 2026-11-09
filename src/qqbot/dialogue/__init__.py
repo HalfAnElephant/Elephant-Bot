@@ -1,12 +1,13 @@
 import json
 import os
+import random
 import tempfile
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class PersonaSpec(BaseModel):
@@ -14,10 +15,52 @@ class PersonaSpec(BaseModel):
     persona_id: str
     version: int = Field(ge=1)
     name: str
-    identity: str
+    identity: str = Field(validation_alias=AliasChoices("identity", "personality"))
     traits: tuple[str, ...]
     style: dict[str, Any]
     boundaries: tuple[str, ...]
+    behavior_style: str = ""
+    reply_style: str = ""
+    group_chat_prompt: str = ""
+    private_chat_prompts: str = ""
+    multiple_reply_style: tuple[str, ...] = ()
+    multiple_probability: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
+
+
+def select_temporary_reply_style(persona):
+    """MaiBot's one-reply style choice, held for one host run by the gateway."""
+    core = persona.get("core", persona)
+    candidates = [style.strip() for style in core.get("multiple_reply_style", ()) if style.strip()]
+    probability = core.get("multiple_probability", 0)
+    if not candidates or probability <= 0 or random.random() > probability:
+        return ""
+    return random.choice(candidates)
+
+
+def render_persona(persona, surface="", *, temporary_style=""):
+    """Render only host-owned settings; learned expression material stays outside system."""
+    core, group = persona.get("core", persona), persona.get("group", {})
+    lines = ["你是" + str(group.get("name") or core.get("name") or "聊天伙伴") + "。"]
+    for label, value in (
+        ("身份与性格", core.get("identity", core.get("personality", ""))),
+        ("性格补充", "；".join(core.get("traits", ()))),
+        ("行为风格", core.get("behavior_style", "")),
+        ("表达风格", core.get("reply_style", "")),
+    ):
+        if value:
+            lines.append(label + "：" + value)
+    if core.get("style"):
+        lines.append("其他表达设置：" + json.dumps(core["style"], ensure_ascii=False))
+    attention = core.get("private_chat_prompts" if surface == "private" else "group_chat_prompt", "")
+    if attention:
+        lines.append("当前聊天注意事项：\n" + attention)
+    if group:
+        lines.append("当前会话的表达偏好（覆盖默认风格，不改变事实、权限或边界）：" + json.dumps(group, ensure_ascii=False))
+    if temporary_style:
+        lines.append("这次回复的说话风格可以尝试：\n" + temporary_style)
+    if core.get("boundaries"):
+        lines.append("始终保留的边界：\n" + "\n".join(core["boundaries"]))
+    return "\n".join(lines)
 
 
 class PersonaStore:
@@ -108,7 +151,8 @@ def assemble_prompt(
 ):
     """Untrusted material stays in user data. Current request is never truncated."""
     persona = json.loads(persona_json)
-    system = boundary + "\n人格配置\n" + json.dumps(persona, ensure_ascii=False)
+    surface = platform.get("surface", "") if isinstance(platform, dict) else ""
+    system = boundary + "\n人格配置\n" + render_persona(persona, surface)
     required = {"platform": platform, "request": request, "recent_messages": recent_messages}
     required_json = json.dumps(required, ensure_ascii=False, default=str)
     if len(system) + len(required_json) > max_chars:

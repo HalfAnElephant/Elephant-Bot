@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from qqbot.domain import DTO
 from qqbot.domain.execution import RunBudget
+from qqbot.expressions.config import ExpressionConfig
 from qqbot.permissions import PermissionPolicy
 
 
@@ -142,6 +143,7 @@ class Settings(DTO):
     persona_path: str = "personas/elephant_default.yaml"
     judge: JudgeConfig = JudgeConfig()
     memory: MemoryConfig = MemoryConfig()
+    expression: ExpressionConfig = ExpressionConfig()
     social_evaluated_conversations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
