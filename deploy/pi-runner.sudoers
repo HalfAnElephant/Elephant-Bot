@@ -1,0 +1,3 @@
+# Root launcher accepts only start/stop and two canonical UUIDs.
+# sudo-rs compatibility requires the fixed executable rule without argument globs.
+qqbot-worker ALL=(root) NOPASSWD: /usr/local/libexec/pi-runner-launch

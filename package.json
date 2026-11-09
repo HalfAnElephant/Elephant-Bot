@@ -1,0 +1,1 @@
+{"name":"elephant-bot-harness","private":true,"license":"AGPL-3.0-only","engines":{"node":">=22.19.0"},"dependencies":{"@earendil-works/pi-coding-agent":"1.5.0"}}

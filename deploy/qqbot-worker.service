@@ -1,0 +1,22 @@
+[Unit]
+Description=QQ task supervisor (installation template)
+After=network-online.target qqbot.service qqbot-runner-network.service
+Requires=qqbot.service qqbot-runner-network.service
+
+[Service]
+Type=simple
+User=qqbot-worker
+Group=qqbot-worker
+WorkingDirectory=/opt/qqbot
+EnvironmentFile=/etc/qqbot/worker.env
+ExecStart=/opt/qqbot/.venv/bin/python -m qqbot.jobs.worker --socket /run/qqbot/internal.sock --token-file /etc/qqbot/worker.token --pi /opt/qqbot/node_modules/.bin/pi --workspace /var/lib/qqbot-runners --runner-mode systemd --spool /var/lib/qqbot-worker/spool --archive /var/lib/qqbot/artifacts --model deepseek-v4.1-flash --model-endpoint https://opencode.ai/inference/go/openai/v1/chat/completions
+Restart=on-failure
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+ReadWritePaths=/var/lib/qqbot-worker /var/lib/qqbot/artifacts /var/lib/qqbot-runners /var/lib/qqbot-runner-manifests /var/lib/qqbot-runner-stops /var/lib/qqbot-runner-locks
+InaccessiblePaths=/home /root
+
+[Install]
+WantedBy=multi-user.target

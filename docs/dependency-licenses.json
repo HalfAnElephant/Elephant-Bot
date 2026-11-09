@@ -1,0 +1,192 @@
+[
+  {
+    "package": "alembic",
+    "version": "1.20.1",
+    "license": "MIT"
+  },
+  {
+    "package": "annotated-doc",
+    "version": "0.0.5",
+    "license": "MIT"
+  },
+  {
+    "package": "annotated-types",
+    "version": "0.8.0",
+    "license": "MIT"
+  },
+  {
+    "package": "anyio",
+    "version": "4.16.0",
+    "license": "MIT"
+  },
+  {
+    "package": "certifi",
+    "version": "2026.10.23",
+    "license": "MPL-2.0"
+  },
+  {
+    "package": "cffi",
+    "version": "2.1.1",
+    "license": "MIT-0"
+  },
+  {
+    "package": "click",
+    "version": "8.5.1",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "cryptography",
+    "version": "48.0.1",
+    "license": "Apache-2.0 OR BSD-3-Clause"
+  },
+  {
+    "package": "elephant-qqbot",
+    "version": "0.1.0",
+    "license": "AGPL-3.0-only"
+  },
+  {
+    "package": "fastapi",
+    "version": "0.162.2",
+    "license": "MIT"
+  },
+  {
+    "package": "h11",
+    "version": "0.16.0",
+    "license": "MIT"
+  },
+  {
+    "package": "httpcore",
+    "version": "1.0.9",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "httptools",
+    "version": "0.9.0",
+    "license": "MIT"
+  },
+  {
+    "package": "httpx",
+    "version": "0.28.1",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "idna",
+    "version": "3.20",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "iniconfig",
+    "version": "2.3.1",
+    "license": "MIT"
+  },
+  {
+    "package": "Mako",
+    "version": "1.4.3",
+    "license": "MIT"
+  },
+  {
+    "package": "MarkupSafe",
+    "version": "3.0.4",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "opentelemetry-api",
+    "version": "1.45.2",
+    "license": "Apache-2.0"
+  },
+  {
+    "package": "packaging",
+    "version": "26.3",
+    "license": "Apache-2.0 OR BSD-2-Clause"
+  },
+  {
+    "package": "pluggy",
+    "version": "1.7.0",
+    "license": "MIT"
+  },
+  {
+    "package": "pycparser",
+    "version": "3.12",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "pydantic",
+    "version": "2.14.3",
+    "license": "MIT"
+  },
+  {
+    "package": "pydantic_core",
+    "version": "2.50.4",
+    "license": "MIT"
+  },
+  {
+    "package": "Pygments",
+    "version": "2.21.0",
+    "license": "BSD-2-Clause"
+  },
+  {
+    "package": "pytest",
+    "version": "9.2.0",
+    "license": "MIT"
+  },
+  {
+    "package": "pytest-asyncio",
+    "version": "1.4.1.post1",
+    "license": "Apache-2.0"
+  },
+  {
+    "package": "python-dotenv",
+    "version": "1.2.4",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "PyYAML",
+    "version": "6.0.3",
+    "license": "MIT"
+  },
+  {
+    "package": "ruff",
+    "version": "0.17.4",
+    "license": "MIT"
+  },
+  {
+    "package": "SQLAlchemy",
+    "version": "2.1.8",
+    "license": "MIT"
+  },
+  {
+    "package": "starlette",
+    "version": "1.10.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "typing-inspection",
+    "version": "0.4.5",
+    "license": "MIT"
+  },
+  {
+    "package": "typing_extensions",
+    "version": "4.16.0",
+    "license": "PSF-2.0"
+  },
+  {
+    "package": "uvicorn",
+    "version": "0.54.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "package": "uvloop",
+    "version": "0.23.0",
+    "license": "MIT License"
+  },
+  {
+    "package": "watchfiles",
+    "version": "1.3.0",
+    "license": "MIT"
+  },
+  {
+    "package": "websockets",
+    "version": "17.4",
+    "license": "BSD-3-Clause"
+  }
+]

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小象 · 管理</title>
+<style>
+:root{color-scheme:light;--ink:#202831;--muted:#52616e;--line:#ccd6dd;--accent:#176b62}*{box-sizing:border-box}body{margin:0;background:#f3f6f7;color:var(--ink);font:15px/1.6 system-ui,sans-serif}main{max-width:1160px;margin:auto;padding:28px 24px 64px}h1{font-size:26px;margin:0}h2{font-size:21px;margin:0 0 18px}h3{font-size:16px;margin:18px 0 10px}p{margin:8px 0;color:var(--muted)}header,.bar,.actions{display:flex;align-items:end;gap:12px;flex-wrap:wrap}header{justify-content:space-between;align-items:center;margin-bottom:20px}.card,section{background:white;border:1px solid var(--line);border-radius:12px;padding:20px;margin:14px 0}label{display:flex;flex-direction:column;gap:5px;flex:1;min-width:180px;font-weight:600}input,select,textarea,button{font:inherit;border:1px solid #a9b9c4;border-radius:6px;padding:9px 11px}input,select,textarea{width:100%;background:#fff;color:var(--ink)}textarea{resize:vertical;min-height:90px;font-family:ui-monospace,monospace;font-weight:400}button{cursor:pointer;background:#f7f9fa;color:var(--ink);white-space:nowrap}button.primary,nav button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:white}button.danger{color:#9e2929}button:disabled{opacity:.55;cursor:default}:focus-visible{outline:3px solid #d18923;outline-offset:3px}nav{display:flex;gap:8px;flex-wrap:wrap;margin:22px 0 12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:480px;overflow:auto;background:#f6f8fa;border:1px solid #e2e8ed;border-radius:6px;padding:14px;font-size:13px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:10px;text-align:left;border-bottom:1px solid #e3e9ed;vertical-align:top;overflow-wrap:anywhere}th{background:#f7f9fa}td button{padding:5px 10px}.scroll{overflow:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.grid>div{min-width:0}.hint{font-size:13px}.status{min-height:26px;margin:12px 0;overflow-wrap:anywhere}.error{color:#a22424}.mono{font-family:ui-monospace,monospace}details{margin:12px 0}summary{cursor:pointer}section[hidden]{display:none}@media(max-width:720px){main{padding:18px 14px}.grid{grid-template-columns:1fr}.card,section{padding:16px}label{min-width:140px}th,td{padding:8px}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>小象 · 管理</h1><span id="connection" aria-live="polite">未连接</span></header>
+<form id="auth" class="card bar">
+<label>管理员令牌<input id="token" type="password" autocomplete="off" required spellcheck="false"></label>
+<button class="primary" type="submit">连接</button><button id="logout" type="button">断开</button>
+</form>
+<div class="bar">
+<label>会话 ID<input id="cid" list="conversation-options" spellcheck="false" placeholder="选择或输入会话 ID"></label>
+<datalist id="conversation-options"></datalist><button id="refresh-conversations" type="button">刷新会话</button>
+</div>
+<nav aria-label="管理页面">
+<button data-panel="overview" aria-pressed="true">总览</button>
+<button data-panel="conversations" aria-pressed="false">会话</button>
+<button data-panel="tasks" aria-pressed="false">任务</button>
+<button data-panel="memories" aria-pressed="false">记忆与词典</button>
+<button data-panel="configuration" aria-pressed="false">配置</button>
+</nav>
+<div id="notice" class="status" role="status" aria-live="polite"></div>
+<section id="overview" aria-labelledby="overview-title">
+<h2 id="overview-title">运行总览</h2><button id="refresh-overview">刷新状态</button>
+<div class="grid"><div><h3>服务</h3><pre id="service-status">尚未读取</pre></div><div><h3>适配器</h3><pre id="adapter-status">尚未读取</pre></div></div>
+</section>
+<section id="conversations" hidden aria-labelledby="conversations-title">
+<h2 id="conversations-title">会话</h2><div class="scroll"><table><thead><tr><th>会话</th><th>模式</th><th>版本</th><th>操作</th></tr></thead><tbody id="conversation-rows"></tbody></table></div>
+<div class="bar"><label>预期策略版本<input id="policy-version" type="number" min="1" step="1" required></label><label>发言模式<select id="mode"><option>addressed_only</option><option>silent</option><option>shadow</option><option>social</option></select></label><button id="save-mode" class="primary">保存模式</button></div>
+<label>本会话人格覆盖 JSON<textarea id="persona" rows="4" spellcheck="false">{}</textarea></label>
+<div class="actions"><button id="save-persona">保存人格覆盖</button><button id="load-decisions">查看最近判别</button></div><pre id="decision-output">尚未读取</pre>
+</section>
+<section id="tasks" hidden aria-labelledby="tasks-title">
+<h2 id="tasks-title">后台任务</h2><button id="load-tasks">读取本会话任务</button><div class="scroll"><table><thead><tr><th>任务 ID</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="task-rows"></tbody></table></div>
+<div class="bar"><label>任务 ID<input id="task-id" spellcheck="false"></label><button id="load-task">查询</button><button id="cancel-task" class="danger">取消任务</button><button id="start-events">连接事件</button><button id="stop-events">停止事件</button></div>
+<p class="hint">当前执行器不支持补充输入。</p><button disabled aria-label="补充输入，当前执行器不支持">补充输入（不支持）</button>
+<div class="bar"><label>重试幂等键<input id="retry-key" spellcheck="false"></label><button id="new-retry-key">新键</button><button id="retry-task">重试任务</button></div>
+<div class="grid"><div><h3>任务详情</h3><pre id="task-output">尚未读取</pre></div><div><h3>事件</h3><pre id="event-output" role="log" aria-live="polite">未连接</pre></div></div>
+<details><summary>新建后台任务</summary><label>目标<textarea id="task-goal" rows="4" maxlength="16000"></textarea></label><div class="bar"><label>新任务幂等键<input id="create-key" spellcheck="false"></label><button id="new-create-key">新键</button><button id="create-task" class="primary">创建任务</button></div></details>
+</section>
+<section id="memories" hidden aria-labelledby="memories-title">
+<h2 id="memories-title">记忆与词典</h2><div class="bar"><label>记忆状态<select id="memory-status"><option value="">全部</option><option>candidate</option><option>active</option><option>disputed</option><option>superseded</option><option>expired</option><option>deleted</option></select></label><button id="load-memories">读取记忆</button><button id="load-jargon">读取词典</button></div>
+<div class="scroll"><table><thead><tr><th>ID / 作用域</th><th>状态</th><th>内容</th><th>操作</th></tr></thead><tbody id="memory-rows"></tbody></table></div>
+<pre id="memory-output">尚未选择</pre>
+<h3>纠正记忆</h3><label>记忆 ID<input id="memory-id" spellcheck="false"></label><label>新的来源事件 ID<input id="source-event" spellcheck="false"></label><label>纠正内容<textarea id="memory-text" rows="3" maxlength="4000"></textarea></label><div class="actions"><button id="correct-memory" class="primary">提交纠正</button><button id="delete-memory" class="danger">删除记忆</button></div>
+</section>
+<section id="configuration" hidden aria-labelledby="configuration-title">
+<h2 id="configuration-title">配置</h2><div class="actions"><button id="load-config">读取当前配置</button><button id="load-versions">读取版本列表</button></div>
+<p>当前版本 <span id="config-version" class="mono">尚未读取</span></p><label>配置候选 JSON<textarea id="config-json" rows="18" spellcheck="false">{}</textarea></label><div class="actions"><button id="validate-config">校验候选</button><button id="apply-config" class="primary">应用候选</button></div>
+<div class="bar"><label>历史版本<select id="versions"><option value="">尚未读取</option></select></label><button id="load-version">读取为候选</button></div><pre id="config-output">尚未读取</pre>
+</section>
+</main>
+<script>
+'use strict';
+(() => {
+  const $ = id => document.getElementById(id);
+  let token = '', conversations = [], configVersion = null, eventController = null, authEpoch = 0;
+  let streamTask = '', eventCursor = '0';
+  const uuid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
+  const encode = encodeURIComponent;
+  const show = (id, value) => { $(id).textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); };
+  function notice(message, error = false) { show('notice', message); $('notice').classList.toggle('error', error); }
+  function required(id, label) { const value = $(id).value.trim(); if (!value) throw new Error('请填写' + label); return value; }
+  const cid = () => required('cid', '会话 ID');
+  const taskID = () => required('task-id', '任务 ID');
+  function headers(extra = {}) { if (!token) throw new Error('请先连接管理员令牌'); return {Authorization: 'Bearer ' + token, ...extra}; }
+  async function request(path, options = {}) {
+    const epoch = authEpoch;
+    const response = await fetch(path, {method: options.method || 'GET', cache: 'no-store', headers: headers({'Content-Type': 'application/json', ...options.headers}), body: options.body === undefined ? undefined : JSON.stringify(options.body)});
+    const raw = await response.text();
+    if (epoch !== authEpoch) throw new Error('连接已切换，已忽略先前响应');
+    let value; try { value = raw ? JSON.parse(raw) : null; } catch { value = raw; }
+    if (!response.ok) throw new Error('HTTP ' + response.status + ' · ' + (typeof value === 'object' ? JSON.stringify(value?.detail ?? value) : value));
+    return value;
+  }
+  function action(id, operation) { $(id).addEventListener('click', async () => { const button = $(id); button.disabled = true; try { await operation(); } catch (error) { notice(error.message, true); } finally { button.disabled = false; } }); }
+  function cell(row, value) { const td = document.createElement('td'); td.textContent = String(value ?? ''); row.append(td); return td; }
+  function button(parent, title, operation) { const control = document.createElement('button'); control.type = 'button'; control.textContent = title; control.addEventListener('click', async () => { control.disabled = true; try { await operation(); } catch (error) { notice(error.message, true); } finally { control.disabled = false; } }); parent.append(control); return control; }
+  function selectConversation(id) { $('cid').value = id; const row = conversations.find(item => item.id === id); $('policy-version').value = row?.policy?.policy_version ?? ''; if (row?.policy?.mode) $('mode').value = row.policy.mode; }
+  $('cid').addEventListener('change', () => selectConversation($('cid').value.trim()));
+  async function loadConversations() {
+    conversations = await request('/api/v1/conversations');
+    $('conversation-options').replaceChildren(); $('conversation-rows').replaceChildren();
+    for (const item of conversations) {
+      const option = document.createElement('option'); option.value = item.id; $('conversation-options').append(option);
+      const row = document.createElement('tr'); cell(row, item.id); cell(row, item.policy?.mode); cell(row, item.policy?.policy_version); button(cell(row, ''), '选择', () => selectConversation(item.id)); $('conversation-rows').append(row);
+    }
+    if (!$('cid').value && conversations.length) selectConversation(conversations[0].id); else selectConversation($('cid').value);
+    notice('已读取 ' + conversations.length + ' 个会话');
+  }
+  async function overview() { const [status, adapters] = await Promise.all([request('/api/v1/status'), request('/api/v1/adapters')]); show('service-status', status); show('adapter-status', adapters); }
+  document.querySelectorAll('[data-panel]').forEach(control => control.addEventListener('click', () => {
+    document.querySelectorAll('[data-panel]').forEach(item => { const active = item === control; item.setAttribute('aria-pressed', String(active)); $(item.dataset.panel).hidden = !active; });
+  }));
+  $('auth').addEventListener('submit', async event => {
+    event.preventDefault(); stopEvents(); authEpoch += 1; token = $('token').value; $('token').value = '';
+    try { await overview(); show('connection', '已连接'); await loadConversations(); notice('已连接'); }
+    catch (error) { token = ''; show('connection', '连接失败'); notice(error.message, true); }
+  });
+  $('logout').addEventListener('click', () => {
+    stopEvents(); authEpoch += 1; token = ''; configVersion = null; conversations = []; $('token').value = ''; show('connection', '未连接');
+    document.querySelectorAll('pre').forEach(item => { item.textContent = '已断开'; });
+    ['conversation-rows', 'task-rows', 'memory-rows', 'conversation-options', 'versions'].forEach(id => $(id).replaceChildren());
+    ['cid', 'policy-version', 'task-id', 'task-goal', 'memory-id', 'source-event', 'memory-text'].forEach(id => { $(id).value = ''; });
+    $('config-json').value = '{}'; $('persona').value = '{}'; show('config-version', '尚未读取'); notice('已断开');
+  });
+  action('refresh-overview', overview); action('refresh-conversations', loadConversations);
+  async function patchPolicy(change) {
+    const expected = Number(required('policy-version', '预期策略版本')); if (!Number.isInteger(expected) || expected < 1) throw new Error('预期策略版本应为正整数');
+    const id = cid(); const result = await request('/api/v1/conversations/' + encode(id) + '/policy', {method: 'PATCH', body: {expected_version: expected, ...change}});
+    await loadConversations(); selectConversation(id); show('decision-output', result); notice('会话设置已保存');
+  }
+  action('save-mode', () => patchPolicy({mode: $('mode').value}));
+  action('save-persona', () => patchPolicy({persona: JSON.parse($('persona').value)}));
+  action('load-decisions', async () => show('decision-output', await request('/api/v1/conversations/' + encode(cid()) + '/decisions')));
+  async function loadTasks() {
+    const rows = await request('/api/v1/tasks?conversation_id=' + encode(cid())); $('task-rows').replaceChildren();
+    for (const item of rows) { const row = document.createElement('tr'); cell(row, item.public_id); cell(row, item.state); cell(row, item.created_at); button(cell(row, ''), '查看', async () => { selectTask(item.public_id); await loadTask(); }); $('task-rows').append(row); }
+    notice('已读取 ' + rows.length + ' 个任务');
+  }
+  function selectTask(id) { if ($('task-id').value !== id) { stopEvents(); eventCursor = '0'; streamTask = ''; show('event-output', '未连接'); } $('task-id').value = id; }
+  $('task-id').addEventListener('change', () => { stopEvents(); eventCursor = '0'; streamTask = ''; show('event-output', '未连接'); });
+  async function loadTask() { show('task-output', await request('/api/v1/tasks/' + encode(taskID()))); }
+  action('load-tasks', loadTasks); action('load-task', loadTask);
+  action('cancel-task', async () => { show('task-output', await request('/api/v1/tasks/' + encode(taskID()) + '/cancel', {method: 'POST'})); notice('取消请求已处理'); });
+  $('retry-key').value = uuid(); $('create-key').value = uuid();
+  action('new-retry-key', () => { $('retry-key').value = uuid(); }); action('new-create-key', () => { $('create-key').value = uuid(); });
+  action('retry-task', async () => {
+    const result = await request('/api/v1/tasks/' + encode(taskID()) + '/retry', {method: 'POST', headers: {'Idempotency-Key': required('retry-key', '重试幂等键')}});
+    selectTask(result.public_id); show('task-output', result); notice('重试请求已处理');
+  });
+  action('create-task', async () => {
+    const result = await request('/api/v1/tasks', {method: 'POST', headers: {'Idempotency-Key': required('create-key', '新任务幂等键')}, body: {conversation_id: cid(), goal: required('task-goal', '任务目标')}});
+    selectTask(result.public_id); show('task-output', result); notice('任务已提交');
+  });
+  function stopEvents() { if (eventController) eventController.abort(); eventController = null; }
+  $('stop-events').addEventListener('click', () => { stopEvents(); notice('事件读取已停止'); });
+  action('start-events', async () => {
+    stopEvents(); const id = taskID(); if (streamTask !== id) { streamTask = id; eventCursor = '0'; show('event-output', ''); }
+    const controller = new AbortController(); eventController = controller;
+    try {
+      const response = await fetch('/api/v1/tasks/' + encode(id) + '/events', {headers: headers({'Last-Event-ID': eventCursor}), signal: controller.signal, cache: 'no-store'});
+      if (!response.ok) throw new Error('事件读取失败 · HTTP ' + response.status + ' · ' + await response.text());
+      if (!response.body) throw new Error('浏览器无法读取事件流');
+      notice('正在读取任务事件'); const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
+      while (true) {
+        const chunk = await reader.read(); if (chunk.done || controller.signal.aborted) break; buffer += decoder.decode(chunk.value, {stream: true}); buffer = buffer.replace(/\r\n/g, '\n');
+        let end;
+        while ((end = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2); const data = [];
+          for (const line of frame.split('\n')) { if (line.startsWith('id:')) eventCursor = line.slice(3).trim(); if (line.startsWith('data:')) data.push(line.slice(5).trimStart()); }
+          if (data.length) $('event-output').textContent = ($('event-output').textContent + data.join('\n') + '\n').slice(-24000);
+        }
+        if (buffer.length > 1000000) throw new Error('事件帧超过读取上限');
+      }
+      notice('事件流已结束');
+    } catch (error) { if (error.name !== 'AbortError') throw error; }
+    finally { if (eventController === controller) eventController = null; }
+  });
+  let memoryRows = [];
+  async function loadMemories(jargon = false) {
+    let path = '/api/v1/' + (jargon ? 'jargon' : 'memories') + '?conversation_id=' + encode(cid());
+    if (!jargon && $('memory-status').value) path += '&status=' + encode($('memory-status').value);
+    memoryRows = await request(path); $('memory-rows').replaceChildren();
+    for (const record of memoryRows) {
+      const row = document.createElement('tr'); cell(row, record.memory_id + '\n' + record.scope_type); cell(row, record.status); cell(row, record.text);
+      const controls = cell(row, ''); button(controls, '选择', () => { $('memory-id').value = record.memory_id; $('memory-text').value = record.text; show('memory-output', record); });
+      if (record.predicate.startsWith('jargon:') && record.status === 'candidate') {
+        button(controls, '审核通过', async () => { show('memory-output', await request('/api/v1/jargon/' + encode(record.memory_id) + '?publish=true', {method: 'PATCH'})); await loadMemories(true); });
+        button(controls, '拒绝', async () => { show('memory-output', await request('/api/v1/jargon/' + encode(record.memory_id) + '?publish=false', {method: 'PATCH'})); await loadMemories(true); });
+      }
+      $('memory-rows').append(row);
+    }
+    notice('已读取 ' + memoryRows.length + ' 条记录');
+  }
+  action('load-memories', () => loadMemories()); action('load-jargon', () => loadMemories(true));
+  action('correct-memory', async () => {
+    const result = await request('/api/v1/memories/' + encode(required('memory-id', '记忆 ID')), {method: 'PATCH', body: {source_event_id: required('source-event', '新的来源事件 ID'), text: required('memory-text', '纠正内容')}});
+    show('memory-output', result); $('memory-id').value = result.memory_id; notice('记忆已纠正');
+  });
+  action('delete-memory', async () => { const result = await request('/api/v1/memories/' + encode(required('memory-id', '记忆 ID')), {method: 'DELETE'}); show('memory-output', result); $('memory-text').value = ''; await loadMemories(); notice('记忆已删除'); });
+  action('load-config', async () => { const result = await request('/api/v1/config'); configVersion = result.version; show('config-version', configVersion); $('config-json').value = JSON.stringify(result.config, null, 2); show('config-output', {model_key_configured: result.model_key_configured}); });
+  function configRequest() { if (!configVersion) throw new Error('请先读取当前配置'); return {expected_version: configVersion, config: JSON.parse($('config-json').value)}; }
+  action('validate-config', async () => { show('config-output', await request('/api/v1/config/validate', {method: 'POST', body: configRequest()})); notice('配置校验完成'); });
+  action('apply-config', async () => { const result = await request('/api/v1/config/apply', {method: 'POST', body: configRequest()}); configVersion = result.version; show('config-version', configVersion); show('config-output', result); notice('配置已应用'); });
+  action('load-versions', async () => { const versions = await request('/api/v1/config/versions'); $('versions').replaceChildren(); for (const version of versions) { const option = document.createElement('option'); option.value = version; option.textContent = version; $('versions').append(option); } notice('已读取 ' + versions.length + ' 个历史版本'); });
+  action('load-version', async () => { if (!configVersion) throw new Error('请先读取当前配置'); const version = required('versions', '历史版本'); const candidate = await request('/api/v1/config/versions/' + encode(version)); $('config-json').value = JSON.stringify(candidate, null, 2); show('config-output', {candidate_version: version, expected_version: configVersion}); notice('历史配置已载入候选'); });
+  window.addEventListener('pagehide', () => { stopEvents(); authEpoch += 1; token = ''; });
+})();
+</script>
+</body>
+</html>

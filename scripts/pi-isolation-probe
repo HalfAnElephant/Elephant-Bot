@@ -1,0 +1,76 @@
+#!/usr/bin/python3 -I
+"""Fixed root-installed acceptance probe. Never exposed by the production launcher."""
+
+import json
+import os
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+config = json.loads(Path("/run/qqbot/probe.json").read_text())
+checks = {}
+checks["uid_boundary"] = os.getuid() == config["runner_uid"] and os.getuid() != config["worker_uid"]
+status = Path("/proc/self/status").read_text()
+checks["no_new_privileges"] = "NoNewPrivs:\t1" in status
+checks["no_capabilities"] = (
+    int(next(line.split()[1] for line in status.splitlines() if line.startswith("CapEff:")), 16) == 0
+)
+for index, path in enumerate(config["forbidden_reads"]):
+    try:
+        with open(path, "rb") as source:
+            source.read(1)
+    except OSError:
+        checks["private_read_" + str(index)] = True
+    else:
+        checks["private_read_" + str(index)] = False
+for index, path in enumerate(config["forbidden_sockets"]):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(1)
+    try:
+        client.connect(path)
+    except OSError:
+        checks["private_socket_" + str(index)] = True
+    else:
+        checks["private_socket_" + str(index)] = False
+    finally:
+        client.close()
+route_lines = Path("/proc/self/net/route").read_text().splitlines()[1:]
+checks["no_default_route"] = not any(
+    line.split()[1] == "00000000" for line in route_lines if len(line.split()) > 1
+)
+for name, port, expected in [
+    ("approved_proxy", config["approved_port"], True),
+    ("forbidden_port", config["forbidden_port"], False),
+]:
+    try:
+        client = socket.create_connection((config["proxy_host"], port), timeout=2)
+    except OSError:
+        connected = False
+    else:
+        connected = True
+        client.close()
+    checks[name] = connected is expected
+try:
+    own = Path("/workspace/own-probe.txt")
+    own.write_text("own workspace")
+    checks["own_workspace"] = own.read_text() == "own workspace"
+except OSError:
+    checks["own_workspace"] = False
+if not all(checks.values()):
+    print(json.dumps({"passed": False, "checks": checks}), flush=True)
+    raise SystemExit(1)
+child = subprocess.Popen(
+    [
+        "/usr/bin/python3",
+        "-I",
+        "-c",
+        "import os,time; os.setsid(); print(os.getpid(),flush=True); time.sleep(300)",
+    ],
+    stdout=subprocess.PIPE,
+    text=True,
+)
+child_pid = int(child.stdout.readline())
+print(json.dumps({"passed": True, "checks": checks, "child_pid": child_pid}), flush=True)
+while True:
+    time.sleep(300)

@@ -1,0 +1,234 @@
+#!/opt/qqbot/.venv/bin/python -I
+"""Root-only fixed Linux acceptance. Contains no arbitrary-command interface."""
+
+import argparse
+import json
+import os
+import pwd
+import select
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+from qqbot.harness.launcher import (
+    POLICY,
+    ROOT_MANIFESTS,
+    WORKSPACES,
+    atomic_root_json,
+    prepare_workspace,
+    production_policy,
+    systemd_argv,
+    unit_stopped,
+)
+
+PROBE = "/opt/qqbot/bin/pi-isolation-probe"
+
+
+def bind_port(host, ports):
+    for port in ports:
+        listener = socket.socket()
+        try:
+            listener.bind((host, port))
+            listener.listen(4)
+            return listener, port
+        except OSError:
+            listener.close()
+    raise RuntimeError("no available probe port")
+
+
+def alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0]
+        return state != "Z"
+    except FileNotFoundError:
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--enable-policy", action="store_true")
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit("root administrator required")
+    os.umask(0o077)
+    policy = production_policy(require_verified=False)
+    if policy["isolation_verified"]:
+        atomic_root_json(POLICY, {**policy, "isolation_verified": False}, mode=0o644)
+    task_id, run_id, other_id = str(uuid4()), str(uuid4()), str(uuid4())
+    worker, runner = pwd.getpwnam("qqbot-worker"), pwd.getpwnam("qqbot-runner")
+    unit = "qqbot-run-" + run_id + ".service"
+    process = helper = approved = forbidden = unix = None
+    created = []
+    workspace, other = WORKSPACES / run_id, WORKSPACES / other_id
+    private = Path("/var/lib/qqbot") / ("isolation-probe-" + run_id)
+    worker_private = Path("/var/lib/qqbot-worker") / ("isolation-probe-" + run_id + ".env")
+    unix_path = Path("/run/qqbot") / ("isolation-probe-" + run_id + ".sock")
+    manifest_path = ROOT_MANIFESTS / (run_id + ".json")
+    probe_path = ROOT_MANIFESTS / (run_id + ".probe.json")
+    try:
+        for directory in (workspace, other):
+            prepare_workspace(directory.name)
+            created.append(directory)
+        other_file = other / "other-task.txt"
+        other_file.write_text("isolation sentinel")
+        os.chown(other_file, runner.pw_uid, worker.pw_gid)
+        for path, owner in ((private, 0), (worker_private, worker.pw_uid)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("isolation sentinel")
+            path.chmod(0o600)
+            os.chown(path, owner, worker.pw_gid)
+            created.append(path)
+        unix_path.parent.mkdir(parents=True, exist_ok=True)
+        unix = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        unix.bind(str(unix_path))
+        unix.listen(4)
+        created.append(unix_path)
+        helper = subprocess.Popen(
+            ["/usr/bin/sleep", "300"],
+            user=worker.pw_uid,
+            group=worker.pw_gid,
+            extra_groups=[],
+            env={"PATH": "/usr/bin:/bin", "QQBOT_ISOLATION_SENTINEL": run_id},
+        )
+        approved, approved_port = bind_port(
+            policy["proxy_host"], range(policy["proxy_port_min"], policy["proxy_port_max"] + 1)
+        )
+        outside = range(policy["proxy_port_max"] + 1, min(65536, policy["proxy_port_max"] + 100))
+        if policy["proxy_port_max"] == 65535:
+            outside = range(max(1024, policy["proxy_port_min"] - 100), policy["proxy_port_min"])
+        forbidden, forbidden_port = bind_port(policy["proxy_host"], outside)
+        manifest = {
+            "schema_version": 1,
+            "task_id": task_id,
+            "run_id": run_id,
+            "session_id": run_id,
+            "profile": "pi_research",
+            "model": policy["approved_models"][0],
+            "proxy_url": f"http://{policy['proxy_host']}:{approved_port}",
+            "model_token": "a" * 43,
+            "tool_token": "b" * 43,
+            "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat(),
+        }
+        atomic_root_json(manifest_path, manifest)
+        created.append(manifest_path)
+        atomic_root_json(
+            probe_path,
+            {
+                "runner_uid": runner.pw_uid,
+                "worker_uid": worker.pw_uid,
+                "forbidden_reads": [
+                    str(private),
+                    str(worker_private),
+                    str(other_file),
+                    "/etc/qqbot/worker.env",
+                    "/etc/qqbot/worker.token",
+                    f"/proc/{helper.pid}/environ",
+                    f"/proc/{os.getpid()}/environ",
+                ],
+                "forbidden_sockets": [str(unix_path), "/run/qqbot/internal.sock"],
+                "proxy_host": policy["proxy_host"],
+                "approved_port": approved_port,
+                "forbidden_port": forbidden_port,
+            },
+        )
+        created.append(probe_path)
+        argv = systemd_argv(task_id, run_id, policy)
+        for index, value in enumerate(argv):
+            if value.startswith("--property=BindReadOnlyPaths="):
+                argv[index] += f" {PROBE}:{PROBE} {probe_path}:/run/qqbot/probe.json"
+        argv[-3:] = [PROBE]
+        with tempfile.TemporaryFile() as stderr:
+            process = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=stderr, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+            )
+            deadline = time.monotonic() + 30
+            report = None
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([process.stdout], [], [], 1)
+                if ready:
+                    line = process.stdout.readline(65536)
+                    if not line:
+                        break
+                    try:
+                        candidate = json.loads(line)
+                    except ValueError:
+                        continue
+                    if "passed" in candidate:
+                        report = candidate
+                        break
+                if process.poll() is not None:
+                    break
+            if not report or not report.get("passed"):
+                stderr.seek(0)
+                diagnostic = stderr.read(4096).decode(errors="replace")
+                raise RuntimeError(json.dumps({"probe": report, "diagnostic": diagnostic}))
+            access = subprocess.run(
+                [
+                    "/usr/bin/python3",
+                    "-I",
+                    "-c",
+                    'from pathlib import Path; import sys; assert Path(sys.argv[1]).read_text() == "own workspace"',
+                    str(workspace / "own-probe.txt"),
+                ],
+                user=worker.pw_uid,
+                group=worker.pw_gid,
+                extra_groups=[],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if access.returncode != 0:
+                raise RuntimeError("supervisor cannot traverse/read the runner workspace")
+            report["checks"]["supervisor_workspace_access"] = True
+            subprocess.run(["/usr/bin/systemctl", "stop", unit], check=True, timeout=15)
+            process.wait(timeout=10)
+            child_pid = report["child_pid"]
+            deadline = time.monotonic() + 5
+            while alive(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if alive(child_pid) or not unit_stopped(unit):
+                raise RuntimeError("background descendant or cgroup survived stop")
+            report["checks"]["descendant_cgroup_stop"] = True
+            if args.enable_policy:
+                atomic_root_json(POLICY, {**policy, "isolation_verified": True}, mode=0o644)
+            print(
+                json.dumps(
+                    {
+                        "passed": True,
+                        "policy_enabled": args.enable_policy,
+                        "checks": report["checks"],
+                        "verified_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            )
+    finally:
+        subprocess.run(
+            ["/usr/bin/systemctl", "stop", unit],
+            check=False,
+            timeout=15,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if process and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        if helper:
+            helper.terminate()
+            helper.wait(timeout=5)
+        for listener in (approved, forbidden, unix):
+            if listener:
+                listener.close()
+        for path in reversed(created):
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()

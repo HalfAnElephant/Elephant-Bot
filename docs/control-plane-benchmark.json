@@ -1,0 +1,102 @@
+{
+  "scope": "synthetic platform, real local SQLite/Core/TaskService; no model/QQ/harness load",
+  "machine": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.13.9",
+  "events": 30000,
+  "conversations": 20,
+  "rate_per_second": 50,
+  "scheduled_duration_seconds": 600,
+  "elapsed_seconds": 600.1,
+  "ingress_p95_ms": 0.7428749959217384,
+  "task_accept_p95_ms": 1.621707997401245,
+  "task_query_p95_ms": 0.18404200091026723,
+  "task_samples": 600,
+  "inbox_states": {
+    "DONE": 30000
+  },
+  "rss_samples": [
+    {
+      "elapsed_s": 0.01,
+      "maxrss": 97828864
+    },
+    {
+      "elapsed_s": 30.0,
+      "maxrss": 106725376
+    },
+    {
+      "elapsed_s": 60.0,
+      "maxrss": 107429888
+    },
+    {
+      "elapsed_s": 90.0,
+      "maxrss": 107692032
+    },
+    {
+      "elapsed_s": 120.0,
+      "maxrss": 107921408
+    },
+    {
+      "elapsed_s": 150.0,
+      "maxrss": 108118016
+    },
+    {
+      "elapsed_s": 180.01,
+      "maxrss": 108265472
+    },
+    {
+      "elapsed_s": 210.0,
+      "maxrss": 108363776
+    },
+    {
+      "elapsed_s": 240.0,
+      "maxrss": 108462080
+    },
+    {
+      "elapsed_s": 270.01,
+      "maxrss": 108527616
+    },
+    {
+      "elapsed_s": 300.0,
+      "maxrss": 108576768
+    },
+    {
+      "elapsed_s": 330.0,
+      "maxrss": 108642304
+    },
+    {
+      "elapsed_s": 360.0,
+      "maxrss": 108691456
+    },
+    {
+      "elapsed_s": 390.02,
+      "maxrss": 108822528
+    },
+    {
+      "elapsed_s": 420.04,
+      "maxrss": 108838912
+    },
+    {
+      "elapsed_s": 450.0,
+      "maxrss": 108871680
+    },
+    {
+      "elapsed_s": 480.0,
+      "maxrss": 108937216
+    },
+    {
+      "elapsed_s": 510.02,
+      "maxrss": 109002752
+    },
+    {
+      "elapsed_s": 540.0,
+      "maxrss": 109068288
+    },
+    {
+      "elapsed_s": 570.0,
+      "maxrss": 109150208
+    }
+  ],
+  "window_count": 20,
+  "max_window_messages": 40,
+  "passed": true
+}

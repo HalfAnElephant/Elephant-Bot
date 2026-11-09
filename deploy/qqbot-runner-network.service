@@ -1,0 +1,12 @@
+[Unit]
+Description=Elephant isolated runner network
+After=network-online.target
+Before=qqbot-worker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/pi-runner-network
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

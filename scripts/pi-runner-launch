@@ -1,0 +1,6 @@
+#!/opt/qqbot/.venv/bin/python -I
+"""Install root-owned with the root-owned qqbot Python package."""
+
+from qqbot.harness.launcher import main
+
+main()

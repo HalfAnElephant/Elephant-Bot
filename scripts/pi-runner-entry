@@ -1,0 +1,100 @@
+#!/usr/bin/python3 -I
+"""Fixed entry executed inside the restricted runner mount/network namespace."""
+
+import json
+import os
+import sys
+from pathlib import Path
+from uuid import UUID
+
+if len(sys.argv) != 3:
+    raise SystemExit("task and run IDs are required")
+task_id, run_id = sys.argv[1:]
+if any(str(UUID(value)) != value for value in (task_id, run_id)):
+    raise SystemExit("canonical UUID required")
+manifest = json.loads(Path("/run/qqbot/manifest.json").read_text())
+if manifest["task_id"] != task_id or manifest["run_id"] != run_id or manifest["session_id"] != run_id:
+    raise SystemExit("launch identity mismatch")
+if os.getuid() == 0:
+    raise SystemExit("runner must use the dedicated unprivileged account")
+status = Path("/proc/self/status").read_text()
+if "NoNewPrivs:\t1" not in status:
+    raise SystemExit("NoNewPrivileges is required")
+for forbidden in ("/etc/qqbot", "/var/lib/qqbot", "/var/lib/qqbot-worker", "/run/qqbot/internal.sock"):
+    if Path(forbidden).exists():
+        raise SystemExit("host/private path is visible inside runner")
+for home in ("/home", "/root"):
+    try:
+        if list(Path(home).iterdir()):
+            raise SystemExit("personal home contents are visible inside runner")
+    except (FileNotFoundError, PermissionError):
+        pass
+if any(
+    line.split()[1] == "00000000"
+    for line in Path("/proc/self/net/route").read_text().splitlines()[1:]
+    if len(line.split()) > 1
+):
+    raise SystemExit("runner network namespace must have no default route")
+os.umask(0o007)
+workspace = Path("/workspace")
+profile = workspace / "profile"
+profile.mkdir(mode=0o770, exist_ok=True)
+(workspace / "sessions").mkdir(mode=0o770, exist_ok=True)
+config = {
+    "providers": {
+        "qqbot": {
+            "baseUrl": manifest["proxy_url"] + "/v1",
+            "api": "openai-completions",
+            "apiKey": manifest["model_token"],
+            "models": [
+                {
+                    "id": manifest["model"],
+                    "name": manifest["model"],
+                    "reasoning": False,
+                    "input": ["text"],
+                    "contextWindow": 32768,
+                    "maxTokens": 4096,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                }
+            ],
+        }
+    }
+}
+(profile / "models.json").write_text(json.dumps(config))
+env = {
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C.UTF-8",
+    "HOME": str(profile),
+    "PI_CODING_AGENT_DIR": str(profile),
+    "PI_OFFLINE": "1",
+    "PI_TELEMETRY": "0",
+    "QQBOT_RESEARCH_URL": manifest["proxy_url"],
+    "QQBOT_TOOL_TOKEN": manifest["tool_token"],
+}
+argv = [
+    "/usr/bin/node",
+    "/opt/qqbot/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    "--mode",
+    "rpc",
+    "--provider",
+    "qqbot",
+    "--model",
+    manifest["model"],
+    "--session",
+    str(workspace / "sessions" / (run_id + ".jsonl")),
+    "--no-extensions",
+    "--no-builtin-tools",
+    "--tools",
+    "research_search,research_fetch,research_write",
+    "--extension",
+    "/opt/qqbot/research_extension.ts",
+    "--no-mcp",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-context-files",
+    "--no-themes",
+    "--no-approve",
+    "--offline",
+]
+os.chdir(workspace)
+os.execve(argv[0], argv, env)

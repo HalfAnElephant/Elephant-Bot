@@ -1,0 +1,58 @@
+schema_version: 1
+inspected_on: '2026-11-08'
+references:
+  maibot:
+    repository: https://github.com/Mai-with-u/MaiBot
+    commit: e5391507531706a8bfce011d55ed94628039f2de
+    inspected_paths: [LICENSE, src/A_memorix/LICENSE-MAIBOT-GPL.md, src/maisaka/turn_trigger/dynamic_gate.py, src/config/personality_service.py]
+    copied_paths: []
+    use: design_reference_only
+    license_evidence: [docs/upstream-evidence/maibot-license, docs/upstream-evidence/memorix-license]
+    license: GPL-3.0; A_memorix defaults to AGPL-3.0; MaiBot-only exception not adopted
+  astrbot:
+    repository: https://github.com/AstrBotDevs/AstrBot
+    commit: 4df1a906b640f6a2958f97a0e8946892de6374d9
+    inspected_paths: [LICENSE, astrbot/core/platform/sources/qqofficial_webhook/qo_webhook_server.py]
+    copied_paths: []
+    use: protocol_reference_only
+    license: AGPL-3.0
+    license_evidence: [docs/upstream-evidence/astrbot-license]
+  pi:
+    repository: https://github.com/earendil-works/pi
+    commit: f9a26365568127461c47a07a37dcb42c140a3ac5
+    tag: v1.5.0
+    package: '@earendil-works/pi-coding-agent'
+    package_version: 1.5.0
+    integrity: sha512-xNDZ5kqowO6Z03FS2gwAkPEGk1ssxVcYKQ6qZId84mFEvwACvvyc2l0vAMOS+c5zvxLRMLBE9r4y44IGYkMJaQ==
+    node_engines: '>=22.19.0'
+    protocol_contract: packages/coding-agent/docs/rpc.md
+    inspected_paths: [LICENSE, packages/coding-agent/docs/rpc.md, packages/coding-agent/docs/rpc-commands.md, packages/coding-agent/docs/cli.md]
+    copied_paths: []
+    use: external_rpc_process
+    license: MIT
+    license_evidence: [docs/upstream-evidence/pi-license]
+  napcat:
+    repository: https://github.com/NapNeko/NapCatQQ
+    commit: 98d781d19815d1625b24d717ce280ecf0a4f6d0c
+    inspected_paths: [LICENSE]
+    copied_paths: []
+    use: separately_installed_protocol_peer
+    license: LicenseRef-NapCat-Limited-Redistribution
+    license_evidence: [docs/upstream-evidence/napcat-license]
+  onebot:
+    repository: https://github.com/botuniverse/onebot-11
+    commit: d4456ee706f9ada9c2dfde56a2bcfc69752600e4
+    inspected_paths: [README.md]
+    copied_paths: []
+    use: protocol_implementation_no_source_copy
+    license: not_established_no_root_LICENSE
+runtime:
+  python: 3.13.9
+  node_test_host: 26.12.1
+model_contracts:
+  foreground: openai_chat_completions_compatible_explicit_endpoint_and_model
+  jev:
+    model_id: jev-1.14.0
+    question_set_version: speech-v1
+    calibration_dataset: null
+    enabled: false

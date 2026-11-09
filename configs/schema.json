@@ -1,0 +1,422 @@
+{
+  "$defs": {
+    "AdapterConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "title": "Instance Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "onebot",
+            "official"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "bot_id": {
+          "title": "Bot Id",
+          "type": "string"
+        },
+        "secret_env": {
+          "title": "Secret Env",
+          "type": "string"
+        },
+        "app_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "App Id"
+        },
+        "websocket_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Websocket Url"
+        },
+        "allowed_groups": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Groups",
+          "type": "array"
+        },
+        "allowed_users": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Users",
+          "type": "array"
+        },
+        "admin_users": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Admin Users",
+          "type": "array"
+        },
+        "known_bot_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Known Bot Ids",
+          "type": "array"
+        },
+        "full_mode_enabled": {
+          "default": false,
+          "title": "Full Mode Enabled",
+          "type": "boolean"
+        },
+        "full_mode_verified": {
+          "default": false,
+          "title": "Full Mode Verified",
+          "type": "boolean"
+        },
+        "proactive_verified": {
+          "default": false,
+          "title": "Proactive Verified",
+          "type": "boolean"
+        },
+        "reply_window_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Reply Window Seconds",
+          "type": "integer"
+        },
+        "max_replies": {
+          "default": 5,
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Max Replies",
+          "type": "integer"
+        },
+        "signature_max_age_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Signature Max Age Seconds",
+          "type": "integer"
+        },
+        "api_base": {
+          "default": "https://api.bot.qq.com",
+          "title": "Api Base",
+          "type": "string"
+        },
+        "token_url": {
+          "default": "https://api.bot.qq.com/app/getAppAccessToken",
+          "title": "Token Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instance_id",
+        "kind",
+        "bot_id",
+        "secret_env"
+      ],
+      "title": "AdapterConfig",
+      "type": "object"
+    },
+    "JudgeConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "rule",
+          "enum": [
+            "rule",
+            "jev",
+            "structured"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "endpoint": {
+          "default": "https://api.typesafe.ai/v1/systemone",
+          "title": "Endpoint",
+          "type": "string"
+        },
+        "model": {
+          "default": "jev-1.14.0",
+          "title": "Model",
+          "type": "string"
+        },
+        "api_key_env": {
+          "default": "QQBOT_JUDGE_KEY",
+          "title": "Api Key Env",
+          "type": "string"
+        }
+      },
+      "title": "JudgeConfig",
+      "type": "object"
+    },
+    "MemoryConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "maintenance_enabled": {
+          "default": false,
+          "title": "Maintenance Enabled",
+          "type": "boolean"
+        },
+        "auto_extract": {
+          "default": false,
+          "title": "Auto Extract",
+          "type": "boolean"
+        },
+        "extractor_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extractor Endpoint"
+        },
+        "extractor_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extractor Model"
+        },
+        "extractor_key_env": {
+          "default": "QQBOT_MEMORY_KEY",
+          "title": "Extractor Key Env",
+          "type": "string"
+        },
+        "embedding_endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Endpoint"
+        },
+        "embedding_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Model"
+        },
+        "embedding_version": {
+          "default": "v1",
+          "title": "Embedding Version",
+          "type": "string"
+        },
+        "embedding_dimensions": {
+          "anyOf": [
+            {
+              "maximum": 65536,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Dimensions"
+        },
+        "embedding_key_env": {
+          "default": "QQBOT_EMBEDDING_KEY",
+          "title": "Embedding Key Env",
+          "type": "string"
+        },
+        "raw_retention_days": {
+          "default": 30,
+          "maximum": 3650,
+          "minimum": 1,
+          "title": "Raw Retention Days",
+          "type": "integer"
+        }
+      },
+      "title": "MemoryConfig",
+      "type": "object"
+    },
+    "ModelConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "api_key_env": {
+          "default": "QQBOT_MODEL_KEY",
+          "title": "Api Key Env",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "maximum": 120,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ModelConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "deployment_id": {
+      "default": "elephant-local",
+      "title": "Deployment Id",
+      "type": "string"
+    },
+    "database": {
+      "default": "var/core.db",
+      "title": "Database",
+      "type": "string"
+    },
+    "adapters": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AdapterConfig"
+      },
+      "title": "Adapters",
+      "type": "array"
+    },
+    "admin_token_env": {
+      "default": "QQBOT_ADMIN_TOKEN",
+      "title": "Admin Token Env",
+      "type": "string"
+    },
+    "internal_token_env": {
+      "default": "QQBOT_INTERNAL_TOKEN",
+      "title": "Internal Token Env",
+      "type": "string"
+    },
+    "model": {
+      "$ref": "#/$defs/ModelConfig",
+      "default": {
+        "endpoint": null,
+        "model": null,
+        "api_key_env": "QQBOT_MODEL_KEY",
+        "timeout_seconds": 30
+      }
+    },
+    "source_url": {
+      "default": "",
+      "title": "Source Url",
+      "type": "string"
+    },
+    "send_budget_per_minute": {
+      "default": 6,
+      "maximum": 60,
+      "minimum": 1,
+      "title": "Send Budget Per Minute",
+      "type": "integer"
+    },
+    "timezone": {
+      "default": "Asia/Shanghai",
+      "title": "Timezone",
+      "type": "string"
+    },
+    "tasks_enabled": {
+      "default": false,
+      "title": "Tasks Enabled",
+      "type": "boolean"
+    },
+    "internal_socket": {
+      "default": "var/internal.sock",
+      "title": "Internal Socket",
+      "type": "string"
+    },
+    "persona_path": {
+      "default": "personas/elephant_default.yaml",
+      "title": "Persona Path",
+      "type": "string"
+    },
+    "judge": {
+      "$ref": "#/$defs/JudgeConfig",
+      "default": {
+        "kind": "rule",
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "model": "jev-1.14.0",
+        "api_key_env": "QQBOT_JUDGE_KEY"
+      }
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryConfig",
+      "default": {
+        "maintenance_enabled": false,
+        "auto_extract": false,
+        "extractor_endpoint": null,
+        "extractor_model": null,
+        "extractor_key_env": "QQBOT_MEMORY_KEY",
+        "embedding_endpoint": null,
+        "embedding_model": null,
+        "embedding_version": "v1",
+        "embedding_dimensions": null,
+        "embedding_key_env": "QQBOT_EMBEDDING_KEY",
+        "raw_retention_days": 30
+      }
+    },
+    "social_evaluated_conversations": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Social Evaluated Conversations",
+      "type": "array"
+    }
+  },
+  "title": "Settings",
+  "type": "object"
+}

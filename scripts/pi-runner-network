@@ -1,0 +1,29 @@
+#!/bin/sh
+# Fixed root-owned namespace; no default route and no general host access.
+set -eu
+[ "$(id -u)" = 0 ]
+if ip netns exec qqbot-runner true 2>/dev/null; then
+  exit 0
+fi
+ip netns add qqbot-runner
+ip link add qqbot-host type veth peer name qqbot-task
+ip link set qqbot-task netns qqbot-runner
+ip addr add 10.203.0.1/30 dev qqbot-host
+ip link set qqbot-host up
+ip -n qqbot-runner addr add 10.203.0.2/30 dev qqbot-task
+ip -n qqbot-runner link set qqbot-task up
+ip -n qqbot-runner link set lo up
+ip netns exec qqbot-runner nft -f - <<'NFT'
+table inet qqbot_runner {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+    ip daddr 10.203.0.1 tcp dport 30000-30999 accept
+  }
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+  }
+}
+NFT

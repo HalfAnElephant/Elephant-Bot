@@ -1,0 +1,27 @@
+[Unit]
+Description=Elephant QQ Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqbot
+Group=qqbot-worker
+SupplementaryGroups=qqbot
+WorkingDirectory=/opt/qqbot
+EnvironmentFile=/etc/qqbot/core.env
+ExecStart=/opt/qqbot/.venv/bin/qqbot serve --config /etc/qqbot/core.yaml
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=qqbot
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/qqbot /run/qqbot
+
+[Install]
+WantedBy=multi-user.target

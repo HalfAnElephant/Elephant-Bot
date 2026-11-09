@@ -1,0 +1,23 @@
+deployment_id: elephant-local
+database: var/core.db
+adapters: []
+source_url: ''
+tasks_enabled: false
+model:
+  endpoint: null
+  model: null
+  api_key_env: QQBOT_MODEL_KEY
+# Add adapters only after setting credentials and explicit target allowlists.
+# - instance_id: napcat_test
+#   kind: onebot
+#   bot_id: '12345'
+#   secret_env: QQBOT_ONEBOT_TOKEN
+#   allowed_groups: ['67890']
+# - instance_id: official_test
+#   kind: official
+#   bot_id: bot_identity
+#   app_id: app_id
+#   secret_env: QQBOT_OFFICIAL_SECRET
+#   allowed_groups: [group_openid]
+#   full_mode_enabled: false
+#   full_mode_verified: false
