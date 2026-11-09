@@ -52,31 +52,31 @@
     </aside>
 
     <div class="workspace">
-      <header class="topbar"><div><p class="eyebrow">ELEPHANT / WORKSPACE</p><h1 id="page-title">配置中心</h1><p id="page-subtitle">让每一项设置，都清晰可控。</p></div><span class="topbar-badge"><span class="status-dot" aria-hidden="true"></span>私有控制台</span></header>
+      <header class="topbar"><div><p class="eyebrow">ELEPHANT / WORKSPACE</p><h1 id="page-title">配置中心</h1><p id="page-subtitle">连接、行为与运行参数。</p></div><span class="topbar-badge"><span class="status-dot" aria-hidden="true"></span>管理员</span></header>
       <main id="main-content" class="content" tabindex="-1">
         <div id="notice" class="status" role="status" aria-live="polite" hidden></div>
         <div id="conversation-picker" class="conversation-picker bar" hidden><label for="cid">当前会话<input id="cid" list="conversation-options" spellcheck="false" placeholder="选择或输入会话 ID"></label><datalist id="conversation-options"></datalist><button id="refresh-conversations" type="button">刷新会话</button></div>
 
         <section id="configuration" aria-labelledby="configuration-title">
-          <div class="section-head"><div><h2 id="configuration-title">机器人配置</h2><p class="section-description">查看、调整并安全保存当前服务的全部 Core 设置。</p></div><button id="load-config" class="secondary">重新读取</button></div>
+          <div class="section-head"><div><h2 id="configuration-title">机器人配置</h2><p class="section-description">按分类调整机器人设置，修改后统一预览和保存。</p></div><button id="load-config" class="secondary">重新读取</button></div>
           <div id="config-state" class="editor-state" role="status">连接后自动读取配置。</div>
           <div class="configuration-toolbar"><label class="search-box" for="config-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="config-search" type="search" placeholder="搜索设置，例如：模型、超时、预算…" autocomplete="off" aria-label="搜索配置"></label><span id="config-search-count" class="hint" aria-live="polite"></span></div>
           <div id="config-categories" class="category-tabs" aria-label="配置分类"></div>
           <div id="config-errors" class="error-summary" role="alert" hidden></div>
           <div id="config-form" class="settings-form"><div class="loading-state">正在准备配置表单…</div></div>
-          <div class="supporting-settings">
+          <details class="supporting-settings advanced-settings"><summary>高级设置与恢复<span>JSON、凭据状态、历史版本</span></summary>
             <details class="editor-json"><summary>高级 JSON 编辑<span>查看或导入完整配置</span></summary><p class="hint">表单与 JSON 共享同一份草稿。编辑后可载入表单，或直接校验、预览并保存。</p><label for="config-json">完整配置 JSON</label><textarea id="config-json" rows="16" spellcheck="false">{}</textarea><button id="config-use-json">将 JSON 载入表单</button></details>
             <details><summary>凭据状态<span>环境变量与部署配置</span></summary><p class="hint">控制台编辑环境变量名称，不读取密钥值。密钥请在 Core / Worker 环境文件中设置；修改后重启对应服务。</p><div id="credentials" class="credential-list">尚未读取</div><p class="hint">Worker 模型、启动参数与主机隔离策略由部署环境管理。</p></details>
             <details><summary>版本与恢复<span>载入历史版本作为草稿</span></summary><div class="bar"><button id="load-versions">读取版本列表</button><label for="versions">历史版本<select id="versions"><option value="">尚未读取</option></select></label><button id="load-version">载入草稿</button></div><p class="hint">载入不会立即生效。检查变更后，再保存或应用。</p><dl class="version-line"><dt>运行版本</dt><dd id="config-version" class="mono">尚未读取</dd><dt>已保存版本</dt><dd id="saved-config-version" class="mono">尚未读取</dd></dl></details>
-            <details class="technical-details"><summary>校验与生效说明</summary><p id="hot-fields" class="hint"></p><p class="hint">需重启的设置保存后保留当前运行状态。修改模型还需同步 Worker 模型参数和许可名单，再重启 Core / Worker。</p><pre id="config-output">尚未校验</pre></details>
-          </div>
-          <div class="editor-actions"><div class="save-bar-info"><strong id="config-change-count">暂无修改</strong><span id="config-save-status">修改后可预览并保存</span></div><div class="actions"><button id="discard-config" class="quiet" disabled>撤销修改</button><button id="validate-config">校验</button><button id="preview-config" disabled>预览变更</button><button id="apply-config" disabled>立即应用</button><button id="save-config" class="primary" disabled>保存配置</button></div></div>
+            <details class="technical-details"><summary>校验与生效说明</summary><p id="hot-fields" class="hint"></p><p class="hint">需重启的设置保存后保留当前运行状态。修改模型还需同步 Worker 模型参数和许可名单，再重启 Core / Worker。</p><div class="actions"><button id="validate-config">仅校验</button><button id="preview-config" disabled>仅预览变更</button></div><pre id="config-output">尚未校验</pre></details>
+          </details>
+          <div class="editor-actions"><div class="save-bar-info"><strong id="config-change-count">暂无修改</strong><span id="config-save-status">修改后可预览并保存</span></div><div class="actions"><button id="discard-config" class="quiet" disabled>撤销修改</button><button id="apply-config" disabled>立即应用</button><button id="save-config" class="primary" disabled>预览并保存</button></div></div>
         </section>
 
         <section id="global-persona" hidden aria-labelledby="global-persona-title">
-          <div class="section-head"><div><h2 id="global-persona-title">小象的表达方式</h2><p class="section-description">定义身份、性格与表达边界，保存后用于后续回复。</p></div><button id="load-global-persona">重新读取</button></div>
+          <div class="section-head"><div><h2 id="global-persona-title">小象的表达方式</h2><p class="section-description">直接编辑身份、语气和措辞，保存后用于后续回复。</p></div><button id="load-global-persona">重新读取</button></div>
           <div id="global-persona-state" class="editor-state" role="status">正在读取全局人格…</div>
-          <div class="source-note">这里设置全局人格。各会话可以单独覆盖名称、语气与参与程度。</div>
+          <div class="source-note">这里的设置用于所有会话；会话内的单独设置优先。</div>
           <div id="global-persona-errors" class="error-summary" role="alert" hidden></div>
           <div id="global-persona-form" class="settings-form"></div>
           <details class="editor-json"><summary>高级 JSON 编辑</summary><label for="global-persona-json">全局人格 JSON</label><textarea id="global-persona-json" rows="14" spellcheck="false">{}</textarea><button id="global-persona-use-json">将 JSON 载入表单</button></details>
@@ -85,9 +85,9 @@
         </section>
 
         <section id="permissions" hidden aria-labelledby="permissions-title">
-          <div class="section-head"><div><h2 id="permissions-title">谁可以做什么</h2><p class="section-description">按接入、群组和用户设定操作范围，让访问边界清晰可见。</p></div><button id="load-permissions">重新读取</button></div>
+          <div class="section-head"><div><h2 id="permissions-title">谁可以做什么</h2><p class="section-description">选择用户或群聊，再指定允许或禁止的操作。</p></div><button id="load-permissions">重新读取</button></div>
           <div id="permissions-state" class="editor-state" role="status">正在读取权限策略…</div>
-          <div class="source-note">此处是当前生效的权限策略，优先于配置中心中的初始值。更改会立即影响机器人与管理员操作，保存前请核对变更。</div>
+          <div class="source-note">规则仅在保存后生效。没有规则命中时，使用下方的默认处理方式。</div>
           <div id="permissions-errors" class="error-summary" role="alert" hidden></div>
           <div id="permissions-form" class="settings-form"></div>
           <details class="editor-json"><summary>高级 JSON 编辑</summary><label for="permissions-json">权限策略 JSON</label><textarea id="permissions-json" rows="14" spellcheck="false">{}</textarea><button id="permissions-use-json">将 JSON 载入表单</button></details>
@@ -131,7 +131,7 @@
   </div>
 
   <dialog id="confirm-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
-    <div class="dialog-header"><span class="eyebrow">REVIEW CHANGES</span><h2 id="dialog-title">确认变更</h2><p id="dialog-description"></p></div>
+    <div class="dialog-header"><span class="eyebrow">变更确认</span><h2 id="dialog-title">确认变更</h2><p id="dialog-description"></p></div>
     <div id="dialog-changes" class="dialog-body"></div>
     <div class="dialog-actions"><button id="dialog-cancel" type="button">返回编辑</button><button id="dialog-confirm" class="primary" type="button">确认保存</button></div>
   </dialog>

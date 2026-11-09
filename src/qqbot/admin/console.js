@@ -27,6 +27,7 @@ const ConsoleModel = (() => {
     if (schema.type === 'object') return Object.fromEntries(Object.entries(schema.properties || {}).map(([key, child]) => [key, defaultValue(child, root)]));
     if (schema.type === 'array') return [];
     if (schema.type === 'boolean') return false;
+    if (schema.type === 'null') return null;
     if (schema.type === 'integer' || schema.type === 'number') return schema.minimum ?? 0;
     return '';
   }
@@ -47,16 +48,70 @@ const ConsoleModel = (() => {
       throw Object.assign(new Error('内容类型与字段要求不符，请检查 JSON。'), {path});
     }
     if (schema.type === 'object' && schema.properties) {
+      for (const key of schema.required || []) if (!Object.hasOwn(value, key)) throw Object.assign(new Error('缺少必填字段，请保留完整内容。'), {path: path ? path + '.' + key : key});
       for (const [key, child] of Object.entries(schema.properties)) if (Object.hasOwn(value, key)) assertShape(value[key], child, root, path ? path + '.' + key : key);
     }
     if (schema.type === 'array' && schema.items) value.forEach((item, index) => assertShape(item, schema.items, root, path + '.' + index));
   }
-  return {equal, changes, resolve, defaultValue, errorPath, assertShape};
+  const subjectFields = {
+    global: [], adapter: ['adapter_instance_id'], bot: ['adapter_instance_id', 'bot_identity_id'],
+    group: ['adapter_instance_id', 'group_id'], person: ['adapter_instance_id', 'identity_namespace', 'user_id'],
+    group_member: ['adapter_instance_id', 'identity_namespace', 'group_id', 'user_id']
+  };
+  const scopeLabels = {global: '所有人', person: '指定用户', group: '指定群', group_member: '群内成员', adapter: '整个接入', bot: '指定机器人'};
+  const actionLabels = {
+    '*': '全部操作', 'conversation.receive': '接收消息', 'notification.send': '发送回复与通知',
+    'model.request': '调用模型', 'conversation.policy.set': '调整发言模式', 'conversation.persona.set': '调整会话人格',
+    'task.create': '创建任务', 'task.read': '查看任务', 'task.cancel': '取消任务', 'task.*': '全部任务操作',
+    'memory.read': '读取记忆', 'memory.*': '全部记忆与词典操作', 'history.*': '读取历史与来源'
+  };
+  function updateAction(actions, action, enabled) {
+    if (!enabled) return actions.filter(value => value !== action);
+    const kept = action === '*' ? [...actions] : actions.filter(value => value !== '*');
+    return kept.includes(action) ? kept : [...kept, action];
+  }
+  function subjectNamespace(subject, adapters, automaticValue = null) {
+    if ((subject.identity_namespace && subject.identity_namespace !== automaticValue) || !subjectFields[subject.kind]?.includes('identity_namespace')) return subject.identity_namespace;
+    const adapter = adapters.find(item => item.instance_id === subject.adapter_instance_id);
+    if (adapter?.kind === 'onebot') return 'qq';
+    if (adapter?.kind === 'official' && adapter.app_id) return 'qq_app:' + adapter.app_id;
+    return automaticValue ? null : subject.identity_namespace;
+  }
+  function newPermissionRule(id, subject = {}) {
+    return {id, enabled: true, priority: 0, effect: 'deny', actions: ['conversation.receive'], resources: ['*'], subject: {...subject, kind: 'person'}};
+  }
+  function validatePolicy(policy) {
+    const ids = new Set();
+    (policy.rules || []).forEach((rule, index) => {
+      const fail = (path, message) => { throw Object.assign(new Error(message), {path: 'rules.' + index + '.' + path}); };
+      if (!rule.id || ids.has(rule.id)) fail('id', '每条规则需要唯一的标识。'); ids.add(rule.id);
+      for (const key of subjectFields[rule.subject.kind] || []) if (!rule.subject[key]) fail('subject.' + key, '请填写此对象所需的' + ({adapter_instance_id: '接入', identity_namespace: '身份来源', user_id: '用户账号', group_id: '群号', bot_identity_id: '机器人标识'}[key]) + '。');
+      if (!rule.actions?.length) fail('actions', '请至少选择一种操作。');
+      if (!rule.resources?.length) fail('resources', '请填写资源范围；全部资源使用 *。');
+    });
+    return policy;
+  }
+  function valueType(value) { return value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value; }
+  function emptyValue(type) { return {string: '', number: 0, boolean: false, object: {}, array: [], null: null}[type]; }
+  function ruleTarget(subject) {
+    const title = scopeLabels[subject.kind] || subject.kind;
+    const pieces = [];
+    if (subject.user_id) pieces.push('用户 ' + subject.user_id);
+    if (subject.group_id) pieces.push('群 ' + subject.group_id);
+    if (subject.bot_identity_id) pieces.push('机器人 ' + subject.bot_identity_id);
+    if (subject.adapter_instance_id) pieces.push('接入 ' + subject.adapter_instance_id);
+    return title + (pieces.length ? ' · ' + pieces.join(' / ') : '');
+  }
+  function permissionExplanation(result) {
+    const outcome = result.effect === 'allow' ? '允许此操作' : '禁止此操作';
+    return outcome + '。' + (result.matched_rule ? '命中规则：' + ruleTarget(result.matched_rule.subject) + '；优先级 ' + result.matched_rule.priority + '。' : '没有规则匹配，使用默认处理方式。') + '（策略版本 ' + result.policy_version + '）';
+  }
+  return {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation};
 })();
 if (typeof module !== 'undefined') module.exports = ConsoleModel;
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id), encode = encodeURIComponent;
-  const {equal, changes, resolve, defaultValue, errorPath, assertShape} = ConsoleModel;
+  const {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation} = ConsoleModel;
   const editors = [], replaceButtons = ['load-config', 'load-global-persona', 'load-permissions', 'load-versions', 'load-version', 'config-use-json', 'global-persona-use-json', 'permissions-use-json'];
   let token = '', authEpoch = 0, saving = false, dialogPending = false, activePanel = 'configuration', noticeTimer;
   let conversations = [], configVersion = null, savedConfigVersion = null, personaVersion = null, permissionVersion = null;
@@ -143,11 +198,11 @@ if (typeof document !== 'undefined') (() => {
     for (const change of diff) {
       const row = element('div', undefined, 'diff-row');
       row.append(
-        element('strong', change.path || '完整内容'),
+        element('strong', readablePath(change.path)),
         element('small', '原值'),
-        element('pre', change.before === undefined ? '未设置' : JSON.stringify(change.before, null, 2), 'diff-before'),
+        element('pre', change.before === undefined ? '未设置' : readableValue(change.path, change.before), 'diff-before'),
         element('small', '新值'),
-        element('pre', change.after === undefined ? '移除' : JSON.stringify(change.after, null, 2), 'diff-after')
+        element('pre', change.after === undefined ? '移除' : readableValue(change.path, change.after), 'diff-after')
       );
       $('dialog-changes').append(row);
     }
@@ -167,7 +222,7 @@ if (typeof document !== 'undefined') (() => {
     deployment_id: '部署标识', database: '数据库路径', adapters: 'QQ 接入', admin_token_env: '管理员令牌变量', internal_token_env: '内部令牌变量', model: '模型', source_url: '源码地址', send_budget_per_minute: '每分钟发送预算', timezone: '时区', tasks_enabled: '启用后台任务', interactive_execution_enabled: '启用交互执行', permissions: '初始权限策略', execution: '执行与资源预算', context: '上下文', internal_socket: '内部通信 Socket', persona_path: '人格文件路径', judge: '发言判断', memory: '记忆', social_evaluated_conversations: '已完成社交评估的会话',
     instance_id: '接入实例标识', kind: '类型', bot_id: '机器人账号标识', secret_env: '接入密钥变量', app_id: '应用 ID', websocket_url: 'WebSocket 地址', allowed_groups: '兼容群列表', allowed_users: '兼容用户列表', admin_users: '管理员角色列表', known_bot_ids: '已知机器人账号', full_mode_enabled: '启用全量消息权限', full_mode_verified: '已验证全量消息', proactive_verified: '已验证主动消息', reply_window_seconds: '回复窗口（秒）', max_replies: '最多回复数', signature_max_age_seconds: '签名最大时效（秒）', api_base: 'API 地址', token_url: '令牌地址',
     endpoint: '请求地址', api_key_env: 'API 密钥变量', timeout_seconds: '超时（秒）', context_window: '模型上下文窗口', max_active: '最大活跃执行数', sustained_limit: '持续任务上限', foreground_wait_ms: '前台等待（毫秒）', interactive_budget: '交互任务预算', budget: '后台任务预算', warm_max: '常驻进程上限', warm_idle_max: '空闲进程上限', warm_ttl_seconds: '空闲保留（秒）',
-    max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', hard_input_tokens: '输入硬上限', keep_recent_tokens: '近期消息保留 Token', compaction_input_tokens: '压缩输入预算', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
+    max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', keep_recent_tokens: '近期消息保留 Token', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
     maintenance_enabled: '启用记忆维护', auto_extract: '自动提取记忆', extractor_endpoint: '提取服务地址', extractor_model: '提取模型', extractor_key_env: '提取密钥变量', embedding_endpoint: '向量服务地址', embedding_model: '向量模型', embedding_version: '向量版本', embedding_dimensions: '向量维度', embedding_key_env: '向量密钥变量', raw_retention_days: '原始记录保留（天）',
     preset: '预设', default_effect: '默认行为', rules: '权限规则', id: '规则 ID', enabled: '启用', priority: '优先级', subject: '主体范围', actions: '操作匹配', resources: '资源匹配', effect: '行为', adapter_instance_id: '接入实例 ID', bot_identity_id: '机器人身份 ID', identity_namespace: '身份命名空间', group_id: '群 ID', user_id: '用户 ID',
     persona_id: '人格标识', name: '名称', identity: '身份说明', traits: '性格特征', style: '表达风格', boundaries: '行为边界', model_calls: '模型调用次数', tool_calls: '工具调用次数', active_seconds: '活跃执行（秒）', total_wall_seconds: '总时长（秒）', output_tokens_per_call: '每次输出 Token', input_tokens: '输入 Token 预算', output_tokens: '输出 Token 预算', completion_reserve: '完成阶段预留模型调用'
@@ -197,9 +252,9 @@ if (typeof document !== 'undefined') (() => {
   let category = 0;
   function field(raw, initial, key, root, state, path) {
     const schema = resolve(raw, root), wrap = element('div', undefined, 'field');
-    const title = labels[key] || key, name = 'setting-' + (++fieldCounter);
+    const title = raw.uiLabel || labels[key] || key, name = 'setting-' + (++fieldCounter);
     wrap.dataset.path = path;
-    const label = element('label', title); label.htmlFor = name;
+    const label = element('label', title);
     label.append(element('small', path, 'field-key')); wrap.append(label);
     let read, control;
     if (schema.type === 'object' && schema.properties) {
@@ -231,14 +286,14 @@ if (typeof document !== 'undefined') (() => {
       button(wrap, '添加' + title, () => { render([...read(), defaultValue(schema.items, root)]); state.sync(); items.lastElementChild?.querySelector('input')?.focus(); }, 'add-item');
     } else if (schema.type === 'array' && resolve(schema.items || {}, root).type === 'string') {
       control = element('textarea'); control.rows = 3; control.value = (initial || []).join('\n');
-      read = () => control.value === '' ? [] : control.value.split('\n');
+      read = () => control.value === (initial || []).join('\n') ? structuredClone(initial || []) : control.value === '' ? [] : control.value.split('\n');
       wrap.append(element('small', '每行一项；留空表示空列表。', 'field-help'));
     } else if (schema.type === 'boolean') {
       control = element('input'); control.type = 'checkbox'; control.checked = Boolean(initial); control.setAttribute('role', 'switch'); control.className = 'switch-control';
       read = () => control.checked;
     } else if (schema.enum) {
       control = element('select');
-      for (const value of schema.enum) { const option = element('option', enumLabels[key]?.[value] || String(value)); option.value = String(value); control.append(option); }
+      for (const value of schema.enum) { const option = element('option', raw.uiOptions?.[value] || enumLabels[key]?.[value] || String(value)); option.value = String(value); control.append(option); }
       control.value = String(initial ?? defaultValue(raw, root)); read = () => control.value;
     } else if (schema.type === 'integer' || schema.type === 'number') {
       control = element('input'); control.type = 'number'; control.step = schema.type === 'integer' ? '1' : 'any'; control.value = initial ?? ''; control.required = true;
@@ -247,7 +302,7 @@ if (typeof document !== 'undefined') (() => {
       read = () => { if (!control.checkValidity() || !Number.isFinite(control.valueAsNumber)) throw new Error('请填写允许范围内的数值。'); return control.valueAsNumber; };
       wrap.append(element('small', '范围：' + (schema.minimum ?? '不限') + ' – ' + (schema.maximum ?? '不限') + (schema.type === 'integer' ? '，整数' : ''), 'field-help'));
     } else if (schema.type === 'string') {
-      control = element(key === 'identity' ? 'textarea' : 'input'); control.value = initial ?? '';
+      control = element(key === 'identity' || raw.uiMultiline ? 'textarea' : 'input'); control.value = initial ?? '';
       if (schema.minLength !== undefined) { control.minLength = schema.minLength; control.required = schema.minLength > 0; }
       if (schema.maxLength !== undefined) control.maxLength = schema.maxLength;
       read = () => { if (!control.checkValidity()) throw new Error('请检查必填内容和长度限制。'); return control.value; };
@@ -256,19 +311,252 @@ if (typeof document !== 'undefined') (() => {
       read = () => { try { return JSON.parse(control.value); } catch { throw new Error('JSON 格式不正确，请检查引号和逗号。'); } };
       wrap.append(element('small', '自由结构，使用 JSON 编辑。', 'field-help'));
     }
-    if (control) { control.id = name; control.spellcheck = false; wrap.append(control); }
+    if (control) { label.htmlFor = name; control.id = name; control.spellcheck = false; wrap.append(control); }
+    else { const heading = element('div', undefined, 'field-label'); heading.append(...label.childNodes); label.replaceWith(heading); }
     if (schema.nullable && control) {
       const toggle = element('label', undefined, 'nullable'), nullBox = element('input'); nullBox.type = 'checkbox'; nullBox.checked = initial === null;
       toggle.append(nullBox, document.createTextNode('暂不设置')); wrap.append(toggle); control.disabled = nullBox.checked;
       nullBox.addEventListener('change', () => { control.disabled = nullBox.checked; });
       const getter = read; read = () => nullBox.checked ? null : getter();
     }
-    const hint = helps[key] || (key.endsWith('_env') ? '填写环境变量名称；密钥在服务环境文件中管理。' : schema.description);
+    const hint = raw.uiHelp || helps[key] || (key.endsWith('_env') ? '填写环境变量名称；密钥在服务环境文件中管理。' : schema.description);
     if (hint) wrap.append(element('small', hint, 'field-help'));
     const error = element('p', '', 'field-error'); error.id = name + '-error'; error.hidden = true; wrap.append(error);
     control?.setAttribute('aria-describedby', error.id);
     state.fields.set(path, {node: wrap, error, control});
     return {node: wrap, read: () => { try { return read(); } catch (error) { if (!error.path) error.path = path; throw error; } }};
+  }
+  Object.assign(labels, {default_language: '默认语言', tone: '交流语气', wording: '措辞偏好', formality: '正式程度', reply_length: '回复长度', participation: '参与方式'});
+  const specialTypes = {string: '文本', number: '数字', boolean: '开关'};
+  function readablePath(path) {
+    if (!path) return '完整内容';
+    return path.split('.').map((part, index, parts) => /^\d+$/.test(part) ? (parts[index - 1] === 'rules' ? '规则 ' : '第 ') + (Number(part) + 1) + (parts[index - 1] === 'rules' ? '' : ' 项') : labels[part] || part).join(' › ');
+  }
+  function readableValue(path, value) {
+    const key = path.split('.').pop();
+    if (value === null) return '未设置';
+    if (typeof value === 'boolean') return value ? '开启' : '关闭';
+    if (key === 'preset') return String(value) + '（配置标签）';
+    if (value && typeof value === 'object' && value.subject && value.actions && value.effect) return (value.effect === 'allow' ? '允许 ' : '禁止 ') + ruleTarget(value.subject) + '\n操作：' + value.actions.map(action => actionLabels[action] || action).join('、') + '\n资源：' + value.resources.join('、') + '\n优先级：' + value.priority + (value.enabled ? ' · 已启用' : ' · 未启用');
+    if (value && typeof value === 'object' && value.kind && key === 'subject') return ruleTarget(value);
+    if (typeof value === 'string') return (key === 'kind' ? scopeLabels[value] : enumLabels[key]?.[value]) || (path.includes('actions') ? actionLabels[value] : null) || value;
+    if (Array.isArray(value) && value.every(item => typeof item === 'string')) return value.map(item => path.includes('actions') ? actionLabels[item] || item : item).join('、') || '空列表';
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+  }
+  function containerField(state, path, node, title) {
+    const error = element('p', '', 'field-error'); error.hidden = true; node.append(error); node.dataset.path = path;
+    state.fields.set(path, {node, error, control: null});
+    if (title) node.setAttribute('aria-label', title);
+  }
+  function appendField(parent, schema, value, key, root, state, path, options = {}) {
+    const item = field({...schema, ...options}, value, key, root, state, path); parent.append(item.node); return item;
+  }
+  function adapterHints(input) {
+    if (!input) return;
+    let options = $('console-adapter-options');
+    if (!options) { options = element('datalist'); options.id = 'console-adapter-options'; document.body.append(options); }
+    options.replaceChildren();
+    for (const adapter of configView?.config?.adapters || []) { const option = element('option', adapter.kind === 'onebot' ? 'OneBot / NapCat' : 'QQ 官方机器人'); option.value = adapter.instance_id; options.append(option); }
+    input.setAttribute('list', options.id); input.placeholder = '选择已接入的机器人';
+  }
+  function subjectForm(initial, schema, root, state, path) {
+    const node = element('div', undefined, 'subject-fields nested-fields'); let source = structuredClone(initial), reads = [], automaticNamespace = null;
+    const kind = appendField(node, schema.properties.kind, source.kind || 'global', 'kind', root, state, path + '.kind', {uiLabel: '这条规则针对谁', uiOptions: scopeLabels});
+    const fields = element('div', undefined, 'subject-conditions nested-fields');
+    const more = element('details', undefined, 'subject-advanced'); more.append(element('summary', '更多身份条件'));
+    node.append(fields, more);
+    function renderConditions() {
+      fields.replaceChildren(); more.replaceChildren(element('summary', '更多身份条件')); reads = [];
+      const requiredFields = subjectFields[kind.read()] || [];
+      for (const [key, raw] of Object.entries(schema.properties)) {
+        if (key === 'kind') continue;
+        const target = requiredFields.includes(key) && key !== 'identity_namespace' ? fields : more;
+        const item = appendField(target, raw, Object.hasOwn(source, key) ? source[key] : defaultValue(raw, root), key, root, state, path + '.' + key, {
+          uiLabel: {adapter_instance_id: 'QQ 接入', user_id: '用户账号 / OpenID', group_id: '群号 / 群 OpenID', identity_namespace: '身份来源', bot_identity_id: '机器人标识'}[key] || labels[key],
+          uiHelp: key === 'identity_namespace' ? '已配置的 OneBot 自动使用 qq；官方机器人在已知应用 ID 时自动识别。其他来源请填写真实身份命名空间。' : requiredFields.includes(key) ? '此对象类型需要填写。' : '未设置时不增加限制；已填写的额外条件仍参与匹配。'
+        });
+        reads.push([key, item.read]);
+        const control = state.fields.get(path + '.' + key)?.control;
+        if (key === 'adapter_instance_id') adapterHints(control);
+        if (key === 'identity_namespace') item.node.addEventListener('input', () => { automaticNamespace = null; });
+        if (requiredFields.includes(key) && key !== 'identity_namespace') {
+          const nullable = item.node.querySelector('.nullable'); if (nullable) nullable.hidden = true;
+          const box = nullable?.querySelector('input'); if (box) box.checked = false;
+          if (control) control.disabled = false;
+        }
+      }
+      const extra = Object.keys(schema.properties).filter(key => key !== 'kind' && !requiredFields.includes(key) && source[key] != null && source[key] !== '');
+      more.querySelector('summary').textContent = extra.length ? '更多身份条件 · ' + extra.length + ' 项额外限定' : '更多身份条件';
+      more.open = extra.length > 0;
+    }
+    function read() {
+      const value = {...source, kind: kind.read(), ...Object.fromEntries(reads.map(([key, getter]) => [key, getter()]))};
+      const namespace = subjectNamespace(value, configView?.config?.adapters || [], automaticNamespace);
+      if (namespace !== value.identity_namespace) {
+        automaticNamespace = namespace || null;
+        value.identity_namespace = namespace;
+        const item = state.fields.get(path + '.identity_namespace'), checkbox = item.node.querySelector('.nullable input');
+        if (checkbox) checkbox.checked = !namespace; item.control.disabled = !namespace; item.control.value = namespace || '';
+      }
+      return value;
+    }
+    renderConditions();
+    state.fields.get(path + '.kind').control.addEventListener('change', () => { source = read(); renderConditions(); state.sync(); });
+    containerField(state, path, node, '规则对象');
+    return {node, read};
+  }
+  function actionPicker(initial, state, path) {
+    const node = element('div', undefined, 'action-picker field wide'), options = element('div', undefined, 'action-options');
+    node.append(element('label', '涉及哪些操作'), options); let values = [...initial]; const controls = new Map();
+    const custom = element('details', undefined, 'custom-actions'); custom.append(element('summary', '其他操作名称'));
+    const text = element('textarea'); text.rows = 2; text.setAttribute('aria-label', '其他操作名称，每行一项'); text.value = values.filter(value => !Object.hasOwn(actionLabels, value)).join('\n');
+    custom.append(element('p', '未列出的操作会原样保留。每行填写一个准确名称或命名空间通配符，例如 github.*。', 'field-help'), text); node.append(custom);
+    for (const [value, title] of Object.entries(actionLabels)) {
+      const label = element('label', undefined, 'action-option'), input = element('input'); input.type = 'checkbox'; input.checked = values.includes(value); input.value = value;
+      label.append(input, document.createTextNode(title)); options.append(label); controls.set(value, input);
+      input.addEventListener('change', () => { values = updateAction(values, value, input.checked); for (const [key, item] of controls) item.checked = values.includes(key); state.sync(); });
+    }
+    text.addEventListener('input', () => { values = [...values.filter(value => Object.hasOwn(actionLabels, value)), ...text.value.split('\n').map(value => value.trim()).filter(Boolean)]; });
+    node.append(element('p', '选择具体操作会取消“全部操作”；完整工作流程可能需要多种操作权限。', 'field-help'));
+    containerField(state, path, node, '操作选择'); return {node, read: () => [...values]};
+  }
+  function permissionForm(value, schema, state, form) {
+    form.classList.add('permission-editor'); const policy = {...defaultValue(schema, schema), ...structuredClone(value)};
+    const defaults = element('div', undefined, 'policy-default'); form.append(defaults);
+    const fallback = appendField(defaults, schema.properties.default_effect, policy.default_effect, 'default_effect', schema, state, 'default_effect', {uiLabel: '没有规则匹配时', uiOptions: {allow: '默认允许', deny: '默认拒绝'}});
+    const guidance = element('p', '', 'policy-guidance'); defaults.append(guidance);
+    function defaultHelp() { guidance.textContent = fallback.read() === 'allow' ? '只想屏蔽某人或某群？保持默认允许，再添加一条禁止规则即可。' : '默认拒绝会限制未被明确允许的操作。先保留管理员访问规则，再为需要使用的人配置允许规则。'; }
+    defaultHelp(); state.fields.get('default_effect').control.addEventListener('change', defaultHelp);
+    const list = element('div', undefined, 'permission-rule-list'); let rows = [];
+    const ruleSchema = resolve(schema.properties.rules.items, schema), selectorSchema = resolve(ruleSchema.properties.subject, schema);
+    function renderRules(values, expanded = null) {
+      for (const key of [...state.fields.keys()]) if (key.startsWith('rules.')) state.fields.delete(key);
+      list.replaceChildren(); rows = [];
+      if (!values.length) list.append(element('p', '还没有单独规则，所有操作使用上面的默认行为。', 'empty-state'));
+      values.forEach((originalRule, index) => {
+        const rule = {...defaultValue(schema.properties.rules.items, schema), ...originalRule};
+        rule.subject = {...defaultValue(ruleSchema.properties.subject, schema), ...rule.subject};
+        const path = 'rules.' + index, card = element('details', undefined, 'permission-rule'); card.open = rule.id === expanded;
+        const summary = element('summary', undefined, 'rule-summary');
+        const effectTag = element('span', '', 'rule-effect'), target = element('strong', '', 'rule-target'), actionsText = element('span', '', 'rule-actions'), status = element('small', '', 'rule-state');
+        summary.append(effectTag, target, actionsText, status); card.append(summary);
+        const body = element('div', undefined, 'permission-rule-body'), basics = element('div', undefined, 'rule-basics nested-fields'); body.append(basics); card.append(body);
+        const effect = appendField(basics, ruleSchema.properties.effect, rule.effect, 'effect', schema, state, path + '.effect', {uiLabel: '处理方式'});
+        const enabled = appendField(basics, ruleSchema.properties.enabled, rule.enabled ?? true, 'enabled', schema, state, path + '.enabled', {uiLabel: '启用这条规则'});
+        const subject = subjectForm(rule.subject, selectorSchema, schema, state, path + '.subject'); body.append(subject.node);
+        const actions = actionPicker(rule.actions, state, path + '.actions'); body.append(actions.node);
+        const advanced = element('details', undefined, 'rule-advanced'); advanced.append(element('summary', '高级设置')); body.append(advanced);
+        const advancedGrid = element('div', undefined, 'nested-fields'); advanced.append(advancedGrid);
+        const resources = appendField(advancedGrid, ruleSchema.properties.resources, rule.resources, 'resources', schema, state, path + '.resources', {uiLabel: '资源范围', uiHelp: '通常保留 *，表示全部资源。需要限制特定资源时再填写精确标识或前缀。'});
+        const priority = appendField(advancedGrid, ruleSchema.properties.priority, rule.priority ?? 0, 'priority', schema, state, path + '.priority', {uiHelp: '数值越大越优先；同优先级按对象、资源与操作的具体程度匹配，同级时拒绝优先。列表顺序不影响结果。'});
+        const id = appendField(advancedGrid, ruleSchema.properties.id, rule.id, 'id', schema, state, path + '.id', {uiLabel: '规则标识'});
+        const read = () => ({...rule, effect: effect.read(), enabled: enabled.read(), subject: subject.read(), actions: actions.read(), resources: resources.read(), priority: priority.read(), id: id.read()});
+        function summarize() {
+          try { const current = read(); effectTag.textContent = current.effect === 'allow' ? '允许' : '禁止'; effectTag.className = 'rule-effect ' + current.effect; target.textContent = ruleTarget(current.subject); actionsText.textContent = current.actions.map(action => actionLabels[action] || action).join('、') || '尚未选择操作'; status.textContent = current.enabled ? '已启用' : '未启用'; }
+          catch { status.textContent = '请完成设置'; }
+        }
+        summarize(); body.addEventListener('input', summarize); body.addEventListener('change', summarize);
+        button(body, '移除规则', () => { const remaining = rows.filter((_, rowIndex) => rowIndex !== index).map(row => row.read()); renderRules(remaining); state.sync(); }, 'text-danger');
+        containerField(state, path, card, '权限规则'); rows.push({read}); list.append(card);
+      });
+    }
+    function addRule(rule) { renderRules([...rows.map(row => row.read()), rule], rule.id); state.sync(); }
+    button(defaults, '添加管理员保留规则', () => {
+      addRule({id: 'console-admin-' + uuid().slice(0, 8), enabled: true, priority: 1000, effect: 'allow', actions: ['*'], resources: ['*'], subject: {...defaultValue(ruleSchema.properties.subject, schema), kind: 'person', adapter_instance_id: 'admin_api', identity_namespace: 'admin_api', user_id: 'owner'}});
+      notice('管理员保留规则已加入草稿，保存后生效。');
+    });
+    form.append(list); renderRules(policy.rules || []); containerField(state, 'rules', list, '权限规则列表');
+    button(form, '添加规则', () => addRule(newPermissionRule('rule-' + uuid().slice(0, 8), defaultValue(ruleSchema.properties.subject, schema))), 'add-item');
+    const advanced = element('details', undefined, 'policy-advanced'); advanced.append(element('summary', '兼容配置标签')); form.append(advanced);
+    const preset = appendField(advanced, schema.properties.preset, policy.preset, 'preset', schema, state, 'preset', {uiLabel: '预设标签', uiOptions: {allow_all: 'allow_all（兼容标签）', custom: 'custom（兼容标签）'}, uiHelp: '这是保存的配置标签，不决定是否放行，也不会清空规则。实际默认行为以上方选择为准。'});
+    return () => ({...policy, default_effect: fallback.read(), preset: preset.read(), rules: rows.map(row => row.read())});
+  }
+  function schemaForStyle(value) {
+    const type = valueType(value);
+    if (type === 'object') return {type, properties: Object.fromEntries(Object.entries(value).map(([key, item]) => [key, schemaForStyle(item)]))};
+    if (type === 'array') return {type, items: value.every(item => typeof item === 'string') ? {type: 'string'} : {}};
+    return {type};
+  }
+  function styleForm(value, state, root) {
+    const node = element('div', undefined, 'style-fields'), fields = element('div', undefined, 'nested-fields'); node.append(fields); let rows = [];
+    function render(values) {
+      for (const key of [...state.fields.keys()]) if (key.startsWith('style.')) state.fields.delete(key);
+      fields.replaceChildren(); rows = [];
+      for (const [key, original] of Object.entries(values)) {
+        const row = element('div', undefined, 'style-entry'), schema = schemaForStyle(original), complex = ['object', 'array', 'null'].includes(valueType(original)) && !(Array.isArray(original) && original.every(item => typeof item === 'string'));
+        let parent = row;
+        if (complex) { parent = element('details', undefined, 'style-complex'); parent.append(element('summary', (labels[key] || key) + ' · 结构化内容')); row.append(parent); }
+        const item = appendField(parent, schema, original, key, root, state, 'style.' + key, {uiMultiline: ['tone', 'wording'].includes(key), uiHelp: key === 'default_language' ? '例如 zh-CN（简体中文）、en（英语）。' : ''});
+        const tools = element('div', undefined, 'style-entry-tools'); row.append(tools);
+        button(tools, '移除', () => { render(Object.fromEntries(rows.filter(entry => entry.key !== key).map(entry => [entry.key, entry.read()]))); state.sync(); }, 'quiet');
+        fields.append(row); rows.push({key, read: item.read});
+      }
+    }
+    render(value);
+    const add = element('details', undefined, 'style-add'); add.append(element('summary', '添加表达偏好')); node.append(add);
+    const name = element('input'); name.placeholder = '偏好名称，例如 humor'; name.setAttribute('aria-label', '新的表达偏好名称');
+    const type = element('select'); type.setAttribute('aria-label', '表达偏好内容类型');
+    for (const [key, label] of Object.entries(specialTypes)) { const option = element('option', label); option.value = key; type.append(option); }
+    add.append(name, type);
+    button(add, '添加', () => {
+      const key = name.value.trim(); if (!key) throw new Error('请填写表达偏好名称。');
+      if (rows.some(item => item.key === key)) throw new Error('这个表达偏好已经存在。');
+      render({...Object.fromEntries(rows.map(item => [item.key, item.read()])), [key]: emptyValue(type.value)}); name.value = ''; state.sync();
+    });
+    containerField(state, 'style', node, '表达方式'); return {node, read: () => Object.fromEntries(rows.map(item => [item.key, item.read()]))};
+  }
+  function personaForm(value, schema, state, form) {
+    form.classList.add('persona-editor'); const reads = [];
+    function section(title, keys) {
+      const section = element('div', undefined, 'persona-section'), fields = element('div', undefined, 'nested-fields'); section.append(element('h3', title), fields); form.append(section);
+      for (const key of keys) { const item = appendField(fields, schema.properties[key], value[key], key, schema, state, key); reads.push([key, item.read]); }
+      return section;
+    }
+    section('基本信息', ['name', 'identity']); section('性格与边界', ['traits', 'boundaries']);
+    const expression = section('表达方式', []), style = styleForm(value.style || {}, state, schema); expression.append(style.node); reads.push(['style', style.read]);
+    const advanced = element('details', undefined, 'persona-advanced'); advanced.append(element('summary', '人格标识与版本')); const content = element('div', undefined, 'nested-fields'); advanced.append(content); form.append(advanced);
+    for (const key of Object.keys(schema.properties).filter(key => !reads.some(([name]) => name === key))) {
+      const item = appendField(content, schema.properties[key], value[key], key, schema, state, key); reads.push([key, item.read]);
+    }
+    return () => ({...value, ...Object.fromEntries(reads.map(([key, getter]) => [key, getter()]))});
+  }
+  let permissionCheckRead;
+  function setupPermissionChecker(schema) {
+    const hidden = $('permission-subject'), detail = hidden.closest('details'), original = {adapter_instance_id: 'admin_api', identity_namespace: 'admin_api', user_id: 'owner'};
+    const action = $('permission-action'), resource = $('permission-resource'), submit = $('check-permission');
+    detail.replaceChildren(element('summary', '检查当前生效权限'));
+    detail.append(element('p', '选择对象与操作，查看已保存策略的判断。尚未保存的草稿不参与检查。', 'field-help'));
+    const form = element('div', undefined, 'permission-check-form'), targetLabel = element('label', '检查对象'), target = element('select'); target.id = 'permission-check-target'; targetLabel.htmlFor = target.id;
+    for (const [value, title] of [['admin', '当前管理员'], ['custom', '指定 QQ 用户或群']]) { const option = element('option', title); option.value = value; target.append(option); }
+    targetLabel.append(target); form.append(targetLabel); detail.append(form);
+    const ruleSchema = resolve(schema.properties.rules.items, schema), selectorSchema = resolve(ruleSchema.properties.subject, schema);
+    const state = {fields: new Map(), sync: () => { hidden.value = JSON.stringify(readSubject()); }};
+    const subject = subjectForm({...defaultValue(ruleSchema.properties.subject, schema), kind: 'person'}, selectorSchema, schema, state, 'check-subject'); subject.node.hidden = true; form.append(subject.node);
+    function readSubject() { if (target.value === 'admin') return {...original}; const {kind, ...value} = subject.read(); return value; }
+    target.addEventListener('change', () => { subject.node.hidden = target.value === 'admin'; state.sync(); });
+    subject.node.addEventListener('input', state.sync); subject.node.addEventListener('change', state.sync);
+    const actionLabel = element('label', '检查哪种操作'), choices = element('select'); choices.id = 'permission-check-action'; actionLabel.htmlFor = choices.id;
+    const catalog = {'admin.get': '访问控制台', ...Object.fromEntries(Object.entries(actionLabels).filter(([key]) => !key.includes('*')))};
+    if (!Object.hasOwn(catalog, action.value)) catalog[action.value] = action.value;
+    for (const [value, title] of Object.entries(catalog)) { const option = element('option', title); option.value = value; choices.append(option); }
+    const custom = element('option', '自定义操作…'); custom.value = '__custom__'; choices.append(custom); choices.value = action.value;
+    actionLabel.append(choices); form.append(actionLabel);
+    const advanced = element('details', undefined, 'permission-check-advanced'); advanced.append(element('summary', '指定资源或自定义操作'));
+    const actionCustom = element('label', '操作名称'); actionCustom.htmlFor = action.id; actionCustom.append(action);
+    const resourceLabel = element('label', '要检查的实际资源'); resourceLabel.htmlFor = resource.id; resourceLabel.append(resource);
+    advanced.append(actionCustom, resourceLabel, element('p', '结果只针对填写的资源；有资源范围规则时，请填写真实资源标识，例如 conversation:会话ID。', 'field-help')); form.append(advanced);
+    choices.addEventListener('change', () => { if (choices.value === '__custom__') { advanced.open = true; action.focus(); } else action.value = choices.value; });
+    action.addEventListener('input', () => { choices.value = Object.hasOwn(catalog, action.value) ? action.value : '__custom__'; });
+    hidden.hidden = true; form.append(hidden, submit);
+    const result = element('p', '', 'source-note'); result.id = 'permission-check-result'; result.hidden = true; result.setAttribute('role', 'status'); detail.append(result);
+    form.addEventListener('input', () => { result.hidden = true; }); form.addEventListener('change', () => { result.hidden = true; });
+    permissionCheckRead = () => {
+      if (target.value === 'custom') {
+        try { validatePolicy({rules: [{id: 'check', subject: subject.read(), actions: [action.value], resources: [resource.value]}]}); }
+        catch (error) { delete error.path; throw error; }
+      }
+      return readSubject();
+    };
   }
   function editor(prefix, panel) {
     const form = $(prefix + '-form'), json = $(prefix + '-json');
@@ -321,6 +609,10 @@ if (typeof document !== 'undefined') (() => {
       if (!schema) throw new Error('请先读取配置。');
       assertShape(value, schema);
       state.schema = schema; state.baseline = structuredClone(baseline); state.jsonDirty = false; form.inert = false; form.replaceChildren(); state.fields.clear(); state.groupNodes = [];
+      if (prefix === 'permissions' || prefix === 'global-persona') {
+        state.getter = prefix === 'permissions' ? permissionForm(value, schema, state, form) : personaForm(value, schema, state, form);
+        json.value = JSON.stringify(value, null, 2); state.sync(); return;
+      }
       const reads = [], seen = new Set();
       function add(parent, key) {
         const raw = schema.properties[key]; if (!raw) return; seen.add(key);
@@ -334,7 +626,12 @@ if (typeof document !== 'undefined') (() => {
         $('config-categories').replaceChildren();
         categories.forEach(([title, keys], index) => {
           const group = element('div', undefined, 'config-group nested-fields'); group.dataset.category = String(index); group.id = 'config-category-' + index;
-          keys.forEach(key => add(group, key)); form.append(group); state.groupNodes.push(group);
+          if (keys.length === 1 && keys[0] === 'permissions') {
+            const intro = element('div', undefined, 'initial-permission-note'); intro.append(element('p', '这里仅是新数据库的初始值。管理当前机器人权限，请打开实时权限策略。', 'field-help'));
+            button(intro, '管理当前生效权限', () => navigate('permissions')); group.append(intro);
+            const advanced = element('details'); advanced.append(element('summary', '查看初始权限配置')); group.append(advanced); add(advanced, 'permissions');
+          } else keys.forEach(key => add(group, key));
+          form.append(group); state.groupNodes.push(group);
           const tab = button($('config-categories'), title, () => { category = index; $('config-search').value = ''; filterConfig(); });
           tab.dataset.category = String(index); tab.setAttribute('aria-controls', group.id); tab.setAttribute('aria-pressed', 'false');
         });
@@ -535,7 +832,7 @@ if (typeof document !== 'undefined') (() => {
   });
   const loadPermissions = () => loadEditor(permissionEditor, async () => {
     const [result, schema] = await Promise.all([request('/api/v1/permissions'), request('/api/v1/permissions/schema')]);
-    return () => { const {policy_version, ...policy} = result; permissionVersion = policy_version; permissionEditor.load(policy, schema); show('permissions-output', {policy_version}); };
+    return () => { const {policy_version, ...policy} = result; permissionVersion = policy_version; permissionEditor.load(policy, schema); setupPermissionChecker(schema); show('permissions-output', {policy_version}); };
   });
   action('load-config', () => loadConfig()); action('load-global-persona', loadPersona); action('load-permissions', loadPermissions);
   action('validate-config', async () => {
@@ -574,7 +871,7 @@ if (typeof document !== 'undefined') (() => {
     personaVersion = result.version; personaEditor.load(result.persona); show('global-persona-output', result); notice('全局人格已保存并生效。');
   }));
   action('save-permissions', () => mutate(async () => {
-    const policy = permissionEditor.read(), diff = changes(permissionEditor.baseline, policy);
+    const policy = validatePolicy(permissionEditor.read()), diff = changes(permissionEditor.baseline, policy);
     if (!diff.length || !await confirmDialog('更新生效中的权限策略？', '更改会立即影响所有操作。服务会检查管理员入口是否仍可访问。', diff, '保存权限策略')) return;
     const result = await request('/api/v1/permissions', {method: 'PUT', body: {expected_version: permissionVersion, policy}});
     const {policy_version, ...updated} = result; permissionVersion = policy_version; permissionEditor.load(updated); show('permissions-output', result); notice('权限策略已保存并生效。');
@@ -593,8 +890,8 @@ if (typeof document !== 'undefined') (() => {
     configEditor.load(candidate, configEditor.schema, configEditor.baseline); notice('历史版本已载入草稿。校验并保存后才会恢复。');
   });
   action('check-permission', async () => {
-    const result = await request('/api/v1/permissions/explain', {method: 'POST', body: {subject: JSON.parse($('permission-subject').value), action: required('permission-action', '操作'), resource: required('permission-resource', '资源')}});
-    show('permissions-output', result); $('permissions-output').closest('details')?.setAttribute('open', ''); notice('当前策略检查结果：' + (result.effect === 'allow' ? '允许此操作' : '拒绝此操作') + '。');
+    const result = await request('/api/v1/permissions/explain', {method: 'POST', body: {subject: permissionCheckRead ? permissionCheckRead() : JSON.parse($('permission-subject').value), action: required('permission-action', '操作'), resource: required('permission-resource', '资源')}});
+    show('permissions-output', result); show('permission-check-result', permissionExplanation(result)); $('permission-check-result').hidden = false;
   });
   $('config-search').addEventListener('input', filterConfig);
   const panels = {
@@ -604,7 +901,7 @@ if (typeof document !== 'undefined') (() => {
     tasks: ['后台任务', '查询任务进展，处理执行与交付。', async () => { if (!conversations.length) await loadConversations(); if ($('cid').value) await loadTasks(); }],
     memories: ['记忆与词典', '审阅记忆、纠正内容与管理词典。', async () => { if (!conversations.length) await loadConversations(); if ($('cid').value) await loadMemories(); }],
     'global-persona': ['全局人格', '设定小象的身份、表达与行为边界。', () => personaEditor.getter || loadPersona()],
-    permissions: ['权限策略', '为主体、操作与资源配置访问范围。', () => permissionEditor.getter || loadPermissions()]
+    permissions: ['权限策略', '决定哪些用户、群聊可以使用哪些功能。', () => permissionEditor.getter || loadPermissions()]
   };
   async function navigate(panel, updateHash = true) {
     if (!panels[panel]) panel = 'configuration'; activePanel = panel;

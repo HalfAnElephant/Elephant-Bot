@@ -73,3 +73,77 @@ test('invalid JSON structure is rejected before replacing any editor draft', () 
   assert.doesNotThrow(() => assertShape(draft, schema));
   assert.deepEqual(draft, before);
 });
+
+test('permission actions retain unknown patterns and selecting a specific action narrows wildcard deliberately', () => {
+  const {updateAction} = require('../src/qqbot/admin/console.js');
+  const original = ['*', 'future.tool', 'github.*'];
+  const updated = updateAction(original, 'conversation.receive', true);
+  assert.deepEqual(updated, ['future.tool', 'github.*', 'conversation.receive']);
+  assert.deepEqual(original, ['*', 'future.tool', 'github.*']);
+  assert.deepEqual(updateAction(updated, '*', true), [...updated, '*']);
+  assert.deepEqual(updateAction(updated, 'conversation.receive', false), ['future.tool', 'github.*']);
+});
+
+test('new permission rules target a named user and do not deny every operation globally', () => {
+  const {newPermissionRule, validatePolicy} = require('../src/qqbot/admin/console.js');
+  const rule = newPermissionRule('example', {adapter_instance_id: null, user_id: null, identity_namespace: null});
+  assert.equal(rule.subject.kind, 'person');
+  assert.deepEqual(rule.actions, ['conversation.receive']);
+  assert.equal(rule.effect, 'deny');
+  assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.subject.adapter_instance_id');
+});
+
+test('namespace inference uses known adapter identities and preserves explicit custom namespaces', () => {
+  const {subjectNamespace} = require('../src/qqbot/admin/console.js');
+  const adapters = [{instance_id: 'nap', kind: 'onebot'}, {instance_id: 'official', kind: 'official', app_id: '123'}, {instance_id: 'unknown', kind: 'official'}];
+  assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'nap', identity_namespace: null}, adapters), 'qq');
+  assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'qq'}, adapters, 'qq'), 'qq_app:123');
+  assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'custom'}, adapters, 'qq'), 'custom');
+  assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'unknown', identity_namespace: 'qq'}, adapters, 'qq'), null);
+  assert.equal(subjectNamespace({kind: 'group', adapter_instance_id: 'nap', identity_namespace: null}, adapters), null);
+});
+
+test('policy validation preserves preset, unknown actions and additional selector constraints', () => {
+  const {validatePolicy, ruleTarget} = require('../src/qqbot/admin/console.js');
+  const policy = {preset: 'allow_all', default_effect: 'deny', rules: [{id: 'future', effect: 'allow', actions: ['future.operation'], resources: ['*'], subject: {kind: 'global', user_id: '123', identity_namespace: 'special'}}]};
+  const before = structuredClone(policy);
+  assert.equal(validatePolicy(policy), policy);
+  assert.deepEqual(policy, before);
+  assert.match(ruleTarget(policy.rules[0].subject), /用户 123/);
+});
+
+test('permission validation locates missing member identities, empty action lists and duplicate rule IDs', () => {
+  const {validatePolicy} = require('../src/qqbot/admin/console.js');
+  const rule = {id: 'a', subject: {kind: 'group_member', adapter_instance_id: 'nap', identity_namespace: 'qq', group_id: '456', user_id: null}, actions: ['*'], resources: ['*']};
+  assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.subject.user_id');
+  rule.subject.user_id = '123'; rule.actions = [];
+  assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.actions');
+  rule.actions = ['future.action'];
+  assert.throws(() => validatePolicy({rules: [rule, rule]}), error => error.path === 'rules.1.id');
+});
+
+test('style type helpers distinguish null from objects and preserve false and zero defaults', () => {
+  const {valueType, emptyValue} = require('../src/qqbot/admin/console.js');
+  assert.equal(valueType(null), 'null'); assert.equal(valueType([]), 'array');
+  assert.equal(valueType(false), 'boolean'); assert.equal(valueType(0), 'number');
+  assert.equal(emptyValue('boolean'), false); assert.equal(emptyValue('number'), 0);
+  assert.equal(defaultValue({type: 'null'}, {}), null);
+});
+
+test('JSON imports reject missing required fields before replacing a populated form', () => {
+  const {assertShape} = require('../src/qqbot/admin/console.js');
+  const schema = {type: 'object', required: ['name', 'style'], properties: {name: {type: 'string'}, style: {type: 'object', additionalProperties: true}}};
+  assert.throws(() => assertShape({style: {}}, schema), error => error.path === 'name');
+  const untouched = {name: '小象', style: {tone: '自然', unknown: {enabled: false, value: null}}};
+  assert.doesNotThrow(() => assertShape(untouched, schema));
+  assert.deepEqual(untouched.style.unknown, {enabled: false, value: null});
+});
+
+
+test('permission explanation identifies matching rule or fallback without requiring JSON', () => {
+  const {permissionExplanation} = require('../src/qqbot/admin/console.js');
+  assert.match(permissionExplanation({effect: 'allow', matched_rule: null, policy_version: 2}), /允许此操作。没有规则匹配，使用默认处理方式/);
+  const text = permissionExplanation({effect: 'deny', matched_rule: {priority: 3, subject: {kind: 'person', user_id: '123'}}, policy_version: 4});
+  assert.match(text, /禁止此操作。命中规则：指定用户 · 用户 123；优先级 3/);
+  assert.match(text, /策略版本 4/);
+});
