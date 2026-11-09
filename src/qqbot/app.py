@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import secrets
 import socket
@@ -8,7 +7,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy import func, select
 
 from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
@@ -17,10 +16,12 @@ from qqbot.admin.api import ADMIN_HTML
 from qqbot.admin.api import router as admin_router
 from qqbot.cli import migrate
 from qqbot.clock import Clock
-from qqbot.config import Settings
+from qqbot.configuration import ConfigurationStore
+from qqbot.domain import ConversationRef
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.api import internal_router
 from qqbot.observability import configure_logging
+from qqbot.permissions import PermissionSubject
 from qqbot.runtime import Core
 from qqbot.storage.db import Database
 from qqbot.storage.schema import conversations, inbox, outbox
@@ -34,12 +35,8 @@ class InternalServer(uvicorn.Server):
 
 def create_app(settings, *, clock=None, run_background=True, official_client=None, model_client=None):
     configure_logging()
-    applied = Path(settings.database).parent / "runtime-config.json"
-    if applied.exists():
-        values = json.loads(applied.read_text())
-        if set(values) - {"model", "send_budget_per_minute"}:
-            raise ValueError("invalid persisted runtime configuration")
-        settings = Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}))
+    config_store = ConfigurationStore(settings)
+    settings = config_store.read()
     clock = clock or Clock()
     migrate(settings.database)
     db = Database(settings.database)
@@ -53,6 +50,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         for cfg in settings.adapters
     }
     core = Core(settings, db, clock, adapters, model_client)
+    core.config_store = config_store
 
     @asynccontextmanager
     async def lifespan(app):
@@ -61,7 +59,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         try:
             for adapter in adapters.values():
                 await adapter.start()
-            if settings.tasks_enabled and run_background:
+            if (settings.tasks_enabled or settings.interactive_execution_enabled) and run_background:
                 token = os.environ.get(settings.internal_token_env, "")
                 internal = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
                 internal.include_router(internal_router(core.tasks, token))
@@ -112,6 +110,15 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     app = FastAPI(title="Elephant Bot", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.core, app.state.adapters, app.state.db, app.state.ready = core, adapters, db, False
 
+    @app.middleware("http")
+    async def private_console_responses(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith(("/admin", "/api/v1/")):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     @app.exception_handler(ValueError)
     async def invalid_request(request, exc):
         return JSONResponse({"detail": str(exc)[:240]}, status_code=422)
@@ -159,12 +166,31 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     @app.get("/admin", response_class=HTMLResponse)
     def management_page():
         return HTMLResponse(
-            ADMIN_HTML, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+            ADMIN_HTML,
+            headers={"Content-Security-Policy": (
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+                "frame-ancestors 'none'; form-action 'self'"
+            )},
         )
+
+    @app.get("/admin/assets/{name}")
+    def console_asset(name: str):
+        media_types = {"console.js": "text/javascript", "console.css": "text/css"}
+        if name not in media_types:
+            raise HTTPException(404)
+        return FileResponse(Path(__file__).parent / "admin" / name, media_type=media_types[name])
 
     @app.get("/api/v1/status")
     async def status(request: Request):
         admin(request)
+        core.permissions.require(
+            PermissionSubject(
+                adapter_instance_id="admin_api", identity_namespace="admin_api", user_id="owner"
+            ),
+            "service.status.read",
+            "service:core",
+        )
         with db.engine.connect() as c:
             pending = c.execute(
                 select(func.count()).select_from(inbox).where(inbox.c.state == "PENDING")
@@ -173,12 +199,12 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         return {
             "inbox_pending": pending,
             "deliveries": dict(delivery_states),
-            "model_configured": bool(
-                core.settings.model.model
-                and core.settings.model.endpoint
-                and os.environ.get(core.settings.model.api_key_env)
-            ),
+            "model_configured": None,
+            "model_execution": "worker_pi"
+            if core.settings.interactive_execution_enabled or core.settings.tasks_enabled
+            else "disabled",
             "tasks_enabled": core.settings.tasks_enabled,
+            "interactive_execution_enabled": core.settings.interactive_execution_enabled,
             "adapters": [
                 {
                     "id": key,
@@ -194,9 +220,33 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     @app.get("/api/v1/conversations")
     async def list_conversations(request: Request):
         admin(request)
+        core.permissions.require(
+            PermissionSubject(
+                adapter_instance_id="admin_api", identity_namespace="admin_api", user_id="owner"
+            ),
+            "conversation.list",
+            "conversation:*",
+        )
         with db.engine.connect() as c:
             rows = [dict(r._mapping) for r in c.execute(select(conversations).limit(200))]
-        return [{**row, "policy": core.state(row["id"])} for row in rows]
+        refs = {row["id"]: ConversationRef.model_validate_json(row["ref_json"]) for row in rows}
+        names = {}
+
+        async def resolve_names(instance_id, adapter):
+            selected = [ref for ref in refs.values() if ref.adapter_instance_id == instance_id]
+            if selected and isinstance(adapter, OneBotAdapter):
+                names[instance_id] = await adapter.resolve_conversation_names(selected)
+
+        await asyncio.gather(*(resolve_names(key, adapter) for key, adapter in adapters.items()))
+        result = []
+        for row in rows:
+            ref = refs[row["id"]]
+            name = names.get(ref.adapter_instance_id, {}).get((ref.surface, ref.remote_conversation_id))
+            name = name or ("群聊" if ref.surface == "group" else "私聊")
+            result.append({**row, "policy": core.state(row["id"]), "display_name": name,
+                           "remote_id": ref.remote_conversation_id,
+                           "display_label": f"{name}（{ref.remote_conversation_id}）"})
+        return result
 
     @app.websocket("/onebot/{instance_id}")
     async def onebot(websocket: WebSocket, instance_id: str):

@@ -3,6 +3,11 @@
 set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run as root' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Linux is required' >&2; exit 1; }
+# Bubblewrap is also required by credentialed gh and isolated workspace processes.
+if ! command -v bwrap >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y bubblewrap
+fi
 cd /opt/qqbot
 [ -x .venv/bin/python ] && [ -x /usr/bin/node ]
 # Validate before granting sudo access to the Python launcher/runtime.
@@ -34,6 +39,7 @@ install -o root -g root -m 0755 scripts/pi-runner-entry /opt/qqbot/bin/pi-runner
 install -o root -g root -m 0755 scripts/pi-isolation-probe /opt/qqbot/bin/pi-isolation-probe
 install -o root -g root -m 0755 scripts/pi-isolation-check /usr/local/libexec/pi-isolation-check
 install -o root -g root -m 0444 src/qqbot/harness/research_extension.ts /opt/qqbot/research_extension.ts
+install -o root -g root -m 0444 src/qqbot/harness/pi_bridge.ts /opt/qqbot/pi_bridge.ts
 install -o root -g root -m 0644 deploy/runner-policy.json /etc/qqbot/runner-policy.json
 runner_sudoers_tmp=$(mktemp /etc/sudoers.d/.qqbot-runner.XXXXXX)
 trap 'rm -f "$runner_sudoers_tmp"' EXIT

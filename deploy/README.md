@@ -1,6 +1,6 @@
 # Ubuntu runner deployment
 
-The production code path is `SystemdResearchRun`, selected by `--runner-mode systemd`. It invokes the fixed sudo launcher with `start|stop TASK_UUID RUN_UUID`. Local mode remains the default for protocol development. Production startup rejects non-Linux hosts and root policies whose `isolation_verified` flag is false. Each target host requires Linux namespace, cgroup and credential acceptance before enabling the policy.
+The production code path is `SystemdGeneralRun`, selected by `--runner-mode systemd`. It invokes the fixed sudo launcher with `start|stop LAUNCH_TASK_UUID PROCESS_UUID`. Protocol-1 research recovery retains its legacy run identity. Local mode remains the default for protocol development. Production startup rejects non-Linux hosts and root policies whose `isolation_verified` flag is false. Each target host requires Linux namespace, cgroup and credential acceptance before enabling the policy.
 
 ## Minimal installation
 
@@ -19,6 +19,34 @@ The worker service intentionally permits its tightly scoped sudo launcher, so it
 
 Verify systemd options on the target Ubuntu release. Test cross-run workspace access, Core/database/socket/key access, `/proc` credentials, background child survival, cancellation, lease loss and archive symlink/hardlink replacement. No claim of OS isolation follows from the offline tests alone.
 
-A root launcher writes `/var/lib/qqbot-runner-stops/RUN_UUID.json` only after the unit is inactive and its cgroup is empty. Core checks root ownership, directory/file modes and canonical task/run identity before reconciliation. Never replace this proof with a user-supplied boolean. An administrator can reconcile an expired spool result under new recovery ownership, or close the stopped task without a result. Old fencing never commits a new terminal state directly.
+A root launcher writes `/var/lib/qqbot-runner-stops/PROCESS_UUID.json` only after the unit is inactive and its cgroup is empty. Core checks root ownership, directory/file modes and canonical task/run identity before reconciliation. For general runs, Core also requires the authenticated Worker to have recorded STOPPED after draining gateway requests and host tool processes. A pi cgroup marker alone cannot prove host Git/gh cleanup. If the Worker crashes before reporting that proof, reconciliation remains blocked; verify and stop the Worker service cgroup and recover its ownership before releasing capacity. Never replace these proofs with a user-supplied boolean. An administrator can reconcile an expired spool result under new recovery ownership, or close the stopped task without a result. Old fencing never commits a new terminal state directly.
 
 A host using UFW may require a narrow allowance from `10.203.0.2` to `10.203.0.1`, TCP ports `30000:30999`, on `qqbot-host`. The installer leaves host-wide firewall administration to the operator. Its network namespace helper and unit restore the isolated link before the Worker starts. Verify host reboot recovery on the target deployment before relying on automatic service restoration.
+
+## Generic workspace and GitHub tools
+
+The installer installs Ubuntu's `bubblewrap` package when `bwrap` is missing. Credentialed `gh.exec` and `process.start` require Linux user/PID/mount namespaces. Validate bubblewrap under the actual Worker service account and its AppArmor/systemd restrictions before enabling these capabilities. Installation alone does not establish isolation acceptance.
+
+Workspace processes receive an empty environment, private `/proc`, `/dev` and `/tmp`, system binaries and their own workspace. Network access is disabled. Credentialed GitHub CLI runs have network access, private process/mount namespaces and a trusted empty working directory. They receive only the host-bound token and omit operator homes, Git helpers and service credential files. Install `gh` beneath `/usr` or `/bin` for the credentialed path. Keep installed extensions and executables administrator-owned.
+
+Use `git.transport` for authenticated clone, fetch and push. It uses a trusted temporary repository and copies only bounded regular Git objects from a workspace, omitting its config, hooks and helpers. Pushes require a full commit SHA and explicit destination branch, then verify the remote ref. Fetch imports objects and returns `fetch_head` for an explicit subsequent workspace operation. `gh` checkout/clone/download/upload commands report the controlled Git provider requirement. Ordinary workspace commands receive no GitHub token.
+
+The first implementation keeps processes owned by their originating run. A run with live processes must remain active or explicitly terminate them before becoming quiescent. Task-level process-lease transfer requires a separate implementation. Validate descendant cleanup, cancellation, timeout, symlink races, inaccessible service credentials and clone/edit/commit/push on the target Linux host. Local fixture tests cover protocol and evidence behavior but do not perform GitHub writes.
+
+### Local gh authentication
+
+Worker credentials prefer the configured host's local `gh` login, then fall back to
+`QQBOT_GITHUB_TOKEN` (or `--github-token-env`). For a systemd Worker whose service
+account cannot access the login user's home, use a service drop-in:
+
+```ini
+[Service]
+LoadCredential=hosts.yml:/home/LOGIN_USER/.config/gh/hosts.yml
+LoadCredential=config.yml:/home/LOGIN_USER/.config/gh/config.yml
+Environment=GH_CONFIG_DIR=%d
+```
+
+Replace the source path with the existing `gh` configuration. systemd supplies a
+read-only private copy at service startup; include `config.yml` so gh does not attempt
+a configuration migration in that read-only directory; restart the Worker after changing that
+login. The runner sandbox receives neither this file nor the user's home directory.

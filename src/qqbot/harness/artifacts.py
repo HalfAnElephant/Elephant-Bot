@@ -6,21 +6,38 @@ import stat
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
+DEFAULT_ARTIFACT_MIME_TYPES = {
+    ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json",
+    ".zip": "application/zip", ".pdf": "application/pdf", ".png": "image/png",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".csv": "text/csv", ".html": "text/html",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
 
-def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024):
+
+def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, mime_types=None):
     if len(paths) > 20:
         raise ValueError("too many artifacts")
-    root = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    mime_types = dict(DEFAULT_ARTIFACT_MIME_TYPES if mime_types is None else mime_types)
     archive = Path(archive)
     archive.mkdir(parents=True, exist_ok=True, mode=0o700)
-    exported = []
+    archive_fd = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        root = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except BaseException:
+        os.close(archive_fd)
+        raise
+    exported, created = [], []
     total = 0
     try:
         for relative in paths:
             path = PurePosixPath(relative)
             if path.is_absolute() or ".." in path.parts or not path.parts:
                 raise ValueError("artifact path must stay in workspace")
-            if path.suffix not in {".txt", ".md", ".json"}:
+            mime_type = mime_types.get(path.suffix.lower())
+            if not isinstance(mime_type, str) or not mime_type:
                 raise ValueError("unsupported artifact type")
             directory = os.dup(root)
             try:
@@ -50,14 +67,17 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024):
                         or len(content) != info.st_size
                     ):
                         raise ValueError("artifact changed during export")
-                    content.decode("utf-8")
+                    if mime_type.startswith("text/") or mime_type == "application/json":
+                        content.decode("utf-8")
                 finally:
                     os.close(fd)
             finally:
                 os.close(directory)
             artifact_id = str(uuid4())
-            destination = archive / artifact_id
-            with destination.open("xb") as output:
+            destination_fd = os.open(artifact_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=archive_fd)
+            created.append(artifact_id)
+            with os.fdopen(destination_fd, "wb") as output:
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
@@ -67,15 +87,14 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024):
                     "relative_path": str(path),
                     "size": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
-                    "mime_type": {".md": "text/markdown", ".txt": "text/plain", ".json": "application/json"}[
-                        path.suffix
-                    ],
+                    "mime_type": mime_type,
                 }
             )
     except BaseException:
-        for artifact in exported:
-            (archive / artifact["id"]).unlink(missing_ok=True)
+        for artifact_id in created:
+            os.unlink(artifact_id, dir_fd=archive_fd)
         raise
     finally:
         os.close(root)
+        os.close(archive_fd)
     return exported

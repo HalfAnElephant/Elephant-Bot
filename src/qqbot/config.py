@@ -7,6 +7,8 @@ import yaml
 from pydantic import Field, model_validator
 
 from qqbot.domain import DTO
+from qqbot.domain.execution import RunBudget
+from qqbot.permissions import PermissionPolicy
 
 
 class AdapterConfig(DTO):
@@ -49,6 +51,7 @@ class ModelConfig(DTO):
     model: str | None = None
     api_key_env: str = "QQBOT_MODEL_KEY"
     timeout_seconds: int = Field(default=30, ge=1, le=120)
+    context_window: int = Field(default=32768, ge=2048, le=2000000)
 
 
 class JudgeConfig(DTO):
@@ -72,6 +75,54 @@ class MemoryConfig(DTO):
     raw_retention_days: int = Field(default=30, ge=1, le=3650)
 
 
+class ExecutionConfig(DTO):
+    max_active: int = Field(default=4, ge=1, le=32)
+    sustained_limit: int = Field(default=2, ge=1, le=31)
+    foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
+    interactive_budget: RunBudget = RunBudget(
+        model_calls=30, tool_calls=80, active_seconds=600, total_wall_seconds=3600,
+        output_tokens_per_call=4096,
+    )
+    budget: RunBudget = RunBudget()
+    warm_max: int = Field(default=4, ge=0, le=32)
+    warm_idle_max: int = Field(default=2, ge=0, le=32)
+    warm_ttl_seconds: int = Field(default=300, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def bounded_capacity(self):
+        if self.sustained_limit >= self.max_active:
+            raise ValueError("reserve at least one execution slot for new interaction")
+        if self.warm_max and self.warm_idle_max > self.warm_max:
+            raise ValueError("idle process limit exceeds resident limit")
+        return self
+
+
+class ContextConfig(DTO):
+    max_request_bytes: int = Field(default=16777216, ge=4096, le=16777216)
+    max_tokens: int | None = Field(default=None, ge=256, le=2000000,
+        description="pi soft compaction threshold; null reserves 10% of the model window or output headroom, whichever is larger")
+    keep_recent_tokens: int | None = Field(default=None, ge=128, le=2000000,
+        description="pi recent context retained during compaction; null uses 20% of the model window")
+    compaction_output_tokens: int = Field(default=4096, ge=128, le=32768)
+    recent_messages: int = Field(default=64, ge=1, le=100)
+    topic_idle_seconds: int = Field(default=1800, ge=60, le=86400)
+    version: str = "context-v2"
+
+    def limits(self, model_window: int, output_tokens: int) -> dict:
+        output = max(output_tokens, self.compaction_output_tokens)
+        headroom = output + 1024
+        soft = self.max_tokens if self.max_tokens is not None else model_window - max(
+            (model_window + 9) // 10, headroom
+        )
+        recent = self.keep_recent_tokens if self.keep_recent_tokens is not None else min(
+            model_window // 5, soft // 2
+        )
+        if not 0 < recent < soft <= model_window - headroom:
+            raise ValueError("context requires recent < soft threshold with output headroom inside model window")
+        return {"max_bytes": self.max_request_bytes, "soft_compaction_input_tokens": soft,
+                "keep_recent_tokens": recent, "compaction_output_tokens": self.compaction_output_tokens}
+
+
 class Settings(DTO):
     deployment_id: str = "elephant-local"
     database: str = "var/core.db"
@@ -80,9 +131,13 @@ class Settings(DTO):
     internal_token_env: str = "QQBOT_INTERNAL_TOKEN"
     model: ModelConfig = ModelConfig()
     source_url: str = ""
-    send_budget_per_minute: int = Field(default=6, ge=1, le=60)
+    send_budget_per_minute: int = Field(default=0, ge=0, le=60)
     timezone: str = "Asia/Shanghai"
     tasks_enabled: bool = False
+    interactive_execution_enabled: bool = True
+    permissions: PermissionPolicy = PermissionPolicy()
+    execution: ExecutionConfig = ExecutionConfig()
+    context: ContextConfig = ContextConfig()
     internal_socket: str = "var/internal.sock"
     persona_path: str = "personas/elephant_default.yaml"
     judge: JudgeConfig = JudgeConfig()
@@ -94,8 +149,26 @@ class Settings(DTO):
         ids = [a.instance_id for a in self.adapters]
         if len(ids) != len(set(ids)):
             raise ValueError("adapter instance IDs must be unique")
+        output = max(
+            self.execution.interactive_budget.output_tokens_per_call,
+            self.execution.budget.output_tokens_per_call,
+        )
+        self.context.limits(self.model.context_window, output)
         return self
 
 
 def load_settings(path: str | Path) -> Settings:
     return Settings.model_validate_json(json.dumps(yaml.safe_load(Path(path).read_text()) or {}))
+
+
+def runtime_config_path(settings: Settings) -> Path:
+    # Anchor to the startup file's database, even when the saved database changes.
+    return Path(settings.database).resolve().parent / "runtime-config.json"
+
+
+def load_runtime_settings(settings: Settings) -> Settings:
+    path = runtime_config_path(settings)
+    if not path.exists():
+        return settings
+    values = json.loads(path.read_text())
+    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}))

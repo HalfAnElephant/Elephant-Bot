@@ -26,6 +26,7 @@ ROOT_DIRECTORY = Path("/var/lib/qqbot-runner-root")
 LAUNCHER = "/usr/local/libexec/pi-runner-launch"
 ENTRY = "/opt/qqbot/bin/pi-runner-entry"
 EXTENSION = "/opt/qqbot/research_extension.ts"
+GENERAL_EXTENSION = "/opt/qqbot/pi_bridge.ts"
 NETWORK_NAMESPACE = "/run/netns/qqbot-runner"
 
 
@@ -111,53 +112,44 @@ def production_policy(path=POLICY, *, require_verified=True):
 
 
 def validate_manifest(manifest, task_id, run_id, policy, *, check_deadline=True):
-    expected = {
-        "schema_version",
-        "task_id",
-        "run_id",
-        "session_id",
-        "profile",
-        "model",
-        "proxy_url",
-        "model_token",
-        "tool_token",
-        "expires_at",
-    }
-    if (
-        set(manifest) != expected
-        or type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
-    ):
+    version = manifest.get("schema_version")
+    common = {"schema_version", "task_id", "run_id", "session_id", "profile", "model", "proxy_url", "expires_at"}
+    expected = common | ({"model_token", "tool_token"} if version == 1 else
+                         {"process_id", "process_epoch", "process_token", "model_context_window", "output_tokens", "soft_input_tokens", "keep_recent_tokens"})
+    if type(version) is not int or version not in {1, 2} or set(manifest) != expected:
         raise ValueError("invalid launch manifest schema")
-    for key, value in (("task_id", task_id), ("run_id", run_id), ("session_id", run_id)):
-        if canonical_uuid(manifest[key]) != value:
+    if canonical_uuid(manifest["task_id"]) != task_id:
+        raise ValueError("launch identity mismatch")
+    canonical_uuid(manifest["run_id"])
+    canonical_uuid(manifest["session_id"])
+    if version == 1:
+        if manifest["run_id"] != run_id or manifest["session_id"] != run_id or manifest["profile"] != "pi_research":
             raise ValueError("launch identity mismatch")
-    if manifest["profile"] != "pi_research" or manifest["model"] not in policy["approved_models"]:
-        raise ValueError("profile or model is not approved")
+    elif (canonical_uuid(manifest["process_id"]) != run_id or manifest["profile"] != "pi"
+          or type(manifest["process_epoch"]) is not int or manifest["process_epoch"] < 1):
+        raise ValueError("invalid general process identity")
+    if version == 2 and (type(manifest["model_context_window"]) is not int
+            or not 8192 <= manifest["model_context_window"] <= 2000000
+            or type(manifest["output_tokens"]) is not int or not 1 <= manifest["output_tokens"] <= 32768):
+        raise ValueError("invalid model limits")
+    if version == 2 and (type(manifest["soft_input_tokens"]) is not int or type(manifest["keep_recent_tokens"]) is not int
+            or not 0 < manifest["keep_recent_tokens"] < manifest["soft_input_tokens"]
+            or manifest["soft_input_tokens"] + manifest["output_tokens"] > manifest["model_context_window"]):
+        raise ValueError("invalid compaction limits")
+    if manifest["model"] not in policy["approved_models"]:
+        raise ValueError("model is not approved")
     parsed = urlsplit(manifest["proxy_url"])
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname != policy["proxy_host"]
-        or parsed.username
-        or parsed.password
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
+    if (parsed.scheme != "http" or parsed.hostname != policy["proxy_host"] or parsed.username
+            or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
         raise ValueError("invalid capability proxy URL")
     if not parsed.port or not policy["proxy_port_min"] <= parsed.port <= policy["proxy_port_max"]:
         raise ValueError("proxy port is not approved")
-    for key in ("model_token", "tool_token"):
-        if (
-            not isinstance(manifest[key], str)
-            or not 32 <= len(manifest[key]) <= 128
-            or not all(c.isalnum() or c in "_-" for c in manifest[key])
-        ):
+    for key in (("model_token", "tool_token") if version == 1 else ("process_token",)):
+        if (not isinstance(manifest[key], str) or not 32 <= len(manifest[key]) <= 128
+                or not all(c.isalnum() or c in "_-" for c in manifest[key])):
             raise ValueError("invalid capability token")
     deadline = datetime.fromisoformat(manifest["expires_at"])
-    if deadline.tzinfo is None or (
-        check_deadline and not 0 < (deadline - datetime.now(UTC)).total_seconds() <= 1800
-    ):
+    if deadline.tzinfo is None or (check_deadline and not 0 < (deadline - datetime.now(UTC)).total_seconds() <= (1800 if version == 1 else 86400)):
         raise ValueError("launch deadline expired or exceeds budget")
     return manifest
 
@@ -256,8 +248,9 @@ def prepare_workspace(run_id):
     return workspace
 
 
-def systemd_argv(task_id, run_id, policy):
+def systemd_argv(task_id, run_id, policy, *, general=False):
     workspace = str(WORKSPACES / run_id)
+    extension = GENERAL_EXTENSION if general else EXTENSION
     properties = {
         "User": "qqbot-runner",
         "Group": "qqbot-worker",
@@ -285,12 +278,12 @@ def systemd_argv(task_id, run_id, policy):
         "TasksMax": "64",
         "MemoryMax": "1G",
         "CPUQuota": "100%",
-        "RuntimeMaxSec": "1800",
+        "RuntimeMaxSec": "86400" if general else "1800",
         "KillMode": "control-group",
         "ExitType": "cgroup",
         "TimeoutStopSec": "5",
         "BindPaths": workspace + ":/workspace",
-        "BindReadOnlyPaths": f"/usr:/usr /lib:/lib -/lib64:/lib64 /opt/qqbot/node_modules:/opt/qqbot/node_modules {ENTRY}:{ENTRY} {EXTENSION}:{EXTENSION} {ROOT_MANIFESTS / (run_id + '.json')}:/run/qqbot/manifest.json",
+        "BindReadOnlyPaths": f"/usr:/usr /lib:/lib -/lib64:/lib64 /opt/qqbot/node_modules:/opt/qqbot/node_modules {ENTRY}:{ENTRY} {extension}:{extension} {ROOT_MANIFESTS / (run_id + '.json')}:/run/qqbot/manifest.json",
         "ReadWritePaths": "/workspace",
     }
     return [
@@ -359,7 +352,8 @@ def main():
                     policy,
                     check_deadline=False,
                 )
-            if manifest.get("task_id") != task_id or manifest.get("run_id") != run_id:
+            identity_key = "process_id" if manifest.get("schema_version") == 2 else "run_id"
+            if manifest.get("task_id") != task_id or manifest.get(identity_key) != run_id:
                 raise SystemExit("stop identity mismatch")
             subprocess.run(["/usr/bin/systemctl", "stop", unit], timeout=15, check=False, env=env)
             if not record_stop(task_id, run_id, unit):
@@ -374,13 +368,13 @@ def main():
             info = directory.stat(follow_symlinks=False)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit("untrusted runner installation directory")
-        for executable in (ENTRY, EXTENSION):
+        for executable in (ENTRY, GENERAL_EXTENSION if manifest["schema_version"] == 2 else EXTENSION):
             info = Path(executable).stat(follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit("untrusted runner executable or extension")
         prepare_workspace(run_id)
         atomic_root_json(ROOT_MANIFESTS / (run_id + ".json"), manifest)
-        process = subprocess.Popen(systemd_argv(task_id, run_id, policy), env=env)
+        process = subprocess.Popen(systemd_argv(task_id, run_id, policy, general=manifest["schema_version"] == 2), env=env)
         deadline = time.monotonic() + 10
         while process.poll() is None and not registered(unit):
             if time.monotonic() >= deadline:

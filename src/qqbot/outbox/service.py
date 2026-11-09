@@ -1,4 +1,6 @@
-from datetime import timedelta
+from contextlib import nullcontext
+from datetime import datetime, timedelta
+from random import Random
 from uuid import uuid4
 
 from sqlalchemy import and_, func, insert, or_, select, update
@@ -6,12 +8,24 @@ from sqlalchemy import and_, func, insert, or_, select, update
 from qqbot.domain import OutboundEnvelope, SendReceipt, stable_id
 from qqbot.storage.schema import outbox, reply_counters
 
+from .presentation import plain_text, split_text
+
 
 class Outbox:
     def __init__(self, db, clock):
         self.db, self.clock = db, clock
 
     def enqueue(self, c, envelope: OutboundEnvelope) -> str:
+        text = envelope.text if envelope.plain_text else plain_text(envelope.text)
+        deliveries = []
+        for offset, part in enumerate(split_text(text)):
+            deliveries.append(self._enqueue_one(c, envelope.model_copy(update={
+                "text": part, "plain_text": True, "part_no": envelope.part_no + offset,
+                "delivery_id": envelope.delivery_id if offset == 0 else str(uuid4()),
+            })))
+        return deliveries[0]
+
+    def _enqueue_one(self, c, envelope):
         key = stable_id(
             envelope.origin_kind,
             envelope.origin_id,
@@ -48,6 +62,8 @@ class Outbox:
                 origin_id=envelope.origin_id,
                 origin_kind=envelope.origin_kind,
                 part_no=envelope.part_no,
+                task_id=envelope.parent_task_id,
+                notification_sequence=envelope.notification_sequence,
             )
         )
         return envelope.delivery_id
@@ -68,16 +84,20 @@ class Outbox:
         policy_version=None,
         anchor_message_id=None,
         requester=None,
+        parent_task_id=None,
+        notification_sequence=0,
+        purpose=None,
     ):
         ids = []
-        for part_no, start in enumerate(range(0, len(text), 1800)):
+        for part_no, part in enumerate(split_text(plain_text(text))):
             ids.append(
                 self.enqueue(
                     c,
                     OutboundEnvelope(
                         delivery_id=str(uuid4()),
                         target=target,
-                        text=text[start : start + 1800],
+                        text=part,
+                        plain_text=True,
                         origin_kind=origin_kind,
                         origin_id=origin_id,
                         part_no=part_no,
@@ -89,10 +109,35 @@ class Outbox:
                         policy_version=policy_version,
                         anchor_message_id=anchor_message_id,
                         requester=requester,
+                        parent_task_id=parent_task_id,
+                        notification_sequence=notification_sequence,
+                        purpose=purpose,
                     ),
                 )
             )
         return ids
+
+    def _prepare_pending(self, c, row):
+        envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
+        if envelope.plain_text:
+            return envelope
+        parts = split_text(plain_text(envelope.text))
+        envelope = envelope.model_copy(update={"text": parts[0], "plain_text": True})
+        c.execute(update(outbox).where(outbox.c.id == row["id"]).values(envelope_json=envelope.model_dump_json()))
+        for offset, part in enumerate(parts[1:], 1):
+            self._enqueue_one(c, envelope.model_copy(update={"text": part, "delivery_id": str(uuid4()),
+                                                          "part_no": envelope.part_no + offset}))
+        return envelope
+
+    @staticmethod
+    def _spacing(delivery_id):
+        # The persisted UUID gives each send a stable random gap across retries and restarts.
+        return timedelta(seconds=Random(delivery_id).uniform(1.2, 2.8))
+
+    def _defer(self, c, delivery_id, due):
+        c.execute(update(outbox).where(outbox.c.id == delivery_id,
+            or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at < due.isoformat()))
+            .values(next_attempt_at=due.isoformat()))
 
     def recover(self):
         with self.db.transaction() as c:
@@ -140,20 +185,31 @@ class Outbox:
                 .values(state="PENDING", envelope_json=envelope.model_dump_json())
             )
 
-    async def dispatch_once(self, adapters, budget=6, pre_send=None):
+    async def dispatch_once(self, adapters, budget=0, pre_send=None):
         with self.db.engine.connect() as c:
             rows = (
                 c.execute(
                     select(outbox)
-                    .where(outbox.c.state.in_(["PENDING", "RETRYABLE"]))
-                    .order_by(outbox.c.created_at, outbox.c.id)
+                    .where(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
+                           or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()))
+                    .order_by(outbox.c.created_at, outbox.c.conversation_id, outbox.c.origin_id,
+                              outbox.c.part_no, outbox.c.id)
                     .limit(50)
                 )
                 .mappings()
                 .all()
             )
         for row in rows:
-            envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
+            with self.db.transaction() as c:
+                current = c.execute(select(outbox).where(outbox.c.id == row["id"],
+                    outbox.c.state.in_(["PENDING", "RETRYABLE"]))).mappings().first()
+                if not current:
+                    continue
+                try:
+                    envelope = self._prepare_pending(c, current)
+                except ValueError:
+                    self._receipt(row["id"], SendReceipt(state="FAILED", error_code="EMPTY_TEXT"), connection=c)
+                    continue
             now = self.clock.now()
             if row["next_attempt_at"] and row["next_attempt_at"] > now.isoformat():
                 continue
@@ -177,6 +233,23 @@ class Outbox:
                     self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code=check.reason))
                 continue
             with self.db.transaction() as c:
+                current = c.execute(select(outbox.c.state, outbox.c.next_attempt_at).where(
+                    outbox.c.id == row["id"])).mappings().one()
+                if current["state"] not in {"PENDING", "RETRYABLE"} or (
+                    current["next_attempt_at"] and current["next_attempt_at"] > now.isoformat()
+                ):
+                    continue
+                if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
+                    outbox.c.state == "SENDING")).first():
+                    continue
+                last = c.execute(select(outbox.c.id, outbox.c.sent_at, outbox.c.attempted_at).where(
+                    outbox.c.conversation_id == envelope.target.key, outbox.c.attempted_at.is_not(None))
+                    .order_by(func.coalesce(outbox.c.sent_at, outbox.c.attempted_at).desc()).limit(1)).mappings().first()
+                if last:
+                    due = datetime.fromisoformat(last["sent_at"] or last["attempted_at"]) + self._spacing(last["id"])
+                    if due > now:
+                        self._defer(c, row["id"], due)
+                        continue
                 predecessor = c.execute(
                     select(outbox.c.id).where(
                         outbox.c.conversation_id == envelope.target.key,
@@ -188,22 +261,30 @@ class Outbox:
                 ).first()
                 if predecessor:
                     continue
-                used = c.execute(
-                    select(func.count())
-                    .select_from(outbox)
-                    .where(
-                        outbox.c.conversation_id == envelope.target.key,
-                        or_(
-                            outbox.c.state.in_(["SENDING", "UNKNOWN"]),
-                            and_(
-                                outbox.c.state == "SENT",
-                                outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
-                            ),
-                        ),
-                    )
-                ).scalar_one()
-                if used >= budget:
+                if envelope.parent_task_id and c.execute(select(outbox.c.id).where(
+                    outbox.c.task_id == envelope.parent_task_id,
+                    outbox.c.notification_sequence < envelope.notification_sequence,
+                    outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
                     continue
+                if budget:
+                    used = c.execute(
+                        select(func.count())
+                        .select_from(outbox)
+                        .where(
+                            outbox.c.conversation_id == envelope.target.key,
+                            or_(
+                                outbox.c.state == "SENDING",
+                                and_(outbox.c.state == "UNKNOWN",
+                                    outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat()),
+                                and_(
+                                    outbox.c.state == "SENT",
+                                    outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
+                                ),
+                            ),
+                        )
+                    ).scalar_one()
+                    if used >= budget:
+                        continue
                 claimed = c.execute(
                     update(outbox)
                     .where(outbox.c.id == row["id"], outbox.c.state.in_(["PENDING", "RETRYABLE"]))
@@ -217,8 +298,10 @@ class Outbox:
                 receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
             self._receipt(envelope.delivery_id, receipt)
 
-    def _receipt(self, delivery_id, receipt):
-        with self.db.transaction() as c:
+    def _receipt(self, delivery_id, receipt, *, connection=None):
+        with self.db.transaction() if connection is None else nullcontext(connection) as c:
+            previous = c.execute(select(outbox.c.state, outbox.c.conversation_id).where(
+                outbox.c.id == delivery_id)).mappings().one()
             c.execute(
                 update(outbox)
                 .where(outbox.c.id == delivery_id)
@@ -232,3 +315,23 @@ class Outbox:
                     else None,
                 )
             )
+
+            if previous["state"] == "SENDING":
+                due = self.clock.now() + self._spacing(delivery_id)
+                pending = c.execute(select(outbox.c.id).where(
+                    outbox.c.conversation_id == previous["conversation_id"],
+                    outbox.c.state.in_(["PENDING", "RETRYABLE"]))).scalars().all()
+                for pending_id in pending:
+                    self._defer(c, pending_id, due)
+
+            if receipt.state == "SENT":
+                from qqbot.storage.task_schema import notifications, waits
+                origin = c.execute(select(outbox.c.origin_id).where(outbox.c.id == delivery_id)).scalar_one()
+                remaining = c.execute(select(outbox.c.id).where(outbox.c.origin_id == origin,
+                    outbox.c.state != "SENT")).first()
+                if not remaining:
+                    now = self.clock.now()
+                    c.execute(update(notifications).where(notifications.c.id == origin).values(state="SENT"))
+                    c.execute(update(waits).where(waits.c.notification_id == origin,
+                        waits.c.delivered_at.is_(None)).values(delivered_at=now.isoformat(),
+                            expires_at=(now + timedelta(hours=1)).isoformat()))

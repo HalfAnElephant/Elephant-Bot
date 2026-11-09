@@ -2,13 +2,15 @@ import pytest
 from sqlalchemy import select
 
 from qqbot.clock import FakeClock
+from qqbot.domain.execution import TaskGoal
 from qqbot.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
 from qqbot.harness.artifacts import export_artifacts
 from qqbot.jobs.service import TaskService
 from qqbot.outbox.service import Outbox
+from qqbot.permissions import PermissionRule
 from qqbot.storage.db import Database
 from qqbot.storage.schema import metadata, outbox
-from qqbot.storage.task_schema import runs
+from qqbot.storage.task_schema import inputs, notifications, runs, waits
 
 
 @pytest.fixture
@@ -64,7 +66,7 @@ def test_accept_complete_delivery_and_fence(setup):
     assert service.submit(claim["run_id"], claim["fencing_token"], "worker", result)["state"] == "SUCCEEDED"
     assert service.get(task["public_id"], access)["state"] == "SUCCEEDED"
     with service.db.engine.connect() as c:
-        assert len(c.execute(select(outbox)).all()) == 2
+        assert len(c.execute(select(outbox)).all()) == 1
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0
 
 
@@ -75,7 +77,7 @@ def test_cancel_rejects_late_success_keeps_slot(setup):
     service.cancel(task["public_id"], access)
     with pytest.raises(PermissionError):
         service.submit(
-            claim["run_id"], claim["fencing_token"], "worker", {"status": "failed", "summary": "done"}
+            claim["run_id"], claim["fencing_token"], "worker", {"status": "completed", "summary": "done"}
         )
     assert service.claim("other") is None
     assert service.stopped(claim["run_id"], claim["fencing_token"], "worker")["state"] == "CANCELLED"
@@ -92,17 +94,24 @@ def test_expired_lease_never_reexecutes(setup):
         service.renew(claim["run_id"], claim["fencing_token"], "worker")
 
 
-def test_member_cannot_submit(setup):
+def test_member_uses_same_permission_service(setup):
     service, event, access, _clock = setup
+    member = access.model_copy(update={"role": "member"})
+    assert service.accept(event, member, "work")["requester"] == member.principal.key
+    service.permissions.upsert(
+        PermissionRule(id="deny-create", effect="deny", actions=("task.create",)),
+        expected_version=0,
+        actor="test",
+    )
     with pytest.raises(PermissionError):
-        service.accept(event, access.model_copy(update={"role": "member"}), "work")
+        service.accept(event.model_copy(update={"event_id": "another"}), member, "work")
 
 
 def test_completion_requires_real_manifest(setup):
     service, event, access, _clock = setup
-    service.accept(event, access, "work")
+    service.accept(event, access, TaskGoal(text="work", requested_outputs=("report.md",)))
     claim = service.claim("w")
-    with pytest.raises(ValueError, match="exported artifacts"):
+    with pytest.raises(ValueError, match="requested outputs missing"):
         service.submit(
             claim["run_id"], claim["fencing_token"], "w", {"status": "completed", "summary": "claimed done"}
         )
@@ -144,7 +153,10 @@ async def test_internal_worker_http_contract(setup):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core") as client:
         assert (await client.post("/internal/tasks/claim", json={"worker_id": "w"})).status_code == 401
         client.headers["Authorization"] = "Bearer " + "a" * 32
-        claim = (await client.post("/internal/tasks/claim", json={"worker_id": "w"})).json()
+        assert (await client.post("/internal/tasks/claim", json={"worker_id": "w"})).json() is None
+        claim = (
+            await client.post("/internal/tasks/claim", json={"worker_id": "w", "protocol_version": 2})
+        ).json()
         payload = {
             "worker_id": "w",
             "run_id": claim["run_id"],
@@ -276,7 +288,7 @@ async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
     assert service.get(task["public_id"], access)["state"] == "CANCELLED"
     with service.db.engine.connect() as c:
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0
-        assert len(c.execute(select(outbox)).all()) == 1
+        assert len(c.execute(select(outbox)).all()) == 0
 
 
 @pytest.mark.asyncio
@@ -318,6 +330,163 @@ async def test_supervisor_cancellation_stops_and_commits_failure(setup, tmp_path
         with pytest.raises(asyncio.CancelledError):
             await execution
         assert not list(worker.spool.directory.rglob("*.json"))
-    assert service.get(task["public_id"], access)["state"] == "FAILED"
+    assert service.get(task["public_id"], access)["state"] == "QUEUED"
     with service.db.engine.connect() as c:
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0
+    explanation = service.claim("explainer")
+    assert explanation["notification_status"] == "failed"
+    assert explanation["context"]["control_response"]
+    with pytest.raises(PermissionError):
+        service.authorize(explanation["run_id"], explanation["fencing_token"], "explainer", {"action": "github.issue.write"})
+    service.submit(explanation["run_id"], explanation["fencing_token"], "explainer",
+        {"status": "failed", "summary": "执行已中断，尚未完成。"})
+    assert service.get(task["public_id"], access)["state"] == "FAILED"
+
+
+def test_no_artifact_success_and_notification_identity(setup):
+    service, event, access, _clock = setup
+    task = service.accept(event, access.model_copy(update={"role": "member"}), "Say hello")
+    assert service.claim("old-worker", protocol_version=1) is None
+    claim = service.claim("worker", protocol_version=2)
+    packet = {"text": "正在核实当前资料。", "notification_id": "progress-1"}
+    first = service.notify(claim["run_id"], claim["fencing_token"], "worker", packet)
+    assert service.notify(claim["run_id"], claim["fencing_token"], "worker", packet) == first
+    with pytest.raises(ValueError, match="identity conflict"):
+        service.notify(claim["run_id"], claim["fencing_token"], "worker", {**packet, "text": "changed"})
+    result = {"status": "completed", "summary": "你好。"}
+    assert service.submit(claim["run_id"], claim["fencing_token"], "worker", result)["state"] == "SUCCEEDED"
+    assert service.submit(claim["run_id"], claim["fencing_token"], "worker", result)["state"] == "SUCCEEDED"
+    with service.db.engine.connect() as conn:
+        assert (
+            len(conn.execute(select(notifications).where(notifications.c.task_id == task["id"])).all()) == 2
+        )
+        assert len(conn.execute(select(outbox).where(outbox.c.origin_id == "progress-1")).all()) == 1
+
+
+@pytest.mark.parametrize("reply_before_settle", [True, False])
+def test_wait_answer_race_continues_same_task_once(setup, reply_before_settle):
+    service, event, access, _clock = setup
+    task = service.accept(event, access, "Need a chosen repository")
+    claim = service.claim("worker")
+    packet = {
+        "question_id": "question-1",
+        "text": "要操作哪个仓库？",
+        "checkpoint": "No external changes yet",
+    }
+    assert service.ask(claim["run_id"], claim["fencing_token"], "worker", packet)["waiting"]
+    answer = event.model_copy(update={"event_id": "answer", "platform_message_id": "answer-message"})
+    if reply_before_settle:
+        service.add_input(task["public_id"], answer, access, "org/repo", question_id="question-1")
+    waiting_result = {"status": "waiting_input", "summary": "已向用户询问目标仓库。"}
+    state = service.submit(claim["run_id"], claim["fencing_token"], "worker", waiting_result)["state"]
+    assert state == ("QUEUED" if reply_before_settle else "WAITING_INPUT")
+    if not reply_before_settle:
+        service.add_input(task["public_id"], answer, access, "org/repo", question_id="question-1")
+    replay = service.add_input(task["public_id"], answer, access, "org/repo", question_id="question-1")
+    assert replay["accepted"]
+    resumed = service.claim("worker")
+    assert resumed["task_id"] == task["id"] and resumed["run_id"] != claim["run_id"]
+    assert resumed["continuation"]["checkpoint"] == packet["checkpoint"]
+    assert [value["text"] for value in resumed["continuation"]["inputs"]] == ["org/repo"]
+    assert service.claim("another") is None
+    with service.db.engine.connect() as conn:
+        assert len(conn.execute(select(inputs)).all()) == 1
+        assert conn.execute(select(waits.c.state)).scalar_one() == "CONSUMED"
+        assert len(conn.execute(select(notifications)).all()) == 1
+
+
+@pytest.mark.parametrize("settled", [True, False])
+def test_cancel_dominates_wait_and_late_reply(setup, settled):
+    service, event, access, _clock = setup
+    task = service.accept(event, access, "Ask a question")
+    claim = service.claim("worker")
+    service.ask(
+        claim["run_id"],
+        claim["fencing_token"],
+        "worker",
+        {
+            "question_id": "question-1",
+            "text": "目标是什么？",
+            "checkpoint": "Awaiting goal",
+        },
+    )
+    if settled:
+        service.submit(
+            claim["run_id"],
+            claim["fencing_token"],
+            "worker",
+            {
+                "status": "waiting_input",
+                "summary": "正在等待目标。",
+            },
+        )
+    assert service.cancel(task["public_id"], access)["state"] == (
+        "CANCELLED" if settled else "CANCEL_REQUESTED"
+    )
+    answer = event.model_copy(update={"event_id": "late-answer"})
+    with pytest.raises(PermissionError):
+        service.add_input(task["public_id"], answer, access, "Too late", question_id="question-1")
+    assert service.question_for(answer) is None
+    if not settled:
+        with pytest.raises(PermissionError):
+            service.submit(
+                claim["run_id"], claim["fencing_token"], "worker", {"status": "completed", "summary": "Late"}
+            )
+        assert service.stopped(claim["run_id"], claim["fencing_token"], "worker")["state"] == "CANCELLED"
+    assert service.claim("another") is None
+
+
+def test_question_reply_mapping_disambiguates_multiple_waits(setup):
+    from sqlalchemy import update
+
+    service, event, access, _clock = setup
+    ids = []
+    for index in range(2):
+        source = event.model_copy(update={"event_id": f"source-{index}"})
+        task = service.accept(source, access, "Choose target")
+        claim = service.claim("worker")
+        question_id = f"question-{index}"
+        service.ask(
+            claim["run_id"],
+            claim["fencing_token"],
+            "worker",
+            {
+                "question_id": question_id,
+                "text": "请提供目标。",
+                "checkpoint": "Awaiting target",
+            },
+        )
+        service.submit(
+            claim["run_id"],
+            claim["fencing_token"],
+            "worker",
+            {
+                "status": "waiting_input",
+                "summary": "等待目标。",
+            },
+        )
+        with service.db.transaction() as conn:
+            conn.execute(
+                update(outbox)
+                .where(outbox.c.origin_id == question_id)
+                .values(state="SENT", platform_message_id=f"bot-question-{index}")
+            )
+        ids.append((question_id, task["public_id"]))
+    answer = event.model_copy(update={"event_id": "answer"})
+    assert service.question_for(answer) is None
+    mapped = service.question_for(answer.model_copy(update={"reply_to": "bot-question-1"}))
+    assert mapped == {"id": ids[1][0], "public_id": ids[1][1]}
+
+
+def test_notification_rejects_tool_protocol_but_allows_ordinary_mentions(setup):
+    service, event, access, _clock = setup
+    service.accept(event, access, "work")
+    claim = service.claim("worker")
+    with pytest.raises(ValueError, match="model emitted tool-call protocol"):
+        service.notify(claim["run_id"], claim["fencing_token"], "worker", {"notification_id": "protocol-test", "text":
+            '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="capability_invoke">not executed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'})
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(outbox)).first() is None
+    service.notify(claim["run_id"], claim["fencing_token"], "worker", {"notification_id": "protocol-test", "text": "DSML 是一种工具调用协议，当前查询已完成。"})
+    with service.db.engine.connect() as conn:
+        assert len(conn.execute(select(outbox)).all()) == 1

@@ -3,21 +3,37 @@ database: var/core.db
 adapters: []
 source_url: ''
 tasks_enabled: false
+interactive_execution_enabled: true
+permissions:
+  preset: allow_all
+  default_effect: allow
+  rules: []
+execution:
+  max_active: 4
+  sustained_limit: 2
+  foreground_wait_ms: 5000
+  warm_max: 4
+  warm_idle_max: 2
+  warm_ttl_seconds: 300
+context:
+  max_request_bytes: 16777216
+  max_tokens: null # pi automatic threshold, derived from the model window
+  keep_recent_tokens: null # pi automatic recent-context retention
+  compaction_output_tokens: 4096
 model:
   endpoint: null
   model: null
   api_key_env: QQBOT_MODEL_KEY
-# Add adapters only after setting credentials and explicit target allowlists.
+  context_window: 1000000 # Set the actual window supported by your model
+# Set adapter credentials before adding an adapter. Configure optional restrictions through permissions.
 # - instance_id: napcat_test
 #   kind: onebot
 #   bot_id: '12345'
 #   secret_env: QQBOT_ONEBOT_TOKEN
-#   allowed_groups: ['67890']
 # - instance_id: official_test
 #   kind: official
 #   bot_id: bot_identity
 #   app_id: app_id
 #   secret_env: QQBOT_OFFICIAL_SECRET
-#   allowed_groups: [group_openid]
 #   full_mode_enabled: false
 #   full_mode_verified: false

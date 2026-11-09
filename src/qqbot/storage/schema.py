@@ -77,3 +77,6 @@ audit_events = Table(
     Column("created_at", String, nullable=False),
     Column("detail", Text, nullable=False),
 )
+
+outbox.append_column(Column("task_id", String))
+outbox.append_column(Column("notification_sequence", Integer, nullable=False, server_default="0"))

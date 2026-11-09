@@ -29,6 +29,8 @@ spool/
 workspaces/
 runtime-config.json
 persona-overrides.json
+persona-global.json
+config-versions/
 *.overrides.json
 auth.json
 models.json

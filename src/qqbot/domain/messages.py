@@ -155,6 +155,7 @@ class OutboundEnvelope(DTO):
     origin_id: str
     part_no: int = 0
     content_version: int = 1
+    plain_text: bool = False
     expires_at: datetime
     allow_proactive: bool = False
     context_version: int | None = None
@@ -162,6 +163,9 @@ class OutboundEnvelope(DTO):
     policy_version: int | None = None
     anchor_message_id: str | None = None
     requester: PrincipalRef | None = None
+    parent_task_id: str | None = None
+    notification_sequence: int = 0
+    purpose: Literal["progress", "question", "result", "status"] | None = None
 
 
 class DeliveryCheck(DTO):

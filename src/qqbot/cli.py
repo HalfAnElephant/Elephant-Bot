@@ -11,11 +11,24 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from qqbot.config import Settings, load_settings
+from qqbot.config import Settings, load_runtime_settings, load_settings
 
 
 def migrate(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    if Path(path).exists() and Path(path).stat().st_size:
+        from datetime import UTC, datetime
+        with sqlite3.connect(path) as source:
+            try:
+                revision = source.execute("SELECT version_num FROM alembic_version").fetchone()
+            except sqlite3.OperationalError:
+                revision = None
+            if not revision or revision[0] != "0007":
+                backup_path = str(path) + ".before-0007-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + ".db"
+                descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(descriptor)
+                with sqlite3.connect(backup_path) as destination:
+                    source.backup(destination)
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
     command.upgrade(cfg, "head")
@@ -32,7 +45,8 @@ def main():
     parser.add_argument("--snapshot")
     parser.add_argument("--deletion-ledger")
     args = parser.parse_args()
-    settings = load_settings(args.config)
+    startup_settings = load_settings(args.config)
+    settings = load_runtime_settings(startup_settings)
     if args.command in {"backup", "restore", "export-deletions"}:
         from qqbot.storage.operations import backup, export_deletions, restore
 
@@ -80,9 +94,9 @@ def main():
         lock = os.open(settings.database + ".core.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if settings.tasks_enabled:
+            if settings.tasks_enabled or settings.interactive_execution_enabled:
                 clean_stale_socket(settings.internal_socket)
-            uvicorn.run(create_app(settings), host="127.0.0.1", port=8080)
+            uvicorn.run(create_app(startup_settings), host="127.0.0.1", port=8080)
         finally:
             os.close(lock)
 

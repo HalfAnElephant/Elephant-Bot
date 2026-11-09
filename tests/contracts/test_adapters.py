@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import timedelta
 from uuid import uuid4
 
@@ -147,7 +148,7 @@ async def test_D02_D03_unknown_and_expired(official_config, incoming, clock, off
 
 
 def test_A04_real_local_websocket(tmp_path, nap_config, clock, nap_event):
-    settings = Settings(database=str(tmp_path/"ws.db"), adapters=(nap_config,))
+    settings = Settings(interactive_execution_enabled=False, database=str(tmp_path/"ws.db"), adapters=(nap_config,))
     app = create_app(settings, clock=clock)
     headers = {"authorization":"Bearer test-secret", "x-self-id":"100"}
     with TestClient(app) as client:
@@ -158,6 +159,14 @@ def test_A04_real_local_websocket(tmp_path, nap_config, clock, nap_event):
             assert request["action"] == "send_group_msg"
             ws.send_json({"echo": request["echo"],"status":"ok","retcode":0,"data":{"message_id":999}})
         assert app.state.adapters["nap"].context_gap
+        for _ in range(100):
+            with app.state.db.engine.connect() as conn:
+                if conn.execute(select(outbox.c.state)).scalar_one() == "SENT":
+                    break
+            time.sleep(0.01)
+        else:
+            pytest.fail("first WebSocket acknowledgement was not committed")
+        clock.advance(3)
         with client.websocket_connect("/onebot/nap", headers=headers) as ws:
             event = {**nap_event, "message_id":401}
             ws.send_json({"echo":request["echo"],"status":"ok","retcode":0,"data":{"message_id":1000}})
@@ -181,3 +190,34 @@ def test_full_and_at_dual_notification_updates_invitation_once(official_config, 
     assert updated.ingest_seq > stored.ingest_seq
     incoming.finish(stored.event_id, expected_seq=stored.ingest_seq)
     assert incoming.pending()[0].mentions_bot
+
+
+@pytest.mark.parametrize("budget, expected", [(0, 8), (1, 1)])
+async def test_outbox_unlimited_default_and_explicit_limit(nap_config, incoming, clock, nap_event, db, budget, expected):
+    from qqbot.domain import DeliveryCheck, SendReceipt
+
+    nap = OneBotAdapter(nap_config, "d", incoming, clock)
+    event = nap.normalize(nap_event)
+    sent = []
+
+    class Adapter:
+        async def validate_delivery(self, item):
+            return DeliveryCheck(allowed=True, reason="OK")
+
+        async def send(self, item):
+            sent.append(item.origin_id)
+            return SendReceipt(state="SENT", platform_message_id=str(len(sent)))
+
+    outgoing = Outbox(db, clock)
+    with db.transaction() as c:
+        for index in range(8):
+            outgoing.enqueue(c, envelope(event.model_copy(update={"event_id": str(index)}), clock))
+    options = {"budget": budget} if budget else {}
+    await outgoing.dispatch_once({"nap": Adapter()}, **options)
+    await outgoing.dispatch_once({"nap": Adapter()}, **options)
+    assert len(sent) == 1
+    for _ in range(7):
+        clock.advance(3)
+        await outgoing.dispatch_once({"nap": Adapter()}, **options)
+    assert len(sent) == len(set(sent)) == expected
+    assert Settings().send_budget_per_minute == 0

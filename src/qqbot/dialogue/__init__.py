@@ -21,23 +21,39 @@ class PersonaSpec(BaseModel):
 
 
 class PersonaStore:
-    def __init__(self, path, overrides_path=None):
+    def __init__(self, path, overrides_path=None, global_path=None):
         self.path = Path(path)
         self.overrides_path = (
             Path(overrides_path) if overrides_path else self.path.with_suffix(".overrides.json")
         )
         self._core = None
+        self.global_path = Path(global_path) if global_path else None
         self._overrides = {}
         self.reload()
 
     def reload(self):
         parsed = PersonaSpec.model_validate(yaml.safe_load(self.path.read_text()))
+        if self.global_path and self.global_path.exists():
+            saved = json.loads(self.global_path.read_text())
+            if saved["source_path"] == str(self.path.resolve()):
+                parsed = PersonaSpec.model_validate(saved["persona"])
         overrides = json.loads(self.overrides_path.read_text()) if self.overrides_path.exists() else {}
         if not isinstance(overrides, dict):
             raise TypeError("invalid persona override store")
         for values in overrides.values():
             self._validate_override(values)
         self._core, self._overrides = parsed, overrides
+
+    def set_core(self, persona: PersonaSpec):
+        from qqbot.configuration import atomic_write
+
+        if self.global_path is None:
+            raise ValueError("global persona persistence is not configured")
+        persona = PersonaSpec.model_validate(persona)
+        atomic_write(self.global_path, json.dumps({
+            "source_path": str(self.path.resolve()), "persona": persona.model_dump(mode="json"),
+        }, ensure_ascii=False))
+        self._core = persona
 
     @staticmethod
     def _validate_override(values):
