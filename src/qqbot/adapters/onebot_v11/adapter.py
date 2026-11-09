@@ -26,6 +26,7 @@ from qqbot.domain import (
     UnknownSegment,
     stable_id,
 )
+from qqbot.permissions import PermissionService, PermissionSubject
 
 
 def decode_cq(value):
@@ -89,8 +90,9 @@ class ForwardSocket:
 
 
 class OneBotAdapter:
-    def __init__(self, config, deployment_id, inbox, clock):
+    def __init__(self, config, deployment_id, inbox, clock, *, permissions=None):
         self.config, self.deployment_id, self.inbox, self.clock = config, deployment_id, inbox, clock
+        self.permissions = permissions or PermissionService()
         self.websocket = None
         self.generation = 0
         self.pending = {}
@@ -306,12 +308,9 @@ class OneBotAdapter:
             or envelope.target.adapter_instance_id != self.config.instance_id
         ):
             return DeliveryCheck(allowed=False, reason="IDENTITY_MISMATCH")
-        allowed = (
-            self.config.allowed_users
-            if envelope.target.surface == Surface.PRIVATE
-            else self.config.allowed_groups
-        )
-        if envelope.target.remote_conversation_id not in allowed:
+        if not self.permissions.check(
+            PermissionSubject.from_refs(envelope.target), "notification.send", "conversation:" + envelope.target.key
+        ).allowed:
             return DeliveryCheck(allowed=False, reason="TARGET_DENIED")
         if envelope.target.surface == Surface.GUILD_CHANNEL:
             return DeliveryCheck(allowed=False, reason="UNSUPPORTED_SURFACE")

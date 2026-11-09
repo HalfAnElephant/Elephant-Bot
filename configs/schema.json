@@ -135,6 +135,145 @@
       "title": "AdapterConfig",
       "type": "object"
     },
+    "ContextConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_request_bytes": {
+          "default": 262144,
+          "maximum": 8388608,
+          "minimum": 4096,
+          "title": "Max Request Bytes",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "default": 6000,
+          "maximum": 1000000,
+          "minimum": 256,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "hard_input_tokens": {
+          "default": 8000,
+          "maximum": 1000000,
+          "minimum": 256,
+          "title": "Hard Input Tokens",
+          "type": "integer"
+        },
+        "keep_recent_tokens": {
+          "default": 2000,
+          "maximum": 1000000,
+          "minimum": 128,
+          "title": "Keep Recent Tokens",
+          "type": "integer"
+        },
+        "compaction_input_tokens": {
+          "default": 16000,
+          "maximum": 1000000,
+          "minimum": 256,
+          "title": "Compaction Input Tokens",
+          "type": "integer"
+        },
+        "compaction_output_tokens": {
+          "default": 1000,
+          "maximum": 100000,
+          "minimum": 128,
+          "title": "Compaction Output Tokens",
+          "type": "integer"
+        },
+        "recent_messages": {
+          "default": 16,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Recent Messages",
+          "type": "integer"
+        },
+        "topic_idle_seconds": {
+          "default": 1800,
+          "maximum": 86400,
+          "minimum": 60,
+          "title": "Topic Idle Seconds",
+          "type": "integer"
+        },
+        "version": {
+          "default": "context-v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "title": "ContextConfig",
+      "type": "object"
+    },
+    "ExecutionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "max_active": {
+          "default": 4,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Max Active",
+          "type": "integer"
+        },
+        "sustained_limit": {
+          "default": 2,
+          "maximum": 31,
+          "minimum": 1,
+          "title": "Sustained Limit",
+          "type": "integer"
+        },
+        "foreground_wait_ms": {
+          "default": 5000,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Foreground Wait Ms",
+          "type": "integer"
+        },
+        "interactive_budget": {
+          "$ref": "#/$defs/RunBudget",
+          "default": {
+            "model_calls": 6,
+            "tool_calls": 8,
+            "active_seconds": 60,
+            "total_wall_seconds": 600,
+            "output_tokens_per_call": 600,
+            "completion_reserve": 1
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/RunBudget",
+          "default": {
+            "model_calls": 30,
+            "tool_calls": 60,
+            "active_seconds": 1800,
+            "total_wall_seconds": 7200,
+            "output_tokens_per_call": 600,
+            "completion_reserve": 1
+          }
+        },
+        "warm_max": {
+          "default": 4,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Warm Max",
+          "type": "integer"
+        },
+        "warm_idle_max": {
+          "default": 2,
+          "maximum": 32,
+          "minimum": 0,
+          "title": "Warm Idle Max",
+          "type": "integer"
+        },
+        "warm_ttl_seconds": {
+          "default": 300,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Warm Ttl Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ExecutionConfig",
+      "type": "object"
+    },
     "JudgeConfig": {
       "additionalProperties": false,
       "properties": {
@@ -306,9 +445,237 @@
           "minimum": 1,
           "title": "Timeout Seconds",
           "type": "integer"
+        },
+        "context_window": {
+          "default": 32768,
+          "maximum": 2000000,
+          "minimum": 2048,
+          "title": "Context Window",
+          "type": "integer"
         }
       },
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "PermissionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "default": "allow_all",
+          "enum": [
+            "allow_all",
+            "custom"
+          ],
+          "title": "Preset",
+          "type": "string"
+        },
+        "default_effect": {
+          "default": "allow",
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "title": "Default Effect",
+          "type": "string"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "PermissionPolicy",
+      "type": "object"
+    },
+    "PermissionRule": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "priority": {
+          "default": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "subject": {
+          "$ref": "#/$defs/SubjectSelector"
+        },
+        "actions": {
+          "default": [
+            "*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Actions",
+          "type": "array"
+        },
+        "resources": {
+          "default": [
+            "*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Resources",
+          "type": "array"
+        },
+        "effect": {
+          "enum": [
+            "allow",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "effect"
+      ],
+      "title": "PermissionRule",
+      "type": "object"
+    },
+    "RunBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "model_calls": {
+          "default": 30,
+          "maximum": 200,
+          "minimum": 2,
+          "title": "Model Calls",
+          "type": "integer"
+        },
+        "tool_calls": {
+          "default": 60,
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
+        },
+        "active_seconds": {
+          "default": 1800,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Active Seconds",
+          "type": "integer"
+        },
+        "total_wall_seconds": {
+          "default": 7200,
+          "maximum": 604800,
+          "minimum": 1,
+          "title": "Total Wall Seconds",
+          "type": "integer"
+        },
+        "output_tokens_per_call": {
+          "default": 600,
+          "maximum": 32768,
+          "minimum": 1,
+          "title": "Output Tokens Per Call",
+          "type": "integer"
+        },
+        "completion_reserve": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Completion Reserve",
+          "type": "integer"
+        }
+      },
+      "title": "RunBudget",
+      "type": "object"
+    },
+    "SubjectSelector": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adapter Instance Id"
+        },
+        "bot_identity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bot Identity Id"
+        },
+        "identity_namespace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity Namespace"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        },
+        "kind": {
+          "default": "global",
+          "enum": [
+            "global",
+            "adapter",
+            "bot",
+            "group",
+            "person",
+            "group_member"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "SubjectSelector",
       "type": "object"
     }
   },
@@ -348,7 +715,8 @@
         "endpoint": null,
         "model": null,
         "api_key_env": "QQBOT_MODEL_KEY",
-        "timeout_seconds": 30
+        "timeout_seconds": 30,
+        "context_window": 32768
       }
     },
     "source_url": {
@@ -357,9 +725,9 @@
       "type": "string"
     },
     "send_budget_per_minute": {
-      "default": 6,
+      "default": 0,
       "maximum": 60,
-      "minimum": 1,
+      "minimum": 0,
       "title": "Send Budget Per Minute",
       "type": "integer"
     },
@@ -372,6 +740,60 @@
       "default": false,
       "title": "Tasks Enabled",
       "type": "boolean"
+    },
+    "interactive_execution_enabled": {
+      "default": true,
+      "title": "Interactive Execution Enabled",
+      "type": "boolean"
+    },
+    "permissions": {
+      "$ref": "#/$defs/PermissionPolicy",
+      "default": {
+        "preset": "allow_all",
+        "default_effect": "allow",
+        "rules": []
+      }
+    },
+    "execution": {
+      "$ref": "#/$defs/ExecutionConfig",
+      "default": {
+        "max_active": 4,
+        "sustained_limit": 2,
+        "foreground_wait_ms": 5000,
+        "interactive_budget": {
+          "active_seconds": 60,
+          "completion_reserve": 1,
+          "model_calls": 6,
+          "output_tokens_per_call": 600,
+          "tool_calls": 8,
+          "total_wall_seconds": 600
+        },
+        "budget": {
+          "active_seconds": 1800,
+          "completion_reserve": 1,
+          "model_calls": 30,
+          "output_tokens_per_call": 600,
+          "tool_calls": 60,
+          "total_wall_seconds": 7200
+        },
+        "warm_max": 4,
+        "warm_idle_max": 2,
+        "warm_ttl_seconds": 300
+      }
+    },
+    "context": {
+      "$ref": "#/$defs/ContextConfig",
+      "default": {
+        "max_request_bytes": 262144,
+        "max_tokens": 6000,
+        "hard_input_tokens": 8000,
+        "keep_recent_tokens": 2000,
+        "compaction_input_tokens": 16000,
+        "compaction_output_tokens": 1000,
+        "recent_messages": 16,
+        "topic_idle_seconds": 1800,
+        "version": "context-v1"
+      }
     },
     "internal_socket": {
       "default": "var/internal.sock",

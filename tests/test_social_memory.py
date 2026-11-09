@@ -112,9 +112,7 @@ def test_evidence_permissions_revocation(setup):
         svc.candidate(access, record(), explicit=True)
     event("e")
     r = svc.candidate(access, record(), explicit=True)
-    with pytest.raises(PermissionError):
-        svc.commit(access, r.memory_id)
-    svc.commit(access, r.memory_id, authorized=True)
+    svc.commit(access, r.memory_id)
     other = access.model_copy(
         update={"principal": access.principal.model_copy(update={"remote_user_id": "other"})}
     )
@@ -177,3 +175,35 @@ def test_replay_safe_ids_and_global_revocation_epoch(setup):
     svc.forget(access, new.memory_id)
     assert svc.version(other) > before
     svc.forget(access, new.memory_id)
+
+
+def test_default_allow_member_management_and_policy_revocation(setup):
+    from qqbot.permissions import PermissionPolicy, PermissionRule, PermissionService
+
+    svc, access, event, record, _clock = setup
+    access = access.model_copy(update={"role": "member"})
+    event("e")
+    candidate = record().model_copy(update={"scope_type": "conversation", "subject_ref": ""})
+    svc.candidate(access, candidate, explicit=True)
+    svc.commit(access, candidate.memory_id)
+    assert svc.retrieve(access, "陈")
+    svc.permissions = PermissionService(policy=PermissionPolicy(rules=(
+        PermissionRule(id="deny-forget", effect="deny", actions=("memory.manage",)),
+    )))
+    with pytest.raises(PermissionError):
+        svc.forget(access, candidate.memory_id)
+    assert svc.retrieve(access, "陈")
+
+
+def test_memory_source_permission_revokes_retrieval(setup):
+    from qqbot.permissions import PermissionPolicy, PermissionRule, PermissionService
+
+    svc, access, event, record, _clock = setup
+    event("e")
+    candidate = svc.candidate(access, record(), explicit=True)
+    svc.commit(access, candidate.memory_id)
+    assert svc.retrieve(access, "陈")
+    svc.permissions = PermissionService(policy=PermissionPolicy(rules=(
+        PermissionRule(id="deny-source", effect="deny", actions=("memory.source.read",), resources=("event:e",)),
+    )))
+    assert svc.retrieve(access, "陈") == []

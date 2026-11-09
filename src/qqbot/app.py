@@ -21,6 +21,7 @@ from qqbot.config import Settings
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.api import internal_router
 from qqbot.observability import configure_logging
+from qqbot.permissions import PermissionSubject
 from qqbot.runtime import Core
 from qqbot.storage.db import Database
 from qqbot.storage.schema import conversations, inbox, outbox
@@ -61,7 +62,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         try:
             for adapter in adapters.values():
                 await adapter.start()
-            if settings.tasks_enabled and run_background:
+            if (settings.tasks_enabled or settings.interactive_execution_enabled) and run_background:
                 token = os.environ.get(settings.internal_token_env, "")
                 internal = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
                 internal.include_router(internal_router(core.tasks, token))
@@ -165,6 +166,13 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     @app.get("/api/v1/status")
     async def status(request: Request):
         admin(request)
+        core.permissions.require(
+            PermissionSubject(
+                adapter_instance_id="admin_api", identity_namespace="admin_api", user_id="owner"
+            ),
+            "service.status.read",
+            "service:core",
+        )
         with db.engine.connect() as c:
             pending = c.execute(
                 select(func.count()).select_from(inbox).where(inbox.c.state == "PENDING")
@@ -173,12 +181,12 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         return {
             "inbox_pending": pending,
             "deliveries": dict(delivery_states),
-            "model_configured": bool(
-                core.settings.model.model
-                and core.settings.model.endpoint
-                and os.environ.get(core.settings.model.api_key_env)
-            ),
+            "model_configured": None,
+            "model_execution": "worker_pi"
+            if core.settings.interactive_execution_enabled or core.settings.tasks_enabled
+            else "disabled",
             "tasks_enabled": core.settings.tasks_enabled,
+            "interactive_execution_enabled": core.settings.interactive_execution_enabled,
             "adapters": [
                 {
                     "id": key,
@@ -194,6 +202,13 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     @app.get("/api/v1/conversations")
     async def list_conversations(request: Request):
         admin(request)
+        core.permissions.require(
+            PermissionSubject(
+                adapter_instance_id="admin_api", identity_namespace="admin_api", user_id="owner"
+            ),
+            "conversation.list",
+            "conversation:*",
+        )
         with db.engine.connect() as c:
             rows = [dict(r._mapping) for r in c.execute(select(conversations).limit(200))]
         return [{**row, "policy": core.state(row["id"])} for row in rows]

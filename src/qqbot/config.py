@@ -7,6 +7,8 @@ import yaml
 from pydantic import Field, model_validator
 
 from qqbot.domain import DTO
+from qqbot.domain.execution import RunBudget
+from qqbot.permissions import PermissionPolicy
 
 
 class AdapterConfig(DTO):
@@ -49,6 +51,7 @@ class ModelConfig(DTO):
     model: str | None = None
     api_key_env: str = "QQBOT_MODEL_KEY"
     timeout_seconds: int = Field(default=30, ge=1, le=120)
+    context_window: int = Field(default=32768, ge=2048, le=2000000)
 
 
 class JudgeConfig(DTO):
@@ -72,6 +75,47 @@ class MemoryConfig(DTO):
     raw_retention_days: int = Field(default=30, ge=1, le=3650)
 
 
+class ExecutionConfig(DTO):
+    max_active: int = Field(default=4, ge=1, le=32)
+    sustained_limit: int = Field(default=2, ge=1, le=31)
+    foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
+    interactive_budget: RunBudget = RunBudget(
+        model_calls=6, tool_calls=8, active_seconds=60, total_wall_seconds=600
+    )
+    budget: RunBudget = RunBudget()
+    warm_max: int = Field(default=4, ge=0, le=32)
+    warm_idle_max: int = Field(default=2, ge=0, le=32)
+    warm_ttl_seconds: int = Field(default=300, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def bounded_capacity(self):
+        if self.sustained_limit >= self.max_active:
+            raise ValueError("reserve at least one execution slot for new interaction")
+        if self.warm_max and self.warm_idle_max > self.warm_max:
+            raise ValueError("idle process limit exceeds resident limit")
+        return self
+
+
+class ContextConfig(DTO):
+    max_request_bytes: int = Field(default=262144, ge=4096, le=8388608)
+    max_tokens: int = Field(default=6000, ge=256, le=1000000)
+    hard_input_tokens: int = Field(default=8000, ge=256, le=1000000)
+    keep_recent_tokens: int = Field(default=2000, ge=128, le=1000000)
+    compaction_input_tokens: int = Field(default=16000, ge=256, le=1000000)
+    compaction_output_tokens: int = Field(default=1000, ge=128, le=100000)
+    recent_messages: int = Field(default=16, ge=1, le=100)
+    topic_idle_seconds: int = Field(default=1800, ge=60, le=86400)
+    version: str = "context-v1"
+
+    @model_validator(mode="after")
+    def bounded_context(self):
+        if not self.keep_recent_tokens < self.max_tokens < self.hard_input_tokens:
+            raise ValueError("context limits require recent < soft < hard")
+        if self.compaction_input_tokens < self.hard_input_tokens:
+            raise ValueError("compaction input budget must cover the normal hard input budget")
+        return self
+
+
 class Settings(DTO):
     deployment_id: str = "elephant-local"
     database: str = "var/core.db"
@@ -80,9 +124,13 @@ class Settings(DTO):
     internal_token_env: str = "QQBOT_INTERNAL_TOKEN"
     model: ModelConfig = ModelConfig()
     source_url: str = ""
-    send_budget_per_minute: int = Field(default=6, ge=1, le=60)
+    send_budget_per_minute: int = Field(default=0, ge=0, le=60)
     timezone: str = "Asia/Shanghai"
     tasks_enabled: bool = False
+    interactive_execution_enabled: bool = True
+    permissions: PermissionPolicy = PermissionPolicy()
+    execution: ExecutionConfig = ExecutionConfig()
+    context: ContextConfig = ContextConfig()
     internal_socket: str = "var/internal.sock"
     persona_path: str = "personas/elephant_default.yaml"
     judge: JudgeConfig = JudgeConfig()
@@ -94,6 +142,17 @@ class Settings(DTO):
         ids = [a.instance_id for a in self.adapters]
         if len(ids) != len(set(ids)):
             raise ValueError("adapter instance IDs must be unique")
+        output = max(
+            self.execution.interactive_budget.output_tokens_per_call,
+            self.execution.budget.output_tokens_per_call,
+        )
+        if self.context.hard_input_tokens + output > self.model.context_window:
+            raise ValueError("input and output budget exceed configured model context window")
+        if (
+            self.context.compaction_input_tokens + self.context.compaction_output_tokens
+            > self.model.context_window
+        ):
+            raise ValueError("compaction budget exceeds configured model context window")
         return self
 
 

@@ -1,4 +1,4 @@
-"""One process per run, no ambient credentials, extensions or executable tools."""
+"""The sole pi RPC adapter. A quiescent run need not stop its resident process."""
 
 import asyncio
 import json
@@ -14,8 +14,8 @@ MAX_EVENT = 2 * 1024 * 1024
 MAX_DIAGNOSTICS = 20 * 1024 * 1024
 
 
-class PiHarness:
-    capabilities = HarnessCapabilities()
+class PiRunnerAdapter:
+    capabilities = HarnessCapabilities(append_input=True, interactive_questions=True)
 
     def __init__(
         self,
@@ -29,14 +29,24 @@ class PiHarness:
         research=None,
         research_url=None,
         session_id=None,
+        gateway=None,
+        gateway_url=None,
     ):
         self.executable = str(Path(executable).resolve(strict=True))
         self.workspace = Path(workspace).resolve()
         self.provider, self.model, self.api_key, self.timeout = provider, model, api_key, timeout
         self.research, self.research_url = research, research_url
+        self.gateway, self.gateway_url = gateway, gateway_url
+        self.quiescent_verified = False
+        self.busy = False
+        self.input_lock = asyncio.Lock()
+        self.accepting_input = False
+        self.steered_inputs = set()
+        self.actual_session_id = None
         self.event_sink = None
         self.process = None
         self.queue = asyncio.Queue(maxsize=8)
+        self.responses = {}
         self.readers = []
         self.diagnostics_bytes = 0
         self.stderr_tail = bytearray()
@@ -65,7 +75,10 @@ class PiHarness:
             "--no-approve",
             "--offline",
         ]
-        if self.research:
+        if self.gateway:
+            argv.remove("--no-tools")
+            argv += ["--no-builtin-tools", "--extension", str(Path(__file__).with_name("pi_bridge.ts"))]
+        elif self.research:
             argv.remove("--no-tools")
             argv += [
                 "--no-builtin-tools",
@@ -89,6 +102,21 @@ class PiHarness:
             "PI_TELEMETRY": "0",
             "LANG": "C.UTF-8",
         }
+        limits = self.gateway.claim.get("context", {}).get("limits", {}) if self.gateway else {}
+        (profile / "settings.json").write_text(json.dumps({
+            "cacheWarming": "off", "defaultThinkingLevel": "off",
+            "compaction": {"enabled": True, "reserveTokens": (self.gateway.model_window if self.gateway else 32768) - limits.get("soft_compaction_input_tokens", 6000),
+                           "keepRecentTokens": limits.get("keep_recent_tokens", 2000)},
+        }))
+        if self.gateway:
+            env["QQBOT_GATEWAY_URL"] = self.gateway_url
+            env["QQBOT_PROCESS_TOKEN"] = self.gateway.process_token
+            # Bootstrap credentials are deliberately unusable for model/tool requests.
+            (profile / "models.json").write_text(json.dumps({"providers": {"qqbot": {
+                "baseUrl": self.gateway_url + "/v1", "api": "openai-completions", "apiKey": "binding-required",
+                "models": [{"id": self.model, "name": self.model, "reasoning": False, "input": ["text"],
+                    "contextWindow": self.gateway.model_window, "maxTokens": max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output),
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}))
         if self.research:
             env["QQBOT_RESEARCH_URL"] = self.research_url
             env["QQBOT_TOOL_TOKEN"] = self.research.tool_token
@@ -129,14 +157,25 @@ class PiHarness:
         )
         self.readers = [asyncio.create_task(self._stdout()), asyncio.create_task(self._stderr())]
 
-    async def command(self, kind, **values):
+    async def command(self, kind, *, wait=False, **values):
         if not self.process or self.process.returncode is not None:
             raise RuntimeError("runner stopped")
         command_id = str(uuid4())
+        future = asyncio.get_running_loop().create_future() if wait else None
+        if future:
+            self.responses[command_id] = future
         self.process.stdin.write(
             json.dumps({"id": command_id, "type": kind, **values}, ensure_ascii=False).encode() + b"\n"
         )
         await self.process.stdin.drain()
+        if future:
+            try:
+                response = await asyncio.wait_for(future, 10)
+                if not response.get("success"):
+                    raise RuntimeError(str(response.get("error", "RPC rejected command")))
+                return response.get("data", {})
+            finally:
+                self.responses.pop(command_id, None)
         return command_id
 
     async def _stdout(self):
@@ -149,10 +188,17 @@ class PiHarness:
                     raise TypeError("RPC event must be an object")
                 if self.event_sink:
                     self.event_sink(record)
-                await self.queue.put(record)
+                pending = self.responses.get(record.get("id")) if record.get("type") == "response" else None
+                if pending is not None and not pending.done():
+                    pending.set_result(record)
+                else:
+                    await self.queue.put(record)
         except (ValueError, TypeError, UnicodeError, RuntimeError) as error:
             await self.queue.put({"type": "host_error", "error": str(error)})
         finally:
+            for pending in self.responses.values():
+                if not pending.done():
+                    pending.set_exception(RuntimeError("RPC closed before command acknowledgement"))
             await self.queue.put({"type": "host_eof"})
 
     async def _stderr(self):
@@ -168,6 +214,8 @@ class PiHarness:
         secrets = [self.api_key]
         if self.research:
             secrets += [self.research.model_token, self.research.tool_token, self.research.upstream_key]
+        if self.gateway:
+            secrets += [self.gateway.model_token, self.gateway.tool_token, self.gateway.key, self.gateway.process_token]
         for secret in filter(None, secrets):
             text = text.replace(secret, "[REDACTED]")
             for length in range(min(len(secret), len(text)), 7, -1):
@@ -184,13 +232,20 @@ class PiHarness:
         tail = self.safe_diagnostic(self.stderr_tail.decode("utf-8", errors="replace"))[-2000:]
         return "Runner failed. " + detail + ("\nRunner stderr\n" + tail if tail else "")
 
-    async def run(self, goal):
-        await self.start()
-        text = ""
-        error = None
+    async def run(self, goal, *, keep_alive=False):
+        if self.busy:
+            raise RuntimeError("session already has an active run")
+        self.busy, self.quiescent_verified = True, False
+        self.accepting_input = True
+        self.steered_inputs = set()
+        text, error, settled = "", None, False
         try:
-            prompt_id = await self.command("prompt", message=goal)
-            async with asyncio.timeout(self.timeout):
+            if not self.process:
+                await self.start()
+            message = json.dumps({"binding_id": self.gateway.binding}) if self.gateway else goal
+            prompt_id = await self.command("prompt", message=message)
+            async with asyncio.timeout(self.timeout) as deadline:
+                self.run_timeout = deadline
                 while True:
                     event = await self.queue.get()
                     kind = event.get("type")
@@ -211,29 +266,84 @@ class PiHarness:
                                 if part.get("type") == "text"
                             )
                     elif kind == "agent_settled":
-                        if error or not text.strip():
+                        async with self.input_lock:
+                            self.accepting_input = False
+                        if error or (not text.strip() and not (self.gateway and self.gateway.waiting)):
                             raise RuntimeError(error or "no final assistant output")
-                        return TaskResult(
-                            status="completed",
-                            summary=text[:10000],
-                            limitations=("Research quality requires human review.",)
-                            if self.research
-                            else (
-                                "No research tools enabled. Source retrieval and report quality have not been verified.",
-                            ),
-                        )
+                        if self.gateway:
+                            state = await self.rpc("get_state")
+                            if state.get("isStreaming") or state.get("isCompacting"):
+                                raise RuntimeError("pi settled with pending work")
+                            if state.get("pendingMessageCount"):
+                                await self.rpc("clear_queue")
+                            if self.steered_inputs:
+                                history = await self.rpc("get_messages")
+                                user_text = json.dumps([m for m in history.get("messages", []) if m.get("role") == "user"], ensure_ascii=False)
+                                for input_id in self.steered_inputs:
+                                    if "用户补充[" + input_id + "]" in user_text:
+                                        await self.gateway.call("input-ack", {"input_id": input_id})
+                            self.actual_session_id = state.get("sessionId")
+                            actual = Path(state["sessionFile"])
+                            if actual not in {self.session_path, Path("/workspace/sessions") / self.session_path.name}:
+                                raise RuntimeError("pi session path changed unexpectedly")
+                            self.actual_session_file = str(actual)
+                            if not await self.gateway.drain():
+                                raise RuntimeError("run I/O has not drained")
+                        self.quiescent_verified, settled = True, True
+                        outcome = (self.gateway.outcome or {}) if self.gateway else {}
+                        status = (self.gateway.claim.get("notification_status") if self.gateway else None) or outcome.get("status", "completed")
+                        if self.gateway and self.gateway.waiting:
+                            status = "waiting_input"
+                        elif self.gateway and any(value in {"unknown", "partial", "dispatched", "prepared"} for value in self.gateway.effects.values()):
+                            status = "partial" if status == "completed" else status
+                        return TaskResult(status=status, summary=text[:10000] or "Waiting checkpoint persisted.",
+                            observation_refs=tuple(outcome.get("observation_refs", self.gateway.observations if self.gateway else ())),
+                            effect_refs=tuple(outcome.get("effect_refs", self.gateway.effects if self.gateway else ())),
+                            limitations=tuple(outcome.get("unresolved_items", ())))
                     elif kind in {"host_error", "host_eof"}:
                         raise RuntimeError(event.get("error", "RPC closed before agent_settled"))
         finally:
-            await self.stop()
+            self.busy = False
+            if not keep_alive or not settled:
+                await self.stop()
+
+    async def rpc(self, kind, **values):
+        if kind == "compact" and self.busy:
+            raise RuntimeError("manual compaction requires an idle session")
+        command_id = await self.command(kind, **values)
+        async with asyncio.timeout(10):
+            while True:
+                event = await self.queue.get()
+                if event.get("type") in {"host_error", "host_eof"}:
+                    raise RuntimeError(event.get("error", "RPC closed"))
+                if event.get("id") == command_id:
+                    if not event.get("success"):
+                        raise RuntimeError(str(event.get("error", "RPC command rejected")))
+                    return event.get("data", {})
+
+    async def append_input(self, input_id, text, *, host_notice=False):
+        async with self.input_lock:
+            if not self.busy or not self.accepting_input or not self.gateway or self.gateway.waiting:
+                raise RuntimeError("run is not accepting steering input")
+            if input_id in self.steered_inputs:
+                return
+            result = await self.command("steer", wait=True, message=json.dumps({"binding_id": self.gateway.binding,
+                               "input_id": input_id, "text": text, "host_notice": host_notice}, ensure_ascii=False))
+            if not host_notice:
+                self.steered_inputs.add(input_id)
+            return result
 
     async def stop(self):
+        drained = await self.gateway.stop_requests() if self.gateway else True
+        if self.gateway:
+            self.gateway.revoke()
+            await self.gateway.processes.close_run(self.gateway.context)
         if self.research:
             self.research.revoke()
         process = self.process
         if not process:
-            self.stopped_verified = True
-            return True
+            self.stopped_verified = drained
+            return drained
         if process.returncode is None:
             for command in ("clear_queue", "abort"):
                 try:
@@ -264,5 +374,9 @@ class PiHarness:
             os.killpg(process.pid, 0)
             self.stopped_verified = False
         except ProcessLookupError:
-            self.stopped_verified = process.returncode is not None
+            self.stopped_verified = drained and process.returncode is not None
         return self.stopped_verified
+
+
+# Import compatibility; there is only one RPC implementation.
+PiHarness = PiRunnerAdapter

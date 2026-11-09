@@ -5,8 +5,9 @@ import os
 import re
 import stat
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -16,8 +17,10 @@ from sqlalchemy import select
 
 from qqbot.config import Settings
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, TextSegment, stable_id
+from qqbot.domain.messages import SendReceipt
 from qqbot.domain.tasks import TaskResult
 from qqbot.memory import MemoryRecord
+from qqbot.permissions import PermissionRule, PermissionService, PermissionSubject, PolicyVersionConflict
 from qqbot.storage.schema import conversations, decisions, inbox, outbox
 from qqbot.storage.social_schema import social_records
 from qqbot.storage.task_schema import events, runs, tasks
@@ -72,8 +75,84 @@ class DeliveryResolution(BaseModel):
     platform_message_id: str | None = Field(default=None, max_length=128)
 
 
+class PermissionRuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=0)
+    rule: PermissionRule
+
+
+class PermissionCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subject: PermissionSubject
+    action: str = Field(min_length=1)
+    resource: str = Field(min_length=1)
+
+
 def router(core, authenticate):
-    router = APIRouter(dependencies=[Depends(authenticate)])
+    permissions = getattr(core, "permissions", None) or PermissionService(core.db, core.clock)
+    admin_subject = PermissionSubject(
+        adapter_instance_id="admin_api", identity_namespace="admin_api", user_id="owner"
+    )
+
+    def authorize_admin(request: Request):
+        action = "admin." + request.method.lower()
+        if not permissions.check(admin_subject, action, "http:" + request.url.path).allowed:
+            raise HTTPException(403, "permission denied")
+
+    router = APIRouter(dependencies=[Depends(authenticate), Depends(authorize_admin)])
+
+    def require_permission(action, resource):
+        if not permissions.check(admin_subject, action, resource).allowed:
+            raise HTTPException(403, "permission denied")
+
+    def permission_management(action):
+        if not permissions.check(admin_subject, "permission." + action, "permission:policy").allowed:
+            raise HTTPException(403, "permission denied")
+
+    @router.get("/api/v1/permissions")
+    def list_permissions():
+        permission_management("list")
+        return permissions.list()
+
+    @router.post("/api/v1/permissions/check")
+    def check_permission(body: PermissionCheckRequest):
+        permission_management("check")
+        return permissions.check(body.subject, body.action, body.resource).model_dump(mode="json")
+
+    @router.post("/api/v1/permissions/explain")
+    def explain_permission(body: PermissionCheckRequest):
+        permission_management("explain")
+        return permissions.explain(body.subject, body.action, body.resource).model_dump(mode="json")
+
+    @router.get("/api/v1/permissions/{rule_id}")
+    def get_permission(rule_id: str):
+        permission_management("get")
+        rule = permissions.get(rule_id)
+        if rule is None:
+            raise HTTPException(404, "permission rule unavailable")
+        return {"policy_version": permissions.policy_version, "rule": rule.model_dump(mode="json")}
+
+    @router.put("/api/v1/permissions/{rule_id}")
+    def upsert_permission(rule_id: str, body: PermissionRuleRequest):
+        permission_management("upsert")
+        if rule_id != body.rule.id:
+            raise HTTPException(422, "rule ID differs from path")
+        try:
+            return permissions.upsert(
+                body.rule, expected_version=body.expected_version, actor="admin_api:owner"
+            )
+        except PolicyVersionConflict as error:
+            raise HTTPException(409, str(error)) from error
+
+    @router.delete("/api/v1/permissions/{rule_id}")
+    def delete_permission(rule_id: str, expected_version: int):
+        permission_management("delete")
+        try:
+            return permissions.delete(rule_id, expected_version=expected_version, actor="admin_api:owner")
+        except PolicyVersionConflict as error:
+            raise HTTPException(409, str(error)) from error
+        except LookupError as error:
+            raise HTTPException(404, str(error)) from error
 
     def conversation(cid):
         with core.db.engine.connect() as c:
@@ -85,10 +164,8 @@ def router(core, authenticate):
         ref = ConversationRef.model_validate_json(raw)
         if ref.adapter_instance_id not in core.adapters:
             raise HTTPException(404, "adapter unavailable")
-        cfg = core.adapters[ref.adapter_instance_id].config
-        allowlist = cfg.allowed_users if ref.surface == "private" else cfg.allowed_groups
-        if ref.remote_conversation_id not in allowlist:
-            raise HTTPException(403, "conversation is outside current allowlist")
+        if not permissions.check(admin_subject, "conversation.manage", "conversation:" + ref.key).allowed:
+            raise HTTPException(403, "permission denied")
         return ref
 
     def owner(ref, principal=None):
@@ -112,6 +189,7 @@ def router(core, authenticate):
         return dict(row)
 
     def memory_row(memory_id):
+        require_permission("memory.manage", "memory:" + memory_id)
         with core.db.engine.connect() as c:
             row = c.execute(select(social_records).where(social_records.c.id == memory_id)).mappings().first()
         if not row:
@@ -149,7 +227,7 @@ def router(core, authenticate):
             segments=(TextSegment(text=goal),),
             trace_id=str(uuid4()),
         )
-        core.inbox.accept(event)
+        event = core.inbox.accept(event)[0]
         core.inbox.finish(event_id)
         return event
 
@@ -189,6 +267,7 @@ def router(core, authenticate):
 
     @router.get("/api/v1/conversations/{cid}/decisions")
     def recent_decisions(cid: str):
+        require_permission("history.read", "conversation:" + cid)
         conversation(cid)
         with core.db.engine.connect() as c:
             return [
@@ -207,11 +286,12 @@ def router(core, authenticate):
             raise HTTPException(409, "tasks disabled")
         ref = conversation(body.conversation_id)
         event = action_event(ref, idempotency_key, body.goal)
-        result = core.tasks.accept(event, owner(ref), body.goal)
+        result = core.submit_turn(event, background=True, text=body.goal, invited=True, access=owner(ref))
         return {"public_id": result["public_id"], "state": result["state"]}
 
     @router.get("/api/v1/tasks")
     def list_tasks(conversation_id: str):
+        require_permission("task.read", "conversation:" + conversation_id)
         conversation(conversation_id)
         with core.db.engine.connect() as c:
             return [
@@ -231,7 +311,8 @@ def router(core, authenticate):
         with core.db.engine.connect() as c:
             result["deliveries"] = [
                 dict(r._mapping)
-                for r in c.execute(select(outbox.c.id, outbox.c.state).where(outbox.c.origin_id == row["id"]))
+                for r in c.execute(select(outbox.c.id, outbox.c.state).where(
+                    (outbox.c.task_id == row["id"]) | (outbox.c.origin_id == row["id"])))
             ]
         return result
 
@@ -252,6 +333,8 @@ def router(core, authenticate):
             ))
             if changed.rowcount != 1:
                 raise HTTPException(409, "only UNKNOWN deliveries can be reconciled")
+            core.outbox._receipt(delivery_id, SendReceipt(state=body.state,
+                platform_message_id=body.platform_message_id), connection=c)
         core.audit("delivery.resolve", delivery_id, "admin_api:owner", body.model_dump_json())
         return {"state":body.state, "resent":False}
 
@@ -278,7 +361,8 @@ def router(core, authenticate):
         row = task_row(public_id)
         ref = conversation(row["conversation"])
         event = action_event(ref, idempotency_key, row["goal"])
-        result = core.tasks.retry(public_id, event, owner(ref))
+        context = core.context_for(event, owner(ref), invited=True)
+        result = core.tasks.retry(public_id, event, owner(ref), context=context)
         return {"public_id": result["public_id"], "state": result["state"]}
 
     @router.get("/api/v1/tasks/{public_id}/events")
@@ -314,6 +398,7 @@ def router(core, authenticate):
 
     @router.get("/api/v1/memories")
     def memories(conversation_id: str, status: str | None = None):
+        require_permission("memory.read", "conversation:" + conversation_id)
         conversation(conversation_id)
         with core.db.engine.connect() as c:
             query = select(social_records.c.record_json).where(
@@ -398,6 +483,12 @@ def router(core, authenticate):
         # Connection/credential/process changes need an explicit restart, never a half-applied runtime.
         current = core.settings.model_dump()
         candidate = body.config.model_dump()
+        if candidate["model"] != current["model"] and (
+            core.settings.interactive_execution_enabled or core.settings.tasks_enabled
+        ):
+            raise HTTPException(
+                409, "model changes require restarting Core and Worker with matching startup configuration"
+            )
         mutable = {"model", "send_budget_per_minute"}
         if any(candidate[k] != current[k] for k in current if k not in mutable):
             raise HTTPException(409, "connection, identity, judge or isolation changes require restart")
@@ -446,10 +537,14 @@ def router(core, authenticate):
             raise HTTPException(409, "artifact unavailable") from error
         if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != digest:
             raise HTTPException(409, "artifact digest changed")
+        filename = PurePosixPath(item.get("relative_path") or item["id"]).name[:255] or item["id"]
         return Response(
             content,
             media_type="application/octet-stream",
-            headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": 'attachment; filename="report.md"'},
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename, safe=""),
+            },
         )
 
     return router

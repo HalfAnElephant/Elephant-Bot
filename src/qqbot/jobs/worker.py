@@ -2,10 +2,12 @@
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import signal
 import socket
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +17,7 @@ import httpx
 import uvicorn
 
 from qqbot.harness.artifacts import export_artifacts
+from qqbot.harness.gateway import RunGateway
 from qqbot.harness.launcher import (
     LAUNCHER,
     MANIFESTS,
@@ -24,7 +27,9 @@ from qqbot.harness.launcher import (
     verify_stop_marker,
 )
 from qqbot.harness.pi import MAX_EVENT, PiHarness
+from qqbot.harness.pool import SessionPool
 from qqbot.harness.research import ResearchCapabilities
+from qqbot.providers import ModelCapacity
 
 
 class CapabilityServer(uvicorn.Server):
@@ -69,13 +74,16 @@ class Spool:
 
 
 class Worker:
-    def __init__(self, client, worker_id, spool, harness_factory):
+    def __init__(self, client, worker_id, spool, harness_factory, *, pool=None):
         self.client, self.worker_id, self.spool, self.harness_factory = (
             client,
             worker_id,
             spool,
             harness_factory,
         )
+        self.pool = pool
+        self.replay_lock = asyncio.Lock()
+        self.event_lock = asyncio.Lock()
 
     async def call(self, operation, **payload):
         response = await self.client.post(
@@ -95,9 +103,13 @@ class Worker:
             if lease["state"] != "CANCEL_REQUESTED":
                 raise
             await self.call("stopped", **identity)
-        path.unlink()
+        path.unlink(missing_ok=True)
 
     async def flush_events(self, run_id=None):
+        async with self.event_lock:
+            await self._flush_events(run_id)
+
+    async def _flush_events(self, run_id=None):
         root = self.spool.directory / "events"
         if run_id:
             root = root / run_id
@@ -113,7 +125,7 @@ class Worker:
                     status = await self.call("recovery-status", **identity)
                     if not status["discard_spool"]:
                         continue
-                path.unlink()
+                path.unlink(missing_ok=True)
 
     def event_sink(self, identity):
         seq = 0
@@ -175,50 +187,78 @@ class Worker:
                     identity = {key: payload[key] for key in ("run_id", "fencing_token")}
                     status = await self.call("recovery-status", **identity)
                     if status["discard_spool"]:
-                        path.unlink()
+                        path.unlink(missing_ok=True)
                     continue
                 raise
 
     async def once(self):
-        await self.replay()
-        if any(self.spool.directory.glob("*.json")):
-            return False
-        claim = await self.call("claim")
+        async with self.replay_lock:
+            await self.replay()
+        claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
         if not claim:
             return False
         identity = {key: claim[key] for key in ("run_id", "fencing_token")}
+        use_pool = self.pool is not None and claim.get("protocol_version", 1) >= 2
         try:
-            harness = self.harness_factory(claim)
+            harness = await self.pool.acquire(claim) if use_pool else self.harness_factory(claim)
+            if inspect.isawaitable(harness):
+                harness = await harness
         except (ValueError, RuntimeError, OSError):
             payload = {
                 **identity,
-                "result": {"status": "failed", "summary": "Runner configuration rejected before startup."},
+                "result": {"status": "failed", "agent_authored": False, "summary": "Runner configuration rejected before startup."},
                 "stopped": True,
             }
             path = self.spool.save(payload)
             await self.deliver_result(payload, path)
             return True
         harness.event_sink = self.event_sink(identity)
-        if getattr(harness, "research", None):
-            harness.research.event_sink = harness.event_sink
+        gateway = getattr(harness, "gateway", None) or getattr(harness, "research", None)
+        if gateway:
+            gateway.event_sink = harness.event_sink
         harness.event_sink({"type": "host_accepted"})
-        execution = asyncio.create_task(harness.run(claim["goal"]))
+        execution = asyncio.create_task(harness.run(claim["goal"], keep_alive=True) if use_pool else harness.run(claim["goal"]))
+        committed = False
+        last_renewed = time.monotonic()
+        last_reminder = time.monotonic()
         try:
             while not execution.done():
-                done, _ = await asyncio.wait({execution}, timeout=10)
+                done, _ = await asyncio.wait({execution}, timeout=0.15)
                 if done:
                     break
                 try:
-                    lease = await self.call("renew", **identity)
+                    operation = "renew" if time.monotonic() - last_renewed >= 10 else "control"
+                    lease = await self.call(operation, **identity)
+                    if operation == "renew":
+                        last_renewed = time.monotonic()
                 except (httpx.HTTPError, ValueError):
                     await harness.stop()
                     execution.cancel()
                     await asyncio.gather(execution, return_exceptions=True)
                     return False
+                if getattr(harness, "gateway", None):
+                    harness.gateway.provider.background = lease.get("delivery") == "DETACHED"
+                    if "budget" in lease:
+                        harness.gateway.tools.max_calls = lease["budget"].get("tool_calls", 60)
+                    if "active_seconds_remaining" in lease and getattr(harness, "run_timeout", None):
+                        harness.run_timeout.reschedule(asyncio.get_running_loop().time() + lease["active_seconds_remaining"])
                 if hasattr(harness, "renewed"):
                     harness.renewed()
                 if lease["state"] == "RUNNING":
                     await self.flush_events(claim["run_id"])
+                    if getattr(harness, "gateway", None) and not harness.gateway.waiting:
+                        if lease.get("notification_due") and time.monotonic() - last_reminder >= 90:
+                            await harness.append_input("silence:" + str(int(time.monotonic())),
+                                "较长时间没有已送达的反馈。若有重要的新事实或阻塞，请自然告知用户；没有新信息不重复心跳。",
+                                host_notice=True)
+                            last_reminder = time.monotonic()
+                        for extra in await self.call("inputs", **identity):
+                            try:
+                                await harness.append_input(extra["id"], extra["text"])
+                            except RuntimeError:
+                                if not execution.done() and getattr(harness, "accepting_input", True):
+                                    raise
+                                break
                 if lease["state"] != "RUNNING":
                     await harness.stop()
                     execution.cancel()
@@ -227,28 +267,28 @@ class Worker:
                     return True
             try:
                 result = execution.result().model_dump(mode="json")
-                if getattr(harness, "research", None):
-                    result["evidence"] = harness.research.evidence
-                    result["artifacts"] = export_artifacts(
-                        harness.workspace, harness.archive, harness.research.artifacts
-                    )
-                    if not result["artifacts"] or not result["evidence"]:
-                        result["status"] = "failed"
-                        result["limitations"] = [
-                            "Research acceptance failed: artifact and retrieval evidence are required."
-                        ]
+                if gateway:
+                    result["evidence"] = gateway.evidence
+                    paths = list(gateway.artifacts)
+                    if result["status"] == "completed":
+                        paths.extend(claim.get("goal_spec", {}).get("requested_outputs", []))
+                    result["artifacts"] = export_artifacts(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
             except Exception as error:  # noqa: BLE001 - Persist a failed result at the execution boundary.
                 summary = harness.failure_summary(error)
-                result = {"status": "failed", "summary": summary}
+                result = {"status": "failed", "agent_authored": False, "summary": summary}
                 harness.event_sink({"type": "host_error", "error": summary})
-            if not harness.stopped_verified:
+            if not harness.stopped_verified and not getattr(harness, "quiescent_verified", False):
                 await self.flush_events(claim["run_id"])
                 await self.call("uncertain", **identity)
                 return False
-            payload = {**identity, "result": result, "stopped": True}
+            payload = {**identity, "result": result, "stopped": harness.stopped_verified,
+                       "quiescent": getattr(harness, "quiescent_verified", False)}
+            if hasattr(harness, "process_identity"):
+                payload["process"] = harness.process_identity()
             path = self.spool.save(payload)
             await self.flush_events(claim["run_id"])
             await self.deliver_result(payload, path)
+            committed = True
             return True
         except asyncio.CancelledError:
             await harness.stop()
@@ -262,7 +302,7 @@ class Worker:
                             **identity,
                             "result": {
                                 "status": "failed",
-                                "summary": "Supervisor stopped before task completion.",
+                                "summary": "Supervisor stopped before task completion.", "agent_authored": False,
                             },
                             "stopped": True,
                         }
@@ -278,7 +318,10 @@ class Worker:
                 pass
             raise
         finally:
-            await harness.stop()
+            if use_pool:
+                await self.pool.release(harness, committed)
+            else:
+                await harness.stop()
             if not execution.done():
                 execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
@@ -476,6 +519,231 @@ class SystemdResearchRun(ResearchRun):
         return self.stopped_verified
 
 
+def configured_github(args):
+    from qqbot.capabilities.github import GitHubCLI
+    host = getattr(args, "github_host", "github.com")
+    executable = getattr(args, "gh", "gh")
+    def credentials(context):
+        if context.host != host:
+            raise PermissionError("credential host differs from requested host")
+        # Ignore gh's environment overrides so the local login really takes precedence.
+        environment = {key: value for key, value in os.environ.items() if key not in {
+            "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_DEBUG"}}
+        token = ""
+        try:
+            result = subprocess.run(
+                [executable, "auth", "token", "--hostname", host], env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=5, check=False,
+            )
+            if result.returncode == 0:
+                token = result.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        token = token or os.environ.get(getattr(args, "github_token_env", "QQBOT_GITHUB_TOKEN"), "")
+        return {"GH_TOKEN" if host == "github.com" else "GH_ENTERPRISE_TOKEN": token} if token else {}
+    return GitHubCLI(executable=executable, credentials=credentials)
+
+
+class GeneralRun(PiHarness):
+    def __init__(self, args, claim, client, process_id, session_id, capacity):
+        self.args, self.claim, self.core_client = args, claim, client
+        self.worker_id, self.process_id, self.session_id = args.worker_id, process_id, session_id
+        self.process_epoch, self.registered = 1, False
+        workspace = Path(args.workspace) / process_id
+        self.prepare_workspace(workspace)
+        self.archive = Path(args.archive)
+        self.server = self.server_task = self.listener = None
+        github = configured_github(args)
+        gateway = RunGateway(workspace, args.model, os.environ.get("QQBOT_RUNNER_OPENAI_KEY", ""),
+            args.model_endpoint, call=self.gateway_call, capacity=capacity, github=github,
+            github_host=getattr(args, "github_host", "github.com"),
+            content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
+            model_window=getattr(args, "model_context_window", 32768))
+        super().__init__(args.pi, workspace, provider="qqbot", model=args.model, gateway=gateway, session_id=session_id)
+
+    def prepare_workspace(self, workspace):
+        workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (workspace / "outputs").mkdir(exist_ok=True, mode=0o700)
+
+    async def gateway_call(self, operation, payload):
+        response = await self.core_client.post("/internal/tasks/" + operation, json={
+            "worker_id": self.worker_id, "run_id": self.claim["run_id"],
+            "fencing_token": self.claim["fencing_token"], "payload": payload})
+        response.raise_for_status()
+        return response.json()
+
+    async def bind(self, claim):
+        if self.busy:
+            raise RuntimeError("cannot bind active session")
+        self.claim = claim
+        if not claim.get("repository") and getattr(self.args, "repository", None):
+            claim["repository"] = self.args.repository
+        bindings = dict(value.split("=", 1) for value in getattr(self.args, "workspace_binding", []))
+        reference = claim.get("plan", {}).get("workspace_ref")
+        if reference:
+            if reference not in bindings:
+                raise ValueError("workspace reference has no configured binding")
+            execution_workspace = Path(bindings[reference]).resolve(strict=True)
+        else:
+            execution_workspace = Path(getattr(self.args, "spool", str(Path(self.args.archive).parent / "spool"))).parent / "workspaces" / claim["task_id"]
+            execution_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (execution_workspace / "outputs").mkdir(exist_ok=True, mode=0o700)
+        self.gateway.workspace = execution_workspace
+        self.gateway.bind(claim)
+        self.timeout = claim.get("active_seconds_remaining", claim.get("plan", {}).get("budget", {}).get("active_seconds", 1800))
+        if self.timeout <= 0:
+            raise ValueError("task active execution budget exhausted")
+        await self.gateway_call("bind-process", {"process_id": self.process_id, "session_id": self.session_id,
+            "epoch": self.process_epoch, "generation": self.gateway.generation,
+            "scope_key": claim.get("context", {}).get("key", "task:" + claim["task_id"]),
+            "session_file": str(self.session_path), "identity": {"pid": self.process.pid if self.process else None,
+                "launch_task_id": getattr(self, "launch_task_id", claim["task_id"])}})
+        self.registered = True
+
+    def process_identity(self):
+        return {"id": self.process_id, "epoch": self.process_epoch, "generation": self.gateway.generation,
+                "actual_session_id": getattr(self, "actual_session_id", None),
+                "actual_session_file": getattr(self, "actual_session_file", None)}
+
+    async def start(self):
+        self.listener = socket.socket()
+        self.bind_listener()
+        self.listener.listen(16)
+        self.gateway_url = f"http://{self.listener.getsockname()[0]}:{self.listener.getsockname()[1]}"
+        self.server = CapabilityServer(uvicorn.Config(self.gateway.app, log_level="warning", access_log=False))
+        self.server_task = asyncio.create_task(self.server.serve(sockets=[self.listener]))
+        for _ in range(100):
+            if self.server.started:
+                break
+            if self.server_task.done():
+                await self.server_task
+            await asyncio.sleep(0.01)
+        if not self.server.started:
+            raise RuntimeError("capability gateway failed to start")
+        await self.start_runner()
+
+    def bind_listener(self):
+        self.listener.bind(("127.0.0.1", 0))
+
+    async def start_runner(self):
+        await PiHarness.start(self)
+
+    async def stop_runner(self):
+        return await PiHarness.stop(self)
+
+    async def stop(self):
+        drained = await self.gateway.stop_requests()
+        stopped = await self.stop_runner()
+        if self.server:
+            self.server.should_exit = True
+        if self.server_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.server_task), 2)
+            except TimeoutError:
+                self.server_task.cancel()
+                await asyncio.gather(self.server_task, return_exceptions=True)
+        if self.listener:
+            self.listener.close()
+        pending = {task for task in self.server.server_state.tasks if not task.done()} if self.server else set()
+        for task in pending:
+            task.cancel()
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=10)
+        stopped = stopped and drained and not pending
+        self.stopped_verified = stopped
+        if self.registered:
+            try:
+                await self.gateway_call("process-stopped", {"process_id": self.process_id,
+                    "epoch": self.process_epoch, "stopped": stopped})
+            except httpx.HTTPError:
+                # Core retains this resident slot as UNKNOWN until authenticated reconciliation.
+                pass
+        return stopped
+
+
+class SystemdGeneralRun(GeneralRun):
+    def __init__(self, args, claim, client, process_id, session_id, capacity):
+        self.policy = production_policy()
+        if Path(args.pi).resolve() != Path("/opt/qqbot/node_modules/.bin/pi").resolve(strict=True):
+            raise ValueError("production pi runtime path is fixed")
+        if Path(args.workspace).resolve() != WORKSPACES:
+            raise ValueError("production workspace root is fixed")
+        self.launch_task_id = claim["task_id"]
+        self.manifest_path = None
+        super().__init__(args, claim, client, process_id, session_id, capacity)
+
+    def prepare_workspace(self, workspace):
+        # Only the root launcher creates production workspace directories.
+        return
+
+    def bind_listener(self):
+        for port in range(self.policy["proxy_port_min"], self.policy["proxy_port_max"] + 1):
+            try:
+                self.listener.bind((self.policy["proxy_host"], port))
+                return
+            except OSError:
+                continue
+        raise RuntimeError("no available approved proxy port")
+
+    async def start_runner(self):
+        from datetime import UTC, datetime, timedelta
+        manifest = {"schema_version": 2, "task_id": self.launch_task_id, "run_id": self.claim["run_id"],
+            "session_id": self.session_id, "process_id": self.process_id, "process_epoch": self.process_epoch,
+            "profile": "pi", "model": self.model, "proxy_url": self.gateway_url,
+            "process_token": self.gateway.process_token, "model_context_window": self.gateway.model_window,
+            "output_tokens": max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output),
+            "soft_input_tokens": self.claim.get("context", {}).get("limits", {}).get("soft_compaction_input_tokens", 6000),
+            "keep_recent_tokens": self.claim.get("context", {}).get("limits", {}).get("keep_recent_tokens", 2000),
+            "expires_at": (datetime.now(UTC) + timedelta(hours=23)).isoformat()}
+        validate_manifest(manifest, self.launch_task_id, self.process_id, self.policy)
+        MANIFESTS.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.manifest_path = MANIFESTS / (self.process_id + ".json")
+        with self.manifest_path.open("x") as output:
+            os.chmod(self.manifest_path, 0o600)
+            json.dump(manifest, output)
+            output.flush()
+            os.fsync(output.fileno())
+        self.process = await asyncio.create_subprocess_exec("/usr/bin/sudo", "-n", LAUNCHER,
+            "start", self.launch_task_id, self.process_id,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            limit=MAX_EVENT + 1, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, start_new_session=True)
+        self.readers = [asyncio.create_task(self._stdout()), asyncio.create_task(self._stderr())]
+
+    async def stop_runner(self):
+        self.gateway.revoke()
+        await self.gateway.processes.close_run(self.gateway.context)
+        if not self.process and not self.manifest_path:
+            self.stopped_verified = True
+            return True
+        if self.process and self.process.returncode is None:
+            for operation in ("clear_queue", "abort"):
+                try:
+                    await asyncio.wait_for(self.command(operation), 1)
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+        if not verify_stop_marker(self.launch_task_id, self.process_id):
+            stop = await asyncio.create_subprocess_exec("/usr/bin/sudo", "-n", LAUNCHER, "stop",
+                self.launch_task_id, self.process_id, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            try:
+                await asyncio.wait_for(stop.wait(), 25)
+            except TimeoutError:
+                self.stopped_verified = False
+                return False
+        if self.process:
+            try:
+                await asyncio.wait_for(self.process.wait(), 5)
+            except TimeoutError:
+                self.stopped_verified = False
+                return False
+        for reader in self.readers:
+            reader.cancel()
+        await asyncio.gather(*self.readers, return_exceptions=True)
+        self.stopped_verified = verify_stop_marker(self.launch_task_id, self.process_id)
+        return self.stopped_verified
+
+
 async def main_async(args):
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
@@ -487,21 +755,43 @@ async def main_async(args):
     async with httpx.AsyncClient(
         transport=transport, base_url="http://core", headers={"Authorization": "Bearer " + token}, timeout=5
     ) as client:
-        worker = Worker(
-            client,
-            args.worker_id,
-            Spool(args.spool),
-            lambda claim: (SystemdResearchRun if args.runner_mode == "systemd" else ResearchRun)(
-                args, claim, client
-            ),
-        )
-        while True:
-            try:
-                worked = await worker.once()
-            except (httpx.HTTPError, OSError):
-                worked = False
-            if not worked:
-                await asyncio.sleep(3)
+        capacity = ModelCapacity(args.concurrency, 1)
+        if args.runner_mode == "systemd":
+            factory = lambda claim, process_id, session_id: SystemdGeneralRun(args, claim, client, process_id, session_id, capacity)
+        else:
+            factory = lambda claim, process_id, session_id: GeneralRun(args, claim, client, process_id, session_id, capacity)
+        pool = SessionPool(factory, max_resident=args.concurrency, max_idle=args.max_idle, ttl=args.idle_ttl)
+        legacy = lambda claim: (SystemdResearchRun if args.runner_mode == "systemd" else ResearchRun)(args, claim, client)
+        worker = Worker(client, args.worker_id, Spool(args.spool), legacy, pool=pool)
+        from qqbot.capabilities.gateway import standard_registry
+        from qqbot.jobs.waiters import ExternalWaiters
+        async def waiter_call(operation, payload):
+            return await worker.call(operation, payload=payload)
+        waiter = asyncio.create_task(ExternalWaiters(waiter_call, standard_registry(github=configured_github(args))).run())
+        active = set()
+        try:
+            while True:
+                if waiter.done():
+                    await waiter
+                    raise RuntimeError("external waiter stopped unexpectedly")
+                finished = {task for task in active if task.done()}
+                for finished_task in finished:
+                    try:
+                        finished_task.result()
+                    except (httpx.HTTPError, OSError, RuntimeError):
+                        pass
+                active -= finished
+                if len(active) < args.concurrency:
+                    active.add(asyncio.create_task(worker.once()))
+                await pool.sweep()
+                await asyncio.sleep(0.15)
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            for running in active:
+                running.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+            await pool.close()
 
 
 def main():
@@ -514,6 +804,15 @@ def main():
     parser.add_argument("--archive", required=True)
     parser.add_argument("--runner-mode", choices=["local", "systemd"], default="local")
     parser.add_argument("--worker-id", default="local-worker")
+    parser.add_argument("--repository")
+    parser.add_argument("--github-host", default="github.com")
+    parser.add_argument("--workspace-binding", action="append", default=[])
+    parser.add_argument("--gh", default="gh")
+    parser.add_argument("--github-token-env", default="QQBOT_GITHUB_TOKEN")
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--max-idle", type=int, default=2)
+    parser.add_argument("--idle-ttl", type=int, default=300)
+    parser.add_argument("--model-context-window", type=int, default=32768)
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--model-endpoint", default="https://api.openai.com/v1/chat/completions")
     try:

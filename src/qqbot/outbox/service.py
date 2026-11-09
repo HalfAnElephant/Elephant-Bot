@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from datetime import timedelta
 from uuid import uuid4
 
@@ -48,6 +49,8 @@ class Outbox:
                 origin_id=envelope.origin_id,
                 origin_kind=envelope.origin_kind,
                 part_no=envelope.part_no,
+                task_id=envelope.parent_task_id,
+                notification_sequence=envelope.notification_sequence,
             )
         )
         return envelope.delivery_id
@@ -68,6 +71,9 @@ class Outbox:
         policy_version=None,
         anchor_message_id=None,
         requester=None,
+        parent_task_id=None,
+        notification_sequence=0,
+        purpose=None,
     ):
         ids = []
         for part_no, start in enumerate(range(0, len(text), 1800)):
@@ -89,6 +95,9 @@ class Outbox:
                         policy_version=policy_version,
                         anchor_message_id=anchor_message_id,
                         requester=requester,
+                        parent_task_id=parent_task_id,
+                        notification_sequence=notification_sequence,
+                        purpose=purpose,
                     ),
                 )
             )
@@ -140,7 +149,7 @@ class Outbox:
                 .values(state="PENDING", envelope_json=envelope.model_dump_json())
             )
 
-    async def dispatch_once(self, adapters, budget=6, pre_send=None):
+    async def dispatch_once(self, adapters, budget=0, pre_send=None):
         with self.db.engine.connect() as c:
             rows = (
                 c.execute(
@@ -188,22 +197,30 @@ class Outbox:
                 ).first()
                 if predecessor:
                     continue
-                used = c.execute(
-                    select(func.count())
-                    .select_from(outbox)
-                    .where(
-                        outbox.c.conversation_id == envelope.target.key,
-                        or_(
-                            outbox.c.state.in_(["SENDING", "UNKNOWN"]),
-                            and_(
-                                outbox.c.state == "SENT",
-                                outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
-                            ),
-                        ),
-                    )
-                ).scalar_one()
-                if used >= budget:
+                if envelope.parent_task_id and c.execute(select(outbox.c.id).where(
+                    outbox.c.task_id == envelope.parent_task_id,
+                    outbox.c.notification_sequence < envelope.notification_sequence,
+                    outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
                     continue
+                if budget:
+                    used = c.execute(
+                        select(func.count())
+                        .select_from(outbox)
+                        .where(
+                            outbox.c.conversation_id == envelope.target.key,
+                            or_(
+                                outbox.c.state == "SENDING",
+                                and_(outbox.c.state == "UNKNOWN",
+                                    outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat()),
+                                and_(
+                                    outbox.c.state == "SENT",
+                                    outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
+                                ),
+                            ),
+                        )
+                    ).scalar_one()
+                    if used >= budget:
+                        continue
                 claimed = c.execute(
                     update(outbox)
                     .where(outbox.c.id == row["id"], outbox.c.state.in_(["PENDING", "RETRYABLE"]))
@@ -217,8 +234,8 @@ class Outbox:
                 receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
             self._receipt(envelope.delivery_id, receipt)
 
-    def _receipt(self, delivery_id, receipt):
-        with self.db.transaction() as c:
+    def _receipt(self, delivery_id, receipt, *, connection=None):
+        with self.db.transaction() if connection is None else nullcontext(connection) as c:
             c.execute(
                 update(outbox)
                 .where(outbox.c.id == delivery_id)
@@ -232,3 +249,15 @@ class Outbox:
                     else None,
                 )
             )
+
+            if receipt.state == "SENT":
+                from qqbot.storage.task_schema import notifications, waits
+                origin = c.execute(select(outbox.c.origin_id).where(outbox.c.id == delivery_id)).scalar_one()
+                remaining = c.execute(select(outbox.c.id).where(outbox.c.origin_id == origin,
+                    outbox.c.state != "SENT")).first()
+                if not remaining:
+                    now = self.clock.now()
+                    c.execute(update(notifications).where(notifications.c.id == origin).values(state="SENT"))
+                    c.execute(update(waits).where(waits.c.notification_id == origin,
+                        waits.c.delivered_at.is_(None)).values(delivered_at=now.isoformat(),
+                            expires_at=(now + timedelta(hours=1)).isoformat()))

@@ -162,6 +162,9 @@ class OutboundEnvelope(DTO):
     policy_version: int | None = None
     anchor_message_id: str | None = None
     requester: PrincipalRef | None = None
+    parent_task_id: str | None = None
+    notification_sequence: int = 0
+    purpose: Literal["progress", "question", "result", "status"] | None = None
 
 
 class DeliveryCheck(DTO):

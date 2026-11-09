@@ -147,7 +147,7 @@ async def test_D02_D03_unknown_and_expired(official_config, incoming, clock, off
 
 
 def test_A04_real_local_websocket(tmp_path, nap_config, clock, nap_event):
-    settings = Settings(database=str(tmp_path/"ws.db"), adapters=(nap_config,))
+    settings = Settings(interactive_execution_enabled=False, database=str(tmp_path/"ws.db"), adapters=(nap_config,))
     app = create_app(settings, clock=clock)
     headers = {"authorization":"Bearer test-secret", "x-self-id":"100"}
     with TestClient(app) as client:

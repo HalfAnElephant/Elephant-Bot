@@ -8,6 +8,7 @@ from pydantic import Field, field_validator
 from sqlalchemy import and_, delete, insert, or_, select, update
 
 from qqbot.domain.messages import DTO, AccessContext, InboundEvent
+from qqbot.permissions import PermissionService
 from qqbot.storage.schema import inbox
 from qqbot.storage.social_schema import (
     conversation_summaries,
@@ -83,10 +84,12 @@ def _safe(text):
 class SocialService:
     """Core-owned service. All mutations and evidence checks share a SQLite transaction."""
 
-    def __init__(self, db, clock):
+    def __init__(self, db, clock, *, permissions=None):
         self.db, self.clock = db, clock
+        self.permissions = permissions or PermissionService()
 
     def _access(self, access):
+        self.permissions.require(access, "memory.read", "conversation:" + access.conversation.key)
         cid, pid = access.conversation.key, access.principal.key
         permitted = [
             and_(social_records.c.scope_type == "conversation", social_records.c.scope_id == cid),
@@ -97,47 +100,43 @@ class SocialService:
             ),
             social_records.c.scope_type == "global_curated",
         ]
-        if access.role == "owner" and access.conversation.surface.value == "private":
+        if access.conversation.surface.value == "private":
             permitted.append(
                 and_(social_records.c.scope_type == "owner_private", social_records.c.scope_id == pid)
             )
         return or_(*permitted)
 
     def _management_access(self, access):
+        self.permissions.require(access, "memory.manage", "conversation:" + access.conversation.key)
         cid, pid = access.conversation.key, access.principal.key
         permitted = [
+            and_(social_records.c.scope_type == "conversation", social_records.c.scope_id == cid),
             and_(
                 social_records.c.scope_type == "principal_in_conversation",
                 social_records.c.scope_id == cid,
                 social_records.c.subject_ref == pid,
-            )
+            ),
+            social_records.c.scope_type == "global_curated",
         ]
-        if access.role in {"admin", "owner"}:
+        if access.conversation.surface.value == "private":
             permitted.append(
-                and_(social_records.c.scope_type == "conversation", social_records.c.scope_id == cid)
+                and_(social_records.c.scope_type == "owner_private", social_records.c.scope_id == pid)
             )
-        if access.role == "owner":
-            permitted.append(social_records.c.scope_type == "global_curated")
-            if access.conversation.surface.value == "private":
-                permitted.append(
-                    and_(social_records.c.scope_type == "owner_private", social_records.c.scope_id == pid)
-                )
         return or_(*permitted)
 
     def _manageable(self, access, record):
+        self.permissions.require(access, "memory.manage", "memory:" + record.memory_id)
         if record.scope_type == "principal_in_conversation":
             return record.scope_id == access.conversation.key and record.subject_ref == access.principal.key
         if record.scope_type == "conversation":
-            return record.scope_id == access.conversation.key and access.role in {"admin", "owner"}
+            return record.scope_id == access.conversation.key
         if record.scope_type == "owner_private":
-            return (
-                record.scope_id == access.principal.key
-                and access.role == "owner"
-                and access.conversation.surface.value == "private"
-            )
-        return access.role == "owner"
+            return record.scope_id == access.principal.key and access.conversation.surface.value == "private"
+        return record.scope_type == "global_curated"
 
     def _evidence(self, conn, access, record):
+        for source_id in record.source_event_ids:
+            self.permissions.require(access, "memory.source.read", "event:" + source_id)
         rows = conn.execute(
             select(inbox.c.event_json).where(
                 inbox.c.id.in_(record.source_event_ids), inbox.c.conversation_id == access.conversation.key
@@ -292,8 +291,7 @@ class SocialService:
         return record
 
     def commit(self, access, memory_id, *, authorized=False):
-        if not authorized:
-            raise PermissionError("explicit commit authorization required")
+        self.permissions.require(access, "memory.commit", "memory:" + memory_id)
         with self.db.transaction() as conn:
             record = self._load(conn, access, memory_id)
             if not self._manageable(access, record):
@@ -352,7 +350,14 @@ class SocialService:
             )
             records = [record for record in records if not revoked.intersection(record.source_event_ids)]
         records = [
-            r for r in records if r.valid_from <= now and (r.valid_until is None or r.valid_until > now)
+            r
+            for r in records
+            if r.valid_from <= now
+            and (r.valid_until is None or r.valid_until > now)
+            and all(
+                self.permissions.check(access, "memory.source.read", "event:" + source).allowed
+                for source in r.source_event_ids
+            )
         ]
         tokens = keywords(query)
         lexical = sorted(
@@ -485,9 +490,8 @@ class SocialService:
             ).scalar_one_or_none()
             if event is None:
                 raise LookupError("source unavailable")
-            source = InboundEvent.model_validate_json(event)
-            if source.principal.key != access.principal.key and access.role not in {"admin", "owner"}:
-                raise PermissionError("source not manageable")
+            InboundEvent.model_validate_json(event)
+            self.permissions.require(access, "memory.source.revoke", "event:" + source_id)
             if (
                 conn.execute(
                     select(social_tombstones.c.source_id).where(social_tombstones.c.source_id == source_id)
@@ -583,8 +587,7 @@ class SocialService:
     def learn_jargon(
         self, access, term, sense_id, definition, evidence_ids, *, authorized=False, allow_output=False
     ):
-        if not authorized:
-            raise PermissionError("jargon publication requires authorization")
+        self.permissions.require(access, "memory.jargon.publish", "conversation:" + access.conversation.key)
         entry = self.jargon(access, term, sense_id, definition, evidence_ids, allow_output=allow_output)
         now = self.clock.now()
         record = MemoryRecord(

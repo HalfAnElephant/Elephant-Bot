@@ -13,8 +13,15 @@ task_id, run_id = sys.argv[1:]
 if any(str(UUID(value)) != value for value in (task_id, run_id)):
     raise SystemExit("canonical UUID required")
 manifest = json.loads(Path("/run/qqbot/manifest.json").read_text())
-if manifest["task_id"] != task_id or manifest["run_id"] != run_id or manifest["session_id"] != run_id:
+general = manifest.get("schema_version") == 2
+identity_key = "process_id" if general else "run_id"
+if manifest["task_id"] != task_id or manifest[identity_key] != run_id:
     raise SystemExit("launch identity mismatch")
+if not general and manifest["session_id"] != run_id:
+    raise SystemExit("legacy session identity mismatch")
+session_id = manifest["session_id"]
+if str(UUID(session_id)) != session_id:
+    raise SystemExit("canonical session UUID required")
 if os.getuid() == 0:
     raise SystemExit("runner must use the dedicated unprivileged account")
 status = Path("/proc/self/status").read_text()
@@ -45,15 +52,15 @@ config = {
         "qqbot": {
             "baseUrl": manifest["proxy_url"] + "/v1",
             "api": "openai-completions",
-            "apiKey": manifest["model_token"],
+            "apiKey": "binding-required" if general else manifest["model_token"],
             "models": [
                 {
                     "id": manifest["model"],
                     "name": manifest["model"],
                     "reasoning": False,
                     "input": ["text"],
-                    "contextWindow": 32768,
-                    "maxTokens": 4096,
+                    "contextWindow": manifest.get("model_context_window", 32768),
+                    "maxTokens": manifest.get("output_tokens", 4096),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                 }
             ],
@@ -61,6 +68,9 @@ config = {
     }
 }
 (profile / "models.json").write_text(json.dumps(config))
+(profile / "settings.json").write_text(json.dumps({"cacheWarming": "off", "defaultThinkingLevel": "off",
+    "compaction": {"enabled": True, "reserveTokens": manifest.get("model_context_window", 32768) - manifest.get("soft_input_tokens", 6000),
+                   "keepRecentTokens": manifest.get("keep_recent_tokens", 2000)}}))
 env = {
     "PATH": "/usr/bin:/bin",
     "LANG": "C.UTF-8",
@@ -68,9 +78,11 @@ env = {
     "PI_CODING_AGENT_DIR": str(profile),
     "PI_OFFLINE": "1",
     "PI_TELEMETRY": "0",
-    "QQBOT_RESEARCH_URL": manifest["proxy_url"],
-    "QQBOT_TOOL_TOKEN": manifest["tool_token"],
 }
+if general:
+    env.update(QQBOT_GATEWAY_URL=manifest["proxy_url"], QQBOT_PROCESS_TOKEN=manifest["process_token"])
+else:
+    env.update(QQBOT_RESEARCH_URL=manifest["proxy_url"], QQBOT_TOOL_TOKEN=manifest["tool_token"])
 argv = [
     "/usr/bin/node",
     "/opt/qqbot/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -81,13 +93,11 @@ argv = [
     "--model",
     manifest["model"],
     "--session",
-    str(workspace / "sessions" / (run_id + ".jsonl")),
+    str(workspace / "sessions" / (session_id + ".jsonl")),
     "--no-extensions",
     "--no-builtin-tools",
-    "--tools",
-    "research_search,research_fetch,research_write",
     "--extension",
-    "/opt/qqbot/research_extension.ts",
+    "/opt/qqbot/pi_bridge.ts" if general else "/opt/qqbot/research_extension.ts",
     "--no-mcp",
     "--no-skills",
     "--no-prompt-templates",

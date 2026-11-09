@@ -22,11 +22,13 @@ from qqbot.domain import (
     TextSegment,
     stable_id,
 )
+from qqbot.permissions import PermissionService, PermissionSubject
 
 
 class OfficialAdapter:
-    def __init__(self, config, deployment_id, inbox, clock, client=None):
+    def __init__(self, config, deployment_id, inbox, clock, client=None, *, permissions=None):
         self.config, self.deployment_id, self.inbox, self.clock = config, deployment_id, inbox, clock
+        self.permissions = permissions or PermissionService()
         self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
         self.token = None
         self.token_expires = clock.now()
@@ -174,10 +176,9 @@ class OfficialAdapter:
             or target.bot_identity_id != self.config.bot_id
         ):
             return DeliveryCheck(allowed=False, reason="IDENTITY_MISMATCH")
-        allowlist = (
-            self.config.allowed_users if target.surface == Surface.PRIVATE else self.config.allowed_groups
-        )
-        if target.remote_conversation_id not in allowlist:
+        if not self.permissions.check(
+            PermissionSubject.from_refs(target), "notification.send", "conversation:" + target.key
+        ).allowed:
             return DeliveryCheck(allowed=False, reason="TARGET_DENIED")
         reply = envelope.reply_context
         if (

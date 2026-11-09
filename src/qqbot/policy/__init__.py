@@ -14,7 +14,7 @@ class PolicyState:
     paused: bool = False
     duplicate: bool = False
     valid_bot_reply: bool = False
-    remaining_budget: int = 6
+    remaining_budget: int | None = None
     last_bot_at: datetime | None = None
     new_human_messages: int = 0
     unanswered_proactive: int = 0
@@ -55,7 +55,7 @@ class SpeechPolicy:
             return result("IGNORE", "HARD_GATE")
         if event.sender_is_bot or state.duplicate or event.event_type != "message.created":
             return result("IGNORE", "ECHO_OR_DUPLICATE")
-        if state.paused or state.mode == "silent" or state.remaining_budget <= 0:
+        if state.paused or state.mode == "silent" or (state.remaining_budget is not None and state.remaining_budget <= 0):
             return result("IGNORE", "PAUSED_OR_BUDGET")
         if not capabilities.can_reply:
             return result("IGNORE", "NO_SEND_CAPABILITY")
