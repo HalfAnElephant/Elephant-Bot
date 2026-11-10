@@ -7,6 +7,28 @@ import pytest
 from qqbot.harness.research import ResearchCapabilities, fetch_public, public_addresses
 
 
+@pytest.mark.parametrize("count", [0, 16, 25])
+def test_public_dns_bounds_connection_candidates(monkeypatch, count):
+    addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"1.1.1.{index + 1}", 443))
+        for index in range(count)
+    ]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
+    if not addresses:
+        with pytest.raises(ValueError, match="empty"):
+            public_addresses("cdn.example", 443)
+    else:
+        assert public_addresses("cdn.example", 443) == addresses[:16]
+
+
+def test_public_dns_checks_addresses_beyond_connection_limit(monkeypatch):
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))] * 16
+    addresses.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
+    with pytest.raises(ValueError, match="public unicast"):
+        public_addresses("cdn.example", 443)
+
+
 def test_ssrf_blocked_and_redirect_schemes(monkeypatch):
     for address in (
         "127.0.0.1",
