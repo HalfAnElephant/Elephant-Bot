@@ -10,6 +10,7 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 - 控制台 Node 测试、Ruff 和配置 schema 一致性。
 - wheel、sdist 与完整源码归档构建。
 - 在归档解压目录中安装生产依赖和 wheel，执行配置校验、数据库迁移/FTS5 检查、人格加载及 HTTP/静态资源冒烟检查。
+- 从 Actions 重新下载上传的发布附件，校验内容校验和与提交号。
 
 `correctness-results` 保存环境、原始日志与 JUnit，`release-assets` 保存构建产物，
 均保留 14 天。任一前置检查失败会阻止后续构建或发布。
