@@ -74,8 +74,9 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
             finally:
                 os.close(directory)
             artifact_id = str(uuid4())
+            # Preserve the archive directory's default Core-reader ACL mask.
             destination_fd = os.open(artifact_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                     0o600, dir_fd=archive_fd)
+                                     0o640, dir_fd=archive_fd)
             created.append(artifact_id)
             with os.fdopen(destination_fd, "wb") as output:
                 output.write(content)

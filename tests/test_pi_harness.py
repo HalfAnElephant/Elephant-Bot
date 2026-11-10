@@ -28,6 +28,25 @@ def test_artifact_boundaries(tmp_path):
         export_artifacts(workspace, archive, ["hard.md"])
 
 
+def test_artifact_creation_keeps_default_reader_acl_eligible(tmp_path, monkeypatch):
+    workspace, archive = tmp_path / "work", tmp_path / "archive"
+    workspace.mkdir()
+    (workspace / "report.txt").write_text("report")
+    open_file, modes = os.open, []
+
+    def track_open(path, flags, mode=0o777, **kwargs):
+        if flags & os.O_CREAT:
+            modes.append(mode)
+        return open_file(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", track_open)
+    exported = export_artifacts(workspace, archive, ["report.txt"])
+    result = archive / exported[0]["id"]
+    assert modes == [0o640]
+    assert result.read_text() == "report"
+    assert result.stat().st_mode & 0o007 == 0
+
+
 @pytest.mark.parametrize(("suffix", "mime", "content"), [
     (".zip", "application/zip", b"PK\x03\x04\xff\x00"),
     (".pdf", "application/pdf", b"%PDF-1.7\n\xff\x00"),
