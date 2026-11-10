@@ -25,6 +25,7 @@ from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.domain.tasks import TaskResult
 from qqbot.expressions import ExpressionVersionConflict
 from qqbot.memory import MemoryRecord
+from qqbot.observability.diagnostics import configuration_status
 from qqbot.permissions import (
     PermissionPolicy,
     PermissionRule,
@@ -32,9 +33,9 @@ from qqbot.permissions import (
     PermissionSubject,
     PolicyVersionConflict,
 )
-from qqbot.storage.schema import conversations, decision_logs, decisions, inbox, outbox
+from qqbot.storage.schema import audit_events, conversations, decision_logs, decisions, inbox, outbox
 from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
-from qqbot.storage.task_schema import events, runs, tasks
+from qqbot.storage.task_schema import events, model_requests, runs, tasks
 
 
 class PolicyPatch(BaseModel):
@@ -552,6 +553,11 @@ def router(core, authenticate):
                 query = query.where(social_records.c.status == status)
             return [json.loads(raw) for raw in c.execute(query.limit(100)).scalars()]
 
+    @router.post("/api/v1/memories/{memory_id}/publish")
+    def publish_memory(memory_id: str):
+        _, access = memory_row(memory_id)
+        return core.social.commit(access, memory_id, authorized=True).model_dump(mode="json")
+
     @router.patch("/api/v1/memories/{memory_id}")
     def correct_memory(memory_id: str, body: MemoryPatch):
         record, access = memory_row(memory_id)
@@ -635,6 +641,7 @@ def router(core, authenticate):
                 *(adapter.secret_env for adapter in saved.adapters),
             }
             return {
+                "diagnostics": configuration_status(core, saved),
                 "config": core.settings.model_dump(mode="json"),
                 "version": config_digest(core.settings),
                 "saved_config": saved.model_dump(mode="json"),
@@ -644,6 +651,29 @@ def router(core, authenticate):
                 **changes(core.settings, saved),
                 "restart_required": saved != core.settings,
             }
+
+    @router.get("/api/v1/memory-maintenance")
+    def memory_maintenance(conversation_id: str):
+        require_permission("memory.read", "conversation:" + conversation_id)
+        conversation(conversation_id)
+        return json.loads(core.state(conversation_id)["state_json"]).get("memory_maintenance", {})
+
+    @router.get("/api/v1/model-calls")
+    def model_calls(limit: int = Query(default=100, ge=1, le=1000)):
+        require_permission("model.usage.read", "model:usage")
+        with core.db.engine.connect() as c:
+            core_rows = c.execute(select(audit_events).where(audit_events.c.kind == "model.call")
+                                  .order_by(audit_events.c.created_at.desc()).limit(limit)).mappings().all()
+            worker_rows = c.execute(select(model_requests).where(model_requests.c.kind != "tool")
+                                    .order_by(model_requests.c.created_at.desc()).limit(limit)).mappings().all()
+        calls = [{"request_id": row["id"], "at": row["created_at"], **json.loads(row["detail"])}
+                 for row in core_rows]
+        calls.extend({"request_id": row["id"], "at": row["created_at"], "phase": row["kind"],
+                      "task_id": row["task_id"], "run_id": row["run_id"], "state": row["state"],
+                      "usage": json.loads(row["usage_json"]) if row["usage_json"] else {"coverage": "unknown"}}
+                     for row in worker_rows)
+        return {"calls": sorted(calls, key=lambda row: (row["at"], row["request_id"]), reverse=True)[:limit],
+                "cost": None, "pricing_version": None}
 
     @router.get("/api/v1/config/schema")
     def config_schema():

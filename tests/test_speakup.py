@@ -101,14 +101,14 @@ async def test_unsent_attempts_are_bounded_and_not_replayed(outcome, tmp_path, c
     core.db.close()
 
 
-async def test_question_nudge_once_outside_daily_quota_and_quiet_hours(tmp_path, clock, nap_config, monkeypatch):
+async def test_question_nudge_once_within_daily_quota_and_quiet_hours(tmp_path, clock, nap_config, monkeypatch):
     calls = []
     def handler(request):
         calls.append(request)
         return response('[沉默]')
     core = setup_core(tmp_path, clock, nap_config, monkeypatch, handler)
     event = incoming(core, clock)
-    core.settings = core.settings.model_copy(update={'speak_up': core.settings.speak_up.model_copy(update={'max_per_day': 0})})
+    core.settings = core.settings.model_copy(update={'speak_up': core.settings.speak_up.model_copy(update={'max_per_day': 1})})
     clock.advance(1)
     with core.db.transaction() as c:
         core.outbox.enqueue_text(c, target=event.conversation, text='今天吃啥？', origin_kind='chat', origin_id='reply')
@@ -119,6 +119,7 @@ async def test_question_nudge_once_outside_daily_quota_and_quiet_hours(tmp_path,
     clock.advance(16 * 60)
     await core.speak_up.tick()
     assert len(calls) == 1
+    assert json.loads(core.state(event.conversation.key)['state_json'])['speak_up']['count'] == 1
     assert '今天吃啥' in json.loads(calls[0].content)['messages'][1]['content']
     clock.advance(60)
     await core.speak_up.tick()
@@ -166,5 +167,43 @@ async def test_only_selected_private_targets_with_permission_and_proactive_capab
     clock.advance(61)
     await core.speak_up.tick()
     assert len(calls) == 1
+    await core.stop()
+    core.db.close()
+
+
+async def test_nudge_respects_zero_daily_quota(tmp_path, clock, nap_config, monkeypatch):
+    calls = []
+    core = setup_core(tmp_path, clock, nap_config, monkeypatch,
+                      lambda request: calls.append(request) or response('在吗？'))
+    event = incoming(core, clock)
+    core.settings = core.settings.model_copy(update={'speak_up': core.settings.speak_up.model_copy(update={'max_per_day': 0})})
+    clock.advance(1)
+    with core.db.transaction() as c:
+        core.outbox.enqueue_text(c, target=event.conversation, text='今天吃啥？', origin_kind='chat', origin_id='reply')
+        c.execute(update(outbox).values(state='SENT', sent_at=clock.now().isoformat()))
+    monkeypatch.setattr(core.speak_up.rng, 'random', lambda: .1)
+    clock.advance(16 * 60)
+    await core.speak_up.tick()
+    assert calls == []
+    await core.stop()
+    core.db.close()
+
+
+async def test_natural_opt_out_revokes_pending_starter(tmp_path, clock, nap_config, monkeypatch):
+    core = setup_core(tmp_path, clock, nap_config, monkeypatch, lambda request: response('在吗？'))
+    event = incoming(core, clock)
+    await core.speak_up.tick()
+    clock.advance(61)
+    await core.speak_up.tick()
+    envelope = deliveries(core)[0]
+    assert core.pre_send(envelope)
+    from qqbot.domain import TextSegment
+    optout = event.model_copy(update={'segments': (TextSegment(text='不要主动找我'),)})
+    assert core.speak_up.preference(optout)
+    assert not core.pre_send(envelope)
+    assert not SpeakUp(core).eligible(event)
+    restore = event.model_copy(update={'segments': (TextSegment(text='恢复主动搭话'),)})
+    assert core.speak_up.preference(restore)
+    assert core.speak_up.eligible(event)
     await core.stop()
     core.db.close()

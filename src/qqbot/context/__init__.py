@@ -13,7 +13,7 @@ from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.execution import TurnInput
 from qqbot.expressions import ExpressionService, build_habits
 from qqbot.storage.schema import inbox, outbox, runtime_state
-from qqbot.storage.social_schema import social_tombstones
+from qqbot.storage.social_schema import conversation_summaries, social_tombstones
 from qqbot.storage.task_schema import notifications, runs, tasks
 
 
@@ -50,7 +50,7 @@ class ContextService:
     def pool_limits(self):
         execution = self.settings.execution
         return {
-            "max_resident": max(execution.max_active, execution.warm_max),
+            "max_resident": max(execution.max_active + 1, execution.warm_max),
             "max_idle": execution.warm_idle_max if execution.warm_max else 0,
             "ttl": execution.warm_ttl_seconds,
         }
@@ -201,7 +201,7 @@ class ContextService:
                 )
         return binding
 
-    def build(self, access, turn, *, invited=True, notice_only=False):
+    def build(self, access, turn, *, invited=True, notice_only=False, memory_options=None):
         if access.principal != turn.principal or access.conversation != turn.conversation:
             raise PermissionError("turn identity mismatch")
         self.permissions.require(access, "history.read", "conversation:" + access.conversation.key)
@@ -225,6 +225,14 @@ class ContextService:
                 for item in topic_index["items"]
                 if not item.get("binding") or self.validate(access, item["binding"]["validation"])
             ]
+            archive_sources = set()
+            if not notice_only and re.search(r"之前|上次|以前|前面|上周|上个月|上月", turn.text):
+                summary_sources = conn.execute(select(conversation_summaries.c.source_ids_json).where(
+                    conversation_summaries.c.conversation_id == access.conversation.key,
+                    conversation_summaries.c.status == "VALID",
+                )).scalar_one_or_none()
+                if summary_sources:
+                    archive_sources.update(json.loads(summary_sources))
             reply_topic = None
             if turn.reply_to:
                 previous_task = conn.execute(
@@ -297,7 +305,7 @@ class ContextService:
             restore_sources = (
                 indexed_sources if turn.reply_to or re.search(r"回到|刚才|之前|前面", turn.text) else set()
             )
-            missing = (set(turn.source_event_ids) | restore_sources) - present
+            missing = (set(turn.source_event_ids) | restore_sources | archive_sources) - present
             if missing:
                 rows.extend(
                     conn.execute(
@@ -493,7 +501,7 @@ class ContextService:
         history = [
             item
             for item in history
-            if item["source"] in selected_ids
+            if item["source"] in selected_ids or item["source"] in archive_sources
             or (item["role"] == "user" and item["message_id"] == turn.reply_to)
             or item["topic"] == selected_topic["id"]
             or (item["topic"] is None and entities(item["text"])[0] == selected_topic["kind"])
@@ -503,7 +511,7 @@ class ContextService:
             item.pop("topic", None)
         if notice_only:
             history.clear()
-        memories = [] if notice_only else self.social.retrieve(access, turn.text)
+        memories = [] if notice_only else self.social.retrieve(access, turn.text, **(memory_options or {}))
         for memory in memories:
             for source in memory.source_event_ids:
                 with self.db.engine.connect() as conn:
@@ -613,7 +621,7 @@ class ContextService:
         }
 
     def validate(self, access, context):
-        if not context:
+        if not context or set(context) == {"skill_version"}:
             return True
         if context.get("scope") != access.conversation.key:
             return False

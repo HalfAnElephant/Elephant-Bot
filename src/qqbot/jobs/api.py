@@ -5,6 +5,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from qqbot.domain.tasks import TaskResult
+from qqbot.observability.diagnostics import report_worker
 
 
 class WorkerRequest(BaseModel):
@@ -33,6 +34,8 @@ def internal_router(service, token):
         if not hmac.compare_digest(authorization, "Bearer " + token):
             raise HTTPException(401)
         try:
+            if operation == "worker-config" and body.payload:
+                return report_worker(service, body.worker_id, body.payload)
             if operation == "claim":
                 claim = service.claim(body.worker_id, body.protocol_version)
                 if claim is None and body.wait_ms:
@@ -54,6 +57,8 @@ def internal_router(service, token):
             if not body.run_id or not body.fencing_token:
                 raise ValueError("run identity required")
             args = (body.run_id, body.fencing_token, body.worker_id)
+            if operation == "memory-query" and body.payload:
+                return await service.memory_query(*args, body.payload)
             if operation == "ledger" and body.payload:
                 return await service.ledger(*args, body.payload)
             if operation == "input-ack" and body.payload:
@@ -64,6 +69,8 @@ def internal_router(service, token):
                 return service.observation(*args, body.payload)
             if operation == "bind-process" and body.payload:
                 return service.bind_process(*args, body.payload)
+            if operation == "bind-skills" and body.payload:
+                return service.bind_skills(*args, body.payload)
             if operation in {"notify", "ask", "authorize", "reserve-budget", "usage"} and body.payload is not None:
                 method = {"notify": service.notify, "ask": service.ask, "authorize": service.authorize,
                           "reserve-budget": service.reserve_budget, "usage": service.record_usage}[operation]

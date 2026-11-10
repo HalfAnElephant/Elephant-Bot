@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from datetime import datetime, timedelta
+from pathlib import Path
 from random import Random
 from uuid import uuid4
 
@@ -14,8 +15,11 @@ from .presentation import chat_bubbles, plain_text, split_text
 class Outbox:
     def __init__(self, db, clock):
         self.db, self.clock = db, clock
+        self.archive_root = Path(db.path).parent / "artifacts"
 
     def enqueue(self, c, envelope: OutboundEnvelope) -> str:
+        if envelope.artifact:
+            return self._enqueue_one(c, envelope.model_copy(update={"plain_text": True}))
         text = envelope.text if envelope.plain_text else plain_text(envelope.text)
         deliveries = []
         for offset, part in enumerate(split_text(text)):
@@ -215,7 +219,7 @@ class Outbox:
             now = self.clock.now()
             if row["next_attempt_at"] and row["next_attempt_at"] > now.isoformat():
                 continue
-            if envelope.expires_at <= now and envelope.origin_kind != "task":
+            if envelope.expires_at <= now and (envelope.origin_kind != "task" or envelope.artifact):
                 self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="EXPIRED"))
                 continue
             adapter = adapters.get(envelope.target.adapter_instance_id)
@@ -224,6 +228,12 @@ class Outbox:
             if pre_send and not pre_send(envelope):
                 self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="STALE_CONTEXT"))
                 continue
+            if envelope.artifact:
+                capabilities = await adapter.capabilities(envelope.target)
+                supported = capabilities.supports_images if envelope.artifact.mime_type.startswith("image/") else capabilities.supports_files
+                if not supported:
+                    self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="UNSUPPORTED_ARTIFACT"))
+                    continue
             check = await adapter.validate_delivery(envelope)
             if not check.allowed:
                 if check.wait_for_trigger:
@@ -294,8 +304,17 @@ class Outbox:
                 )
                 if claimed.rowcount != 1:
                     continue
+            if envelope.artifact:
+                from qqbot.harness.artifacts import read_artifact
+                try:
+                    content = read_artifact(self.archive_root, envelope.artifact)
+                except (OSError, ValueError):
+                    self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="ARTIFACT_UNAVAILABLE"))
+                    continue
+                envelope = envelope.model_copy(update={"artifact_data": content})
             try:
-                receipt = await adapter.send(envelope)
+                send_artifact = getattr(adapter, "send_artifact", None) if envelope.artifact else None
+                receipt = await send_artifact(envelope, pre_send=pre_send) if send_artifact else await adapter.send(envelope)
             except Exception:  # noqa: BLE001 - A send exception may follow an external side effect.
                 receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
             self._receipt(envelope.delivery_id, receipt)

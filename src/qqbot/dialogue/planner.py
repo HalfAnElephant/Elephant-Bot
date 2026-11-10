@@ -9,20 +9,22 @@ from qqbot.domain.execution import ExecutionPlan, TaskGoal
 
 
 def wants_background(text):
-    return bool(re.search(r"后台|慢慢做|等(?:待|到).*(?:CI|构建|测试)", text, re.IGNORECASE))
+    for clause in re.split(r"[，。！？,;；\n]|但是|不过|而是|但", text):
+        if re.search(r"(?:不(?:要|用|必|想)?|别|无需).*(?:后台|慢慢做|等待|等到)", clause):
+            continue
+        if re.search(r"(?:放到|转到|放|转|交给)后台|慢慢做|等(?:待|到).*(?:CI|构建|测试)",
+                     clause, re.IGNORECASE):
+            return True
+    return False
 
 
 def plan_turn(turn, settings, *, background=False, permission_version=0, context=None):
     detached = background or wants_background(turn.text)
-    hints, checks, outputs = [], [], []
+    checks, outputs = [], []
     github = bool(re.search(r"\b(?:PR|Issue|GitHub|CI)\b|仓库|github\.com", turn.text, re.IGNORECASE))
     weather = bool(re.search(r"天气|气温|温度|下雨|预报|\bweather\b", turn.text, re.IGNORECASE)) or (
         (context or {}).get("seed", {}).get("topic", {}).get("kind") == "weather"
     )
-    if github:
-        hints.append("github")
-    if weather or re.search(r"联网|网页|https?://", turn.text):
-        hints.append("web")
     artifact_request = bool(re.search(r"生成|导出|保存为|另存为|写一[份个张]|给我", turn.text))
     if artifact_request:
         filenames = re.finditer(
@@ -70,7 +72,6 @@ def plan_turn(turn, settings, *, background=False, permission_version=0, context
     return goal, ExecutionPlan(
         initial_delivery="DETACHED" if detached else "ATTACHED",
         foreground_wait_ms=settings.execution.foreground_wait_ms,
-        capability_hints=tuple(hints),
         model_config_ref=hashlib.sha256(settings.model.model_dump_json().encode()).hexdigest(),
         context_config_ref=settings.context.version,
         budget=settings.execution.budget if detached else settings.execution.interactive_budget,

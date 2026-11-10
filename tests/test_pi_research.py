@@ -239,7 +239,8 @@ def test_production_manifest_is_fixed_and_linux_gated():
     general = {key: value for key, value in manifest.items() if key not in {"model_token", "tool_token"}}
     general.update(schema_version=2, profile="pi", process_id=run_id, process_epoch=1,
         session_id="33333333-3333-4333-8333-333333333333", process_token="c" * 43,
-        model_context_window=32768, output_tokens=1000, soft_input_tokens=6000, keep_recent_tokens=2000)
+        model_context_window=32768, output_tokens=1000, soft_input_tokens=6000, keep_recent_tokens=2000,
+        skill_version="a" * 64)
     assert validate_manifest(general, task_id, run_id, policy) == general
     for changes in ({"soft_input_tokens": 40000}, {"keep_recent_tokens": 6000}, {"process_epoch": 0},
                     {"process_id": task_id}, {"model_context_window": True}, {"output_tokens": 0}):

@@ -19,6 +19,7 @@ class SessionPool:
             raise ValueError("invalid resident/idle limits")
         self.factory, self.max_resident, self.max_idle, self.ttl = factory, max_resident, max_idle, ttl
         self.entries = {}
+        self.skill_version = None
         self.lock = asyncio.Lock()
 
     async def _evict(self, entry):
@@ -41,10 +42,13 @@ class SessionPool:
         key = claim.get("context", {}).get("key") or "task:" + claim["task_id"]
         if claim.get("plan", {}).get("workspace_ref") or claim.get("delivery") == "DETACHED":
             key = "task:" + claim["task_id"]
+        skill_version = claim.get("context", {}).get("skill_version")
+        if skill_version:
+            key += ":skills:" + skill_version
         async with self.lock:
             limits = claim.get("context", {}).get("pool")
             if limits:
-                if not 0 <= limits["max_idle"] <= limits["max_resident"] <= 32 or limits["max_resident"] < 1 or limits["ttl"] < 1:
+                if not 0 <= limits["max_idle"] <= limits["max_resident"] <= 33 or limits["max_resident"] < 1 or limits["ttl"] < 1:
                     raise ValueError("invalid host pool limits")
                 self.max_resident, self.max_idle, self.ttl = limits["max_resident"], limits["max_idle"], limits["ttl"]
             await self._sweep()
@@ -67,7 +71,8 @@ class SessionPool:
                     raise RuntimeError("resident process capacity exhausted; active and unknown processes retained")
             process_id, session_id = str(uuid4()), str(uuid4())
             runner = self.factory(claim, process_id, session_id)
-            entry = {"id": process_id, "key": key, "state": "BUSY", "used": time.monotonic(), "runner": runner}
+            entry = {"id": process_id, "key": key, "state": "BUSY", "used": time.monotonic(), "runner": runner,
+                     "skill_version": skill_version}
             self.entries[process_id] = entry
             runner.pool_id = process_id
             try:
@@ -86,7 +91,8 @@ class SessionPool:
             entry = self.entries.get(runner.pool_id)
             if not entry:
                 return
-            if committed and runner.quiescent_verified and not runner.stopped_verified:
+            if (committed and runner.quiescent_verified and not runner.stopped_verified
+                    and (not self.skill_version or entry.get("skill_version") == self.skill_version)):
                 entry.update(state="IDLE", used=time.monotonic())
             else:
                 await self._evict(entry)
@@ -101,6 +107,13 @@ class SessionPool:
     async def sweep(self):
         async with self.lock:
             await self._sweep()
+
+    async def retire_skills(self, version):
+        async with self.lock:
+            self.skill_version = version
+            for entry in list(self.entries.values()):
+                if entry["state"] == "IDLE" and entry.get("skill_version") != version:
+                    await self._evict(entry)
 
     async def close(self):
         async with self.lock:

@@ -12,10 +12,12 @@ class JudgmentSignals(DTO):
     invites_participation: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
     useful_contribution: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
     private_exchange: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
-    proactive_allowed: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+    proactive_allowed: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
     request_kind: Literal["chat", "question", "control", "task", "unclear"] = "unclear"
     abstain: bool = False
     model_id: str = "rule-only"
+    backend: str = "rule"
+    schema_version: Literal["judgment-v2"] = "judgment-v2"
 
 
 class SpeechThresholds(DTO):

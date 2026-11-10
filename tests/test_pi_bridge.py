@@ -377,3 +377,222 @@ async def test_locked_pi_image_reaches_upstream_without_entering_session(compact
                for message in messages if isinstance(message.get("content"), list) for part in message["content"])
     session = state.runner.session_path.read_text()
     assert data not in session and "https://cdn.example/signed-image" not in session
+
+
+async def test_locked_pi_context_delta_persists_source_cursor_across_rebind_and_restart(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    state.gateway.revoke()
+    first = {"role": "user", "speaker": "member_a", "source": "source-a", "text": "FIRST_CONTEXT_SENTINEL"}
+    second = {"role": "user", "speaker": "member_b", "source": "source-b", "text": "NEW_GROUP_CONTEXT_SENTINEL"}
+    delivered = {"role": "assistant", "source": "delivery-a", "text": "DELIVERED_CONTEXT_SENTINEL"}
+    seed = {"history": [first], "memories": [], "topic": {"kind": "general"}}
+    for index, history in enumerate(([first], [first, second, delivered], [second, delivered])):
+        state.gateway.bind({**state.claim, "run_id": "delta-run-" + str(index),
+            "context": {**state.claim["context"], "seed": {**seed, "history": history}}})
+        await state.runner.run("Respond with the current context", keep_alive=True)
+        users = [str(message["content"]) for message in state.requests[-1]["payload"]["messages"]
+                 if message["role"] == "user"]
+        combined = "\n".join(users)
+        assert combined.count("FIRST_CONTEXT_SENTINEL") == 1
+        if index:
+            assert combined.count("NEW_GROUP_CONTEXT_SENTINEL") == 1
+            assert combined.count("DELIVERED_CONTEXT_SENTINEL") == 1
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    contexts = [entry for entry in entries if entry.get("customType") == "qqbot-context"]
+    assert len(contexts) == 2
+    assert json.loads(contexts[1]["content"])["context_delta"]["history"] == [second, delivered]
+    assert set(contexts[1]["details"]["source_cursor"]) == {"user:source-a", "user:source-b", "assistant:delivery-a"}
+
+    # A new process loads ACKs from the same session file, without relying on in-memory sets.
+    old_runner = state.runner
+    await old_runner.stop()
+    state.gateway.bind({**state.claim, "run_id": "delta-recovery-run",
+        "context": {**state.claim["context"], "seed": {**seed, "history": [first, second, delivered]}}})
+    state.runner = PiRunnerAdapter(old_runner.executable, old_runner.workspace, provider="qqbot", model="offline",
+        timeout=25, gateway=state.gateway, gateway_url=old_runner.gateway_url,
+        session_id=old_runner.session_path.stem)
+    try:
+        await state.runner.run("Continue after process recovery", keep_alive=True)
+        messages = str(state.requests[-1]["payload"]["messages"])
+        assert messages.count("FIRST_CONTEXT_SENTINEL") == 1
+        assert messages.count("NEW_GROUP_CONTEXT_SENTINEL") == 1
+        assert messages.count("DELIVERED_CONTEXT_SENTINEL") == 1
+        entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+        assert len([entry for entry in entries if entry.get("customType") == "qqbot-context"]) == 2
+    finally:
+        await state.runner.stop()
+
+
+async def test_locked_pi_context_revision_reaches_model_once(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    state.gateway.revoke()
+    for index, text in enumerate(("OLD_CONTEXT_SENTINEL", "CORRECTED_CONTEXT_SENTINEL", "CORRECTED_CONTEXT_SENTINEL")):
+        state.gateway.bind({**state.claim, "run_id": "revision-run-" + str(index),
+            "context": {**state.claim["context"], "seed": {"history": [
+                {"source": "stable-source", "role": "user", "text": text}]}}})
+        await state.runner.run("Use the current source revision", keep_alive=True)
+    messages = str(state.requests[-1]["payload"]["messages"])
+    assert messages.count("OLD_CONTEXT_SENTINEL") == 1
+    assert messages.count("CORRECTED_CONTEXT_SENTINEL") == 1
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    contexts = [entry for entry in entries if entry.get("customType") == "qqbot-context"]
+    assert len(contexts) == 2
+    assert json.loads(contexts[-1]["content"])["context_delta"]["history"][0]["text"] == "CORRECTED_CONTEXT_SENTINEL"
+
+
+async def test_locked_pi_discovers_unknown_skill_reads_and_executes_its_script(compaction_session, tmp_path, monkeypatch):
+    import sys
+
+    from qqbot.capabilities import process as process_module
+    from qqbot.harness.skills import SkillStore
+
+    state = compaction_session
+    source = tmp_path / 'maintained-skills'
+    skill = source / 'camera-advisor'
+    (skill / 'scripts').mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: camera-advisor\ndescription: Prepare a camera recommendation.\n---\n'
+        'CAMERA_SKILL_BODY_SENTINEL\nRun /skills/camera-advisor/scripts/create.py and export outputs/camera.txt.\n')
+    (skill / 'scripts' / 'create.py').write_text(
+        'from pathlib import Path\nPath("outputs").mkdir(exist_ok=True)\n'
+        'Path("outputs/camera.txt").write_text("camera report from unknown skill")\n')
+    snapshot = SkillStore(source, tmp_path / 'versions').select()
+    gateway = state.gateway
+    old_runner = state.runner
+    await old_runner.stop()
+    gateway.revoke()
+    workspace = tmp_path / 'task-workspace'
+    workspace.mkdir()
+    gateway.workspace = workspace
+    gateway.skills = snapshot
+    gateway.bind({**state.claim, 'run_id': 'unknown-skill', 'context': {
+        **state.claim['context'], 'skill_version': snapshot.version}})
+    original_call = gateway.call
+
+    async def host(operation, payload):
+        if operation == 'ledger':
+            return {'state': 'PREPARED', 'result': {}} if payload['operation'] == 'prepare' else {'changed': True}
+        return await original_call(operation, payload)
+
+    gateway.call = host
+    gateway.tools.ledger.call = host
+    # Exercise the production command/mount construction, with a local subprocess replacing bwrap.
+    mounts = []
+
+    async def start_process(*command, **options):
+        mounts.append(command)
+        assert ('--ro-bind', str(snapshot.directory), '/skills') == command[
+            command.index(str(snapshot.directory)) - 1:command.index(str(snapshot.directory)) + 2]
+        argv = list(command[command.index('--') + 1:])
+        argv[0] = sys.executable
+        argv = [arg.replace('/skills/', str(snapshot.directory) + '/') for arg in argv]
+        return await asyncio.create_subprocess_exec(*argv, cwd=workspace, **options)
+
+    monkeypatch.setattr(process_module.sys, 'platform', 'linux')
+    monkeypatch.setattr(process_module.shutil, 'which', lambda _name: '/usr/bin/bwrap')
+    monkeypatch.setattr(process_module, 'start_process', start_process)
+    requests = []
+
+    def upstream(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            system = '\n'.join(str(message['content']) for message in payload['messages'] if message['role'] == 'system')
+            assert 'camera-advisor' in system and '/skills/camera-advisor/SKILL.md' in system
+            assert 'CAMERA_SKILL_BODY_SENTINEL' not in system
+            assert '已安装能力目录' not in system
+            assert 'capability_search' not in [tool['function']['name'] for tool in payload['tools']]
+            tool = {'name': 'read', 'arguments': {'path': '/skills/camera-advisor/SKILL.md'}}
+        elif len(requests) == 2:
+            assert 'CAMERA_SKILL_BODY_SENTINEL' in str(payload['messages'])
+            tool = {'name': 'capability_invoke', 'arguments': {'name': 'process.start',
+                'arguments': {'argv': ['python3', '/skills/camera-advisor/scripts/create.py']}}}
+        elif len(requests) == 3:
+            reference = next(iter(gateway.processes.processes))
+            tool = {'name': 'capability_invoke', 'arguments': {'name': 'process.wait',
+                'arguments': {'process_ref': reference, 'wait_seconds': 5}}}
+        elif len(requests) == 4:
+            tool = {'name': 'task_outcome', 'arguments': {'status': 'completed', 'attachments': ['outputs/camera.txt']}}
+        else:
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                text=completion_sse({'role': 'assistant', 'content': '相机建议文件已生成。'}))
+        message = {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'skill-call-' + str(len(requests)),
+            'type': 'function', 'function': {'name': tool['name'], 'arguments': json.dumps(tool['arguments'])}}]}
+        return httpx.Response(200, headers={'content-type': 'text/event-stream'}, text=completion_sse(message))
+
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    state.runner = PiRunnerAdapter(old_runner.executable, old_runner.workspace, provider='qqbot', model='offline',
+        timeout=25, gateway=gateway, gateway_url=old_runner.gateway_url)
+    try:
+        result = await state.runner.run('Generate a camera recommendation', keep_alive=True)
+    finally:
+        await state.runner.stop()
+    assert result.status == 'completed'
+    assert (workspace / 'outputs' / 'camera.txt').read_text() == 'camera report from unknown skill'
+    assert gateway.artifacts == ['outputs/camera.txt'] and len(mounts) == 1
+    assert len(requests) == 5
+    skill_reads = [call[2] for call in state.host_calls if call[1] == 'observation'
+                   and call[2]['data'].get('skill_version')]
+    assert skill_reads[0]['data']['skill_version'] == snapshot.version
+
+
+@pytest.mark.parametrize('valid', [True, False])
+async def test_locked_pi_explicit_skill_is_loaded_or_stops_before_model(compaction_session, tmp_path, valid):
+    from qqbot.harness.skills import SkillStore
+
+    state = compaction_session
+    old_runner = state.runner
+    await old_runner.stop()
+    source = tmp_path / 'explicit-skills'
+    skill = source / 'explicit-fixture'
+    skill.mkdir(parents=True)
+    description = 'description: Explicit test workflow.\n' if valid else ''
+    (skill / 'SKILL.md').write_text('---\nname: explicit-fixture\n' + description +
+        'disable-model-invocation: true\n---\nEXPLICIT_SKILL_BODY_SENTINEL\n')
+    snapshot = SkillStore(source, tmp_path / 'versions').select()
+    state.gateway.skills = snapshot
+    state.gateway.bind({**state.claim, 'run_id': 'explicit-skill',
+        'goal': '/skill:explicit-fixture Say hello', 'context': {
+            **state.claim['context'], 'skill_version': snapshot.version, 'notify_before_tools': True}})
+    runner = PiRunnerAdapter(old_runner.executable, old_runner.workspace, provider='qqbot', model='offline',
+        timeout=25, gateway=state.gateway, gateway_url=old_runner.gateway_url)
+    try:
+        if valid:
+            result = await runner.run('/skill:explicit-fixture Say hello', keep_alive=True)
+            assert result.status == 'completed'
+            assert len(state.requests) == 1
+            users = [message for message in state.requests[0]['payload']['messages'] if message['role'] == 'user']
+            assert 'EXPLICIT_SKILL_BODY_SENTINEL' in str(users)
+            reads = [call for call in state.host_calls if call[1] == 'observation']
+            assert reads[0][2]['data']['skill_version'] == snapshot.version
+        else:
+            with pytest.raises(RuntimeError, match='Requested skill is unavailable'):
+                await runner.run('/skill:explicit-fixture Say hello', keep_alive=True)
+            assert not state.requests
+    finally:
+        await runner.stop()
+
+
+async def test_locked_pi_continuation_and_restored_updates_are_injected_once(compaction_session):
+    state = compaction_session
+    runner, gateway = state.runner, state.gateway
+    await runner.run("initial goal", keep_alive=True)
+    decision = {"id": "continued-input", "text": "CONTINUATION_DECISION_SENTINEL"}
+    old_decision = {"id": "older-input", "text": "RESTORED_DECISION_SENTINEL"}
+    task_state = {"goal": {}, "checkpoint": None, "user_updates": [old_decision, decision]}
+    continuation = {"checkpoint": "Awaited user input", "inputs": [decision]}
+    gateway.bind({**state.claim, "run_id": "second-run", "task_state": task_state, "continuation": continuation})
+    await runner.run("continue with the user's input", keep_alive=True)
+    second = state.requests[-1]["payload"]["messages"]
+    latest_user = next(message for message in reversed(second) if message["role"] == "user")
+    assert json.dumps(latest_user).count(decision["text"]) == 1
+    assert json.dumps(latest_user).count(old_decision["text"]) == 1
+    gateway.bind({**state.claim, "run_id": "third-run", "task_state": task_state, "continuation": continuation})
+    await runner.run("restore the same durable input state", keep_alive=True)
+    third = state.requests[-1]["payload"]["messages"]
+    latest_user = next(message for message in reversed(third) if message["role"] == "user")
+    assert decision["text"] not in json.dumps(latest_user)
+    assert old_decision["text"] not in json.dumps(latest_user)
+    assert json.dumps(third).count(decision["text"]) == 1
+    assert json.dumps(third).count(old_decision["text"]) == 1

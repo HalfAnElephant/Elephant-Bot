@@ -53,6 +53,7 @@ for column in (
     Column("plan_json", Text, nullable=False, server_default="{}"),
     Column("context_json", Text, nullable=False, server_default="{}"),
     Column("delivery", String, nullable=False, server_default="DETACHED"),
+    Column("execution_priority", String, nullable=False, server_default="BACKGROUND"),
     Column("detach_at", String),
     Column("continuation_revision", Integer, nullable=False, server_default="0"),
     Column("budget_json", Text, nullable=False, server_default="{}"),

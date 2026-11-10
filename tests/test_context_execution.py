@@ -337,7 +337,7 @@ async def test_seed_source_closure_survives_history_trimming_and_revokes(
     first = event(core, nap_event, 812, "最初的资料")
     original = core.contexts.build(core.access(first), core.contexts.turn(first))
     for index in range(core.settings.context.recent_messages + 1):
-        later = event(core, nap_event, 813 + index, "后续消息")
+        later = event(core, nap_event, 813 + index, "接着说")
     refreshed = core.contexts.build(core.access(later), core.contexts.turn(later))
     assert refreshed["key"] == original["key"]
     assert first.event_id not in {item["source"] for item in refreshed["seed"]["history"]}
@@ -387,7 +387,7 @@ async def test_topic_references_weather_followup_and_return_to_displayed_pr(
     assert "location:嘉定" in tomorrow_context["seed"]["topic"]["entities"]
     tomorrow_task = core.submit_turn(tomorrow)
     assert json.loads(tomorrow_task["goal_json"])["success_checks"] == ["observation"]
-    assert "web" in json.loads(tomorrow_task["plan_json"])["capability_hints"]
+    assert json.loads(tomorrow_task["plan_json"])["capability_hints"] == []
     back = event(core, nap_event, 843, "回到刚才第二个 PR，帮我看一下")
     returned = core.contexts.build(core.access(back), core.contexts.turn(back))
     assert returned["topic"] == original["topic"]
@@ -750,6 +750,7 @@ def test_ambiguous_displayed_ordinal_does_not_choose_an_invented_target(clock):
         anchor_event_id="source-2",
         source_event_ids=("source-2",),
         conversation=SimpleNamespace(key="conversation"),
+        principal=SimpleNamespace(key="requester"),
     )
     selected, reference, reason = select_topic(index, turn, clock.now(), 1800)
     assert selected["id"] == "topic-1" and reference is None and reason == "ambiguous_display_ordinal"
@@ -817,14 +818,14 @@ async def test_background_only_still_cancels_immediately_and_queues_control_expl
 @pytest.mark.parametrize(
     ("execution", "expected"),
     [
-        ({"max_active": 4, "warm_max": 0}, {"max_resident": 4, "max_idle": 0, "ttl": 300}),
+        ({"max_active": 4, "warm_max": 0}, {"max_resident": 5, "max_idle": 0, "ttl": 300}),
         (
             {"max_active": 4, "warm_max": 6, "warm_idle_max": 3, "warm_ttl_seconds": 90},
             {"max_resident": 6, "max_idle": 3, "ttl": 90},
         ),
         (
             {"max_active": 6, "warm_max": 2, "warm_idle_max": 1},
-            {"max_resident": 6, "max_idle": 1, "ttl": 300},
+            {"max_resident": 7, "max_idle": 1, "ttl": 300},
         ),
     ],
 )
@@ -864,6 +865,7 @@ def test_rain_followup_does_not_create_a_fictional_location(clock):
         anchor_event_id="e2",
         source_event_ids=("e2",),
         conversation=SimpleNamespace(key="conversation"),
+        principal=SimpleNamespace(key="requester"),
     )
     selected, reference, reason = select_topic(index, turn, clock.now(), 1800)
     assert selected["id"] == "weather-1" and selected["entities"] == ["location:嘉定"]
@@ -944,5 +946,30 @@ async def test_expired_failure_notice_delivers_but_original_and_cancelled_result
     core.adapters["nap"].send = send
     await core.outbox.dispatch_once(core.adapters, pre_send=core.pre_send)
     assert sent == [summary]
+    await core.stop()
+    core.db.close()
+
+
+async def test_historical_reference_consumes_summary_source_index_with_fresh_authorization(
+    tmp_path, nap_config, nap_event, clock,
+):
+    from qqbot.config import ContextConfig
+    from qqbot.memory.maintenance import MemoryMaintenance
+
+    core = core_for(tmp_path, nap_config, clock, context=ContextConfig(recent_messages=2))
+    previous = event(core, nap_event, 9100, '原来的目录是 /srv/old-project')
+    maintenance = MemoryMaintenance(core.social, enabled=True)
+    await maintenance.maintenance_once(core.access(previous))
+    for index in range(4):
+        event(core, nap_event, 9101 + index, '新话题' + str(index))
+    current = event(core, nap_event, 9110, '上次给你的目录是什么')
+    context = core.context_for(current)
+    assert previous.event_id in {row['source'] for row in context['seed']['history']}
+    assert previous.event_id in {row['id'] for row in context['source_manifest']}
+    assert core.validate_context(core.access(current), context)
+    core.social.revoke_source(core.access(previous), previous.event_id)
+    assert not core.validate_context(core.access(current), context)
+    next_context = core.context_for(current)
+    assert previous.event_id not in {row['source'] for row in next_context['seed']['history']}
     await core.stop()
     core.db.close()

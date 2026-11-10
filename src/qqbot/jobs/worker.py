@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import httpx
 import uvicorn
+from fastapi import HTTPException
 
 from qqbot.harness.artifacts import export_artifacts
 from qqbot.harness.gateway import RunGateway
@@ -30,6 +31,13 @@ from qqbot.harness.launcher import (
 from qqbot.harness.pi import MAX_EVENT, PiHarness, compaction_settings
 from qqbot.harness.pool import PoolAcquisitionError, SessionPool
 from qqbot.harness.research import ResearchCapabilities
+from qqbot.harness.skills import (
+    DEFAULT_SKILLS,
+    SKILLSETS,
+    SkillStore,
+    SkillVersionUnavailable,
+)
+from qqbot.observability.diagnostics import model_identity
 from qqbot.providers import ModelCapacity
 
 logger = logging.getLogger(__name__)
@@ -76,7 +84,7 @@ class Spool:
 
 
 class Worker:
-    def __init__(self, client, worker_id, spool, harness_factory, *, pool=None):
+    def __init__(self, client, worker_id, spool, harness_factory, *, pool=None, skills=None):
         self.client, self.worker_id, self.spool, self.harness_factory = (
             client,
             worker_id,
@@ -84,6 +92,7 @@ class Worker:
             harness_factory,
         )
         self.pool = pool
+        self.skills = skills
         self.replay_lock = asyncio.Lock()
         self.event_lock = asyncio.Lock()
 
@@ -168,6 +177,7 @@ class Worker:
                 "agent_settled": "result_ready",
                 "tool_execution_start": "tool_started",
                 "tool_execution_end": "tool_finished",
+                "host_tool_finished": "tool_finished",
                 "source_retrieved": "source",
                 "host_error": "failed",
             }
@@ -180,7 +190,8 @@ class Worker:
             if not kind:
                 return
             payload = {"kind": kind, "pi_type": original}
-            for key in ("toolName", "toolCallId", "isError", "durationMs", "source"):
+            for key in ("toolName", "toolCallId", "isError", "durationMs", "source", "status", "capability",
+                        "elapsed_ms", "skill_name", "skill_path", "skill_version"):
                 if key in event:
                     payload[key] = event[key]
             message = event.get("message", {})
@@ -251,6 +262,8 @@ class Worker:
 
     def failure_result(self, claim, error, harness=None):
         summary = f"Runner failed with {type(error).__name__}."
+        if isinstance(error, SkillVersionUnavailable):
+            summary = str(error)
         if harness is not None and hasattr(harness, "failure_summary"):
             try:
                 summary = harness.failure_summary(error)
@@ -258,7 +271,10 @@ class Worker:
                 logger.error("Failure diagnostic unavailable run_id=%s", claim["run_id"])
         logger.error("Worker run failed worker_id=%s task_id=%s run_id=%s fence=%s error=%s",
                      self.worker_id, claim["task_id"], claim["run_id"], claim["fencing_token"], summary)
-        return {"status": "failed", "agent_authored": False, "summary": summary}
+        result = {"status": "failed", "agent_authored": False, "summary": summary}
+        if isinstance(error, SkillVersionUnavailable):
+            result["failure_code"] = "skill_version_unavailable"
+        return result
 
     async def stop_execution(self, harness, execution):
         if execution is not None:
@@ -290,6 +306,13 @@ class Worker:
         heartbeat = None
         last_renewed = last_reminder = time.monotonic()
         try:
+            if self.skills is not None and claim.get("profile") == "pi":
+                context = claim.setdefault("context", {})
+                snapshot = self.skills.select(context.get("skill_version"))
+                bound = await self.call("bind-skills", **identity, payload={"skill_version": snapshot.version})
+                context["skill_version"] = bound["skill_version"]
+                if self.pool and self.skills.current_version:
+                    await self.pool.retire_skills(self.skills.current_version)
             harness = await self.pool.acquire(claim) if use_pool else self.harness_factory(claim)
             if inspect.isawaitable(harness):
                 harness = await harness
@@ -310,7 +333,7 @@ class Worker:
                 if execution.done():
                     break
                 if getattr(harness, "gateway", None):
-                    harness.gateway.provider.background = lease.get("delivery") == "DETACHED"
+                    harness.gateway.provider.background = lease.get("execution_priority", "BACKGROUND" if lease.get("delivery") == "DETACHED" else "INTERACTIVE") == "BACKGROUND"
                     if "budget" in lease:
                         harness.gateway.tools.max_calls = lease["budget"].get("tool_calls", 60)
                     deadline = getattr(harness, "run_timeout", None)
@@ -399,7 +422,8 @@ class Worker:
             if isinstance(error, PoolAcquisitionError):
                 harness = error.runner
             stopped = await self.stop_execution(harness, execution)
-            if harness is None and use_pool and isinstance(self.pool, SessionPool):
+            if harness is None and (isinstance(error, SkillVersionUnavailable)
+                                    or (use_pool and isinstance(self.pool, SessionPool))):
                 stopped = True  # Pool acquisition failed before binding a runner for this run.
             result = self.failure_result(claim, error, harness)
             payload = {**identity, "result": result, "stopped": stopped, "quiescent": False}
@@ -433,7 +457,7 @@ class Worker:
 
 
 class ResearchRun(PiHarness):
-    def __init__(self, args, claim, client):
+    def __init__(self, args, claim, client, capacity=None):
         self.core_client, self.claim, self.worker_id = client, claim, args.worker_id
         self.lease_until = time.monotonic() + 25
         workspace = Path(args.workspace) / claim["run_id"]
@@ -444,6 +468,8 @@ class ResearchRun(PiHarness):
             upstream=getattr(args, "model_endpoint", "https://api.openai.com/v1/chat/completions"),
             active=lambda: time.monotonic() < self.lease_until,
             authority=self.authority,
+            capacity=capacity,
+            background=self.model_background,
         )
         self.server = None
         self.server_task = None
@@ -470,12 +496,19 @@ class ResearchRun(PiHarness):
                 },
             )
             response.raise_for_status()
-            if response.json()["state"] != "RUNNING":
+            state = response.json()
+            if state["state"] != "RUNNING":
                 return False
+            self.claim["execution_priority"] = state.get("execution_priority", "BACKGROUND")
             self.renewed()
             return True
         except (httpx.HTTPError, ValueError):
             return False
+
+    async def model_background(self):
+        if not await self.authority():
+            raise HTTPException(403, "core rejected model authority")
+        return self.claim.get("execution_priority", "BACKGROUND") == "BACKGROUND"
 
     def renewed(self):
         self.lease_until = time.monotonic() + 25
@@ -526,7 +559,7 @@ class ResearchRun(PiHarness):
 class SystemdResearchRun(ResearchRun):
     """Production path is gated on a root-owned, target-verified Linux policy."""
 
-    def __init__(self, args, claim, client):
+    def __init__(self, args, claim, client, capacity=None):
         self.policy = production_policy()
         if Path(args.pi).resolve() != Path("/opt/qqbot/node_modules/.bin/pi").resolve(strict=True):
             raise ValueError("production Pi runtime path is fixed")
@@ -534,7 +567,7 @@ class SystemdResearchRun(ResearchRun):
             raise ValueError("production workspace root is fixed")
         if claim["profile"] != "pi_research" or claim["session_id"] != claim["run_id"]:
             raise ValueError("unsupported production run identity")
-        super().__init__(args, claim, client)
+        super().__init__(args, claim, client, capacity)
         self.manifest_path = None
 
     def bind_listener(self):
@@ -665,6 +698,12 @@ class GeneralRun(PiHarness):
             github_host=getattr(args, "github_host", "github.com"),
             content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
             model_window=getattr(args, "model_context_window", 32768))
+        version = claim.get("context", {}).get("skill_version")
+        if version:
+            production = getattr(args, "runner_mode", "local") == "systemd"
+            directory = SKILLSETS if production else Path(args.spool).parent / "skillsets"
+            gateway.skills = SkillStore(getattr(args, "skills_dir", DEFAULT_SKILLS), directory,
+                                        production=production).select(version)
         super().__init__(args.pi, workspace, provider="qqbot", model=args.model, gateway=gateway, session_id=session_id)
 
     def prepare_workspace(self, workspace):
@@ -809,6 +848,7 @@ class SystemdGeneralRun(GeneralRun):
             "output_tokens": output,
             "soft_input_tokens": self.gateway.model_window - compaction["reserveTokens"],
             "keep_recent_tokens": compaction["keepRecentTokens"],
+            "skill_version": self.gateway.skills.version,
             "expires_at": (datetime.now(UTC) + timedelta(hours=23)).isoformat()}
         validate_manifest(manifest, self.launch_task_id, self.process_id, self.policy)
         MANIFESTS.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -869,22 +909,41 @@ async def main_async(args):
     async with httpx.AsyncClient(
         transport=transport, base_url="http://core", headers={"Authorization": "Bearer " + token}, timeout=5
     ) as client:
-        capacity = ModelCapacity(args.concurrency, 1)
+        # The single overflow slot serves a new interaction after ordinary runs detach.
+        run_capacity = args.concurrency + 1
+        capacity = ModelCapacity(run_capacity, 1)
         if args.runner_mode == "systemd":
             factory = lambda claim, process_id, session_id: SystemdGeneralRun(args, claim, client, process_id, session_id, capacity)
         else:
             factory = lambda claim, process_id, session_id: GeneralRun(args, claim, client, process_id, session_id, capacity)
-        pool = SessionPool(factory, max_resident=args.concurrency, max_idle=args.max_idle, ttl=args.idle_ttl)
-        legacy = lambda claim: (SystemdResearchRun if args.runner_mode == "systemd" else ResearchRun)(args, claim, client)
-        worker = Worker(client, args.worker_id, Spool(args.spool), legacy, pool=pool)
+        pool = SessionPool(factory, max_resident=run_capacity, max_idle=args.max_idle, ttl=args.idle_ttl)
+        legacy = lambda claim: (SystemdResearchRun if args.runner_mode == "systemd" else ResearchRun)(args, claim, client, capacity)
+        skills = SkillStore(getattr(args, "skills_dir", DEFAULT_SKILLS),
+                            SKILLSETS if args.runner_mode == "systemd" else Path(args.spool).parent / "skillsets",
+                            production=args.runner_mode == "systemd")
+        worker = Worker(client, args.worker_id, Spool(args.spool), legacy, pool=pool, skills=skills)
         from qqbot.capabilities.gateway import standard_registry
         from qqbot.jobs.waiters import ExternalWaiters
         async def waiter_call(operation, payload):
             return await worker.call(operation, payload=payload)
         waiter = asyncio.create_task(ExternalWaiters(waiter_call, standard_registry(github=configured_github(args))).run())
         active = set()
+        next_report = 0.0
         try:
             while True:
+                if time.monotonic() >= next_report:
+                    next_report = time.monotonic() + 30
+                    try:
+                        await worker.call("worker-config", payload={
+                            "model_identity": model_identity(args.model, args.model_endpoint, args.model_context_window),
+                            "skill_version": skills.select().version,
+                            "loaded_skill_versions": sorted({
+                                entry["runner"].gateway.skills.version for entry in pool.entries.values()
+                                if entry["runner"].gateway.skills is not None
+                            }),
+                        })
+                    except Exception:
+                        logger.exception("Worker configuration report failed")
                 if waiter.done():
                     await waiter
                     raise RuntimeError("external waiter stopped unexpectedly")
@@ -895,7 +954,7 @@ async def main_async(args):
                     except Exception:
                         logger.exception("Worker iteration failed worker_id=%s task=%s", args.worker_id, finished_task.get_name())
                 active -= finished
-                if len(active) < args.concurrency:
+                if len(active) < run_capacity:
                     active.add(asyncio.create_task(worker.once()))
                 await pool.sweep()
                 await asyncio.sleep(0.15)
@@ -916,6 +975,7 @@ def main():
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--spool", required=True)
     parser.add_argument("--archive", required=True)
+    parser.add_argument("--skills-dir", default=str(DEFAULT_SKILLS))
     parser.add_argument("--runner-mode", choices=["local", "systemd"], default="local")
     parser.add_argument("--worker-id", default="local-worker")
     parser.add_argument("--repository")

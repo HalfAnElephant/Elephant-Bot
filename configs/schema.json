@@ -242,6 +242,7 @@
         },
         "max_active": {
           "default": 4,
+          "description": "普通执行槽数；另有 1 个有界交互备用槽，正在运行及 UNKNOWN 槽不会因后台化释放。",
           "maximum": 32,
           "minimum": 1,
           "title": "Max Active",
@@ -533,6 +534,11 @@
           "title": "Auto Extract",
           "type": "boolean"
         },
+        "auto_publish_self_reports": {
+          "default": true,
+          "title": "Auto Publish Self Reports",
+          "type": "boolean"
+        },
         "extractor_endpoint": {
           "anyOf": [
             {
@@ -611,11 +617,19 @@
           "type": "string"
         },
         "raw_retention_days": {
-          "default": 30,
-          "maximum": 3650,
-          "minimum": 1,
-          "title": "Raw Retention Days",
-          "type": "integer"
+          "anyOf": [
+            {
+              "maximum": 3650,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "默认 null 永久保留原始记录；显式天数启用过期清理。",
+          "title": "Raw Retention Days"
         }
       },
       "title": "MemoryConfig",
@@ -899,6 +913,7 @@
         },
         "max_per_day": {
           "default": 20,
+          "description": "包含主动发起和追问；沉默及失败尝试也计数。",
           "maximum": 100,
           "minimum": 0,
           "title": "Max Per Day",
@@ -1214,6 +1229,7 @@
       "default": {
         "maintenance_enabled": false,
         "auto_extract": false,
+        "auto_publish_self_reports": true,
         "extractor_endpoint": null,
         "extractor_model": null,
         "extractor_key_env": "QQBOT_MEMORY_KEY",
@@ -1222,7 +1238,7 @@
         "embedding_version": "v1",
         "embedding_dimensions": null,
         "embedding_key_env": "QQBOT_EMBEDDING_KEY",
-        "raw_retention_days": 30
+        "raw_retention_days": null
       }
     },
     "speak_up": {

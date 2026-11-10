@@ -337,7 +337,7 @@ class SocialService:
             self._bump(conn, access.conversation.key)
             return record
 
-    def retrieve(self, access, query: str = "", *, limit=8, embedding=None, model_id=None, version=None):
+    def visible(self, access):
         now = self.clock.now()
         with self.db.engine.connect() as conn:
             raw = conn.execute(
@@ -363,6 +363,10 @@ class SocialService:
                 for source in r.source_event_ids
             )
         ]
+        return records
+
+    def retrieve(self, access, query: str = "", *, limit=8, embedding=None, model_id=None, version=None):
+        records = self.visible(access)
         tokens = keywords(query)
         lexical = sorted(
             ((len(tokens & keywords(r.text)), r) for r in records), key=lambda item: item[0], reverse=True

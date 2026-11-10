@@ -11,24 +11,28 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import and_, func, insert, or_, select, update
 
-from qqbot.context import ContextService, InputBudgetExceeded
+from qqbot.context import ContextService, InputBudgetExceeded, merge_manifest
 from qqbot.conversation import ConversationWindow
 from qqbot.dialogue import PersonaStore
 from qqbot.dialogue.planner import plan_turn, wants_background
+from qqbot.dialogue.router import ambiguous_wait_answer, control_intent, route_turn, task_references
 from qqbot.domain import AccessContext, InboundEvent, Surface, TextSegment, stable_id
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal
 from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechThresholds
 from qqbot.expressions import HTTPLearner
 from qqbot.ingress.service import Inbox
-from qqbot.jobs.service import TaskService
+from qqbot.jobs.service import TERMINAL, TaskService
 from qqbot.memory import MemoryRecord, SocialService
 from qqbot.memory.embedding import HTTPEmbedding
 from qqbot.memory.extraction import HTTPCandidateExtractor
+from qqbot.memory.history import HistoryMemoryService
 from qqbot.memory.maintenance import MemoryMaintenance
+from qqbot.observability.supervision import LoopSupervisor
 from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
 from qqbot.policy.judge import Jev1Judge, JevJudge, RuleOnlyJudge, StructuredLLMJudge
+from qqbot.providers.metering import MeteredClient, call_scope
 from qqbot.speakup import SpeakUp
 from qqbot.storage.schema import audit_events, decision_logs, decisions, inbox, outbox, runtime_state
 from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
@@ -81,7 +85,10 @@ class Core:
             budget_ceiling=settings.execution.budget,
             context_validator=self.validate_context,
         )
-        self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
+        self.model_client = MeteredClient(
+            model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds), db, clock,
+            slots=asyncio.Semaphore(settings.execution.max_active + 1)
+        )
         self.expressions = self.contexts.expressions
         expression = settings.expression
         expression_key = os.environ.get(expression.learner_key_env)
@@ -91,7 +98,7 @@ class Core:
             expression.learner_endpoint or settings.model.endpoint,
             expression.learner_model or settings.model.model,
             expression_key,
-            client=self.model_client,
+            client=self.model_client.for_phase("expression"),
             timeout_seconds=expression.timeout_seconds,
         )
         judge = settings.judge
@@ -102,7 +109,7 @@ class Core:
             if judge.kind == "jev" and judge.model == "jev1":
                 provider = Jev1Judge
             self.judge = provider(
-                os.environ.get(judge.api_key_env), judge.model, judge.endpoint, self.model_client
+                os.environ.get(judge.api_key_env), judge.model, judge.endpoint, self.model_client.for_phase("judge")
             )
         memory = settings.memory
         extractor = (
@@ -111,7 +118,7 @@ class Core:
                 memory.extractor_model,
                 os.environ.get(memory.extractor_key_env),
                 enabled=memory.auto_extract,
-                client=self.model_client,
+                client=self.model_client.for_phase("memory.extract"),
             )
             if memory.extractor_endpoint and memory.extractor_model
             else None
@@ -123,22 +130,26 @@ class Core:
                 memory.embedding_version,
                 os.environ.get(memory.embedding_key_env),
                 memory.embedding_dimensions,
-                self.model_client,
+                self.model_client.for_phase("memory.embedding"),
             )
             if memory.embedding_endpoint and memory.embedding_model
             else None
         )
+        self.history_memory = HistoryMemoryService(self.social, self.embedding)
+        self.tasks.history_memory = self.history_memory
         self.maintenance = MemoryMaintenance(
             self.social,
             extractor=extractor,
             embedding=self.embedding,
             enabled=memory.maintenance_enabled,
             raw_retention_days=memory.raw_retention_days,
+            auto_publish_self_reports=memory.auto_publish_self_reports,
         )
         self.active = {}
         self.active_ids = set()
         self.windows = {}
         self.stopping = False
+        self.supervisor = LoopSupervisor(lambda: self.stopping)
         self.speak_up = SpeakUp(self)
 
     def access(self, event):
@@ -656,12 +667,13 @@ class Core:
                 is not None
             )
 
-    def context_for(self, event, access=None, *, turn=None, invited=None):
+    def context_for(self, event, access=None, *, turn=None, invited=None, memory_options=None):
         self.contexts.settings = self.settings
         access = access or self.access(event)
         return self.contexts.build(
             access,
             turn or self.contexts.turn(event),
+            memory_options=memory_options,
             invited=bool(
                 event.mentions_bot
                 or event.conversation.surface == Surface.PRIVATE
@@ -681,6 +693,8 @@ class Core:
         control_facts=None,
         invited=None,
         access=None,
+        prior_task=None,
+        memory_options=None,
     ):
         request_text = text if text is not None else "\n".join(source.text for source in (event, *fragments))
         detached = background or wants_background(request_text)
@@ -695,7 +709,7 @@ class Core:
         try:
             turn = self.contexts.turn(event, fragments)
             planning_turn = turn.model_copy(update={"text": text}) if text is not None else turn
-            context = self.context_for(event, access, turn=turn, invited=invited)
+            context = self.context_for(event, access, turn=turn, invited=invited, memory_options=memory_options)
             goal, plan = plan_turn(
                 planning_turn,
                 self.settings,
@@ -741,8 +755,19 @@ class Core:
             context.update(allowed_actions=[], control_response=True, control_facts=control_facts)
         elif context.get("selected_reference") and not goal.target_refs:
             goal = goal.model_copy(update={"target_refs": (context["selected_reference"]["resource_id"],)})
+        retry_of_task_id = None
+        if prior_task:
+            if not self.validate_context(access, prior_task["context"]):
+                raise PermissionError("prior task context sources or authorization changed")
+            context["source_manifest"] = merge_manifest(
+                context.get("source_manifest", ()), prior_task["context"].get("source_manifest", ()))
+            context["continuation_of_task_id"] = prior_task["id"]
+            retry_of_task_id, skill_version = self.tasks.continuation_lineage(prior_task["public_id"], access)
+            if skill_version:
+                context["skill_version"] = skill_version
         request_event = event.model_copy(update={"segments": (TextSegment(text=turn.text),)})
-        return self.tasks.accept(request_event, access, goal, plan=plan, context=context)
+        return self.tasks.accept(request_event, access, goal, plan=plan, context=context,
+                                 retry_of_task_id=retry_of_task_id)
 
     def explain_control(self, event, facts):
         return self.submit_turn(event, control_facts=facts)
@@ -804,8 +829,9 @@ class Core:
                 self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
                 return
             command = (event.text.strip().split(maxsplit=1) or [""])[0]
-            if command in CONTROL_COMMANDS:
-                reply = await self.command(event)
+            proactive_preference = self.speak_up.preference(event)
+            if command in CONTROL_COMMANDS or proactive_preference:
+                reply = proactive_preference or await self.command(event)
                 if reply:
                     with self.db.transaction() as c:
                         self.outbox.enqueue_text(
@@ -824,11 +850,51 @@ class Core:
                 else:
                     self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
                 return
-            question = self.tasks.question_for(event)
-            if question:
-                self.tasks.add_input(
-                    question["public_id"], event, access, event.text, question_id=question["id"]
-                )
+            route, target = route_turn(event, self.tasks.turn_candidates(event, access))
+            intent = control_intent(event.text)
+            if intent is None and not task_references(event.text):
+                question = self.tasks.question_for(event)
+                if question:
+                    if ambiguous_wait_answer(event):
+                        route, target, intent = "clarify", [], "answer_clarify"
+                    else:
+                        self.tasks.add_input(
+                            question["public_id"], event, access, event.text, question_id=question["id"]
+                        )
+                        self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
+                        return
+            if route == "clarify":
+                choices = "\n".join(f"{item['public_id']} {item['goal'][:80]}" for item in target)
+                if intent == "answer_clarify":
+                    reply = "这是在回答刚才的问题，还是提出新问题？回答请引用那条提问，新问题可以说“另外帮我……”。"
+                elif intent == "clarify":
+                    reply = "请确认是取消这项任务，还是继续执行？"
+                elif target:
+                    reply = "你想继续或调整哪项任务？请带上任务编号。"
+                else:
+                    reply = "请提供任务编号，或重新说明你想继续、调整或取消的目标。"
+                with self.db.transaction() as c:
+                    self.outbox.enqueue_text(c, target=event.conversation,
+                        text=reply + ("\n" + choices if choices else ""),
+                        origin_kind="command", origin_id=event.event_id, reply_context=event.reply_context)
+                self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
+                return
+            if route in {"continue_task", "answer_wait", "cancel"}:
+                if route == "cancel":
+                    result = self.tasks.cancel(target["public_id"], access)
+                    self.explain_control(event, {"cancel_result": result})
+                elif route == "answer_wait":
+                    self.tasks.add_input(target["public_id"], event, access, event.text, target["wait_id"])
+                else:
+                    try:
+                        self.tasks.add_input(target["public_id"], event, access, event.text)
+                    except PermissionError as exc:
+                        if (str(exc) != "task cannot accept input"
+                                or self.tasks.get(target["public_id"], access)["state"] not in TERMINAL):
+                            raise
+                        self.submit_turn(event, text=(
+                            f"继续此前任务 {target['public_id']}。此前目标\n{target['goal']}\n"
+                            f"用户本次追加或修正\n{event.text}"), invited=True, prior_task=target)
                 self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
                 return
             state = self.state(event.conversation.key)
@@ -1034,6 +1100,7 @@ class Core:
                 if event.conversation.surface == Surface.GROUP and saved.get("speech_thresholds") is not None
                 else self.settings.judge.thresholds.model_copy()
             )
+            judge = self.judge
             judge_status = "not_called"
             judge_duration_ms = None
             judged_event_ids = []
@@ -1057,11 +1124,12 @@ class Core:
                 judged_delivery_ids = [message["source"] for message in context["recent_bot_messages"]]
                 judge_persona_version = context["persona_version"]
                 judge_started = time.monotonic()
-                signals = (await self.judge.judge(context) if event.event_id in judged_event_ids
-                           else JudgmentSignals(abstain=True))
+                with call_scope(message_id=event.event_id, conversation=event.conversation.key, principal=event.principal.key):
+                    signals = (await judge.judge(context) if event.event_id in judged_event_ids
+                               else JudgmentSignals(abstain=True))
                 judge_duration_ms = round((time.monotonic() - judge_started) * 1000, 2)
                 if signals.abstain:
-                    judge_status = "rule_only" if isinstance(self.judge, RuleOnlyJudge) else "abstained"
+                    judge_status = "rule_only" if isinstance(judge, RuleOnlyJudge) else "abstained"
                 else:
                     judge_status = "success"
                 decision = self.policy.decide(
@@ -1086,6 +1154,9 @@ class Core:
                 "participation_rules": participation_settings.model_dump(mode="json"),
                 "capabilities": cap.model_dump(mode="json"),
                 "judge_status": judge_status,
+                "judge_backend": getattr(judge, "backend", type(judge).__name__),
+                "judge_model_id": getattr(judge, "model", "rule-only"),
+                "judge_schema_version": JudgmentSignals.model_fields["schema_version"].default,
                 "judge_duration_ms": judge_duration_ms,
                 "judged_event_ids": judged_event_ids,
                 "judged_delivery_ids": judged_delivery_ids,
@@ -1131,7 +1202,9 @@ class Core:
             if decision.action != "SPEAK":
                 self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
                 return
-            self.submit_turn(event, coalesced)
+            with call_scope(message_id=event.event_id, conversation=event.conversation.key, principal=event.principal.key):
+                memory_options = await self.history_memory.query_options(self.access(event), event.text)
+            self.submit_turn(event, coalesced, memory_options=memory_options)
             with self.db.transaction() as c:
                 for source in (event, *coalesced):
                     c.execute(
@@ -1282,47 +1355,61 @@ class Core:
                 if key not in self.active and self.windows[key].waiting is None:
                     self.windows.pop(key)
 
-    async def delivery_loop(self):
-        while not self.stopping:
+    async def delivery_once(self):
+        # A failed receipt write may leave a completed external send in SENDING.
+        if getattr(self, "_delivery_recovery_needed", False):
+            self.outbox.recover()
+            self._delivery_recovery_needed = False
+        try:
             await self.outbox.dispatch_once(
                 self.adapters, self.settings.send_budget_per_minute, self.pre_send
             )
-            await asyncio.sleep(0.1)
+        except Exception:
+            self._delivery_recovery_needed = True
+            raise
 
-    async def maintenance_loop(self):
-        while not self.stopping:
-            if self.settings.memory.maintenance_enabled or self.settings.expression.enabled:
-                with self.db.engine.connect() as c:
-                    latest = (
-                        select(
-                            inbox.c.event_json,
-                            func.row_number()
-                            .over(partition_by=inbox.c.conversation_id, order_by=inbox.c.seq.desc())
-                            .label("rank"),
-                        )
-                        .where(inbox.c.event_type == "message.created")
-                        .subquery()
-                    )
-                    rows = (
-                        c.execute(select(latest.c.event_json).where(latest.c.rank == 1).limit(200))
-                        .scalars()
-                        .all()
-                    )
-                for raw in rows:
-                    event = InboundEvent.model_validate_json(raw)
-                    if self.allowed(event):
-                        access = self.access(event)
-                        if self.settings.memory.maintenance_enabled:
-                            await self.maintenance.maintenance_once(
+    async def maintenance_once(self, kind):
+        enabled = (self.settings.memory.maintenance_enabled if kind == "memory"
+                   else self.settings.expression.enabled)
+        if not enabled:
+            return
+        with self.db.engine.connect() as c:
+            latest = (
+                select(
+                    inbox.c.event_json,
+                    func.row_number()
+                    .over(partition_by=inbox.c.conversation_id, order_by=inbox.c.seq.desc())
+                    .label("rank"),
+                )
+                .where(inbox.c.event_type == "message.created")
+                .subquery()
+            )
+            rows = c.execute(select(latest.c.event_json).where(latest.c.rank == 1).limit(200)).scalars().all()
+        failure = None
+        for raw in rows:
+            try:
+                event = InboundEvent.model_validate_json(raw)
+                if self.allowed(event):
+                    access = self.access(event)
+                    with call_scope(conversation=event.conversation.key, principal=event.principal.key):
+                        if kind == "memory":
+                            report = await self.maintenance.maintenance_once(
                                 access, auto_extract=self.settings.memory.auto_extract
                             )
-                        if self.settings.expression.enabled:
-                            try:
-                                await self.expressions.maintenance_once(access, self.expression_learner)
-                            except (PermissionError, LookupError, ValueError):
-                                logger.warning("Expression maintenance skipped", extra={"conversation": event.conversation.key})
-                    await asyncio.sleep(0)
-            await asyncio.sleep(30)
+                            if report is not None:
+                                saved = json.loads(self.state(event.conversation.key)["state_json"])
+                                saved["memory_maintenance"] = {"at": self.clock.now().isoformat(), **asdict(report)}
+                                self.save_state(event.conversation.key, state_json=json.dumps(saved))
+                        else:
+                            await self.expressions.maintenance_once(access, self.expression_learner)
+            except Exception as exc:
+                failure = exc
+                logger.exception("Conversation maintenance failed", extra={"data": {
+                    "loop": kind, "error_type": type(exc).__name__,
+                }})
+            await asyncio.sleep(0)
+        if failure is not None:
+            raise failure
 
     def restore_waits(self):
         with self.db.engine.connect() as c:
@@ -1334,18 +1421,25 @@ class Core:
         self.restore_waits()
         self.outbox.recover()
         self.tasks.recover()
-        delivery = asyncio.create_task(self.delivery_loop())
-        maintenance = asyncio.create_task(self.maintenance_loop())
-        speak_up = asyncio.create_task(self.speak_up.run())
+
+        async def execution_once():
+            await self.tick(dispatch=False)
+
+        async def memory_once():
+            await self.maintenance_once("memory")
+
+        async def expression_once():
+            await self.maintenance_once("expression")
+
+        self.supervisor.start("execution", execution_once, interval=0.1, critical=True)
+        self.supervisor.start("delivery", self.delivery_once, interval=0.1, critical=True)
+        self.supervisor.start("memory", memory_once, interval=30, stall_seconds=600)
+        self.supervisor.start("expression", expression_once, interval=30, stall_seconds=600)
+        self.supervisor.start("speakup", self.speak_up.tick, interval=60, stall_seconds=600)
         try:
-            while not self.stopping:
-                await self.tick(dispatch=False)
-                await asyncio.sleep(0.1)
+            await asyncio.gather(*self.supervisor.tasks.values())
         finally:
-            delivery.cancel()
-            maintenance.cancel()
-            speak_up.cancel()
-            await asyncio.gather(delivery, maintenance, speak_up, return_exceptions=True)
+            await self.supervisor.stop()
 
     async def stop(self):
         self.stopping = True

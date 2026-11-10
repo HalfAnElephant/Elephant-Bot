@@ -70,13 +70,13 @@ def test_social_cooldown_and_bounded_wait(max_rechecks):
     policy = SpeechPolicy(clock)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
     state = PolicyState(mode="social", new_human_messages=3)
-    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
     e = event(clock)
     assert policy.decide(e, cap, state, signals).action == "SPEAK"
     state.last_bot_at = clock.now()
     assert policy.decide(e, cap, state, signals).action == "IGNORE"
     state.last_bot_at = None
-    signals = JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, useful_contribution=0.6, private_exchange=0.1)
     actor = ConversationWindow(clock)
     actor.accept(e)
     for _ in range(max_rechecks):
@@ -104,7 +104,7 @@ def test_each_score_threshold_controls_its_decision(scores, field, value, before
     policy = SpeechPolicy(clock)
     state = PolicyState(mode="social", new_human_messages=3)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
-    signals = JudgmentSignals(**{"private_exchange": 0.1, **scores})
+    signals = JudgmentSignals(proactive_allowed=1, **{"private_exchange": 0.1, **scores})
     assert policy.decide(event(clock), cap, state, signals).action == before
     thresholds = SpeechThresholds(**{field: value})
     assert policy.decide(event(clock), cap, state, signals, thresholds=thresholds).action == after
@@ -119,7 +119,7 @@ def test_private_exchange_and_participation_preferences_block_speak_and_wait(use
     scores = {"invites_participation": 0.99, "useful_contribution": useful, "private_exchange": 0.1}
     blocked = policy.decide(event(clock), cap, state, JudgmentSignals(**scores, proactive_allowed=0.1))
     assert blocked.action == "IGNORE" and blocked.reason_codes == ("PARTICIPATION_PREFERENCE",)
-    private = policy.decide(event(clock), cap, state, JudgmentSignals(**{**scores, "private_exchange": 0.8}))
+    private = policy.decide(event(clock), cap, state, JudgmentSignals(proactive_allowed=1, **{**scores, "private_exchange": 0.8}))
     assert private.action == "IGNORE"
     # Explicit invitations retain their separate response path.
     assert policy.decide(event(clock, mentions_bot=True), cap, state,
@@ -132,10 +132,10 @@ def test_zero_threshold_and_precise_participation_blocks():
     state = PolicyState(mode="social", new_human_messages=3)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
     thresholds = SpeechThresholds(invites_participation=0, useful_contribution=0, private_exchange=1)
-    assert policy.decide(event(clock), cap, state, JudgmentSignals(), thresholds=thresholds).action == "SPEAK"
+    assert policy.decide(event(clock), cap, state, JudgmentSignals(proactive_allowed=1), thresholds=thresholds).action == "SPEAK"
     state.new_human_messages = 2
     state.last_bot_at = clock.now()
-    decision = policy.decide(event(clock), cap, state, JudgmentSignals(), thresholds=thresholds)
+    decision = policy.decide(event(clock), cap, state, JudgmentSignals(proactive_allowed=1), thresholds=thresholds)
     assert decision.reason_codes == ("PARTICIPATION_LIMIT",)
     assert decision.blocked_rules == ("COOLDOWN", "MIN_HUMAN_MESSAGES")
 
@@ -177,6 +177,7 @@ async def test_judges_abstain_on_malformed_and_missing_key():
                 "invites_participation",
                 "useful_contribution",
                 "private_exchange",
+                "proactive_allowed",
             )
         }
         values["directed_to_bot"]["noul"] = bad
@@ -199,6 +200,7 @@ async def test_judges_abstain_on_malformed_and_missing_key():
             "invites_participation",
             "useful_contribution",
             "private_exchange",
+            "proactive_allowed",
         )
     }
     structured = StructuredLLMJudge("key", "model", "https://example.invalid")
@@ -351,7 +353,7 @@ def test_social_needs_full_observation_but_no_replay_registration():
     clock = FakeClock()
     state = PolicyState(mode="shadow", new_human_messages=3)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
-    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
     decision = SpeechPolicy(clock).decide(event(clock), cap, state, signals)
     assert decision.action == "IGNORE" and decision.shadow_action == "SPEAK"
     state.mode = "social"
@@ -380,6 +382,12 @@ def test_replay_reports_denominators_and_rejects_split_leakage():
     assert report["must_reply_recall"]["denominator"] == 1
     assert report["must_reply_recall"]["rate"] == 1
     assert report["real_provider_evaluation"] is False
+    assert report["model_requests_per_100_messages"] is None
+    assert report["decision_p95_ms"] is None
+    measured = replay([{**row, "model_requests": 6, "decision_ms": 120}])
+    assert measured["model_requests_per_100_messages"] == 600
+    assert measured["decision_p95_ms"] == 120
+    assert measured["prohibited_violations"] == 0
     with pytest.raises(ValueError, match="splits"):
         replay([row, {**row, "split": "calibration"}])
 
@@ -410,7 +418,7 @@ def test_participation_settings_control_gates(state_update, settings, blocked):
     for field, value in state_update.items():
         setattr(state, field, value)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
-    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
     assert blocked in policy.decide(event(clock), cap, state, signals).blocked_rules
     decision = policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(**settings))
     if state_update.get("recent_bot_ratio") == 0.3:
@@ -424,12 +432,12 @@ def test_participation_cooldown_boundary_and_wait_limit():
     policy = SpeechPolicy(clock)
     cap = AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True)
     state = PolicyState(mode="social", new_human_messages=3, last_bot_at=clock.now() - timedelta(seconds=30))
-    signals = JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
     assert policy.decide(event(clock), cap, state, signals).blocked_rules == ("COOLDOWN",)
     assert policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(cooldown_seconds=30)).action == "SPEAK"
     state.last_bot_at = None
     state.rechecks = 2
-    signals = JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
+    signals = JudgmentSignals(proactive_allowed=1, useful_contribution=0.6, private_exchange=0.1)
     assert policy.decide(event(clock), cap, state, signals).action == "IGNORE"
     decision = policy.decide(event(clock), cap, state, signals, participation=ParticipationSettings(max_rechecks=3))
     assert decision.action == "WAIT" and decision.max_rechecks == 3
@@ -474,3 +482,95 @@ def test_participation_defaults_are_in_config_schema_and_round_trip():
     assert fields["require_member_response"]["type"] == "boolean"
     assert fields["activity_window_seconds"]["minimum"] == 1
     assert fields["participation_budget_ratio"]["maximum"] == 1
+
+
+def test_missing_participation_permission_is_closed_by_default():
+    clock = FakeClock()
+    scores = JudgmentSignals(invites_participation=0.99, useful_contribution=0.99, private_exchange=0)
+    decision = SpeechPolicy(clock).decide(event(clock),
+        AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True),
+        PolicyState(mode="social", new_human_messages=3), scores)
+    assert scores.proactive_allowed == 0
+    assert decision.reason_codes == ("PARTICIPATION_PREFERENCE",)
+
+
+@pytest.mark.parametrize("backend", ["structured", "jev1", "jev"])
+@pytest.mark.parametrize("permission", [0, None, True, "0.9", 1.1])
+async def test_all_judges_share_six_signal_permission_contract(backend, permission):
+    from qqbot.policy.judge import JEV1_QUESTIONS, QUESTIONS, SIGNALS
+
+    assert set(SIGNALS) == set(QUESTIONS) == set(JEV1_QUESTIONS)
+    values = dict.fromkeys(SIGNALS, 0.99)
+    values["private_exchange"] = 0.01
+    values["proactive_allowed"] = permission
+    if permission is None:
+        values.pop("proactive_allowed")
+
+    async def handler(request):
+        if backend == "jev":
+            return httpx.Response(200, json={"answers": {name: {"noul": value} for name, value in values.items()}})
+        if backend == "jev1":
+            body = json.loads(request.content)
+            payload = json.loads(body["messages"][0]["content"])
+            name = next(name for name, question in JEV1_QUESTIONS.items() if payload["question"].endswith(question))
+            if name not in values:
+                return httpx.Response(200, json={"choices": []})
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+                "type": "boolean", "value": "no", "status": "answered", "abstain": False,
+                "distribution": {"yes": values[name], "no": 0.01},
+            })}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(values)}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        judge = {"structured": lambda: StructuredLLMJudge("key", "fixture", "https://example.invalid", client),
+                 "jev1": lambda: Jev1Judge("key", "jev1", "https://example.invalid", client),
+                 "jev": lambda: JevJudge("key", client=client)}[backend]()
+        scores = await judge.judge({"participation_policy": "禁止政治话题", "messages": ["政治"]})
+    assert scores.backend == backend and scores.schema_version == "judgment-v2"
+    assert scores.proactive_allowed == 0
+    assert scores.abstain is (permission != 0 or type(permission) is not int)
+    clock = FakeClock()
+    assert SpeechPolicy(clock).decide(event(clock),
+        AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True),
+        PolicyState(mode="social", new_human_messages=3), scores).action == "IGNORE"
+
+
+@pytest.mark.parametrize("text,wanted", [
+    ("放后台慢慢做", True), ("转到后台处理", True), ("不要放到后台", False),
+    ("别放后台慢慢做", False), ("帮我看看后台报错", False),
+    ("放后台慢慢做，不要修改文件", True), ("慢慢做", True), ("不用等待CI", False),
+    ("请不要把这个任务放到后台", False), ("不要修改文件但可以放后台慢慢做", True),
+])
+def test_delivery_hints_respect_negation_and_business_nouns(text, wanted):
+    from qqbot.dialogue.planner import wants_background
+
+    assert wants_background(text) is wanted
+
+
+@pytest.mark.parametrize("backend", ["structured", "jev1", "jev"])
+async def test_judge_timeout_cannot_open_participation(backend):
+    async def timeout(request):
+        raise httpx.ReadTimeout("fixture timeout", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
+        if backend == "structured":
+            judge = StructuredLLMJudge("key", "fixture", "https://example.invalid", client)
+        elif backend == "jev1":
+            judge = Jev1Judge("key", "jev1", "https://example.invalid", client)
+        else:
+            judge = JevJudge("key", client=client)
+        scores = await judge.judge({})
+    assert scores.abstain and scores.proactive_allowed == 0 and scores.backend == backend
+
+
+def test_fixed_social_policy_baseline():
+    import runpy
+    from pathlib import Path
+    replay = runpy.run_path('evals/social_replay.py')['replay']
+    rows = [json.loads(line) for line in Path('evals/fixtures/social-baseline.jsonl').read_text().splitlines()]
+    result = replay(rows)
+    assert result['total'] == 16
+    assert result['must_reply_recall']['numerator'] == result['must_reply_recall']['denominator'] == 3
+    assert result['ignore_false_trigger_rate']['numerator'] == result['prohibited_violations'] == 0
+    assert result['speech_precision']['numerator'] == result['speech_precision']['denominator'] == 4
+    assert not result['real_provider_evaluation']

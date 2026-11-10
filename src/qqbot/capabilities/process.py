@@ -13,6 +13,7 @@ class ProcessService:
     def __init__(self, *, executable="bwrap", max_processes=4, max_bytes=1048576):
         self.executable, self.max_processes, self.max_bytes = executable, max_processes, max_bytes
         self.processes = {}
+        self.skills = None
         self.lock = asyncio.Lock()
 
     def _owned(self, arguments, context):
@@ -42,6 +43,8 @@ class ProcessService:
         for directory in ("/usr", "/bin", "/lib", "/lib64"):
             if Path(directory).exists():
                 command.extend(["--ro-bind", directory, directory])
+        if self.skills:
+            command.extend(["--ro-bind", str(self.skills.directory), "/skills"])
         command.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
                         "--bind", str(workspace), "/workspace", "--chdir", "/workspace", "--", *argv])
         async with self.lock:

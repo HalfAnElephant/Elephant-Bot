@@ -139,3 +139,62 @@ async def test_normal_entry_passes_persisted_preferences_and_logs_preference_vet
         row = c.execute(select(decision_logs).where(decision_logs.c.event_id == event.event_id)).mappings().one()
     assert json.loads(row["decision_json"])["reason_codes"] == ["PARTICIPATION_PREFERENCE"]
     assert json.loads(row["context_json"])["judge_context_version"] == "speech-context-v2"
+
+
+async def test_judge_hot_switch_logs_actual_backend_and_schema(core, nap_event):
+    from qqbot.policy.judge import Jev1Judge, RuleOnlyJudge, StructuredLLMJudge
+
+    async def capabilities(target):
+        return AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True,
+                                   observation_mode=ObservationMode.FULL)
+
+    core.adapters["nap"].capabilities = capabilities
+    for number in [780, 781]:
+        seed = accept(core, nap_event, number, "人类背景")
+        core.inbox.finish(seed.event_id)
+    for index, judge in enumerate([
+        RuleOnlyJudge(), StructuredLLMJudge(None, "fixture-structured", "https://example.invalid"),
+        Jev1Judge(None, "jev1", "https://example.invalid"),
+    ]):
+        core.judge = judge
+        target = accept(core, nap_event, 782 + index, "大家怎么看")
+        core.save_state(target.conversation.key, mode="social")
+        await core.process(target)
+        with core.db.engine.connect() as conn:
+            row = conn.execute(select(decision_logs).where(decision_logs.c.event_id == target.event_id)).mappings().one()
+        context = json.loads(row["context_json"])
+        assert context["judge_backend"] == judge.backend
+        assert context["judge_model_id"] == getattr(judge, "model", "rule-only")
+        assert context["judge_schema_version"] == "judgment-v2"
+        assert json.loads(row["decision_json"])["signals"]["proactive_allowed"] == 0
+
+
+async def test_judge_swapped_during_request_logs_the_backend_that_ran(core, nap_event):
+    import httpx
+
+    from qqbot.policy.judge import SIGNALS, RuleOnlyJudge, StructuredLLMJudge
+
+    async def capabilities(target):
+        return AdapterCapabilities(can_reply=True, can_observe_unaddressed_messages=True,
+                                   observation_mode=ObservationMode.FULL)
+
+    async def switch_backend(request):
+        core.judge = RuleOnlyJudge()
+        values = {**dict.fromkeys(SIGNALS, 0.99), "proactive_allowed": 0}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(values)}}]})
+
+    core.adapters["nap"].capabilities = capabilities
+    for number in [790, 791]:
+        seed = accept(core, nap_event, number, "人类背景")
+        core.inbox.finish(seed.event_id)
+    target = accept(core, nap_event, 792, "大家怎么看")
+    core.save_state(target.conversation.key, mode="social")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(switch_backend)) as client:
+        core.judge = StructuredLLMJudge("key", "actual-model", "https://example.invalid", client)
+        await core.process(target)
+    assert isinstance(core.judge, RuleOnlyJudge)
+    with core.db.engine.connect() as conn:
+        row = conn.execute(select(decision_logs).where(decision_logs.c.event_id == target.event_id)).mappings().one()
+    context = json.loads(row["context_json"])
+    assert context["judge_backend"] == "structured" and context["judge_model_id"] == "actual-model"
+    assert json.loads(row["decision_json"])["signals"]["backend"] == "structured"

@@ -18,6 +18,8 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from qqbot.providers import ModelCapacity
+
 MAX_PAGE = 1024 * 1024
 
 
@@ -115,12 +117,15 @@ class ResearchCapabilities:
         active=lambda: True,
         transport=None,
         authority=None,
+        capacity=None,
+        background=False,
     ):
         self.workspace = Path(workspace)
         self.model, self.upstream_key, self.upstream = model, upstream_key, upstream
         self.upstream_session = str(uuid4())
         self.active = active
         self.authority = authority
+        self.capacity, self.background = capacity or ModelCapacity(), background
         self.tool_token, self.model_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         self.tool_calls = self.model_calls = 0
         self.revoked = False
@@ -230,7 +235,7 @@ class ResearchCapabilities:
                 if key in body
             }
             payload.update(stream=False, max_tokens=4096)
-            async with self.model_lock:
+            async with self.model_lock, self.capacity.slot(self.background):
                 await self.authorize(authorization, self.model_token)
                 async with (
                     httpx.AsyncClient(

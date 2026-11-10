@@ -68,6 +68,7 @@ class JudgeConfig(DTO):
 class MemoryConfig(DTO):
     maintenance_enabled: bool = False
     auto_extract: bool = False
+    auto_publish_self_reports: bool = True
     extractor_endpoint: str | None = None
     extractor_model: str | None = None
     extractor_key_env: str = "QQBOT_MEMORY_KEY"
@@ -76,12 +77,15 @@ class MemoryConfig(DTO):
     embedding_version: str = "v1"
     embedding_dimensions: int | None = Field(default=None, ge=1, le=65536)
     embedding_key_env: str = "QQBOT_EMBEDDING_KEY"
-    raw_retention_days: int = Field(default=30, ge=1, le=3650)
+    raw_retention_days: int | None = Field(
+        default=None, ge=1, le=3650, description="默认 null 永久保留原始记录；显式天数启用过期清理。"
+    )
 
 
 class ExecutionConfig(DTO):
     notify_before_tools: bool = True
-    max_active: int = Field(default=4, ge=1, le=32)
+    max_active: int = Field(default=4, ge=1, le=32,
+        description="普通执行槽数；另有 1 个有界交互备用槽，正在运行及 UNKNOWN 槽不会因后台化释放。")
     sustained_limit: int = Field(default=2, ge=1, le=31)
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
     interactive_budget: RunBudget = RunBudget(
@@ -133,7 +137,7 @@ class SpeakUpConfig(DTO):
     idle_minutes: int = Field(default=40, ge=1, le=10080)
     min_interval_minutes: int = Field(default=60, ge=1, le=10080)
     max_interval_minutes: int = Field(default=180, ge=1, le=10080)
-    max_per_day: int = Field(default=20, ge=0, le=100)
+    max_per_day: int = Field(default=20, ge=0, le=100, description="包含主动发起和追问；沉默及失败尝试也计数。")
     awake_from: int = Field(default=8, ge=0, le=23)
     awake_to: int = Field(default=23, ge=1, le=24)
     nudge: bool = True

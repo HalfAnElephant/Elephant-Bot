@@ -281,7 +281,7 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
     class Judge:
         async def judge(self, context):
             calls.append(context)
-            return JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
+            return JudgmentSignals(proactive_allowed=1, useful_contribution=0.6, private_exchange=0.1)
 
     core.judge = Judge()
     logged = []
@@ -406,7 +406,7 @@ async def test_social_receipts_hold_reservation_and_stop_unanswered_monologue(
 
             async def judge(self, context):
                 self.calls += 1
-                return JudgmentSignals(
+                return JudgmentSignals(proactive_allowed=1,
                     invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1
                 )
 
@@ -457,7 +457,7 @@ async def test_proactive_pi_context_stale_on_ingress_without_another_tick(
 
     class Judge:
         async def judge(self, context):
-            return JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+            return JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
 
     core.judge = Judge()
     await core.process(value)
@@ -540,7 +540,7 @@ async def test_explicit_quiet_phrase_suppresses_only_proactive_for_ten_minutes(
     class Judge:
         async def judge(self, context):
             calls.append(True)
-            return JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
+            return JudgmentSignals(proactive_allowed=1, invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
 
     core.judge = Judge()
     core.adapters["nap"].account_online = True
@@ -600,5 +600,50 @@ async def test_invited_split_messages_commit_together_only_after_success(
     await task
     with core.db.engine.connect() as c:
         assert c.execute(select(inbox.c.state).where(inbox.c.id == fourth.event_id)).scalar_one() == "PENDING"
+    await core.stop()
+    core.db.close()
+
+
+@pytest.mark.parametrize("recalled_before_settle", [False, True])
+async def test_group_question_ownership_through_process(
+    tmp_path, nap_config, nap_event, clock, monkeypatch, recalled_before_settle
+):
+    from qqbot.storage.task_schema import inputs, waits
+
+    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    core = app.state.core
+    core.adapters["nap"].account_online = True
+    request = new_event(core, nap_event, 2500, "请帮我处理仓库")
+    await core.process(request)
+    original = accepted(core, request)
+    claim = core.tasks.claim("worker")
+    core.tasks.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "question_id": "core-question", "text": "哪个仓库？", "checkpoint": "No writes"})
+    unrelated = core.adapters["nap"].normalize({**nap_event, "user_id": 301, "message_id": 2501,
+        "message": [{"type": "text", "data": {"text": "中午吃什么"}}]})
+    await core.process(core.inbox.accept(unrelated)[0])
+    with core.db.engine.connect() as conn:
+        assert conn.execute(select(inputs.c.id)).first() is None
+        assert conn.execute(select(waits.c.state)).scalar_one() == "INTENT"
+    answer = new_event(core, nap_event, 2502, "org/repo")
+    await core.process(answer)
+    with core.db.engine.connect() as conn:
+        assert conn.execute(select(inputs.c.task_id)).scalar_one() == original["id"]
+        assert conn.execute(select(inputs.c.text)).scalar_one() == "org/repo"
+    if recalled_before_settle:
+        recall = core.adapters["nap"].normalize({"post_type": "notice", "notice_type": "group_recall",
+            "self_id": 100, "user_id": 300, "group_id": 200, "message_id": 2502,
+            "time": int(clock.now().timestamp())})
+        await core.process(core.inbox.accept(recall)[0])
+    core.tasks.submit(claim["run_id"], claim["fencing_token"], "worker", {
+        "status": "waiting_input", "summary": "Waiting"})
+    resumed = core.tasks.claim("worker")
+    assert resumed["task_id"] == original["id"]
+    assert [item["text"] for item in resumed["continuation"]["inputs"]] == ["org/repo"]
+    if recalled_before_settle:
+        with pytest.raises(PermissionError, match="unavailable or revoked evidence"):
+            core.tasks.authorize(resumed["run_id"], resumed["fencing_token"], "worker", {"action": "model.request"})
+    else:
+        assert core.tasks.authorize(resumed["run_id"], resumed["fencing_token"], "worker", {"action": "model.request"})["allowed"]
     await core.stop()
     core.db.close()

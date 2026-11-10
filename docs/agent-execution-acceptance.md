@@ -115,3 +115,87 @@ QQ 的普通回复、命令、进度、提问和结果统一使用纯文本输�
 真实任务 T-d066b72f-a6e 查询明确指定的 YourTongji/YourTJ-Hub，得到 16 个开放 PR。两次业务模型请求、一次 GitHub 工具调用后成功；1,739 字纯文本完整交付，QQ 回执为 SENT（平台消息 ID 424261131），执行槽已释放。先前仅用模糊名称 yourtj 的查询曾选错组织；明确仓库 URL 的流程已验证，不能据此宣称模糊目标解析已完全解决。
 
 部署备份位于 home 的 `/root/elephant-deploy-backups/20261109T073219Z-context-fixes`、`20261109T073756Z-completion-fix` 和 `20261109T080641Z-qq-presentation`。Core/Worker 正常运行且无重启循环。完整 1M 输入压力、QQ 用户阅读确认、真实 GitHub 写操作尚未验收。
+
+## 报告 A 阶段本地验收 2026 年 11 月 10 日
+
+范围为 F01、F02、F03、F19 关键循环和 F21 最小 CI。验证采用本地渠道，环境为 macOS、Python 3.13.9、Node 26.12.1 和锁定的 pi 1.5.0。
+
+| 项目 | 已验证行为 | 主要回归入口 |
+| --- | --- | --- |
+| F01 | 群内无关消息保持独立，发起人引用或 at 回答沿原任务续接，明确引用允许有权限成员参与，私聊唯一等待可普通回答，多等待歧义拒绝。旧 wait 安全默认、重复、撤回、遗忘、过期、延迟和 QQ 秒精度均覆盖。外部等待的显式补充保留至真实观察满足。 | `test_tasks_control.py`、`integration/test_core.py::test_group_question_ownership_through_process` |
+| F02 | 默认永久保留，31 天和 365 天的长文本及图片在摘要、抽取和索引维护后逐字节一致，撤销后派生召回失效。已有数字保留策略继续生效。 | `test_social_maintenance.py`、`test_social_memory.py` |
+| F03 | 真实 pi 配合模拟供应商接收 warm 新群消息、已送达回复和同来源新版本，重放、选择窗口裁切及进程恢复均保持来源去重。 | `test_pi_bridge.py::test_locked_pi_context_delta_persists_source_cursor_across_rebind_and_restart`、`test_locked_pi_context_revision_reaches_model_once` |
+| F19 | 独立循环退避恢复，维护按会话隔离，持续失败和卡住可见，Core 退出及临时 DB 故障使 ready 返回 503，发送后回执落库失败保留 UNKNOWN。 | `test_service_supervision.py` |
+| F21 | 新增 `Correctness` workflow，固定 Ubuntu 24.04、Python 3.13.9、Node 22.19.0、uv 0.11.8 和锁定依赖，执行 pytest、控制台测试及 Ruff，归档提交、环境和原始日志。 | `.github/workflows/ci.yml`，本地 YAML 结构检查通过 |
+
+全量首跑为 605 通过、3 失败，失败均来自仍使用群聊普通消息回答追问的旧夹具。夹具更新为明确 at 后，任务等待、问题、输入与续接范围的最终定点回归 26 项全部通过，复用了其他范围的成功结果。控制台 19 项全部通过，最终 Ruff、配置 schema 一致性和 `git diff --check` 通过。pytest 留有一条现有 Starlette TestClient 弃用警告。
+
+循环的退避从 1 秒开始并上限 30 秒。关键循环连续 3 次失败或运行卡住 120 秒使就绪降级，可选维护和主动搭话的卡住阈值为 600 秒。execution 表示 Core 调度状态，Worker 和模型的实际执行仍依据任务记录核对。已接受后撤回的回答仍保存在任务输入档案中，后续模型请求的来源授权检查会拒绝使用。
+
+本次完成本地代码验收。云端 workflow 运行、分支必过规则、目标 Linux 部署、真实供应商及 QQ 收发尚待对应环境验收。原部署若保存了数值型 `memory.raw_retention_days`，该策略继续执行，永久保留需将其显式设为 `null`。
+
+## 报告 B 阶段本地验收 2026 年 11 月 10 日
+
+范围为 F04、F05、F06、F12 和 F15 一期。继续使用本地验证渠道，环境为 macOS、Python 3.13.9、Node 26.12.1 和锁定的 pi 1.5.0。
+
+| 项目 | 已验证行为 | 主要回归入口 |
+| --- | --- | --- |
+| F04 | 天气转相机或服务器日志建立新话题，明确的日期、继续说和接着说保留原归属，显式引用和展示序号继续有效。业务选择使用 skills，planner 业务 hints 为空，旧资源格式和确定性验证门槛保留兼容。 | `test_context_execution.py`、`integration/test_turn_routing.py` |
+| F05 | 同发起人明确追加、修正、取消和继续沿正确任务处理。多候选或缺少目标询问任务号，暂停请求先确认。追问中的取消和换题优先于答案匹配。结束竞争保留来源闭包，未完成任务续接继承账本和技能版本。 | `integration/test_turn_routing.py`、`test_tasks_control.py` |
+| F06 | 四个旧请求在执行中后台化时，第五个交互请求能使用保留容量。请求边界和排队后重读优先级，长工具占 run、UNKNOWN 占槽及旧 Research runner 的共享容量均覆盖。0010 迁移回填优先级并保留原 run、session 和占槽。 | `test_execution_capacity.py`、`test_execution_migration.py`、`test_provider_gateway.py` |
+| F12 | 两类模型判别共用六字段与 judgment-v2，缺失参与许可默认关闭，非法值、超时、弃权均拒绝本次主动判断。异步热切换日志记录实际完成本轮判断的后端和 schema。 | `test_social_policy.py`、`integration/test_judge_context.py` |
+| F15 | 原生目录发现、受控正文读取、显式选择、按路径执行技能脚本和产物生成已连通。新增 camera-advisor 目录完成脚本执行，业务注册无改动。真实 Worker 与 pi 验证新版任务和旧等待任务重启续接各用固定版本。 | `test_skills.py`、`test_pi_bridge.py`、`test_capability_discovery.py` |
+
+全量首跑 695 项，687 通过、8 失败。失败涉及旧目录断言、明确后续的话题继承、来源裁切夹具、缺少 principal 的旧测试夹具及新 manifest 的版本字段。修复和适配后，对上下文、技能发现、真实 pi、旧研究协议、自然任务路由和技能生命周期统一复验 146 项全部通过，其余已成功且输入相关行为未变的结果复用。新增关闭旧模型目录别名的回归后，当前共收集 696 项。控制台 19 项通过，Ruff、完整配置 schema 一致性、安装脚本语法、固定 entry 编译和 diff 空白检查通过。保留一条既有 Starlette TestClient 弃用警告。
+
+集成故障回归覆盖了 external wait 在 INTENT 阶段收到用户补充后仍等待真实观察、UNKNOWN 及 PARTIAL 加 VERIFIED 步骤的自然续接保持操作身份、技能缺失直接发送一次宿主失败通知，以及扩展错误退出时满事件队列的 reader 能完成取消。真实 pi 探针使用模拟供应商。技能脚本实际生成文件，bubblewrap 部分验证命令和只读挂载构造后由本地子进程替代。真实 Worker 的版本恢复探针使用实际 Core API、数据库、会话池和 pi 进程。
+
+本次选择一个有界交互备用槽，普通槽数为 max_active，硬上限为 max_active 加一。它保证指定的饱和场景，持续无限交互仍受容量约束。自然任务路由只接管明确表达，歧义请求确认。技能版本在任务首次执行时固定，旧版本目录继续保留，源目录更新进入新任务。原有业务适配、等待解释器和语义去重作为一期兼容层保留。
+
+生产部署、目标 Linux 的只读资源与隔离验收、真实供应商和 QQ 收发及云端 CI 仍待对应环境执行。生产升级需要同步 Core、Worker、固定 launcher 与 entry，并发布 root-owned 技能版本。自然语言技能选择质量与真实交互延迟留待固定回放和实际环境评估。
+
+## 报告复审与 C D 阶段本地验收 2026 年 11 月 10 日
+
+本次以用户提供的对比决策报告为工作范围，先复审工作区已有 A B 阶段成果，再补齐其余近期代码任务。继续采用本地验证渠道。所有修改保留在当前工作区，原始报告保持原样。
+
+复审修复了群聊发起人的明确独立请求仍可能被唯一追问消费的问题。通用请求句式进入正常消息路径，未引用的疑问歧义先澄清，任务号与明确回答保持归属。自然语言路由采用确定性句式，尚需真实留出集检验识别质量。
+
+任务状态复查补齐了相同时间修订按 Inbox seq 排序，以及 continuation 和已消费输入统一持久化交付标记。冷恢复可重建已确认修订，warm 后续不会把 READY 到 CONSUMED 的状态变化重复当作新要求。缺失或撤回来源阻止恢复使用，超出字节门时保留原始输入并明确失败。
+
+| 报告项 | 本地交付 | 回归入口与边界 |
+| --- | --- | --- |
+| F07 | history.search/read 与 memory.search/get、内部 lease 鉴权、来源闭包、history-memory 技能 | `test_history_memory.py`、`test_task_memory.py`。中文子串候选和扫描游标支持旧原文分页，跨群、撤回、墓碑与权限变化重新校验。 |
+| F08 | 正常对话查询 embedding、1.5 秒超时、词法回退、按主体及模型版本缓存 | `test_history_memory.py`。同义查询实际走向量分支，供应商失败与维度/版本隔离使用模拟供应商。 |
+| F09 | 多人证据按主体处理、明确自述策略发布、普通候选管理页发布、维护拒绝原因 | `test_history_memory.py`、现有社会记忆回归。`auto_publish_self_reports` 默认开启，仍须启用自动抽取并满足原文引文、同主体、高置信及低风险门限。推断保留 candidate。 |
+| F10 | 复用 goal、inputs、checkpoint 派生状态，历史指代消费摘要来源索引并恢复原文 | `test_task_memory.py`、`test_context_execution.py`、真实 pi 三轮模拟供应商回归。没有新增一份独立业务状态表。 |
+| F11 | 自动黑话候选发现接入原有发布与证据接口 | `test_history_memory.py`。至少三个独立上下文、两名说话人及真实词出现，来源撤回使其失效，输出许可沿用原有词典审查。玩笑与语义消歧质量仍待真实样本。 |
+| F13 | 固定合成策略集、按群与片段拒绝数据泄漏、请求量与决策 p95 指标及 coverage | `evals/fixtures/social-baseline.jsonl` 共 16 项，`test_social_policy.py`。明确呼叫 3/3，禁止/应忽略 0/12 误触，发言标签 4/4。这些是预置信号的策略回归，真实判别器质量与耗时尚未测得。 |
+| F14 | 发起与 nudge 共享每日次数，沉默/失败尝试计数，私聊自然退订立即使待发搭话失效 | `test_speakup.py`。Core 各阶段共用有界模型客户端，所有阶段用量可在统一接口读取。每日次数按生成尝试计，分条平台消息数另由 Outbox 核对。 |
+| F16 | 网页研究、GitHub、工作区与文档技能继续复用已验证通用接口和兼容账本 | 技能、能力、GitHub、Git、进程、等待与 UNKNOWN 回归复用本轮成功结果。真实 GitHub 写入、地点与仓库名解析质量仍待专用环境。动态浏览器和新增解析运行库由具体任务需求决定。 |
+| F17 | Artifact reference 独立持久化投递，NapCat 群聊/私聊原生文件与图片、发送前内容校验 | `test_artifact_delivery.py`。文本与附件分别统计，重启、过期、缺失、篡改、撤权及 UNKNOWN 不重试均覆盖。官方 QQ 明确降级为附件未发送。 |
+| F18 | 复用已有任务/闲聊表达规则、会话偏好覆盖及纠正链路 | 本项按报告采用最小表达范围。持久心情、关系引擎、语音与完整市场属于报告按需求扩展项，当前未启用。真实语气与边界效果待持续互动评估。 |
+| F20 | Core 各模型阶段统一计量，Worker 任务统计合并查询，工具记录技能版本和耗时，日志保留关联 ID 与栈帧 | `test_model_observability.py`、`test_task_memory.py`、服务监督与供应商回归。缺失 usage 保持 null/unknown，未配置价格时费用及定价版本为 null。技能归属字段记录最近成功读取的技能，组合任务须结合轨迹判断。 |
+| F22 | expected/loaded 模型与技能指纹、Worker 心跳及 stale、配置页诊断、备份恢复故障回归 | `test_model_observability.py`、配置控制台与 `integration/test_operations.py`。恢复后已完成结果及 VERIFIED 效果保留，UNKNOWN 不重放且保留占槽，停止证明与核对后可继续排队任务。停止证明在本地恢复用例中为夹具。 |
+
+F01–F06、F12、F15、F19 和 F21 的已有成果同时进入本轮复审与回归。旧业务适配器、历史 wait 解释器及语义去重继续作为报告一期兼容层维护。新增业务通过技能目录扩展，兼容层的全面退役按报告需另行满足旧状态迁移条件。
+
+全量首跑收集 747 项，744 通过、3 失败。一个失败来自撤回拒绝提前触发后测试期待的异常文案过时，另两个来自真实 Worker 测试向 add_input 直接提供未入 Inbox 的合成事件。修复文案与夹具后，追问与路由 42 项通过，真实 pi 晚到输入的 active/settled、技能重启及新增三轮去重 4 项通过。其余受桥接输入变化影响的范围另验 52 项通过。最后上下文、记忆与任务状态统一回归 70 项通过，覆盖新增的来源索引消费与同时间修订排序。
+
+当前收集 750 项。复用未受后续修改影响的全量成功结果，没有重复全量或云端同等验证。控制台 19 项通过，Ruff、配置 schema 一致性、安装脚本语法、固定 entry 编译和 diff 空白检查通过。保留一条 Starlette TestClient 弃用警告。
+
+### 仍待实际环境的退出条件
+
+- 目标 Linux 上新版本 Core、Worker、固定 launcher/entry 与技能只读资源的同步部署及隔离检查。
+- 真实供应商冷/热启动、压缩与输入续接，真实饱和负载的调度与响应 p50/p95。
+- 专用 QQ 会话中的追问、原生文件/图片、重试及断网恢复。当前文件发送证据为本地协议接收器。
+- 专用 GitHub 测试仓库中的创建、修改、评论、审查、批准及 UNKNOWN 回读，需明确测试目标与允许写入范围。
+- 真实群聊标注及留出回放、记忆同义检索的 recall@k 与错误人物率、自然语言技能选择和语气质量。
+- 云端 workflow 的实际执行及仓库必过分支规则。现有 workflow 语法和本地等价检查不能作为云端通过证据。
+
+本轮没有生产部署或真实 QQ/GitHub 写入记录。上述退出条件完成前，整个报告的实际环境验收仍未完成。
+
+### Linux 补充定点检查
+
+home 的独立临时目录使用本轮源码和现有 Python 3.13.9，实际运行 bubblewrap。技能资源只读、任务工作区可写、Core 数据与服务配置路径不可见，技能脚本生成的文件成功导出并按 SHA-256 读取。共七项断言通过。探针使用临时测试技能，未读取服务凭据、未连接模型或 QQ，生产 Core 与 Worker 仍保持运行。该结果覆盖实际进程挂载，固定 systemd launcher 与新版本同步部署仍需独立验收。
+
+管理页浏览器连接连续两次超时，视觉检查未完成。控制台逻辑测试与后端 API 结果保持上述已验证范围。

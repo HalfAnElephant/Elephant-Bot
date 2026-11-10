@@ -58,6 +58,7 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
         for method, path in (
             ("GET", "/api/v1/config"),
             ("GET", "/api/v1/config/schema"),
+            ("GET", "/api/v1/model-calls"),
             ("POST", "/api/v1/config/save"),
             ("POST", "/api/v1/config/validate"),
             ("POST", "/api/v1/config/apply"),
@@ -363,3 +364,15 @@ def test_initial_policy_save_cannot_lock_out_console(console_settings, tmp_path,
         assert response.status_code == 422
         assert client.get("/api/v1/config", headers=AUTH).json() == first
         assert not (tmp_path / "runtime-config.json").exists()
+
+
+def test_model_calls_and_worker_diagnostics_are_available(console_settings, clock):
+    with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
+        calls = client.get('/api/v1/model-calls', headers=AUTH)
+        assert calls.status_code == 200
+        assert calls.json() == {'calls': [], 'cost': None, 'pricing_version': None}
+        diagnostics = client.get('/api/v1/config', headers=AUTH).json()['diagnostics']
+        assert diagnostics['worker_status'] == 'unknown'
+        assert diagnostics['workers'] == []
+        assert diagnostics['expected_model'] == diagnostics['core_loaded_model']
+        assert diagnostics['expected_skills']

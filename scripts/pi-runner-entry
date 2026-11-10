@@ -106,5 +106,9 @@ argv = [
     "--no-approve",
     "--offline",
 ]
+if general:
+    if not isinstance(manifest.get("skill_version"), str) or not Path('/skills').is_dir():
+        raise SystemExit('pinned skill resources are unavailable')
+    argv += ['--skill', '/skills']
 os.chdir(workspace)
 os.execve(argv[0], argv, env)

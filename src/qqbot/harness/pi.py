@@ -86,6 +86,8 @@ class PiRunnerAdapter:
         if self.gateway:
             argv.remove("--no-tools")
             argv += ["--no-builtin-tools", "--extension", str(Path(__file__).with_name("pi_bridge.ts"))]
+            if self.gateway.skills:
+                argv += ["--skill", str(self.gateway.skills.directory)]
         elif self.research:
             argv.remove("--no-tools")
             argv += [
@@ -209,7 +211,8 @@ class PiRunnerAdapter:
             for pending in self.responses.values():
                 if not pending.done():
                     pending.set_exception(RuntimeError("RPC closed before command acknowledgement"))
-            await self.queue.put({"type": "host_eof"})
+            if not asyncio.current_task().cancelling():
+                await self.queue.put({"type": "host_eof"})
 
     async def _stderr(self):
         while chunk := await self.process.stderr.read(65536):
@@ -311,7 +314,7 @@ class PiRunnerAdapter:
                             observation_refs=tuple(outcome.get("observation_refs", self.gateway.observations if self.gateway else ())),
                             effect_refs=tuple(outcome.get("effect_refs", self.gateway.effects if self.gateway else ())),
                             limitations=tuple(outcome.get("unresolved_items", ())))
-                    elif kind in {"host_error", "host_eof"}:
+                    elif kind in {"host_error", "host_eof", "extension_error"}:
                         raise RuntimeError(event.get("error", "RPC closed before agent_settled"))
         finally:
             self.run_timeout = None

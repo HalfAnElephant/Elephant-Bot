@@ -69,7 +69,7 @@ def test_question_fast_reply_is_consumed_after_quiescence_once(execution):
     task = service.accept(event, access, "need input")
     claim = service.claim("w")
     identity = (claim["run_id"], 1, "w")
-    answer = event.model_copy(update={"event_id": "answer"})
+    answer = event.model_copy(update={"event_id": "answer", "mentions_bot": True})
     service.ask(*identity, {"question_id": "q", "text": "Which repository?", "checkpoint": "No changes made"})
     first = service.add_input(task["public_id"], answer, access, "owner/repo", "q")
     assert service.add_input(task["public_id"], answer, access, "owner/repo", "q") == first
@@ -99,6 +99,7 @@ def test_image_only_task_input_is_persisted_and_delivered_once(execution, questi
     if question_reply:
         service.ask(*identity, {"question_id": "q", "text": "Send the image", "checkpoint": "Need image"})
     answer = event.model_copy(update={"event_id": "image-answer", "platform_message_id": "image-message",
+        "mentions_bot": question_reply,
         "segments": (MediaSegment(type="image", attachment_ref="unresolved:fixture",
                                   image_url="https://gchat.qpic.cn/image"),)})
     stored, _ = Inbox(service.db).accept(answer)
@@ -414,7 +415,10 @@ async def test_locked_pi_late_input_survives_settled_boundary(execution, tmp_pat
         try:
             await asyncio.wait_for(checked.wait(), 10)
             runner = next(iter(pool.entries.values()))["runner"]
-            extra = service.add_input(task["public_id"], event.model_copy(update={"event_id": "late"}), access, "and check the second item")
+            from qqbot.ingress.service import Inbox
+
+            late, _ = Inbox(service.db).accept(event.model_copy(update={"event_id": "late", "platform_message_id": "late"}))
+            extra = service.add_input(task["public_id"], late, access, "and check the second item")
             if injection == "settled":
                 with pytest.raises(RuntimeError, match="not accepting"):
                     await runner.append_input(extra["input_id"], "and check the second item")
@@ -540,7 +544,7 @@ def test_continuation_keeps_task_budget_and_completion_reserve(execution):
     claim = service.claim("w")
     service.reserve_budget(claim["run_id"], 1, "w", {"request_id": "first", "kind": "business"})
     service.ask(claim["run_id"], 1, "w", {"question_id": "q", "text": "Which target?", "checkpoint": "No writes"})
-    service.add_input(task["public_id"], event.model_copy(update={"event_id": "reply"}), access, "the original", "q")
+    service.add_input(task["public_id"], event.model_copy(update={"event_id": "reply", "mentions_bot": True}), access, "the original", "q")
     service.submit(claim["run_id"], 1, "w", {"status": "waiting_input", "summary": "Waiting"})
     continuation = service.claim("w")
     with pytest.raises(ValueError, match="budget exhausted"):

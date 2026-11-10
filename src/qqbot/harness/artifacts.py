@@ -98,3 +98,24 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
         os.close(root)
         os.close(archive_fd)
     return exported
+
+
+def read_artifact(archive, artifact):
+    """Recheck the immutable export immediately before delivery."""
+    from uuid import UUID
+
+    if str(UUID(artifact.id)) != artifact.id:
+        raise ValueError("invalid archive reference")
+    root = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(artifact.id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != artifact.size:
+                raise ValueError("unsafe or changed artifact")
+            content = source.read(20 * 1024 * 1024 + 1)
+    finally:
+        os.close(root)
+    if len(content) != artifact.size or hashlib.sha256(content).hexdigest() != artifact.sha256:
+        raise ValueError("artifact digest changed")
+    return content

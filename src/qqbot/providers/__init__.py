@@ -100,14 +100,29 @@ class ModelCapacity:
 
     @asynccontextmanager
     async def slot(self, background):
-        if background:
-            await self.sustained.acquire()
-        try:
-            async with self.total:
+        async def category():
+            value = background() if callable(background) else background
+            return await value if inspect.isawaitable(value) else value
+
+        while True:
+            sustained = await category()
+            sustained_acquired = total_acquired = False
+            try:
+                if sustained:
+                    await self.sustained.acquire()
+                    sustained_acquired = True
+                await self.total.acquire()
+                total_acquired = True
+                # A queued request may have detached while waiting for a model slot.
+                if sustained != await category():
+                    continue
                 yield
-        finally:
-            if background:
-                self.sustained.release()
+                return
+            finally:
+                if total_acquired:
+                    self.total.release()
+                if sustained_acquired:
+                    self.sustained.release()
 
 
 class ProviderAdapter:
@@ -127,6 +142,12 @@ class ProviderAdapter:
         self.business_exhausted = False
         self.active = 0
         self.last_usage = self.ttft = None
+
+    async def _background(self):
+        authorization = await self.authorize("model.request")
+        if isinstance(authorization, dict) and "execution_priority" in authorization:
+            return authorization["execution_priority"] == "BACKGROUND"
+        return self.background
 
     async def _exhausted(self):
         self.business_exhausted = True
@@ -199,7 +220,7 @@ class ProviderAdapter:
             return StreamingResponse(self._stream(payload, headers, request_id), media_type="text/event-stream")
         started, raw = time.monotonic(), None
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
+            async with self.capacity.slot(self._background), httpx.AsyncClient(
                 transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
                 await self.authorize("model.request")
                 async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
@@ -270,7 +291,7 @@ class ProviderAdapter:
         started, first, raw, total, pending = time.monotonic(), None, None, 0, ""
         decoder = codecs.getincrementaldecoder("utf-8")()
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
+            async with self.capacity.slot(self._background), httpx.AsyncClient(
                 transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
                 await self.authorize("model.request")
                 async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:

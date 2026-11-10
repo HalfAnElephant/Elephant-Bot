@@ -24,6 +24,7 @@ class MaintenanceReport(DTO):
     extraction_state: str = "SKIPPED"
     candidates: int = 0
     rejected: int = 0
+    rejections: tuple[dict, ...] = ()
     indexed: int = 0
     skipped_indexes: int = 0
     failed_indexes: int = 0
@@ -39,13 +40,15 @@ class MemoryMaintenance:
         embedding=None,
         *,
         enabled=False,
-        raw_retention_days=30,
+        raw_retention_days=None,
         max_messages=40,
+        auto_publish_self_reports=True,
     ):
-        if raw_retention_days < 1 or not 1 <= max_messages <= 100:
+        if (raw_retention_days is not None and raw_retention_days < 1) or not 1 <= max_messages <= 100:
             raise ValueError("invalid maintenance bounds")
         self.service, self.db, self.clock = service, service.db, service.clock
         self.extractor, self.embedding, self.enabled = extractor, embedding, enabled
+        self.auto_publish_self_reports = auto_publish_self_reports
         self.raw_retention_days, self.max_messages = raw_retention_days, max_messages
 
     def _events(self, access, after_seq, conn):
@@ -165,23 +168,30 @@ class MemoryMaintenance:
             )
             seq, events = self._events(access, checkpoint["extraction_seq"], conn)
         state, count, rejected = "SKIPPED", 0, 0
+        rejections = []
         if seq == checkpoint["extraction_seq"]:
-            return checkpoint["extraction_state"], count, rejected
+            return checkpoint["extraction_state"], count, rejected, ()
         if auto_extract and self.extractor is not None:
             result = await self.extractor.extract(events)
             state = result.state
-            source_ids = {e.event_id for e in events}
+            sources = {e.event_id: e for e in events}
+            source_ids = set(sources)
             for suggestion in result.suggestions:
                 if not suggestion.should_persist:
                     continue
                 try:
                     if not set(suggestion.source_event_ids) <= source_ids:
                         raise ValueError("model widened evidence scope")
-                    if (
-                        suggestion.scope_type == "principal_in_conversation"
-                        and suggestion.subject_ref != access.principal.key
-                    ):
-                        raise PermissionError("model widened subject scope")
+                    evidence = [sources[source] for source in suggestion.source_event_ids]
+                    subject_access = access
+                    if suggestion.scope_type == "principal_in_conversation":
+                        if any(event.principal.key != suggestion.subject_ref for event in evidence):
+                            raise PermissionError("model widened subject scope")
+                        subject_access = access.model_copy(update={"principal": evidence[0].principal, "role": "member"})
+                    explicit = (suggestion.scope_type == "principal_in_conversation"
+                        and suggestion.low_risk and suggestion.confidence >= 0.9
+                        and bool(suggestion.self_report_quote)
+                        and any(suggestion.self_report_quote in event.text for event in evidence))
                     now = self.clock.now()
                     record = MemoryRecord(
                         memory_id=stable_id(
@@ -194,7 +204,7 @@ class MemoryMaintenance:
                         value_json=suggestion.value_json,
                         text=suggestion.text,
                         source_event_ids=suggestion.source_event_ids,
-                        source_kind="inference",
+                        source_kind="user_explicit" if explicit else "inference",
                         confidence=suggestion.confidence,
                         valid_from=now,
                         valid_until=now + timedelta(days=suggestion.valid_for_days),
@@ -202,10 +212,30 @@ class MemoryMaintenance:
                         last_verified_at=now,
                         extraction_model=self.extractor.model,
                     )
-                    self.service.candidate(access, record, auto_enabled=True)
+                    self.service.candidate(subject_access, record, auto_enabled=True)
+                    if explicit and self.auto_publish_self_reports:
+                        self.service.commit(subject_access, record.memory_id, authorized=True)
                     count += 1
-                except (ValueError, PermissionError, LookupError):
+                except (ValueError, PermissionError, LookupError) as error:
                     rejected += 1
+                    rejections.append({"sources": list(suggestion.source_event_ids), "reason": str(error)})
+            for suggestion in result.jargon:
+                try:
+                    if not set(suggestion.source_event_ids) <= source_ids or suggestion.confidence < 0.9:
+                        raise ValueError("insufficient jargon evidence")
+                    evidence = [sources[source] for source in suggestion.source_event_ids]
+                    if any(suggestion.term not in event.text for event in evidence):
+                        raise ValueError("jargon absent from evidence")
+                    entry = self.service.jargon(access, suggestion.term, suggestion.sense_id,
+                        suggestion.definition, suggestion.source_event_ids)
+                    if entry.status != "active":
+                        raise ValueError("insufficient independent jargon contexts")
+                    self.service.learn_jargon(access, suggestion.term, suggestion.sense_id,
+                        suggestion.definition, suggestion.source_event_ids, authorized=True)
+                    count += 1
+                except (ValueError, PermissionError, LookupError) as error:
+                    rejected += 1
+                    rejections.append({"sources": list(suggestion.source_event_ids), "reason": str(error)})
         with self.db.transaction() as conn:
             values = {"extraction_state": state}
             if state != "FAILED":
@@ -218,7 +248,7 @@ class MemoryMaintenance:
                 )
                 .values(**values)
             )
-        return state, count, rejected
+        return state, count, rejected, tuple(rejections)
 
     async def _index(self, access):
         with self.db.engine.connect() as conn:
@@ -275,18 +305,26 @@ class MemoryMaintenance:
 
     def _purge(self, access):
         cid = access.conversation.key
-        cutoff = self.clock.now() - timedelta(days=self.raw_retention_days)
+        cutoff = (
+            self.clock.now() - timedelta(days=self.raw_retention_days)
+            if self.raw_retention_days is not None
+            else None
+        )
         expired_sources = []
         with self.db.engine.connect() as conn:
-            sources = conn.execute(
-                select(inbox.c.id, inbox.c.event_json)
-                .where(
-                    inbox.c.conversation_id == cid,
-                    inbox.c.id.not_in(select(memory_source_retention.c.source_id)),
-                    or_(inbox.c.received_at < cutoff.isoformat(), inbox.c.received_at.is_(None)),
-                )
-                .limit(100)
-            ).all()
+            sources = (
+                []
+                if cutoff is None
+                else conn.execute(
+                    select(inbox.c.id, inbox.c.event_json)
+                    .where(
+                        inbox.c.conversation_id == cid,
+                        inbox.c.id.not_in(select(memory_source_retention.c.source_id)),
+                        or_(inbox.c.received_at < cutoff.isoformat(), inbox.c.received_at.is_(None)),
+                    )
+                    .limit(100)
+                ).all()
+            )
             active = (
                 conn.execute(
                     select(social_records.c.record_json).where(
@@ -373,7 +411,7 @@ class MemoryMaintenance:
             return MaintenanceReport(state="SKIPPED", skipped_indexes=result.rowcount)
         purged, expired = self._purge(access)
         seq = self._summarize(access)
-        extraction, count, rejected = await self._extract(access, auto_extract)
+        extraction, count, rejected, rejections = await self._extract(access, auto_extract)
         indexed, skipped, failed = await self._index(access)
         return MaintenanceReport(
             state="DONE",
@@ -381,6 +419,7 @@ class MemoryMaintenance:
             extraction_state=extraction,
             candidates=count,
             rejected=rejected,
+            rejections=rejections,
             indexed=indexed,
             skipped_indexes=skipped,
             failed_indexes=failed,

@@ -253,7 +253,7 @@ if (typeof document !== 'undefined') (() => {
   const labels = {
     deployment_id: '部署标识', database: '数据库路径', adapters: 'QQ 接入', admin_token_env: '管理员令牌变量', internal_token_env: '内部令牌变量', model: '模型', source_url: '源码地址', send_budget_per_minute: '每分钟发送预算', timezone: '时区', tasks_enabled: '启用后台任务', interactive_execution_enabled: '启用交互执行', permissions: '初始权限策略', execution: '执行与资源预算', context: '上下文', internal_socket: '内部通信 Socket', persona_path: '人格文件路径', judge: '发言判断', memory: '记忆', social_evaluated_conversations: '回放评估记录（兼容旧配置）',
     instance_id: '接入实例标识', kind: '类型', bot_id: '机器人账号标识', secret_env: '接入密钥变量', app_id: '应用 ID', websocket_url: 'WebSocket 地址', allowed_groups: '兼容群列表', allowed_users: '兼容用户列表', admin_users: '管理员角色列表', known_bot_ids: '已知机器人账号', full_mode_enabled: '启用全量消息权限', full_mode_verified: '已验证全量消息', proactive_verified: '已验证主动消息', reply_window_seconds: '回复窗口（秒）', max_replies: '最多回复数', signature_max_age_seconds: '签名最大时效（秒）', api_base: 'API 地址', token_url: '令牌地址',
-    endpoint: '请求地址', api_key_env: 'API 密钥变量', timeout_seconds: '超时（秒）', context_window: '模型上下文窗口', max_active: '最大活跃执行数', sustained_limit: '持续任务上限', foreground_wait_ms: '前台等待（毫秒）', notify_before_tools: '操作前告知用户', interactive_budget: '交互任务预算', budget: '后台任务预算', warm_max: '常驻进程上限', warm_idle_max: '空闲进程上限', warm_ttl_seconds: '空闲保留（秒）',
+    endpoint: '请求地址', api_key_env: 'API 密钥变量', timeout_seconds: '超时（秒）', context_window: '模型上下文窗口', max_active: '普通执行槽数', sustained_limit: '持续任务上限', foreground_wait_ms: '前台等待（毫秒）', notify_before_tools: '操作前告知用户', interactive_budget: '交互任务预算', budget: '后台任务预算', warm_max: '常驻进程上限', warm_idle_max: '空闲进程上限', warm_ttl_seconds: '空闲保留（秒）',
     max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', keep_recent_tokens: '近期消息保留 Token', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
     maintenance_enabled: '启用记忆维护', auto_extract: '自动提取记忆', extractor_endpoint: '提取服务地址', extractor_model: '提取模型', extractor_key_env: '提取密钥变量', embedding_endpoint: '向量服务地址', embedding_model: '向量模型', embedding_version: '向量版本', embedding_dimensions: '向量维度', embedding_key_env: '向量密钥变量', raw_retention_days: '原始记录保留（天）',
     preset: '预设', default_effect: '默认行为', rules: '权限规则', id: '规则 ID', enabled: '启用', priority: '优先级', subject: '主体范围', actions: '操作匹配', resources: '资源匹配', effect: '行为', adapter_instance_id: '接入实例 ID', bot_identity_id: '机器人身份 ID', identity_namespace: '身份命名空间', group_id: '群 ID', user_id: '用户 ID',
@@ -287,7 +287,7 @@ if (typeof document !== 'undefined') (() => {
     persona_path: '首次读取的人格文件。全局人格内容请在“全局人格”页编辑。',
     allowed_groups: '兼容字段；实际访问控制由统一权限策略决定。', allowed_users: '兼容字段；实际访问控制由统一权限策略决定。',
     context: '保留近期 Token < 软上限 < 硬上限；输入与输出总预算不能超过模型窗口。',
-    execution: '持续任务上限应小于最大活跃执行数，给新交互保留容量。',
+    execution: '持续任务上限应小于普通执行槽数。另有 1 个有界交互备用槽；后台化不会释放仍在运行或 UNKNOWN 的槽。',
     expression: '采用 MaiBot 快速表达选择。积累至少 10 条可用素材后开始抽取；群聊默认学习和使用，私聊需添加规则。',
     learner_endpoint: '留空使用主模型地址；使用不同地址时请配置独立的表达学习密钥。',
     learner_model: '留空使用主模型。学习在后台执行，不增加每次回复的模型调用。',
@@ -301,8 +301,8 @@ if (typeof document !== 'undefined') (() => {
     ['主动搭话', ['speak_up']], ['发言', ['send_budget_per_minute', 'judge', 'social_evaluated_conversations']], ['记忆与表达', ['memory', 'expression']],
     ['系统', ['database', 'internal_socket', 'timezone', 'source_url', 'persona_path', 'admin_token_env', 'internal_token_env']], ['初始权限', ['permissions']]
   ];
-  Object.assign(labels, {speak_up: '私聊主动搭话', idle_minutes: '空闲多久后搭话（分钟）', min_interval_minutes: '最短搭话间隔（分钟）', max_interval_minutes: '最长搭话间隔（分钟）', max_per_day: '每人每日搭话次数', awake_from: '清醒开始时间（小时）', awake_to: '清醒结束时间（小时）', nudge: '未回复时轻轻追问', allow: '额外搭话会话'});
-  Object.assign(helps, {speak_up: '默认主动找各 QQ 接入中管理员的已知私聊；额外对象填写会话管理里的完整会话 ID。只在有主动发送能力、权限允许且未静默时搭话。保存后重启生效。', idle_minutes: '从双方最近一次私聊开始计算；空闲时间和随机间隔都满足才触发。', min_interval_minutes: '每轮在最短与最长间隔之间随机安排下一次。', max_interval_minutes: '不能小于最短间隔。', max_per_day: '每人单独计数；生成沉默或失败也计一次，避免频繁重试。', awake_from: '使用系统设置的时区，包含开始小时。', awake_to: '不包含结束小时；24 表示到午夜。', nudge: '最后一句是问句、对方 15～40 分钟没回时，有 50% 概率轻问一次；每句只判断一次，不占每日次数。', allow: '每行一个完整私聊会话 ID；仍需该会话的接收、模型和发送权限。'});
+  Object.assign(labels, {auto_publish_self_reports: '自动发布有明确原文证据的低风险自述', speak_up: '私聊主动搭话', idle_minutes: '空闲多久后搭话（分钟）', min_interval_minutes: '最短搭话间隔（分钟）', max_interval_minutes: '最长搭话间隔（分钟）', max_per_day: '每人每日搭话次数', awake_from: '清醒开始时间（小时）', awake_to: '清醒结束时间（小时）', nudge: '未回复时轻轻追问', allow: '额外搭话会话'});
+  Object.assign(helps, {speak_up: '默认主动找各 QQ 接入中管理员的已知私聊；额外对象填写会话管理里的完整会话 ID。只在有主动发送能力、权限允许且未静默时搭话。保存后重启生效。', idle_minutes: '从双方最近一次私聊开始计算；空闲时间和随机间隔都满足才触发。', min_interval_minutes: '每轮在最短与最长间隔之间随机安排下一次。', max_interval_minutes: '不能小于最短间隔。', max_per_day: '每人单独计数，包含主动发起和追问；生成沉默或失败也计一次，避免频繁重试。', awake_from: '使用系统设置的时区，包含开始小时。', awake_to: '不包含结束小时；24 表示到午夜。', nudge: '最后一句是问句、对方 15～40 分钟没回时，有 50% 概率轻问一次；每句只判断一次，占每日次数。', allow: '每行一个完整私聊会话 ID；仍需该会话的接收、模型和发送权限。'});
   let category = 0;
   function field(raw, initial, key, root, state, path) {
     const schema = resolve(raw, root), wrap = element('div', undefined, 'field');
@@ -369,7 +369,7 @@ if (typeof document !== 'undefined') (() => {
     else { const heading = element('div', undefined, 'field-label'); heading.append(...label.childNodes); label.replaceWith(heading); }
     if (schema.nullable && control) {
       const toggle = element('label', undefined, 'nullable'), nullBox = element('input'); nullBox.type = 'checkbox'; nullBox.checked = initial === null;
-      toggle.append(nullBox, document.createTextNode('暂不设置')); wrap.append(toggle); control.disabled = nullBox.checked;
+      toggle.append(nullBox, document.createTextNode(key === 'raw_retention_days' ? '永久保留原始记录（默认）' : '暂不设置')); wrap.append(toggle); control.disabled = nullBox.checked;
       nullBox.addEventListener('change', () => { control.disabled = nullBox.checked; });
       const getter = read; read = () => nullBox.checked ? null : getter();
     }
@@ -1050,9 +1050,13 @@ if (typeof document !== 'undefined') (() => {
     let path = '/api/v1/' + (jargon ? 'jargon' : 'memories') + '?conversation_id=' + encode(cid());
     if (!jargon && $('memory-status').value) path += '&status=' + encode($('memory-status').value);
     memoryRows = await request(path); $('memory-rows').replaceChildren();
+    if (!jargon) show('memory-output', await request('/api/v1/memory-maintenance?conversation_id=' + encode(cid())));
     for (const record of memoryRows) {
       const row = document.createElement('tr'); cell(row, record.memory_id + '\n' + record.scope_type); cell(row, record.status); cell(row, record.text);
       const controls = cell(row, ''); button(controls, '选择', () => { $('memory-id').value = record.memory_id; $('memory-text').value = record.text; show('memory-output', record); });
+      if (!record.predicate.startsWith('jargon:') && record.status === 'candidate') {
+        button(controls, '发布', async () => { show('memory-output', await request('/api/v1/memories/' + encode(record.memory_id) + '/publish', {method: 'POST'})); await loadMemories(); });
+      }
       if (record.predicate.startsWith('jargon:') && record.status === 'candidate') {
         button(controls, '审核通过', async () => { show('memory-output', await request('/api/v1/jargon/' + encode(record.memory_id) + '?publish=true', {method: 'PATCH'})); await loadMemories(true); });
         button(controls, '拒绝', async () => { show('memory-output', await request('/api/v1/jargon/' + encode(record.memory_id) + '?publish=false', {method: 'PATCH'})); await loadMemories(true); });
@@ -1132,7 +1136,7 @@ if (typeof document !== 'undefined') (() => {
       return () => {
         configMetadata(result); configEditor.load(result.saved_config, schema);
         show('config-state', result.restart_required ? '已保存，等待重启后生效' : '当前运行与保存配置一致');
-        show('config-output', {restart_required: result.restart_required, changed_fields: result.changed_fields});
+        show('config-output', {restart_required: result.restart_required, changed_fields: result.changed_fields, diagnostics: result.diagnostics});
       };
     }, force);
   }

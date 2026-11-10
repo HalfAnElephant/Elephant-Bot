@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import secrets
 import socket
@@ -9,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
@@ -84,6 +86,20 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
                 if not server.started:
                     raise RuntimeError("internal listener failed to start")
             loop = asyncio.create_task(core.run()) if run_background else None
+            app.state.core_task = loop
+            if loop:
+                def core_finished(task):
+                    if task.cancelled():
+                        return
+                    error = task.exception()
+                    if core.stopping:
+                        return
+                    app.state.core_error = type(error).__name__ if error else "UnexpectedExit"
+                    logging.getLogger(__name__).error(
+                        "Core background task exited", extra={"data": {"error_type": app.state.core_error}},
+                        exc_info=(type(error), error, error.__traceback__) if error else None,
+                    )
+                loop.add_done_callback(core_finished)
             app.state.ready = True
             yield
         finally:
@@ -131,6 +147,17 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     async def unavailable(request, exc):
         return JSONResponse({"detail": "object unavailable"}, status_code=404)
 
+    def background_health():
+        loops = core.supervisor.snapshot()
+        task = getattr(app.state, "core_task", None)
+        running = not run_background or (task is not None and not task.done())
+        healthy = running and all(state["healthy"] for state in loops.values() if state["critical"])
+        return {
+            "enabled": run_background, "running": running, "healthy": healthy,
+            "error_type": getattr(app.state, "core_error", None), "loops": loops,
+            "degraded": [name for name, state in loops.items() if not state["healthy"] or state["failures"]],
+        }
+
     @app.get("/healthz")
     @app.get("/health/live")
     def health():
@@ -138,20 +165,28 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
 
     @app.get("/health/ready")
     def ready():
-        with db.engine.connect() as c:
-            c.exec_driver_sql("SELECT 1")
+        database_ready = True
+        try:
+            with db.engine.connect() as c:
+                c.exec_driver_sql("SELECT 1")
+        except SQLAlchemyError:
+            database_ready = False
         disconnected = [
             a.config.instance_id
             for a in adapters.values()
             if isinstance(a, OneBotAdapter) and not a.account_online
         ]
+        background = background_health()
+        is_ready = app.state.ready and database_ready and not disconnected and background["healthy"]
         return JSONResponse(
             {
-                "ready": app.state.ready and not disconnected,
+                "ready": is_ready,
+                "database": "ok" if database_ready else "unavailable",
+                "background": background,
                 "disconnected": disconnected,
                 "external_acceptance": "not_implied_by_readiness",
             },
-            status_code=503 if disconnected or not app.state.ready else 200,
+            status_code=200 if is_ready else 503,
         )
 
     def admin(request: Request):
@@ -196,8 +231,15 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
                 select(func.count()).select_from(inbox).where(inbox.c.state == "PENDING")
             ).scalar_one()
             delivery_states = c.execute(select(outbox.c.state, func.count()).group_by(outbox.c.state)).all()
+            oldest_inbox = c.execute(select(func.min(inbox.c.received_at)).where(inbox.c.state == "PENDING")).scalar_one()
+            oldest_delivery = c.execute(select(func.min(outbox.c.created_at)).where(
+                outbox.c.state.in_(("PENDING", "RETRYABLE", "SENDING"))
+            )).scalar_one()
         return {
             "inbox_pending": pending,
+            "oldest_pending_inbox_at": oldest_inbox,
+            "oldest_pending_delivery_at": oldest_delivery,
+            "background": background_health(),
             "deliveries": dict(delivery_states),
             "model_configured": None,
             "model_execution": "worker_pi"

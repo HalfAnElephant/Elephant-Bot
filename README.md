@@ -5,8 +5,9 @@
 ## 功能与运行环境
 
 - 双接入共用 Inbox / Outbox，消息、任务与投递状态持久化到 SQLite。
-- 普通对话与后台任务共用 pi Agent Loop，通过能力发现调用网页、GitHub、工作区和受控命令。
-- 支持会话内记忆的保存、纠正与遗忘，可选接入候选提取和 embedding 服务。
+- 普通对话与后台任务共用 pi Agent Loop，按需读取原生 skills，并复用网页、GitHub、工作区和受控进程接口。
+- 支持授权历史检索、会话记忆的保存、纠正与遗忘，可选接入多人候选提取、黑话学习和查询 embedding。
+- 产物独立进入持久 Outbox，NapCat 支持原生文件与图片发送，文本和附件分别核对回执。
 - 独立 Worker 提供前后台交付、warm session、进度通知、等待续接、取消与恢复核对，文件按用户目标生成。
 - 统一 PermissionService 默认 allow_all，可按主体、操作和资源配置规则。
 - 管理页提供会话、发言策略、任务、记忆和配置管理。
@@ -96,7 +97,7 @@ uv run qqbot serve --config configs/local.yaml
   保存密钥值。密钥仍通过 `.env` / systemd `EnvironmentFile` 注入；Worker 启动参数、
   root runner policy、网络和系统服务配置仍由部署端管理。
 
-主动搭话在“设置 → 主动搭话”中配置（`speak_up`），保存后重启 Core 生效。沿用 Aurabot 默认值：空闲 40 分钟、随机间隔 60～180 分钟、每人每天 20 次、清醒时段 08:00～23:00；问句无人回应 15～40 分钟后有一次 50% 概率的轻追问。时间使用 `timezone`。默认对象为接入的 `admin_users` 中已有私聊的人，额外对象填完整私聊会话 ID；仍检查接收、模型、发送权限与主动发送能力。忙碌、静默和观察模式不搭话，状态保存在现有数据库中。此功能调用 Core 的 `model.endpoint` / `model.model` / `model.api_key_env`，缺少地址、模型或凭据时不运行；每分钟全局最多发起一次生成，不授予工具权限。
+主动搭话在“设置 → 主动搭话”中配置（`speak_up`），保存后重启 Core 生效。沿用 Aurabot 默认值：空闲 40 分钟、随机间隔 60～180 分钟、每人每天 20 次（含追问、沉默和失败尝试）、清醒时段 08:00～23:00；问句无人回应 15～40 分钟后有一次 50% 概率的轻追问。时间使用 `timezone`。默认对象为接入的 `admin_users` 中已有私聊的人，额外对象填完整私聊会话 ID；仍检查接收、模型、发送权限与主动发送能力。忙碌、静默和观察模式不搭话，状态保存在现有数据库中。此功能调用 Core 的 `model.endpoint` / `model.model` / `model.api_key_env`，缺少地址、模型或凭据时不运行；每分钟全局最多发起一次生成，不授予工具权限。私聊明确说“不要主动找我”可退订，说“恢复主动搭话”可恢复；该偏好持久化并使待发搭话失效。
 
 默认人格采用 Aurabot 大肥鱼正文，仅改名“大象”。已在面板保存的全局人格继续优先于默认文件；已有安装可在“全局人格”中载入 `personas/elephant_default.yaml` 对应内容后保存。QQ 文本支持 `|||` 和短回复换行拆条、`[沉默]` 不发送；当前未接语音和表情包发送器，`<voice>` 内容退为文字，`<sticker:…>` 被省略。心情值模块尚未移植。
 
@@ -207,16 +208,18 @@ OneBot 图片会随当前请求、相关历史和已收录的引用消息送入�
 | `tasks_enabled` | `false` | 启用显式 `/研究` 后台提交 |
 | `permissions.preset` | `allow_all` | 默认无额外操作限制 |
 | `execution.foreground_wait_ms` | `5000` | 等待预算到期只改变交付方式 |
-| `execution.max_active` / `execution.sustained_limit` | `4` / `2` | Core 总执行与持续任务容量 |
+| `execution.max_active` / `execution.sustained_limit` | `4` / `2` | Core 普通执行槽与后台准入上限，另保留 1 个交互槽 |
 | `internal_socket` | `var/internal.sock` | Core 内部 Unix socket |
 | `judge.kind` | `rule` | 可选规则判断 `rule`、Jev `jev`、通用大模型（OpenAI 兼容）`structured` |
-| `memory.maintenance_enabled` | `false` | 增量摘要、保留期清理与索引维护 |
+| `memory.maintenance_enabled` | `false` | 增量摘要与索引维护，按显式保留策略清理 |
 | `memory.auto_extract` | `false` | 模型提取记忆候选，需配置提取 endpoint、model 与密钥 |
 | `expression.enabled` | `true` | 群聊表达学习与使用；实际学习需可用模型凭据，私聊需显式规则 |
 
 完整配置与限制见 [示例配置](configs/example.yaml)、[JSON Schema](configs/schema.json) 和 [发言与记忆说明](docs/social-implementation.md)。默认保持 `addressed_only`；管理员可为具备全量消息能力的会话启用 `social`，无需登记回放评估。主动接话还需配置 `jev` 或 `structured` 发言判别器；默认 `rule` 判别器不主动接话。旧字段 `social_evaluated_conversations` 保留兼容，不再控制准入。
 
 Jev 支持原有 `jev-1.14.0` 协议及 `jev1` 决策接口。使用 `jev1` 时，设置 `judge.kind: jev`、`judge.model: jev1`，并填写完整的 `/v1/chat/completions` 请求地址和独立密钥环境变量。每次判断并发请求六个是／否问题，取各自的 `distribution.yes` 作为分数；总超时 30 秒，任一失败或弃权则放弃本次主动接话。
+
+所有判别后端共用六项信号与 `judgment-v2` 契约，缺失参与许可、非法值、超时或弃权均停止本次主动判断。决策日志保存本轮实际后端、模型与 schema 版本。
 
 `jev1` 从人格的群聊提示词 `group_chat_prompt` 及群级 `participation` 偏好读取主动参与规则。除五项分数外，`proactive_allowed` 低于 0.5 时直接放弃主动发言和等待。闲聊、接梗是否算合适贡献由偏好决定。WAIT 同样遵守私人交流上限。上下文标明目标消息，提供此前最多 12 条消息的匿名说话人、时间、提及、回复关系与非文本类型，以及目标消息前 15 分钟内最多 4 条本机器人已发送回复；撤回、清理、无权限和跨会话内容不进入判断。显式 @、有效引用和私聊沿用受邀回复路径。
 
@@ -270,6 +273,12 @@ Core 模型元信息与 Worker 实际模型配置保持一致。生产 runner �
 - [A01–A62 验收证据与限制](docs/agent-execution-acceptance.md)
 - [运维、备份与投递核对](docs/runbooks/operations.md)
 
+## 业务技能
+
+常用流程维护在 `skills/`，当前包含网页研究、GitHub、工作区开发、文档产物和日历。pi 从原生目录按描述发现，按需通过受控 `read` 读取正文，再复用宿主的文件、进程、网络、账户、等待和操作账本接口。新增由这些接口支持的业务，只需加入技能目录和必要依赖。`/skill:技能名 请求` 可明确选择已加载技能。
+
+本地 Worker 使用 `--skills-dir` 指定维护目录，默认使用仓库 `skills/`。每个任务首次执行时固定内容版本，继续与重试沿用该版本，目录更新后新任务使用新版。旧版本缺失会给出一次失败说明，恢复该版本后可重试。正式环境的不可变版本发布见部署说明。
+
 ## 开发与验证
 
 ```sh
@@ -277,6 +286,8 @@ uv run pytest -q
 node --test tests/console_ui.test.cjs
 uv run ruff check src tests evals scripts
 ```
+
+仓库的 `Correctness` workflow 在 Ubuntu 24.04、`.python-version` 指定的 Python、Node 22.19.0 和锁定的 pi 上运行上述检查，并保存提交、环境与原始结果。
 
 测试使用合成消息和本地模型夹具。部分测试会运行 `node_modules/.bin/pi`，请先安装 npm 锁定依赖。真实 QQ 收发、供应商调用和目标 Linux 主机隔离分别验收。
 

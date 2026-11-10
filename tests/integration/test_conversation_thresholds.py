@@ -114,7 +114,7 @@ async def test_runtime_uses_group_thresholds_and_reevaluation_logs_effective_def
 
     class Judge:
         async def judge(self, context):
-            return JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
+            return JudgmentSignals(proactive_allowed=1, useful_contribution=0.6, private_exchange=0.1)
 
     core.adapters["nap"].capabilities = capabilities
     core.judge = Judge()
@@ -211,7 +211,7 @@ async def test_runtime_applies_group_participation_window_budget_and_gates(
     class Judge:
         async def judge(self, context):
             calls.append(context)
-            return JudgmentSignals(useful_contribution=0.6, private_exchange=0.1)
+            return JudgmentSignals(proactive_allowed=1, useful_contribution=0.6, private_exchange=0.1)
 
     core.adapters["nap"].capabilities = capabilities
     core.judge = Judge()

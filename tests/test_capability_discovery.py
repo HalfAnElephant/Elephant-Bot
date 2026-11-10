@@ -108,16 +108,14 @@ async def test_empty_search_returns_complete_schemas_in_one_response(discovery):
     assert not calls and not any(operation == "ledger" for operation, _ in core.calls)
 
 
-async def test_binding_exposes_callable_catalog_and_host_repository(discovery):
+async def test_binding_uses_skill_resources_and_host_repository(discovery):
     gateway, _core, _calls = discovery
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
         response = await client.post("/binding", json={"binding_id": gateway.binding},
                                      headers={"Authorization": "Bearer " + gateway.process_token})
     result = response.json()
-    catalog = {entry["name"]: entry for entry in result["capability_catalog"]}
-    assert set(catalog) == set(gateway.registry.entries)
-    assert catalog["gh.exec"]["parameters"]["required"] == ["argv"]
-    assert set(catalog["gh.exec"]) == {"name", "description", "parameters"}
+    assert "capability_catalog" not in result
+    assert result["skill_version"] is None and result["skill_directory"] is None
     assert result["repository"] == "owner/repo" and result["github_host"] == "github.com"
 
 
@@ -230,16 +228,26 @@ def sse(message):
     return "data: " + json.dumps(event) + "\n\ndata: " + json.dumps(finish) + "\n\ndata: [DONE]\n\n"
 
 
-async def test_real_pi_invokes_github_from_initial_catalog_without_search(discovery, tmp_path):
+async def test_real_pi_reads_github_skill_before_using_account_adapter(discovery, tmp_path):
+    from qqbot.harness.skills import DEFAULT_SKILLS, SkillStore
+
     gateway, _core, calls = discovery
+    gateway.revoke()
+    gateway.skills = SkillStore(DEFAULT_SKILLS, tmp_path / 'versions').select()
+    gateway.bind({**gateway.claim, 'context': {**gateway.claim['context'],
+                  'skill_version': gateway.skills.version}})
     requests = []
     def upstream(request):
         payload = json.loads(request.content)
         requests.append(payload)
         if len(requests) == 1:
             system = payload["messages"][0]["content"]
-            assert '"name":"gh.exec"' in system and '"argv"' in system
+            assert '/skills/github/SKILL.md' in system and '已安装能力目录' not in system
             assert "owner/repo" in str(payload["messages"])
+            message = {"role": "assistant", "tool_calls": [{"id": "read_github", "type": "function", "function": {
+                "name": "read", "arguments": json.dumps({"path": "/skills/github/SKILL.md"})}}]}
+        elif len(requests) == 2:
+            assert 'GitHub work' in str(payload['messages'])
             message = {"role": "assistant", "tool_calls": [{"id": "fixture_gh", "type": "function", "function": {
                 "name": "capability_invoke", "arguments": json.dumps({"name": "gh.exec", "arguments": {
                     "argv": ["pr", "list", "--json", "number,title,url"]}})}}]}
@@ -252,7 +260,7 @@ async def test_real_pi_invokes_github_from_initial_catalog_without_search(discov
     async with real_pi(gateway, tmp_path) as runner:
         result = await runner.run("trusted goal")
     assert result.summary == "There is one fixture PR, #7."
-    assert len(calls) == 1 and len(requests) == 2
+    assert len(calls) == 1 and len(requests) == 3
     assert calls[0][1].repository == "owner/repo" and calls[0][1].principal == {"user_id": "real-user"}
 
 
@@ -278,3 +286,12 @@ async def test_real_pi_receives_bounded_actionable_gateway_error(discovery, tmp_
         result = await runner.run("trusted goal")
     assert result.summary == "The reference was invalid and can be corrected."
     assert len(requests) == 2 and not calls
+
+
+async def test_native_model_bridge_rejects_legacy_catalog_aliases(discovery):
+    gateway, _core, calls = discovery
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, "capability_invoke", {
+            "name": "capability.search", "arguments": {"query": ""}})
+    assert response.status_code == 422 and "native skill directory" in response.json()["detail"]
+    assert calls == []

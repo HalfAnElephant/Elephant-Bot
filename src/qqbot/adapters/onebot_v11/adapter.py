@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import hashlib
 import json
 import re
 import secrets
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
@@ -333,9 +335,11 @@ class OneBotAdapter:
             can_observe_unaddressed_messages=True,
             supports_reply_reference=True,
             supports_mention=True,
+            supports_images=True,
+            supports_files=True,
             supports_recall=True,
             observation_mode=ObservationMode.FULL,
-            delivery_constraints=("text_only", "history_gap_after_disconnect"),
+            delivery_constraints=("history_gap_after_disconnect",),
         )
 
     async def validate_delivery(self, envelope):
@@ -373,12 +377,26 @@ class OneBotAdapter:
                 "message": chain,
             },
         }
+        if envelope.artifact:
+            if envelope.artifact_data is None:
+                self.pending.pop(key, None)
+                future.cancel()
+                return SendReceipt(state="FAILED", error_code="ARTIFACT_UNAVAILABLE")
+            encoded = "base64://" + base64.b64encode(envelope.artifact_data).decode("ascii")
+            if envelope.artifact.mime_type.startswith("image/"):
+                payload["params"]["message"] = [{"type": "image", "data": {"file": encoded}}]
+            else:
+                payload["action"] = "upload_group_file" if is_group else "upload_private_file"
+                payload["params"].pop("message")
+                payload["params"].update(file=encoded, name=PurePosixPath(envelope.artifact.relative_path).name)
         try:
             await self.websocket.send_json(payload)
             response = await asyncio.wait_for(future, timeout=15)
             if response.get("status") == "ok" and response.get("retcode") == 0:
-                message_id = response.get("data", {}).get("message_id")
-                if message_id is None:
+                data = response.get("data") or {}
+                is_file = envelope.artifact and not envelope.artifact.mime_type.startswith("image/")
+                message_id = data.get("file_id" if is_file else "message_id")
+                if message_id is None or not str(message_id).strip():
                     return SendReceipt(state="UNKNOWN", error_code="MISSING_MESSAGE_ID")
                 return SendReceipt(state="SENT", platform_message_id=str(message_id))
             return SendReceipt(state="FAILED", error_code=str(response.get("retcode", "API_ERROR")))

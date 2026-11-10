@@ -10,11 +10,12 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, insert, select, update
 
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal, WaitCondition
-from qqbot.domain.messages import AccessContext, InboundEvent
+from qqbot.domain.messages import AccessContext, InboundEvent, OutboundEnvelope, Surface
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
 from qqbot.harness.launcher import verify_stop_marker
 from qqbot.permissions import PermissionService
 from qqbot.storage.schema import outbox as outbox_table
+from qqbot.storage.social_schema import memory_source_retention, social_tombstones
 from qqbot.storage.task_schema import events, inputs, model_requests, notifications, runs, tasks, waits
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
@@ -25,12 +26,13 @@ class TaskService:
         self.db, self.clock, self.outbox = db, clock, outbox
         self.permissions = permissions or PermissionService(db, clock)
         self.max_active, self.sustained_limit = max_active, sustained_limit
-        self.max_resident = max_resident if max_resident is not None else max_active
+        self.max_resident = max_resident if max_resident is not None else max_active + 1
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.wakeup = asyncio.Event()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
+        self.outbox.archive_root = self.archive_root
 
     def accept(self, event, access, goal, profile="pi", *, retry_of_task_id=None, plan=None, context=None):
         if access.principal != event.principal or access.conversation != event.conversation:
@@ -63,6 +65,7 @@ class TaskService:
                        "goal_json": goal.model_dump_json(), "plan_json": plan.model_dump_json(),
                        "context_json": json.dumps(context or {}, ensure_ascii=False),
                        "delivery": plan.initial_delivery,
+                       "execution_priority": "INTERACTIVE" if plan.initial_delivery == "ATTACHED" else "BACKGROUND",
                        "detach_at": (now + timedelta(milliseconds=plan.foreground_wait_ms)).isoformat(),
                        "continuation_revision": 0, "budget_json": json.dumps({"model_calls": 0, "tool_calls": 0}),
                        "permission_json": json.dumps({"principal": access.principal.model_dump(mode="json"),
@@ -78,7 +81,7 @@ class TaskService:
         with self.db.transaction() as c:
             c.execute(update(tasks).where(tasks.c.delivery == "ATTACHED",
                 tasks.c.detach_at <= self.clock.now().isoformat(), tasks.c.state.not_in(TERMINAL))
-                .values(delivery="DETACHED"))
+                .values(delivery="DETACHED", execution_priority="BACKGROUND"))
 
     def _access_for(self, task):
         event = InboundEvent.model_validate_json(task["event_json"])
@@ -142,7 +145,11 @@ class TaskService:
             goal = TaskGoal.model_validate_json(old["goal_json"]) if old["goal_json"] != "{}" else TaskGoal(text=old["goal"])
             plan = ExecutionPlan.model_validate_json(old["plan_json"]) if old["plan_json"] != "{}" else ExecutionPlan()
             profile, task_id = old["profile"], old["id"]
-        return self.accept(event, access, goal, profile, retry_of_task_id=task_id, plan=plan, context=context or {})
+            version = json.loads(old["context_json"]).get("skill_version")
+        context = dict(context or {})
+        if version:
+            context["skill_version"] = version
+        return self.accept(event, access, goal, profile, retry_of_task_id=task_id, plan=plan, context=context)
 
     @staticmethod
     def _notification_budget(task):
@@ -157,12 +164,20 @@ class TaskService:
         return ExecutionPlan.model_validate_json(task["plan_json"]).budget, task["deadline"]
 
     def _queue_failure_notice(self, conn, task, result, state):
-        if task["failure_notice_json"] or state == "CANCELLED":
+        if state == "CANCELLED":
             return state
         context = json.loads(task["context_json"])
         # 过期且未调用工具的主动接话直接结束，避免生成多余的失败说明。
         if (context.get("invited") is False and not json.loads(task["budget_json"]).get("tool_calls", 0)
                 and self.context_validator and not self.context_validator(self._access_for(task), context)):
+            return state
+        if result.failure_code == "skill_version_unavailable":
+            version = context.get("skill_version", "current")
+            self._notification(conn, task, None,
+                f"固定技能版本 {version} 暂时不可用，这次任务受阻。恢复这个版本后可以重试。",
+                "result", "important", "skill-failure:" + task["id"])
+            return state
+        if task["failure_notice_json"]:
             return state
         context.update(control_response=True, allowed_actions=[], failure_state=state)
         conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(
@@ -209,14 +224,17 @@ class TaskService:
                 self._queue_failure_notice(c, task, result, "EXPIRED")
 
     def claim(self, worker_id, protocol_version=2):
+        self.detach_due()
         self.recover()
         with self.db.transaction() as c:
-            if c.execute(
+            active = c.execute(
                 select(func.count()).select_from(runs).where(runs.c.slot_reserved == 1)
-            ).scalar_one() >= self.max_active:
-                return None
+            ).scalar_one()
             sustained = c.execute(select(func.count()).select_from(runs.join(tasks, runs.c.task_id == tasks.c.id))
-                .where(runs.c.slot_reserved == 1, tasks.c.delivery == "DETACHED")).scalar_one()
+                .where(runs.c.slot_reserved == 1, tasks.c.execution_priority == "BACKGROUND")).scalar_one()
+            # One finite overflow slot admits a new interaction after ordinary runs detach.
+            if active >= self.max_active + 1 or (active >= self.max_active and sustained != active):
+                return None
             history = tasks.alias("history")
             last_run = (
                 select(func.max(runs.c.lease))
@@ -231,8 +249,9 @@ class TaskService:
                 c.execute(
                     select(tasks)
                     .where(tasks.c.state == "QUEUED", tasks.c.protocol_version <= protocol_version,
-                           tasks.c.delivery == "ATTACHED" if sustained >= self.sustained_limit else True)
-                    .order_by(tasks.c.delivery.asc(), last_run.asc().nulls_first(), tasks.c.created_at, tasks.c.id)
+                           tasks.c.execution_priority == "INTERACTIVE"
+                           if sustained >= self.sustained_limit or active >= self.max_active else True)
+                    .order_by(tasks.c.execution_priority.desc(), last_run.asc().nulls_first(), tasks.c.created_at, tasks.c.id)
                 )
                 .mappings()
                 .all()
@@ -281,6 +300,31 @@ class TaskService:
             checkpoint = c.execute(select(waits.c.checkpoint).where(waits.c.task_id == row["id"],
                 waits.c.state == "CONSUMED").order_by(waits.c.revision.desc()).limit(1)).scalar_one_or_none()
             c.execute(update(inputs).where(inputs.c.id.in_([r["id"] for r in continuation])).values(state="CONSUMED"))
+            from qqbot.context import digest, merge_manifest
+            from qqbot.storage.schema import inbox as history_inbox
+            task_inputs = c.execute(select(inputs.c.id, inputs.c.text, inputs.c.source_id, inputs.c.state,
+                inputs.c.created_at, history_inbox.c.event_json,
+                history_inbox.c.conversation_id.label("source_conversation")).outerjoin(history_inbox,
+                    history_inbox.c.id == inputs.c.source_id).where(inputs.c.task_id == row["id"])
+                .order_by(history_inbox.c.seq, inputs.c.created_at, inputs.c.id)).mappings().all()
+            task_access = self._access_for(row)
+            visible_updates, update_sources = [], []
+            invalid_task_state = False
+            for item in task_inputs:
+                if (item["event_json"] and item["source_conversation"] == row["conversation"]
+                        and self._input_event_valid(c, InboundEvent.model_validate_json(item["event_json"]))
+                        and self.permissions.check(task_access, "history.source.read", "event:" + item["source_id"]).allowed):
+                    visible_updates.append({key: value for key, value in item.items() if key not in {"event_json", "source_conversation"}})
+                    update_sources.append({"kind": "inbox", "id": item["source_id"],
+                        "digest": digest(item["event_json"]), "actions": ["history.source.read"]})
+            invalid_task_state = len(visible_updates) != len(task_inputs)
+            if update_sources or invalid_task_state:
+                context = json.loads(row["context_json"])
+                if invalid_task_state:
+                    context["invalid_task_state"] = True
+                context["source_manifest"] = merge_manifest(context.get("source_manifest", []), update_sources)
+                row = {**row, "context_json": json.dumps(context)}
+                c.execute(update(tasks).where(tasks.c.id == row["id"]).values(context_json=row["context_json"]))
             references = json.loads(row["goal_json"]).get("target_refs", [])
             repository = host = None
             for reference in references:
@@ -306,7 +350,10 @@ class TaskService:
                     - json.loads(row["budget_json"]).get("active_seconds", 0)),
                 "context": json.loads(row["context_json"]),
                 "delivery": row["delivery"],
+                "execution_priority": row["execution_priority"],
                 "continuation": {"checkpoint": checkpoint, "inputs": [dict(r) for r in continuation]},
+                "task_state": {"goal": json.loads(row["goal_json"]), "checkpoint": checkpoint,
+                    "user_updates": visible_updates},
                 "protocol_version": row["protocol_version"],
                 "profile": row["profile"],
                 "lease_expires_at": lease,
@@ -350,7 +397,8 @@ class TaskService:
                 )
             lease = (self.clock.now() + timedelta(seconds=30)).isoformat()
             c.execute(update(runs).where(runs.c.id == run["id"]).values(lease=lease))
-            return {"state": state, "lease_expires_at": lease, "delivery": task["delivery"]}
+            return {"state": state, "lease_expires_at": lease, "delivery": task["delivery"],
+                    "execution_priority": task["execution_priority"]}
 
     def submit(self, run_id, fencing_token, worker_id, result, stopped=True, quiescent=False, process=None):
         result = TaskResult.model_validate_json(json.dumps(result))
@@ -652,6 +700,9 @@ class TaskService:
             return {"state": state}
 
     def _notification(self, c, task, run_id, text, purpose, importance, notification_id):
+        event = InboundEvent.model_validate_json(task["event_json"])
+        result_json = c.execute(select(tasks.c.result_json).where(tasks.c.id == task["id"])).scalar_one() if purpose == "result" else None
+        result = TaskResult.model_validate_json(result_json) if result_json else None
         if not isinstance(text, str) or not text.strip() or len(text) > 10000:
             raise ValueError("notification text must contain 1..10000 characters")
         validate_user_facing_text(text)
@@ -672,11 +723,35 @@ class TaskService:
         now = self.clock.now()
         c.execute(insert(notifications).values(id=notification_id, task_id=task["id"], run_id=run_id,
             sequence=seq, purpose=purpose, importance=importance, body=text, created_at=now.isoformat(), state="ACCEPTED"))
-        event = InboundEvent.model_validate_json(task["event_json"])
-        deliveries = self.outbox.enqueue_text(c, target=event.conversation, text=text,
+        delivery_text = text
+        if result and result.artifacts:
+            manifest = "\n".join(
+                f"• {item.relative_path}，{item.size} 字节，{item.mime_type}，SHA256 {item.sha256}"
+                for item in result.artifacts
+            )
+            delivery_text += "\n" + manifest
+            delivery_text += "\n• 附件将单独发送，待发送文件保留24小时。"
+            if event.conversation.surface == Surface.GUILD_CHANNEL and any(
+                    not item.mime_type.startswith("image/") for item in result.artifacts):
+                delivery_text += "\n• 当前频道接口不支持普通文件附件，普通文件尚未发送。"
+        deliveries = self.outbox.enqueue_text(c, target=event.conversation, text=delivery_text,
             origin_kind="task", origin_id=notification_id, reply_context=event.reply_context,
             ttl_seconds=86400, requester=event.principal, anchor_message_id=event.platform_message_id,
             parent_task_id=task["id"], notification_sequence=seq, purpose=purpose)
+        if purpose == "result":
+            artifacts = result.artifacts if result else ()
+            if event.conversation.surface == Surface.GUILD_CHANNEL:
+                # Unsupported channel files must not block images in the ordered outbox.
+                artifacts = sorted(artifacts, key=lambda item: not item.mime_type.startswith("image/"))
+            for part_no, artifact in enumerate(artifacts, len(deliveries)):
+                self.outbox.enqueue(c, OutboundEnvelope(
+                    delivery_id=str(uuid4()), target=event.conversation,
+                    text="附件 " + artifact.relative_path, artifact=artifact,
+                    origin_kind="task", origin_id=notification_id, part_no=part_no,
+                    reply_context=event.reply_context, expires_at=now + timedelta(days=1),
+                    requester=event.principal, anchor_message_id=event.platform_message_id,
+                    parent_task_id=task["id"], notification_sequence=seq, purpose=purpose,
+                ))
         if purpose == "progress" and importance == "normal":
             last_sent = c.execute(select(func.max(outbox_table.c.sent_at)).where(
                 outbox_table.c.origin_id.in_(select(notifications.c.id).where(notifications.c.task_id == task["id"])))) .scalar_one()
@@ -716,6 +791,9 @@ class TaskService:
             condition = payload.get("condition", {})
             if kind == "external":
                 condition = WaitCondition.model_validate_json(json.dumps(condition)).model_dump(mode="json")
+            else:
+                condition = {"expected_responders": [task["requester"]],
+                             "collaboration_scope": "explicit_reply"}
             self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
                                "important", question_id)
             now = self.clock.now()
@@ -739,9 +817,12 @@ class TaskService:
         with self.db.transaction() as c:
             task = self._visible(c, public_id, access)
             self.permissions.require(access, "task.input", "task:" + task["id"])
+            if not self._input_event_valid(c, event):
+                raise PermissionError("input event is unavailable")
             old = c.execute(select(inputs).where(inputs.c.source_id == event.event_id)).mappings().first()
             if old:
-                if old["task_id"] != task["id"] or old["text"] != text:
+                if (old["task_id"] != task["id"] or old["text"] != text
+                        or (question_id and old["question_id"] != question_id)):
                     raise ValueError("conflicting input replay")
                 return {"accepted": True, "input_id": old["id"]}
             if task["state"] in TERMINAL or task["state"] in {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
@@ -750,6 +831,19 @@ class TaskService:
                 waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
             if question_id and (not wait or wait["id"] != question_id):
                 raise ValueError("question is no longer waiting")
+            if wait and wait["kind"] == "external":
+                from qqbot.dialogue.router import route_turn
+
+                command = event.text.split(maxsplit=2)
+                routed, _ = route_turn(event, [{"public_id": public_id, "reply_match": False,
+                    "state": task["state"], "wait_id": None}])
+                owner_continuation = event.principal.key == task["requester"] and routed == "continue_task"
+                if question_id or (command[:2] != ["/补充", public_id] and not owner_continuation):
+                    raise PermissionError("external wait requires explicit task input")
+            elif wait:
+                match = self._question_for(c, event, public_id=public_id)
+                if not match or match["id"] != wait["id"]:
+                    raise PermissionError("input does not answer this question")
             input_id = str(uuid4())
             c.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=wait["id"] if wait else None,
                 source_id=event.event_id, text=text, state="PENDING", created_at=self.clock.now().isoformat()))
@@ -770,28 +864,134 @@ class TaskService:
                     if images:
                         context.setdefault("images", []).extend(images)
                     c.execute(update(tasks).where(tasks.c.id == task["id"]).values(context_json=json.dumps(context, ensure_ascii=False)))
-            if wait:
+            if wait and wait["kind"] == "input":
                 self._wake(c, task["id"], wait["id"])
             return {"accepted": True, "input_id": input_id}
 
+    @staticmethod
+    def _input_event_valid(c, event):
+        from qqbot.storage.schema import inbox
+        return (event.event_type == "message.created" and not event.sender_is_bot
+                and not c.execute(select(social_tombstones.c.source_id).where(
+                    social_tombstones.c.source_id == event.event_id)).first()
+                and not c.execute(select(memory_source_retention.c.source_id).where(
+                    memory_source_retention.c.source_id == event.event_id)).first()
+                and not c.execute(select(inbox.c.id).where(
+                    inbox.c.conversation_id == event.conversation.key,
+                    inbox.c.message_id == event.platform_message_id,
+                    inbox.c.event_type == "message.recalled")).first())
+
+    def _question_for(self, c, event, public_id=None):
+        if not self._input_event_valid(c, event):
+            return None
+        now = self.clock.now().isoformat()
+        query = select(waits, tasks.c.public_id, tasks.c.requester).join(tasks, tasks.c.id == waits.c.task_id).where(
+            tasks.c.conversation == event.conversation.key, waits.c.kind == "input",
+            waits.c.state.in_(["INTENT", "WAITING"]), tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]),
+            tasks.c.deadline > now,
+            waits.c.id.not_in(select(inputs.c.question_id).where(inputs.c.question_id.is_not(None))))
+        if public_id:
+            query = query.where(tasks.c.public_id == public_id)
+        command = event.text.split(maxsplit=2)
+        if len(command) >= 2 and command[0] == "/补充":
+            query = query.where(tasks.c.public_id == command[1])
+        if event.reply_to:
+            query = query.where(waits.c.notification_id.in_(select(outbox_table.c.origin_id).where(
+                outbox_table.c.conversation_id == event.conversation.key,
+                outbox_table.c.platform_message_id == event.reply_to,
+                outbox_table.c.state == "SENT")))
+        rows = c.execute(query).mappings().all()
+        if len(rows) != 1:
+            return None
+        wait = rows[0]
+        deadline = wait["expires_at"] or wait["delivery_deadline"]
+        created_at = datetime.fromisoformat(wait["created_at"])
+        if ((deadline and deadline <= now) or event.received_at < created_at
+                or event.occurred_at < created_at.replace(microsecond=0)):
+            return None
+        condition = json.loads(wait["condition_json"])
+        expected = condition.get("expected_responders", [wait["requester"]])
+        quoted = bool(event.reply_to)
+        if event.principal.key not in expected and not (
+                quoted and condition.get("collaboration_scope", "explicit_reply") == "explicit_reply"):
+            return None
+        from qqbot.dialogue.router import task_references
+
+        directed = (len(command) >= 2 and command[:2] == ["/补充", wait["public_id"]]
+                    or task_references(event.text) == {wait["public_id"].lower()})
+        if event.conversation.surface != Surface.PRIVATE and not (quoted or event.mentions_bot or directed):
+            return None
+        return {"id": wait["id"], "public_id": wait["public_id"]}
+
+    def continuation_lineage(self, public_id, access):
+        from qqbot.storage.action_schema import operations
+
+        with self.db.engine.connect() as c:
+            task = self._visible(c, public_id, access)
+            if task["state"] not in TERMINAL:
+                raise ValueError("only a terminal task can start a continuation")
+            operation_task_id = self._operation_task_id(c, task)
+            query = select(operations.c.id).where(operations.c.task_id == operation_task_id)
+            if task["state"] == "SUCCEEDED":
+                query = query.where(operations.c.state.in_(["PREPARED", "DISPATCHED", "UNKNOWN", "PARTIAL"]))
+            if not c.execute(query).first():
+                return None, None
+            self.permissions.require(access, "task.retry", "task:" + task["id"])
+            version = json.loads(task["context_json"]).get("skill_version")
+            if not version:
+                context = c.execute(select(tasks.c.context_json).where(tasks.c.id == operation_task_id)).scalar_one()
+                version = json.loads(context).get("skill_version")
+            return task["id"], version
+
+    def turn_candidates(self, event, access):
+        from qqbot.dialogue.router import ACTIVE, task_references
+        from qqbot.storage.schema import inbox
+
+        if access.principal != event.principal or access.conversation != event.conversation:
+            raise PermissionError("input identity mismatch")
+        references = task_references(event.text)
+        cutoff = (self.clock.now() - timedelta(minutes=2)).isoformat()
+        with self.db.engine.connect() as c:
+            reply_ids = set()
+            if event.reply_to:
+                reply_ids.update(c.execute(select(notifications.c.task_id).join(
+                    outbox_table, outbox_table.c.origin_id == notifications.c.id).where(
+                        outbox_table.c.conversation_id == event.conversation.key,
+                        outbox_table.c.platform_message_id == event.reply_to,
+                        outbox_table.c.state == "SENT")).scalars())
+                reply_ids.update(c.execute(select(tasks.c.id).where(tasks.c.source.in_(
+                    select(inbox.c.id).where(inbox.c.conversation_id == event.conversation.key,
+                        inbox.c.message_id == event.reply_to)))).scalars())
+            recent = select(runs.c.task_id).where(runs.c.quiescent_at >= cutoff)
+            rows = c.execute(select(tasks).where(tasks.c.conversation == event.conversation.key,
+                tasks.c.requester == event.principal.key,
+                (tasks.c.state.in_(ACTIVE) | tasks.c.id.in_(recent)
+                 | func.lower(tasks.c.public_id).in_(references) | tasks.c.id.in_(reply_ids)))
+                .order_by(func.lower(tasks.c.public_id).in_(references).desc(),
+                    tasks.c.id.in_(reply_ids).desc(), tasks.c.state.in_(ACTIVE).desc(),
+                    tasks.c.created_at.desc()).limit(20)).mappings().all()
+            pending = dict(c.execute(select(waits.c.task_id, waits.c.id).where(
+                waits.c.kind == "input", waits.c.state.in_(["INTENT", "WAITING"]))).all())
+            return [{"id": row["id"], "public_id": row["public_id"], "goal": row["goal"],
+                     "state": row["state"], "reply_match": row["id"] in reply_ids,
+                     "context": json.loads(row["context_json"]),
+                     "wait_id": pending.get(row["id"]) if row["state"] in ACTIVE else None} for row in rows
+                    if (not json.loads(row["context_json"]).get("control_response")
+                        or (row["state"] in TERMINAL and row["failure_notice_json"]))
+                    and self.permissions.check(access, "task.read", "task:" + row["id"]).allowed]
+
     def question_for(self, event):
         with self.db.engine.connect() as c:
-            query = select(waits.c.id, tasks.c.public_id).join(tasks, tasks.c.id == waits.c.task_id).where(
-                tasks.c.conversation == event.conversation.key, waits.c.kind == "input",
-                waits.c.state.in_(["INTENT", "WAITING"]), tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]))
-            if event.reply_to:
-                query = query.where(waits.c.notification_id.in_(select(outbox_table.c.origin_id).where(
-                    outbox_table.c.conversation_id == event.conversation.key,
-                    outbox_table.c.platform_message_id == event.reply_to)))
-            rows = c.execute(query).mappings().all()
-            return dict(rows[0]) if len(rows) == 1 else None
+            return self._question_for(c, event)
 
-    def _wake(self, c, task_id, question_id):
+    def _wake(self, c, task_id, question_id, *, external_observed=False):
         task = c.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one()
         wait = c.execute(select(waits).where(waits.c.id == question_id)).mappings().one()
         if task["state"] not in {"WAITING_INPUT", "WAITING_EXTERNAL"} or wait["state"] != "WAITING":
             return False
         if task["deadline"] <= self.clock.now().isoformat():
+            return False
+        if wait["kind"] == "external" and not external_observed:
             return False
         if not c.execute(select(inputs.c.id).where(inputs.c.question_id == question_id,
                                                   inputs.c.state == "PENDING")).first():
@@ -801,6 +1001,39 @@ class TaskService:
         c.execute(update(tasks).where(tasks.c.id == task_id).values(state="QUEUED"))
         self.wakeup.set()
         return True
+
+    async def memory_query(self, run_id, fencing_token, worker_id, payload):
+        operation = payload.get("operation")
+        if operation not in {"history.search", "history.read", "memory.search", "memory.get"}:
+            raise ValueError("unsupported memory operation")
+        if not hasattr(self, "history_memory"):
+            raise ValueError("history service unavailable")
+        self.authorize(run_id, fencing_token, worker_id, {"action": operation})
+        with self.db.engine.connect() as c:
+            _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            access = self._access_for(task)
+        result = await self.history_memory.query(access, operation, payload.get("arguments", {}))
+        # Network retrieval can outlive a lease or policy revision.
+        self.authorize(run_id, fencing_token, worker_id, {"action": operation})
+        from qqbot.context import digest, merge_manifest
+        from qqbot.storage.schema import inbox
+        with self.db.transaction() as c:
+            _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            context = json.loads(task["context_json"])
+            manifest = []
+            for source_id in result["source_ids"]:
+                events = self.history_memory._events(access, ids=[source_id])
+                if not events:
+                    raise PermissionError("retrieved source is no longer visible")
+                raw = c.execute(select(inbox.c.event_json).where(inbox.c.id == source_id,
+                    inbox.c.conversation_id == access.conversation.key)).scalar_one()
+                actions = ["history.source.read"]
+                if operation.startswith("memory."):
+                    actions.append("memory.source.read")
+                manifest.append({"kind": "inbox", "id": source_id, "digest": digest(raw), "actions": actions})
+            context["source_manifest"] = merge_manifest(context.get("source_manifest", []), manifest)
+            c.execute(update(tasks).where(tasks.c.id == task["id"]).values(context_json=json.dumps(context)))
+        return result
 
     def authorize(self, run_id, fencing_token, worker_id, payload):
         with self.db.engine.connect() as c:
@@ -812,6 +1045,8 @@ class TaskService:
             resources = payload.get("resources") or [payload.get("resource", "task:" + task["id"])]
             context = json.loads(task["context_json"])
             access = self._access_for(task)
+            if context.get("invalid_task_state"):
+                raise PermissionError("persisted user updates have unavailable or revoked evidence")
             if self.context_validator and context and not self.context_validator(access, context):
                 raise PermissionError("context sources or authorization changed")
             if context.get("control_response") and action not in {"model.request", "task.execute", "notification.send"}:
@@ -823,7 +1058,8 @@ class TaskService:
                 raise PermissionError("wait intent blocks further business tools")
             for resource in resources:
                 decision = self.permissions.require(access, action, resource)
-            return {"allowed": True, "policy_version": decision.policy_version, "waiting": bool(waiting)}
+            return {"allowed": True, "policy_version": decision.policy_version, "waiting": bool(waiting),
+                    "execution_priority": task["execution_priority"]}
 
     def take_inputs(self, run_id, fencing_token, worker_id):
         with self.db.transaction() as c:
@@ -892,6 +1128,22 @@ class TaskService:
                 raise ValueError("usage request was not reserved")
             return {"recorded": True}
 
+    def bind_skills(self, run_id, fencing_token, worker_id, payload):
+        version = payload.get("skill_version")
+        if not isinstance(version, str) or len(version) != 64 or any(ch not in "0123456789abcdef" for ch in version):
+            raise ValueError("a content-addressed skill version is required")
+        with self.db.transaction() as c:
+            _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if task["state"] != "RUNNING":
+                raise PermissionError("cannot bind skills to an inactive task")
+            context = json.loads(task["context_json"])
+            previous = context.get("skill_version")
+            if previous and previous != version:
+                raise PermissionError("task skill version is already fixed")
+            context["skill_version"] = version
+            c.execute(update(tasks).where(tasks.c.id == task["id"]).values(context_json=json.dumps(context)))
+            return {"skill_version": version}
+
     def bind_process(self, run_id, fencing_token, worker_id, payload):
         from qqbot.storage.task_schema import processes, sessions
         with self.db.transaction() as c:
@@ -908,6 +1160,9 @@ class TaskService:
                     raise PermissionError("process is not exclusively idle")
                 if old["session_id"] != session_id or old["epoch"] != payload["epoch"]:
                     raise PermissionError("process identity changed")
+                manifest = c.execute(select(sessions.c.manifest_json).where(sessions.c.id == session_id)).scalar_one()
+                if json.loads(manifest).get("skill_version") != json.loads(task["context_json"]).get("skill_version"):
+                    raise PermissionError("warm session skill version differs from task")
                 c.execute(update(processes).where(processes.c.id == process_id).values(state="BUSY",
                     generation=payload["generation"], last_used=self.clock.now().isoformat()))
                 changed = c.execute(update(sessions).where(sessions.c.id == session_id,
@@ -992,7 +1247,7 @@ class TaskService:
             used = json.loads(task["budget_json"])
             elapsed = max(0, (self.clock.now() - datetime.fromisoformat(_run["accounted_at"])).total_seconds()) if _run["accounted_at"] else 0
             return {"state": "CANCEL_REQUESTED" if deadline <= self.clock.now().isoformat() else task["state"],
-                    "delivery": task["delivery"], "budget": budget,
+                    "delivery": task["delivery"], "execution_priority": task["execution_priority"], "budget": budget,
                     "notification_due": self._notification_due(c, task),
                     "active_seconds_remaining": max(0, budget.get("active_seconds", 1800) - used.get("notification_active_seconds" if _run["run_reason"] == "notification" else "active_seconds", 0) - elapsed)}
 
@@ -1078,7 +1333,7 @@ class TaskService:
             c.execute(insert(inputs).values(id=str(uuid4()), task_id=task["id"], question_id=wait["id"],
                 source_id=payload["source_id"], text=payload["observation"], state="PENDING",
                 created_at=self.clock.now().isoformat()))
-            return {"accepted": True, "woken": self._wake(c, task["id"], wait["id"])}
+            return {"accepted": True, "woken": self._wake(c, task["id"], wait["id"], external_observed=True)}
 
     def extend_budget(self, run_id, fencing_token, worker_id, payload):
         from qqbot.storage.schema import audit_events

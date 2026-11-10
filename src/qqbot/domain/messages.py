@@ -147,8 +147,18 @@ class AdapterCapabilities(DTO):
     delivery_constraints: tuple[str, ...] = ()
 
 
+class Artifact(DTO):
+    id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+    relative_path: str = Field(min_length=1, max_length=512)
+    mime_type: str = Field(min_length=1, max_length=128)
+    size: int = Field(ge=0, le=20 * 1024 * 1024)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class OutboundEnvelope(DTO):
     delivery_id: str
+    artifact: Artifact | None = None
+    artifact_data: bytes | None = Field(default=None, exclude=True)
     target: ConversationRef
     text: str = Field(min_length=1, max_length=10000)
     reply_context: ReplyContext | None = None

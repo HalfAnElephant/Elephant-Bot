@@ -16,6 +16,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+from qqbot.harness.skills import SKILLSETS, skill_files, skill_version, trusted_skill_directory
+
 POLICY = Path("/etc/qqbot/runner-policy.json")
 MANIFESTS = Path("/var/lib/qqbot-worker/launch")
 ROOT_MANIFESTS = Path("/var/lib/qqbot-runner-manifests")
@@ -116,6 +118,8 @@ def validate_manifest(manifest, task_id, run_id, policy, *, check_deadline=True)
     common = {"schema_version", "task_id", "run_id", "session_id", "profile", "model", "proxy_url", "expires_at"}
     expected = common | ({"model_token", "tool_token"} if version == 1 else
                          {"process_id", "process_epoch", "process_token", "model_context_window", "output_tokens", "soft_input_tokens", "keep_recent_tokens"})
+    if version == 2 and (check_deadline or "skill_version" in manifest):
+        expected.add("skill_version")
     if type(version) is not int or version not in {1, 2} or set(manifest) != expected:
         raise ValueError("invalid launch manifest schema")
     if canonical_uuid(manifest["task_id"]) != task_id:
@@ -132,6 +136,9 @@ def validate_manifest(manifest, task_id, run_id, policy, *, check_deadline=True)
             or not 8192 <= manifest["model_context_window"] <= 2000000
             or type(manifest["output_tokens"]) is not int or not 1 <= manifest["output_tokens"] <= 32768):
         raise ValueError("invalid model limits")
+    if version == 2 and "skill_version" in manifest and (
+            not isinstance(manifest["skill_version"], str) or not re.fullmatch(r"[0-9a-f]{64}", manifest["skill_version"])):
+        raise ValueError("invalid skill version")
     if version == 2 and (type(manifest["soft_input_tokens"]) is not int or type(manifest["keep_recent_tokens"]) is not int
             or not 0 < manifest["keep_recent_tokens"] < manifest["soft_input_tokens"]
             or manifest["soft_input_tokens"] + manifest["output_tokens"] > manifest["model_context_window"]):
@@ -248,7 +255,7 @@ def prepare_workspace(run_id):
     return workspace
 
 
-def systemd_argv(task_id, run_id, policy, *, general=False):
+def systemd_argv(task_id, run_id, policy, *, general=False, skill_version=None):
     workspace = str(WORKSPACES / run_id)
     extension = GENERAL_EXTENSION if general else EXTENSION
     properties = {
@@ -286,6 +293,10 @@ def systemd_argv(task_id, run_id, policy, *, general=False):
         "BindReadOnlyPaths": f"/usr:/usr /lib:/lib -/lib64:/lib64 /opt/qqbot/node_modules:/opt/qqbot/node_modules {ENTRY}:{ENTRY} {extension}:{extension} {ROOT_MANIFESTS / (run_id + '.json')}:/run/qqbot/manifest.json",
         "ReadWritePaths": "/workspace",
     }
+    if general:
+        if not isinstance(skill_version, str) or not re.fullmatch(r"[0-9a-f]{64}", skill_version):
+            raise ValueError("a pinned skill version is required for general runners")
+        properties["BindReadOnlyPaths"] += f" {SKILLSETS / skill_version}:/skills"
     return [
         "/usr/bin/systemd-run",
         "--quiet",
@@ -362,6 +373,11 @@ def main():
         manifest = validate_manifest(
             trusted_json(MANIFESTS / (run_id + ".json"), uid=account.pw_uid), task_id, run_id, policy
         )
+        if manifest["schema_version"] == 2:
+            directory = SKILLSETS / manifest["skill_version"]
+            trusted_skill_directory(directory)
+            if skill_version(skill_files(directory)) != manifest["skill_version"]:
+                raise ValueError("production skill version does not match its content")
         if (STOPS / (run_id + ".json")).exists() or (ROOT_MANIFESTS / (run_id + ".json")).exists():
             raise SystemExit("run identity cannot be relaunched")
         for directory in (WORKSPACES, ROOT_DIRECTORY):
@@ -374,7 +390,8 @@ def main():
                 raise SystemExit("untrusted runner executable or extension")
         prepare_workspace(run_id)
         atomic_root_json(ROOT_MANIFESTS / (run_id + ".json"), manifest)
-        process = subprocess.Popen(systemd_argv(task_id, run_id, policy, general=manifest["schema_version"] == 2), env=env)
+        process = subprocess.Popen(systemd_argv(task_id, run_id, policy, general=manifest["schema_version"] == 2,
+                                   skill_version=manifest.get("skill_version")), env=env)
         deadline = time.monotonic() + 10
         while process.poll() is None and not registered(unit):
             if time.monotonic() >= deadline:

@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from qqbot.dialogue import assemble_prompt
 from qqbot.domain import InboundEvent, OutboundEnvelope, Surface
 from qqbot.providers import estimate_tokens
+from qqbot.providers.metering import call_scope
 from qqbot.storage.schema import inbox, outbox
 from qqbot.storage.social_schema import memory_source_retention, social_tombstones
 from qqbot.storage.task_schema import tasks
@@ -47,9 +48,25 @@ class SpeakUp:
                  or cid in core.settings.speak_up.allow)
             and core.allowed(event) and not core.recalled(event)
             and core.state(cid)['mode'] not in {'silent', 'shadow'}
+            and not json.loads(core.state(cid)['state_json']).get('speak_up', {}).get('opted_out', False)
             and all(core.permissions.check(core.access(event), action, 'conversation:' + cid).allowed
                     for action in ('model.request', 'notification.send'))
         )
+
+    def preference(self, event):
+        if event.conversation.surface != Surface.PRIVATE:
+            return None
+        text = event.text.strip(' ，,。！？!?')
+        if re.fullmatch(r'(?:别|不要|不用)(?:再)?主动(?:找我|联系我|给我发消息|发消息)|停止主动搭话', text):
+            disabled = True
+        elif text in {'恢复主动搭话', '可以主动找我了'}:
+            disabled = False
+        else:
+            return None
+        state = json.loads(self.core.state(event.conversation.key)['state_json']).get('speak_up', {})
+        state['opted_out'] = disabled
+        self.save(event.conversation.key, state)
+        return '好，主动搭话已停。' if disabled else '好，已恢复主动搭话。'
 
     def busy(self, cid):
         core = self.core
@@ -119,6 +136,8 @@ class SpeakUp:
                          and 15 < (now - last_at).total_seconds() / 60 < 40
                          and state.get('nudged_for') != last['id']
                          and re.search(r'[？?]|吗|呢|嘛|没$', json.loads(last['envelope_json'])['text'].strip()))
+            if state['count'] >= cfg.max_per_day:
+                continue
             if nudge:
                 if not core.pre_send(OutboundEnvelope.model_validate_json(last['envelope_json'])):
                     continue
@@ -130,15 +149,16 @@ class SpeakUp:
                       and now >= datetime.fromisoformat(state['next_at'])):
                 continue
             else:
-                state['count'] += 1
                 self.schedule(state, now)
+            state['count'] += 1
             # Reserve before the request: failure or restart must not replay an unsolicited attempt.
             state['attempt'] = {'id': 'speakup:' + str(uuid4()), 'source': event.event_id,
                                 'seq': event.ingest_seq, 'permission_version': core.permissions.policy_version}
             self.save(cid, state)
             try:
-                await self.generate(event, state, nudge=nudge,
-                                    last_text=json.loads(last['envelope_json'])['text'] if nudge else '')
+                with call_scope(message_id=event.event_id, conversation=cid, principal=event.principal.key):
+                    await self.generate(event, state, nudge=nudge,
+                                        last_text=json.loads(last['envelope_json'])['text'] if nudge else '')
             except Exception:
                 logger.exception('主动搭话本轮跳过', extra={'conversation': cid})
             return  # One model call per minute globally; never fan out to all friends at once.
@@ -181,7 +201,7 @@ class SpeakUp:
         )
         if not self.valid(envelope):
             return
-        async with core.model_client.stream('POST', model.endpoint,
+        async with core.model_client.for_phase('speak_up').stream('POST', model.endpoint,
                 headers={'Authorization': 'Bearer ' + os.environ[model.api_key_env]},
                 json={'model': model.model, 'messages': messages, 'max_tokens': 300},
                 timeout=model.timeout_seconds) as response:

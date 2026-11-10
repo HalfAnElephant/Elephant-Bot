@@ -26,7 +26,11 @@ sudo ufw allow in on qqbot-host proto tcp from 10.203.0.2 to 10.203.0.1 port 300
 
 ## 健康、任务与投递
 
-`/health/live` 仅表示进程响应；`/health/ready` 还检查 DB、初始化和 NapCat 连接。管理 `/api/v1/status` 的模型字段表示已配置，不表示真实供应商成功。最近实际调用结果以任务事件和验收记录为准。
+`/health/live` 表示进程响应。`/health/ready` 检查 DB、初始化、NapCat 连接、Core 主任务及关键调度和投递循环。数据库暂时不可用、关键循环连续三次失败、退出或单次执行超过 120 秒时返回 503，恢复成功后自动恢复就绪。首个循环错误即可在 `background.degraded` 查看。
+
+`background.loops` 分别提供 execution、delivery、memory、expression、speakup 的 heartbeat、last_success、last_error、last_error_at、failures、stalled 和 exited。execution 表示 Core 调度的状态，Worker 执行与供应商调用仍通过任务事件核对。可选维护故障按循环与会话隔离，并以最多 30 秒的指数退避重试。维护与主动搭话的单次执行超过 600 秒会标记 stalled。卡住的外部操作保留现场，结合任务、平台回执与 UNKNOWN 核对后处理。
+
+鉴权 `/api/v1/status` 同时显示 Inbox、Outbox 积压计数及最旧待办时间，可供外部监控计算积压年龄。健康接口只查询本地状态。最近实际模型调用结果以任务事件和验收记录为准。
 
 - `QUEUED` 没有启动 runner；取消可立即终结。
 - `RUNNING` 有独立 run、lease 与 fencing。租约失效保留槽，不能直接再启动同任务。
@@ -35,9 +39,9 @@ sudo ufw allow in on qqbot-host proto tcp from 10.203.0.2 to 10.203.0.1 port 300
 - 任务完成与发送完成分开。`UNKNOWN` 表示平台可能已接受，不自动重发。核实平台或人工回执后，管理员可 `POST /api/v1/deliveries/{id}/resolve`，提供 `state: SENT|FAILED`、`evidence` 和可选 `platform_message_id`；该操作不发送消息。
 - `WAITING_FOR_TRIGGER` 保留任务结果，等待同会话的新有效触发更新官方回复凭据。已成功分段不重复发送。
 
-`/任务`、`/取消` 与其他确定性命令不等待前台模型；`/静默 30m` 支持 s/m/h，最长 24 小时，持久恢复；不带时长则持续静默直到 `/恢复`。当前 harness 不支持 `/补充`，明确拒绝，不假称已排队。
+`/任务`、`/取消` 与其他确定性命令不等待前台模型；`/静默 30m` 支持 s/m/h，最长 24 小时，持久恢复；不带时长则持续静默直到 `/恢复`。`/补充 任务号 内容` 将输入交给原任务。群聊自动回答等待问题时，发起人需引用问题或 at 机器人，其他成员可明确引用问题参与。外部条件等待中的补充会与真实观察满足后的继续输入一起处理。
 
-产物仅接受有界 UTF-8 Markdown/text/JSON，导出后有 UUID、大小和 SHA-256。鉴权下载读取并校验同一内容快照，拒绝符号链接、硬链接与变化内容；任务创建 30 天后下载返回 410。
+产物接受有界文本、Office、PDF、图片、CSV、JSON 与 ZIP，具体扩展名由 `DEFAULT_ARTIFACT_MIME_TYPES` 限定。导出后有 UUID、大小和 SHA-256。鉴权下载读取并校验同一内容快照，拒绝符号链接、硬链接与变化内容；任务创建 30 天后管理下载返回 410。NapCat 的文件与图片单独进入 Outbox，待发送引用在 24 小时后过期，发送前重验归档摘要、来源与授权。平台回执不确定时保持 UNKNOWN，全部附件完成后通知才记为 SENT。官方 QQ 接入会说明附件未发送，并记录附件失败。
 
 ## 备份、迁移与删除
 
@@ -55,4 +59,21 @@ SQLite backup API 可取得一致在线快照。升级前先保存快照；停 C
 
 管理配置预校验后，以 expected_version 发布。模型和发送预算可热更新；连接、身份、judge、隔离等变更要求重启。版本列表保留发布前配置，读取旧版本为候选后使用当前 expected_version 应用，完成显式回滚。
 
-社交模式要求真实分组隔离的标注回放；`evals/social_replay.py` 不生成虚假标注数据。Jev、embedding 与自动提取需要各自的供应商凭据，缺失时明确跳过/降级。仅有协议夹具通过不能开放 social。
+社交模式要求真实分组隔离的标注回放；`evals/social_replay.py` 消费显式标注数据。`evals/fixtures/social-baseline.jsonl` 是 16 条合成策略回归，预置 signals 仅检查确定性策略，不衡量真实模型选择质量。Jev、embedding 与自动提取需要各自的供应商凭据，缺失时明确跳过/降级。仅有协议夹具通过不能开放 social。
+
+
+## 调用计量与配置诊断
+
+鉴权 `GET /api/v1/model-calls?limit=100` 合并 Core 的判别、表达、记忆、embedding、主动搭话请求与 Worker 的任务、压缩及失败说明请求。Core 记录耗时、排队时间与关联身份，Worker 沿现有任务及 run 记录。缺失 usage 的计数保持 null，coverage 为 unknown。费用及定价版本在缺少价格输入时保持 null。该接口返回最近的有界样本，不能直接当作全历史账单。
+
+工具完成事件带 capability、耗时、成功或异常类型及最近成功读取的技能路径与固定版本。技能字段表示本轮加载上下文，组合多个技能时仍需结合具体工具轨迹核对归属。日志保留允许列出的关联 ID 和异常栈帧，不保存模型正文或凭据。
+
+配置页的 diagnostics 显示保存配置的 expected_model、Core 的 core_loaded_model、expected_skills，以及 Worker 的模型指纹、可用技能版本和在途已加载版本。Worker 每 30 秒经内部认证 API 上报，超过 90 秒标记 stale，未上报显示 unknown。源技能版本与已发布版本不一致时先发布技能快照，在途任务保持原版本。模型失配列出 Core 或 Worker 待重启组件，保存设置不会替换正在运行的进程。
+
+## 历史与自动记忆
+
+`history-memory` 技能通过宿主查询原文和已发布记忆。查询和读取均重新检查当前会话、权限、来源撤回与墓碑，返回稳定 source ID。中文搜索使用子串候选与 n-gram 匹配，返回扫描游标供继续翻页。查询 embedding 限时 1.5 秒，失败退回词法检索，缓存按主体、会话、索引版本和模型版本隔离。
+
+`memory.auto_extract` 启用候选提取，`memory.auto_publish_self_reports` 默认允许有明确自述原文、同主体证据与高置信低风险标记的事实发布。推断保留 candidate，冲突保留 disputed。管理页可查看证据并发布普通候选，维护拒绝原因通过 `GET /api/v1/memory-maintenance?conversation_id=...` 查看。黑话候选要求真实出现、至少三个上下文和两名说话人，发布仍沿既有词典审查策略。
+
+任务恢复从已有目标、输入、检查点派生状态，按真实接入顺序排列用户修订。丢失或撤回的来源会阻止恢复使用，超过请求字节门会明确失败，原始档案与输入仍保留。历史指代可使用摘录摘要的来源索引恢复原文，再沿正常上下文的范围与来源检查。业务进展由任务状态恢复。

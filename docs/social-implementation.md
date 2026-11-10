@@ -76,19 +76,19 @@ extractor = HTTPCandidateExtractor(endpoint, model, api_key, enabled=False)
 embedding = HTTPEmbedding(embedding_endpoint, embedding_model, embedding_version,
                           embedding_key, dimensions=embedding_dimensions)
 maintenance = MemoryMaintenance(social_service, extractor, embedding,
-                                enabled=False, raw_retention_days=30, max_messages=40)
+                                enabled=False, raw_retention_days=None, max_messages=40)
 report = await maintenance.maintenance_once(access, auto_extract=False)
 summary = maintenance.summary(access)
 ```
 
 配置约定由 Core 接入。`memory_maintenance_enabled`、`memory_auto_extract`、`memory_extractor_enabled` 默认 false，分别对应 maintenance.enabled、auto_extract 和 extractor.enabled。模型参数为提取 endpoint/model/API key 与 embedding endpoint/model/version/API key/dimensions。密钥不进入 prompt、数据库或日志。Core 在低优先级、成本预算允许且没有前台请求待处理时调用，每会话避免重叠维护任务。网络供应商对象不接触数据库，所有持久化发生在 Core 持有的 maintenance/service 内。
 
-候选提取器调用真实 Chat Completions HTTP，最多三秒、无隐式重试，每批最多八条结构化建议。没有 key、禁用或无有效人类消息返回 SKIPPED。错误字段、超时和网络失败返回 FAILED。建议不能指定任意 scope_id、owner_private、global_curated、persona 或 source_kind。作用域由 Core 的 access 决定，只能引用该有界片段的原事件，并复用服务对归属、证据、秘密及管理权限的检查。模型建议全部为 inference/candidate，`should_persist` 不授予发布权限，后续仍须人工授权 commit。成员只能创建本会话本人候选，公共会话候选需要管理员身份，不能以管理员身份自动创建他人的个人记录。
+候选提取器调用真实 Chat Completions HTTP，最多三秒、无隐式重试，每批最多八条结构化建议。没有 key、禁用或无有效人类消息返回 SKIPPED。错误字段、超时和网络失败返回 FAILED。建议不能指定任意 scope_id、owner_private、global_curated、persona 或 source_kind。作用域由 Core 的 access 决定，只能引用该有界片段的原事件，并复用服务对归属、证据、秘密及管理权限的检查。模型推断保持 inference/candidate，`should_persist` 不授予发布权限。明确自述同时满足同主体来源、精确引文、低风险标记与置信门限时，可由 `auto_publish_self_reports` 策略授权发布。多人批次按实际证据主体派生 member access，公共候选继续要求相应权限。普通候选可在管理页显式发布。
 
-摘要按 inbox seq 增量推进。程序抽取有来源、时间和说话人的最多 40 条、每条最多 300 字符原文片段，不产生新的模型事实。摘要与检查点在同一事务写入成功后推进。提取检查点独立，失败保留原 seq 以允许下次调度重试，关闭/无 key 则记录 SKIPPED 并推进。此种确定性摘录用于有界上下文压缩，未声称语义总结能力。
+摘要按 inbox seq 增量推进。程序抽取有来源、时间和说话人的最多 40 条、每条最多 300 字符原文片段，不产生新的模型事实。摘要与检查点在同一事务写入成功后推进。提取检查点独立，失败保留原 seq 以允许下次调度重试，关闭/无 key 则记录 SKIPPED 并推进。历史指代可使用摘录的来源索引恢复原文，再沿正常上下文的范围与来源检查。业务目标、用户修订和未完成工作从现有任务状态派生。
 
 向量索引每次最多处理八个有管理权限的作业。缺 key、禁用或记录失效时作业显式 SKIPPED，供应商失败为 FAILED。后续配置好供应商或解决故障后，调用 `maintenance.requeue_embeddings(access)` 重排本作用域可管理的 SKIPPED/FAILED 作业。HTTP 返回后 `store_embedding` 再验证 active 和来源，删除不会被晚到的向量结果复活。
 
-删除现在同步把 MemoryRecord 的 text 改为 `[deleted]`、value_json 改为 `null`、embedding 清空，并记录仅包含 memory ID、会话 ID、来源 ID 和时间的删除台账。有关摘要立即清空并 INVALID，来源 tombstone 禁止旧摘要重新提取。维护会清理升级前遗留的 deleted 正文与索引作业。当前保留策略按 raw_retention_days 清理原消息，长期 active/candidate 事实仍需要的来源仅保留最多 300 字符证据摘录，其余来源清空并撤销。原消息保留由会话维护权限约束，普通用户仅清理本人来源。
+删除现在同步把 MemoryRecord 的 text 改为 `[deleted]`、value_json 改为 `null`、embedding 清空，并记录仅包含 memory ID、会话 ID、来源 ID 和时间的删除台账。有关摘要立即清空并 INVALID，来源 tombstone 禁止旧摘要重新提取。维护会清理升级前遗留的 deleted 正文与索引作业。raw_retention_days 默认 null，永久保留原始消息和非文本段；启用摘要、抽取与索引维护不会按年龄改写原文。显式配置 1–3650 天才启用原消息过期清理，已有数字配置继续生效；长期 active/candidate 事实仍需要的来源仅保留最多 300 字符证据摘录，其余来源清空并撤销。显式过期清理由会话维护权限约束，普通用户仅清理本人来源。
 
 SQLite 在线字段清空不等于磁盘扇区、WAL、外部备份的物理抹除，部署备份与数据库压缩策略需单独处理。中文关键词层目前按授权候选集扫描并在查询时生成 n-gram，达到约五万条有效记录或实测延迟不达标时应转向持久关键词索引及相应迁移。

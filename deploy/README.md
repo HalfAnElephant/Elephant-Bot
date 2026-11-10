@@ -77,3 +77,29 @@ remote readback. An uncertain write must be reconciled before any retry.
 later edits. Recurrence edits apply to the full resource, including its series.
 The legacy VTODO/Reminders scripts are reference material and have no capability
 entry point.
+
+
+## Immutable skill publication
+
+The installer publishes the maintained `/opt/qqbot/skills` tree into root-owned,
+read-only `/opt/qqbot/skillsets/<sha>` directories and atomically selects `current`.
+To publish a skill-only update after placing the reviewed files under the same
+root-owned source directory, use the following root command.
+
+```sh
+/opt/qqbot/.venv/bin/python -m qqbot.harness.skills /opt/qqbot/skills /opt/qqbot/skillsets
+```
+
+New tasks observe the new version. In-flight tasks, durable waits and retries keep
+their pinned version. Keep old version directories while tasks or recovery evidence
+refer to them. Worker retires obsolete idle pi processes and lets active processes
+finish. General runner manifests require a content hash for startup, and old
+manifests remain usable for stopping existing processes.
+
+The launcher verifies root ownership, permissions and content before mounting the
+selected directory read-only at `/skills`. The process service mounts the same
+version there and uses `/workspace` for the task's execution directory. Installed
+system runtimes provide script dependencies. Public HTTPS, authenticated Git and
+calendar access use the existing trusted host adapters, preserving their account
+boundaries, ledger and readback semantics. Target Linux mount and isolation checks
+are required when deploying this change.

@@ -20,6 +20,10 @@ context:
   max_tokens: null # pi automatic threshold, derived from the model window
   keep_recent_tokens: null # pi automatic recent-context retention
   compaction_output_tokens: 4096
+memory:
+  auto_extract: false
+  auto_publish_self_reports: true # 明确自述的证据与低风险门限通过后发布；推断保留候选
+  raw_retention_days: null # 永久保留原始记录；显式设置 1–3650 天才启用过期清理，旧数字配置继续生效
 model:
   endpoint: null
   model: null

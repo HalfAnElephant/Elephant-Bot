@@ -15,7 +15,7 @@ cd /opt/qqbot
 import os
 import stat
 from pathlib import Path
-for root in (Path('/opt/qqbot/.venv'),Path('/opt/qqbot/src/qqbot'),Path('/opt/qqbot/node_modules')):
+for root in (Path('/opt/qqbot/.venv'),Path('/opt/qqbot/src/qqbot'),Path('/opt/qqbot/node_modules'),Path('/opt/qqbot/skills')):
     for directory, directories, files in os.walk(root,followlinks=False):
         for item in [Path(directory),*[Path(directory)/name for name in directories+files]]:
             target = item.resolve(strict=True)
@@ -31,7 +31,7 @@ install -d -o root -g root -m 0755 /var/lib/qqbot-runner-stops
 install -d -o root -g root -m 0700 /var/lib/qqbot-runner-manifests /var/lib/qqbot-runner-locks
 install -d -o root -g root -m 0711 /var/lib/qqbot-runners
 install -d -o root -g root -m 0755 /var/lib/qqbot-runner-root /etc/qqbot /opt/qqbot/bin /usr/local/libexec
-for directory in usr lib lib64 opt/qqbot/node_modules opt/qqbot/bin run/qqbot workspace proc dev sys tmp var/tmp; do
+for directory in usr lib lib64 opt/qqbot/node_modules opt/qqbot/bin run/qqbot workspace skills proc dev sys tmp var/tmp; do
   install -d -o root -g root -m 0755 "/var/lib/qqbot-runner-root/$directory"
 done
 install -o root -g root -m 0755 scripts/pi-runner-launch /usr/local/libexec/pi-runner-launch
@@ -40,6 +40,7 @@ install -o root -g root -m 0755 scripts/pi-isolation-probe /opt/qqbot/bin/pi-iso
 install -o root -g root -m 0755 scripts/pi-isolation-check /usr/local/libexec/pi-isolation-check
 install -o root -g root -m 0444 src/qqbot/harness/research_extension.ts /opt/qqbot/research_extension.ts
 install -o root -g root -m 0444 src/qqbot/harness/pi_bridge.ts /opt/qqbot/pi_bridge.ts
+/opt/qqbot/.venv/bin/python -m qqbot.harness.skills /opt/qqbot/skills /opt/qqbot/skillsets
 install -o root -g root -m 0644 deploy/runner-policy.json /etc/qqbot/runner-policy.json
 runner_sudoers_tmp=$(mktemp /etc/sudoers.d/.qqbot-runner.XXXXXX)
 trap 'rm -f "$runner_sudoers_tmp"' EXIT

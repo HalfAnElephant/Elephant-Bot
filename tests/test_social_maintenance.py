@@ -1,8 +1,11 @@
 import json
 
 import httpx
+import pytest
 from sqlalchemy import select, update
 
+from qqbot.config import MemoryConfig
+from qqbot.domain.messages import MediaSegment
 from qqbot.memory.embedding import HTTPEmbedding
 from qqbot.memory.extraction import HTTPCandidateExtractor
 from qqbot.memory.maintenance import MemoryMaintenance
@@ -122,7 +125,7 @@ async def test_retention_preserves_minimal_evidence_for_active_fact(setup):
     r = svc.candidate(access, record(), explicit=True)
     svc.commit(access, r.memory_id, authorized=True)
     clock.advance(31 * 86400)
-    maintenance = MemoryMaintenance(svc, enabled=True)
+    maintenance = MemoryMaintenance(svc, enabled=True, raw_retention_days=30)
     report = await maintenance.maintenance_once(access)
     assert report.expired_sources == 2
     assert svc.retrieve(access, "陈")
@@ -199,3 +202,55 @@ async def test_source_recall_during_extraction_rejects_late_suggestion(setup):
         report = await maintenance.maintenance_once(access, auto_extract=True)
         assert report.candidates == 0 and report.rejected == 1
         assert maintenance.summary(access) == ""
+
+
+@pytest.mark.parametrize("age_days", [31, 365])
+async def test_default_retention_preserves_old_originals_during_all_maintenance(setup, age_days):
+    svc, access, event, record, clock = setup
+    original = event("e", "小陈" + "x" * 400)
+    original = original.model_copy(
+        update={"segments": (*original.segments, MediaSegment(type="image", attachment_ref="archive/image"))}
+    )
+    event("ee", "没有长期事实的原始消息")
+    with svc.db.transaction() as conn:
+        conn.execute(update(inbox).where(inbox.c.id == "e").values(event_json=original.model_dump_json()))
+        before = dict(conn.execute(select(inbox.c.id, inbox.c.event_json)).all())
+    r = svc.candidate(access, record(), explicit=True)
+    svc.commit(access, r.memory_id, authorized=True)
+    clock.advance(age_days * 86400)
+    async with (
+        provider({"suggestions": []}) as extraction_client,
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"data": [{"embedding": [1.0, 0.0]}]})
+            )
+        ) as embedding_client,
+    ):
+        maintenance = MemoryMaintenance(
+            svc,
+            extractor=HTTPCandidateExtractor(
+                "https://example.invalid", "m", "key", enabled=True, client=extraction_client
+            ),
+            embedding=HTTPEmbedding("https://example.invalid", "m", "v", "key", client=embedding_client),
+            enabled=True,
+        )
+        report = await maintenance.maintenance_once(access, auto_extract=True)
+    assert report.expired_sources == 0
+    assert report.extraction_state == "DONE" and report.indexed == 1
+    assert "小陈" in maintenance.summary(access)
+    with svc.db.engine.connect() as conn:
+        assert dict(conn.execute(select(inbox.c.id, inbox.c.event_json)).all()) == before
+    svc.revoke_source(access, "e")
+    assert maintenance.summary(access) == ""
+    assert svc.retrieve(access, "陈") == []
+    with svc.db.engine.connect() as conn:
+        assert conn.execute(select(social_index_jobs.c.id)).first() is None
+
+
+def test_retention_config_default_and_legacy_number():
+    assert MemoryConfig().raw_retention_days is None
+    assert MemoryConfig.model_validate({"raw_retention_days": None}).raw_retention_days is None
+    assert MemoryConfig.model_validate({"raw_retention_days": 30}).raw_retention_days == 30
+    for days in (0, -1, 3651):
+        with pytest.raises(ValueError):
+            MemoryConfig(raw_retention_days=days)

@@ -18,7 +18,10 @@ from qqbot.storage.task_schema import inputs, notifications, runs, tasks, waits
 @pytest.fixture
 def setup(tmp_path):
     db = Database(str(tmp_path / "test.db"))
+    from qqbot.storage.action_schema import operations
+
     metadata.create_all(db.engine)
+    assert operations.name in metadata.tables
     clock = FakeClock()
     service = TaskService(db, clock, Outbox(db, clock))
     conversation = ConversationRef(
@@ -68,7 +71,7 @@ def test_accept_complete_delivery_and_fence(setup):
     assert service.submit(claim["run_id"], claim["fencing_token"], "worker", result)["state"] == "SUCCEEDED"
     assert service.get(task["public_id"], access)["state"] == "SUCCEEDED"
     with service.db.engine.connect() as c:
-        assert len(c.execute(select(outbox)).all()) == 1
+        assert len(c.execute(select(outbox)).all()) == 2
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0
 
 
@@ -376,7 +379,7 @@ def test_wait_answer_race_continues_same_task_once(setup, reply_before_settle):
         "checkpoint": "No external changes yet",
     }
     assert service.ask(claim["run_id"], claim["fencing_token"], "worker", packet)["waiting"]
-    answer = event.model_copy(update={"event_id": "answer", "platform_message_id": "answer-message"})
+    answer = event.model_copy(update={"event_id": "answer", "platform_message_id": "answer-message", "mentions_bot": True})
     if reply_before_settle:
         service.add_input(task["public_id"], answer, access, "org/repo", question_id="question-1")
     waiting_result = {"status": "waiting_input", "summary": "已向用户询问目标仓库。"}
@@ -525,3 +528,213 @@ def test_stale_proactive_draft_without_tools_ends_without_failure_notice(
         assert '不得编造' in explanation['goal'] and '403' in explanation['goal']
     else:
         assert service.claim('explainer') is None
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_wait_answer_ownership_and_service_boundary(setup, legacy):
+    from qqbot.domain.messages import TextSegment
+
+    service, event, access, _clock = setup
+    task = service.accept(event, access, "Choose repository")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "question_id": "ownership-question", "text": "哪个仓库？", "checkpoint": "No writes"})
+    with service.db.transaction() as conn:
+        stored = json.loads(conn.execute(select(waits.c.condition_json)).scalar_one())
+        assert stored == {"expected_responders": [event.principal.key], "collaboration_scope": "explicit_reply"}
+        if legacy:
+            conn.execute(update(waits).values(condition_json="{}"))
+        conn.execute(update(outbox).values(state="SENT", platform_message_id="question-message"))
+    other = event.principal.model_copy(update={"remote_user_id": "other"})
+    unrelated = event.model_copy(update={"event_id": "unrelated", "principal": other,
+        "segments": (TextSegment(text="中午吃什么"),)})
+    other_access = access.model_copy(update={"principal": other})
+    for answer, identity in [(unrelated, other_access),
+                             (unrelated.model_copy(update={"mentions_bot": True}), other_access),
+                             (unrelated.model_copy(update={"principal": event.principal}), access)]:
+        assert service.question_for(answer) is None
+        with pytest.raises(PermissionError, match="does not answer"):
+            service.add_input(task["public_id"], answer, identity, answer.text)
+    answer = unrelated.model_copy(update={"reply_to": "question-message"})
+    assert service.question_for(answer) == {"id": "ownership-question", "public_id": task["public_id"]}
+    service.permissions.upsert(
+        PermissionRule(id="deny-answer", effect="deny", actions=("task.input",)),
+        expected_version=0, actor="test")
+    with pytest.raises(PermissionError):
+        service.add_input(task["public_id"], answer, other_access, "org/repo", "ownership-question")
+    service.permissions.delete("deny-answer", expected_version=1, actor="test")
+    accepted = service.add_input(task["public_id"], answer, other_access, "org/repo", "ownership-question")
+    assert service.add_input(task["public_id"], answer, other_access, "org/repo", "ownership-question") == accepted
+    assert service.question_for(answer) is None
+    with pytest.raises(PermissionError, match="does not answer"):
+        service.add_input(task["public_id"], answer.model_copy(update={"event_id": "second-answer"}),
+                          other_access, "wrong/repo", "ownership-question")
+    service.submit(claim["run_id"], claim["fencing_token"], "worker", {
+        "status": "waiting_input", "summary": "Waiting"})
+    resumed = service.claim("worker")
+    assert [entry["text"] for entry in resumed["continuation"]["inputs"]] == ["org/repo"]
+
+
+def test_private_wait_and_unavailable_answers(setup):
+    from datetime import timedelta
+
+    from sqlalchemy import insert
+
+    from qqbot.storage.schema import inbox
+
+    service, event, access, clock = setup
+    private = event.conversation.model_copy(update={"surface": Surface.PRIVATE})
+    event = event.model_copy(update={"conversation": private})
+    access = access.model_copy(update={"conversation": private})
+    task = service.accept(event, access, "Choose repository")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "question_id": "private-question", "text": "哪个仓库？", "checkpoint": "No writes"})
+    answer = event.model_copy(update={"event_id": "private-answer", "platform_message_id": "answer"})
+    assert service.question_for(answer)
+    for invalid in [answer.model_copy(update={"occurred_at": clock.now() - timedelta(seconds=1)}),
+                    answer.model_copy(update={"event_type": "message.recalled"}),
+                    answer.model_copy(update={"sender_is_bot": True})]:
+        assert service.question_for(invalid) is None
+        with pytest.raises(PermissionError):
+            service.add_input(task["public_id"], invalid, access, "repo", "private-question")
+    with service.db.transaction() as conn:
+        conn.execute(insert(inbox).values(id="recall", conversation_id=private.key, seq=1,
+            event_json="{}", event_type="message.recalled", message_id="answer"))
+    assert service.question_for(answer) is None
+    with pytest.raises(PermissionError, match="unavailable"):
+        service.add_input(task["public_id"], answer, access, "repo", "private-question")
+    fresh = answer.model_copy(update={"platform_message_id": "fresh"})
+    assert service.add_input(task["public_id"], fresh, access, "repo", "private-question")["accepted"]
+    service.submit(claim["run_id"], claim["fencing_token"], "worker", {
+        "status": "waiting_input", "summary": "Waiting"})
+    resumed = service.claim("worker")
+    clock.advance(1)
+    service.ask(resumed["run_id"], resumed["fencing_token"], "worker", {
+        "question_id": "next-question", "text": "哪个分支？", "checkpoint": "Need branch"})
+    assert service.question_for(fresh) is None
+    with pytest.raises(PermissionError, match="does not answer"):
+        service.add_input(task["public_id"], fresh.model_copy(update={"event_id": "delayed"}), access, "repo")
+    current = fresh.model_copy(update={"event_id": "current", "occurred_at": clock.now(), "received_at": clock.now()})
+    assert service.question_for(current)
+    with service.db.transaction() as conn:
+        conn.execute(update(waits).where(waits.c.id == "next-question").values(expires_at=clock.now().isoformat()))
+    assert service.question_for(current) is None
+    with pytest.raises(PermissionError, match="does not answer"):
+        service.add_input(task["public_id"], current, access, "repo")
+
+
+def test_external_wait_supplement_does_not_satisfy_condition(setup):
+    from qqbot.domain.messages import TextSegment
+
+    service, event, access, _clock = setup
+    task = service.accept(event, access, "Wait for external check")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "kind": "external", "question_id": "external-question", "text": "等待外部检查。",
+        "checkpoint": "No changes", "condition": {"capability": "github.issue.read", "arguments": {},
+            "path": "state", "equals": "closed"}})
+    service.submit(claim["run_id"], claim["fencing_token"], "worker", {
+        "status": "waiting_external", "summary": "Waiting"})
+    answer = event.model_copy(update={"event_id": "supplement", "mentions_bot": True,
+        "segments": (TextSegment(text=f"/补充 {task['public_id']} Additional context"),)})
+    assert service.question_for(answer) is None
+    with pytest.raises(PermissionError, match="explicit task input"):
+        service.add_input(task["public_id"], answer, access, "context", "external-question")
+    service.add_input(task["public_id"], answer, access, "Additional context")
+    assert service.get(task["public_id"], access)["state"] == "WAITING_EXTERNAL"
+    assert service.claim("worker") is None
+    assert service.observe_waiter({"wait_id": "external-question", "revision": 1,
+        "source_id": "observation", "observation": "closed"})["woken"]
+    resumed = service.claim("worker")
+    assert {item["text"] for item in resumed["continuation"]["inputs"]} == {"Additional context", "closed"}
+
+
+@pytest.mark.parametrize("revocation", ["forgotten", "redacted"])
+def test_wait_rejects_revoked_input_sources(setup, revocation):
+    from sqlalchemy import insert
+
+    from qqbot.storage.social_schema import memory_source_retention, social_tombstones
+
+    service, event, access, clock = setup
+    task = service.accept(event, access, "Choose repository")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "question_id": "revoked-question", "text": "哪个仓库？", "checkpoint": "No writes"})
+    answer = event.model_copy(update={"event_id": "revoked-answer", "mentions_bot": True})
+    with service.db.transaction() as conn:
+        table = social_tombstones if revocation == "forgotten" else memory_source_retention
+        values = {"source_id": answer.event_id, "conversation_id": event.conversation.key}
+        if revocation == "redacted":
+            values["redacted_at"] = clock.now().isoformat()
+        conn.execute(insert(table).values(**values))
+    assert service.question_for(answer) is None
+    with pytest.raises(PermissionError, match="unavailable"):
+        service.add_input(task["public_id"], answer, access, "repo")
+
+
+def test_wait_accepts_second_precision_platform_time_after_microsecond_question(setup):
+    from datetime import timedelta
+
+    service, event, access, clock = setup
+    clock.advance(0.5)
+    task = service.accept(event, access, "Choose repository")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "question_id": "fast-question", "text": "哪个仓库？", "checkpoint": "No writes"})
+    answer = event.model_copy(update={"event_id": "fast-answer", "mentions_bot": True,
+        "occurred_at": clock.now().replace(microsecond=0), "received_at": clock.now() + timedelta(milliseconds=1)})
+    assert service.question_for(answer)
+    too_early = answer.model_copy(update={"received_at": clock.now() - timedelta(milliseconds=1)})
+    assert service.question_for(too_early) is None
+    assert service.add_input(task["public_id"], answer, access, "repo")["accepted"]
+
+
+def test_turn_candidates_prioritize_explicit_reference_before_bounded_history(setup):
+    from qqbot.domain.messages import TextSegment
+
+    service, event, access, clock = setup
+    first = None
+    for index in range(21):
+        clock.advance(1)
+        source = event.model_copy(update={"event_id": f"source-{index}",
+            "platform_message_id": f"source-message-{index}", "received_at": clock.now(), "occurred_at": clock.now()})
+        task = service.accept(source, access, "Choose a target")
+        first = first or task
+        claim = service.claim("worker")
+        service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+            "question_id": f"bounded-question-{index}", "text": "目标是什么？", "checkpoint": "No writes"})
+        service.submit(claim["run_id"], claim["fencing_token"], "worker", {
+            "status": "waiting_input", "summary": "等待目标。"})
+    answer = event.model_copy(update={"event_id": "old-target-answer", "received_at": clock.now(),
+        "occurred_at": clock.now(), "segments": (TextSegment(text=f"继续 {first['public_id']}"),)})
+    candidates = service.turn_candidates(answer, access)
+    assert len(candidates) == 20
+    assert candidates[0]["id"] == first["id"]
+    assert service.add_input(first["public_id"], answer, access, "org/repo", "bounded-question-0")["accepted"]
+
+
+@pytest.mark.parametrize("state", ["PREPARED", "DISPATCHED", "UNKNOWN", "PARTIAL"])
+async def test_terminal_continuation_preserves_pending_effect_lineage(setup, state):
+    service, event, access, _clock = setup
+    task = service.accept(event, access, "Create issue")
+    claim = service.claim("worker")
+    service.bind_skills(claim["run_id"], claim["fencing_token"], "worker", {"skill_version": "b" * 64})
+    await service.ledger(claim["run_id"], claim["fencing_token"], "worker", {
+        "operation": "prepare", "operation_id": "unfinished", "arguments_hash": "same",
+        "action": {"name": "github.issue.create", "resources": ["repo:github.com/org/repo"], "effect": "write"},
+        "arguments": {"title": "same write"}})
+    if state != "PREPARED":
+        await service.ledger(claim["run_id"], claim["fencing_token"], "worker", {
+            "operation": "transition", "operation_id": "unfinished", "expected": "PREPARED",
+            "state": "DISPATCHED", "result": {}})
+    if state in {"UNKNOWN", "PARTIAL"}:
+        await service.ledger(claim["run_id"], claim["fencing_token"], "worker", {
+            "operation": "transition", "operation_id": "unfinished", "expected": "DISPATCHED",
+            "state": state, "result": {}})
+    service.submit(claim["run_id"], claim["fencing_token"], "worker", {"status": "partial", "summary": "尚需核验。"})
+    assert service.continuation_lineage(task["public_id"], access) == (task["id"], "b" * 64)
+    service.permissions.upsert(PermissionRule(id="deny-retry", effect="deny", actions=("task.retry",)),
+        expected_version=0, actor="test")
+    with pytest.raises(PermissionError):
+        service.continuation_lineage(task["public_id"], access)

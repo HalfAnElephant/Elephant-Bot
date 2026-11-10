@@ -113,19 +113,23 @@ def select_topic(index, turn, now, idle_seconds, *, reply_topic=None):
             else next(iter(candidates), None)
         )
         reason = "matching_entity" if concrete else "matching_subject"
-    if selected is None and active and not re.search(r"换个话题|另外说|说点别的", turn.text):
+    if (selected is None and active and active.get("principal") == turn.principal.key
+            and not re.search(r"换个话题|另外说|说点别的", turn.text)):
         elapsed = (now - datetime.fromisoformat(active["last_at"])).total_seconds()
         if kind == "general" and elapsed <= idle_seconds:
             score = len(tokens.intersection(active.get("tokens", ())))
-            if len(turn.text.strip()) <= 20 or score >= 4:
-                selected, reason = (
-                    active,
-                    "short_followup" if len(turn.text.strip()) <= 20 else "lexical_relevance",
-                )
+            followup = bool(re.fullmatch(
+                r"(?:那|那么)?(?:明天|后天|下周|下个月|周末)(?:呢|怎么样|如何)?[？?]?"
+                r"|(?:那|这个|那个|这样|然后|还有)呢[？?]?|(?:继续|接着)(?:说|讲|说下去)?[。！!]?|再说说[。！!]?",
+                turn.text.strip(),
+            ))
+            if followup or (active["kind"] == kind and score >= 4):
+                selected, reason = active, "explicit_followup" if followup else "lexical_relevance"
     if selected is None:
         selected = {
             "id": stable_id(turn.conversation.key, turn.anchor_event_id),
             "kind": kind,
+            "principal": turn.principal.key,
             "entities": [],
             "tokens": [],
             "source_ids": [],
@@ -133,6 +137,7 @@ def select_topic(index, turn, now, idle_seconds, *, reply_topic=None):
             "last_at": now.isoformat(),
         }
         items.append(selected)
+    selected["principal"] = turn.principal.key
     selected["entities"] = list(dict.fromkeys((*selected.get("entities", ()), *resources)))[:64]
     selected["tokens"] = sorted(
         (token for token in keywords(turn.text) if len(token) <= 64), key=lambda token: (-len(token), token)

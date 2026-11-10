@@ -1,0 +1,54 @@
+name: Correctness
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.8'
+          enable-cache: true
+      - run: uv sync --locked --python "$(cat .python-version)"
+      - run: npm ci
+      - name: Record environment
+        run: |
+          mkdir -p test-results
+          {
+            git rev-parse HEAD
+            uname -a
+            uv run python --version
+            node --version
+            npm ls @earendil-works/pi-coding-agent
+          } | tee test-results/environment.log
+      - name: Python regression
+        run: |
+          set -o pipefail
+          uv run pytest -q --junitxml=test-results/pytest.xml 2>&1 | tee test-results/pytest.log
+      - name: Console regression
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          node --test tests/console_ui.test.cjs 2>&1 | tee test-results/console.log
+      - name: Lint
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          uv run ruff check src tests evals scripts 2>&1 | tee test-results/ruff.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: correctness-results
+          path: test-results/
