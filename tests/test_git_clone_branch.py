@@ -1,4 +1,7 @@
 """An explicitly selected branch enables a bounded clone without changing the default."""
+import asyncio
+import sys
+
 import pytest
 
 from qqbot.capabilities import GitService, ToolContext
@@ -43,3 +46,27 @@ async def test_branch_validation_precedes_process_or_network(tmp_path, branch, o
     with pytest.raises(ValueError, match="invalid .* branch"):
         await service({"operation": operation, "branch": branch, "commit": "a" * 40}, context)
     assert calls == []
+
+
+async def test_transport_uses_only_trusted_proxy_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("GH_TOKEN", "parent-token-must-stay-out")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "unrelated-secret")
+    captured = {}
+
+    async def start(*argv, **kwargs):
+        captured.update(kwargs["env"])
+        return await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "pass", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=kwargs["env"], start_new_session=True,
+        )
+
+    monkeypatch.setattr("qqbot.capabilities.git.start_process", start)
+    context = ToolContext("task", "run", 1, {"HTTPS_PROXY": "http://untrusted.invalid"}, str(tmp_path), "owner/repo")
+    service = GitService(lambda context: {})
+    result = await service._run(["--version"], tmp_path, context)
+    assert result["exit_code"] == 0
+    assert captured["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert captured["NO_PROXY"] == "localhost"
+    assert "GH_TOKEN" not in captured and "AWS_SECRET_ACCESS_KEY" not in captured

@@ -20,6 +20,9 @@ class GitService:
     async def _run(self, arguments, directory, context, *, authenticate=False):
         env = {"PATH": os.defpath, "HOME": "/nonexistent/elephant-git", "LANG": "C.UTF-8",
                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+        env.update({name: os.environ[name] for name in (
+            "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+        ) if name in os.environ})
         if authenticate:
             token = self.credentials(context).get("GH_TOKEN") or self.credentials(context).get("GH_ENTERPRISE_TOKEN")
             if token:
