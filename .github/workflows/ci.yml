@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_LOCKED: 'true'
+
+jobs:
+  correctness:
+    name: Correctness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.11.8'
+          enable-cache: true
+      - run: uv sync --python "$(cat .python-version)"
+      - run: npm ci --ignore-scripts
+      - name: Record environment and require Pi fixtures
+        run: |
+          mkdir -p test-results
+          {
+            git rev-parse HEAD
+            uname -a
+            uv run python --version
+            node --version
+            test -x node_modules/.bin/pi
+            node_modules/.bin/pi --version
+          } | tee test-results/environment.log
+      - name: Python regression
+        run: |
+          uv run pytest -q --junitxml=test-results/pytest.xml 2>&1 | tee test-results/pytest.log
+          uv run python -c 'import xml.etree.ElementTree as ET; assert not ET.parse("test-results/pytest.xml").findall(".//skipped"), "CI requires all fixtures to run"'
+      - name: Console regression
+        if: ${{ !cancelled() }}
+        run: node --test tests/console_ui.test.cjs 2>&1 | tee test-results/console.log
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: uv run ruff check src tests evals scripts 2>&1 | tee test-results/ruff.log
+      - name: Configuration schema
+        if: ${{ !cancelled() }}
+        run: |
+          uv run qqbot schema > "$RUNNER_TEMP/schema.json"
+          uv run python -c 'import json, os; from pathlib import Path; assert json.loads(Path("configs/schema.json").read_text()) == json.loads((Path(os.environ["RUNNER_TEMP"]) / "schema.json").read_text()), "Regenerate configs/schema.json with qqbot schema"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: correctness-results
+          path: test-results/
+          retention-days: 14
+
+  build:
+    name: Build and smoke test
+    needs: correctness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.11.8'
+          enable-cache: true
+      - name: Build distributions and complete source bundle
+        run: |
+          uv python install "$(cat .python-version)"
+          uv build --no-sources
+          git archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
+          git rev-parse HEAD > dist/REVISION
+      - name: Install and check the extracted release
+        run: |
+          mkdir "$RUNNER_TEMP/release"
+          tar -xzf dist/elephant-bot.tar.gz -C "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release/elephant-bot"
+          uv sync --no-dev --no-editable --python "$(cat .python-version)"
+          uv pip install --python .venv/bin/python --no-deps --reinstall "$GITHUB_WORKSPACE"/dist/*.whl
+          npm ci --ignore-scripts
+          node_modules/.bin/pi --version
+          .venv/bin/qqbot validate
+          .venv/bin/qqbot doctor
+          .venv/bin/python scripts/smoke_release.py
+      - name: Checksum release assets
+        working-directory: dist
+        run: sha256sum ./*.whl ./*.tar.gz REVISION > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

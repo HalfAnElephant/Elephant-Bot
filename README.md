@@ -272,6 +272,10 @@ Core 模型元信息与 Worker 实际模型配置保持一致。生产 runner �
 
 ## 开发与验证
 
+GitHub Actions 自动执行回归、lint、schema 校验、构建和安装冒烟检查。
+推送匹配项目版本的 `v*` 标签后，检查通过会发布包含完整源码包和校验和的 GitHub Release。
+版本发布与手动部署步骤见 [CI 与发布流程](docs/runbooks/releases.md)。
+
 ```sh
 uv run pytest -q
 node --test tests/console_ui.test.cjs
