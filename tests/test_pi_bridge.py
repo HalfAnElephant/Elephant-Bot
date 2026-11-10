@@ -301,6 +301,10 @@ async def test_locked_pi_receives_trusted_elephant_persona_for_every_speech_path
     assert "你是大象" in system and "QQ 文字只用纯文本" in system
     assert "TRUSTED_PERSONA_SENTINEL" in system
     assert "UNTRUSTED_HISTORY_SENTINEL" not in system
+    users = [str(message["content"]) for message in state.requests[0]["payload"]["messages"]
+             if message["role"] == "user"]
+    assert all("TRUSTED_PERSONA_SENTINEL" not in message for message in users)
+    assert any("UNTRUSTED_HISTORY_SENTINEL" in message for message in users)
     assert state.requests[0]["kind"] == ("completion" if notification else "business")
 
 

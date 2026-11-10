@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 
 from qqbot.app import create_app
 from qqbot.config import ModelConfig, Settings, SpeakUpConfig
+from qqbot.dialogue import EXPRESSION_RULES
 from qqbot.domain import OutboundEnvelope
 from qqbot.speakup import SpeakUp
 from qqbot.storage.schema import outbox
@@ -57,6 +58,10 @@ async def test_schedule_survives_restart_and_output_rechecks_state(tmp_path, clo
     sent = deliveries(core)
     assert len(sent) == 1 and len(calls) == 1
     assert 'tools' not in calls[0] and calls[0]['max_tokens'] == 300
+    system = calls[0]['messages'][0]['content']
+    assert system.count(EXPRESSION_RULES) == 1
+    assert core.personas._core.private_chat_prompts in system
+    assert core.personas._core.group_chat_prompt not in system
     assert sent[0].allow_proactive and sent[0].reply_context is None
     assert core.pre_send(sent[0])
     core.save_state(event.conversation.key, mode='silent')

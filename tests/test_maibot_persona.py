@@ -7,7 +7,14 @@ import yaml
 from pydantic import ValidationError
 
 from qqbot import dialogue
-from qqbot.dialogue import PersonaSpec, PersonaStore, render_persona, select_temporary_reply_style
+from qqbot.dialogue import (
+    EXPRESSION_RULES,
+    PersonaSpec,
+    PersonaStore,
+    assemble_prompt,
+    render_persona,
+    select_temporary_reply_style,
+)
 from qqbot.harness.gateway import GENERAL_PROMPT, RunGateway
 from qqbot.providers import COMPLETION_INSTRUCTION
 
@@ -34,16 +41,42 @@ def test_maibot_fields_preserve_legacy_config_and_personality_import():
 
 def test_aurabot_persona_renders_in_both_surfaces_with_boundaries():
     persona = default_persona()
-    assert persona.name == "大象" and persona.identity.startswith("你是大象，")
+    assert persona.name == "大象" and persona.version == 6
     assert "大肥鱼" not in persona.identity and "鲸鱼耳朵" in persona.identity
-    assert "【最后自检】" in persona.identity and "白米饭" in persona.identity
-    assert not persona.behavior_style and not persona.reply_style and not persona.multiple_reply_style
+    assert "灰白" in persona.identity and "白米饭" in persona.identity
+    assert persona.traits and persona.style and persona.behavior_style and persona.reply_style
+    assert persona.multiple_reply_style and persona.multiple_probability == 0
+    assert all(text not in persona.identity for text in ("心情值", "<voice>", "<sticker:", "超过三行", "真实存在的人"))
     snapshot = {"core": persona.model_dump(), "group": {"name": "小象", "reply_length": "简短"}}
     group = render_persona(snapshot, "group")
     private = render_persona(snapshot, "private")
     assert group.startswith("你是小象。") and private.startswith("你是小象。")
     assert persona.identity in group and persona.identity in private
     assert "简短" in group and "不虚构事实" in private
+    assert persona.group_chat_prompt in group and persona.group_chat_prompt not in private
+    assert persona.private_chat_prompts in private and persona.private_chat_prompts not in group
+
+
+@pytest.mark.parametrize("surface", ["group", "private"])
+def test_direct_prompt_shares_host_expression_rules_and_selects_style_once(surface, monkeypatch):
+    choices = []
+    monkeypatch.setattr(dialogue.random, "random", lambda: 0)
+    monkeypatch.setattr(dialogue.random, "choice", lambda styles: choices.append(styles) or styles[0])
+    persona = default_persona().model_dump(mode="json")
+    persona.update(multiple_probability=1, multiple_reply_style=["温和耐心"])
+    messages = assemble_prompt(
+        json.dumps({"core": persona, "group": {"reply_length": "简短"}}, ensure_ascii=False),
+        boundary="HOST_BOUNDARY", platform={"surface": surface}, request="CURRENT_REQUEST",
+        recent_messages=["UNTRUSTED_HISTORY"],
+    )
+    system = messages[0]["content"]
+    assert system.startswith("HOST_BOUNDARY") and system.count(EXPRESSION_RULES) == 1
+    assert EXPRESSION_RULES in GENERAL_PROMPT
+    assert system.index(EXPRESSION_RULES) < system.index(persona["identity"])
+    assert "温和耐心" in system and len(choices) == 1
+    assert "UNTRUSTED_HISTORY" not in system and "CURRENT_REQUEST" not in system
+    data = json.loads(messages[1]["content"])
+    assert data["request"] == "CURRENT_REQUEST" and data["recent_messages"] == ["UNTRUSTED_HISTORY"]
 
 
 def test_new_persona_persists_and_invalid_reload_keeps_last_good(tmp_path):
@@ -80,7 +113,7 @@ async def test_gateway_binds_persona_once_and_keeps_material_out_of_system(tmp_p
     claim = {"task_id": "task", "run_id": "run", "fencing_token": 1, "goal": "聊天",
              "permission_snapshot": {"principal": {"user_id": "user"}},
              "notification_status": "failed" if notification else None,
-             "context": {"expression_habits": "UNTRUSTED_EXPRESSION",
+             "context": {"key": "topic:persona", "expression_habits": "UNTRUSTED_EXPRESSION",
                          "seed": {"surface": "private", "persona": {"core": persona, "group": {}},
                                   "history": ["UNTRUSTED_HISTORY"]}}}
     gateway.bind(claim)
@@ -97,6 +130,10 @@ async def test_gateway_binds_persona_once_and_keeps_material_out_of_system(tmp_p
         assert "UNTRUSTED_EXPRESSION" not in first["system_prompt"]
         assert "UNTRUSTED_HISTORY" not in first["system_prompt"]
         assert first["expression_habits"] == "UNTRUSTED_EXPRESSION"
+        assert first["system_prompt"].count(EXPRESSION_RULES) == 1
+        assert first["seed"] == {"surface": "private", "history": ["UNTRUSTED_HISTORY"]}
+        assert first["seed_id"] == "topic:persona"
+        assert claim["context"]["seed"]["persona"]["core"] == persona
         gateway.revoke()
         gateway.bind({**claim, "run_id": "next"})
         third = await read()

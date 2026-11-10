@@ -6,8 +6,8 @@
 
 | 模块/来源 | 使用方式 | 许可与限制 |
 | --- | --- | --- |
-| MaiBot personality/expression | 保留备用风格兼容、表达抽样与规范化代码、学习与审核提示词；默认人格已改用 Aurabot | GPL-3.0；保留来源和许可，不导入上游全局运行时或 A_memorix |
-| Aurabot | 复制大肥鱼人格正文，仅改名为大象；参考主动搭话机制 | MIT；版权与许可全文见下文 |
+| MaiBot personality/expression | 保留备用风格兼容、表达抽样与规范化代码、学习与审核提示词，参考口语表达和群私聊提示结构 | GPL-3.0；保留来源和许可，不导入上游全局运行时或 A_memorix |
+| Aurabot | 改编大肥鱼角色与打字习惯，参考主动搭话机制 | MIT；版权与许可全文见下文 |
 | A_memorix | 仅核对许可 | AGPL-3.0，额外 GPL 授权只适用于 MaiBot，本项目不继承 |
 | AstrBot Webhook | 协议参考 | AGPL-3.0；未复制代码 |
 | pi 1.5.0 | 独立进程 JSONL RPC | MIT，安装包保留上游版权；不捆绑个人配置 |
@@ -29,14 +29,14 @@
 | `src/qqbot/expressions/prompts/expression_evaluation.prompt` | `prompts/zh-CN/expression_evaluation.prompt` | 保留提示词正文，仅末尾空行不同 |
 | `src/qqbot/expressions/__init__.py` | `src/chat/replyer/maisaka_expression_selector.py` | 适配快速档候选门槛、高频/全池抽样、去重与表达片段格式；改用本项目字符串 ID、权限、来源校验和持久化 |
 | `src/qqbot/expressions/learner.py` | `src/learners/expression_utils.py` | 复用四条表达适宜性审核标准；模型传输、响应校验和来源编号映射改用本项目 HTTP/DTO 接口 |
-| `personas/elephant_default.yaml`（历史版本） | `src/config/official_configs.py` | 旧版曾复制默认人格文案；当前已替换为 Aurabot 人格 |
+| `personas/elephant_default.yaml` | `src/config/official_configs.py` | 旧版曾复制默认人格文案，当前参考其口语表达及群私聊习惯，结合 Aurabot 角色分字段改写 |
 | `src/qqbot/dialogue/__init__.py` | `src/chat/replyer/maisaka_generator_base.py` | 适配概率触发备用风格的选择逻辑；统一渲染旧/新配置，每个执行 run 固定一次选择 |
 
 学习入口和同场景/表达的去重计数参考 `src/learners/expression_learner.py`；没有复制该大型模块。其原文件哈希也列入锁定清单，以区分机制参考与直接移植。Core 调度、数据库迁移、管理 API、权限和删除恢复接线属于本项目适配实现，不声称是 MaiBot 原样代码。
 
 ## Aurabot 人格与主动搭话
 
-来源：[aureth-labs/dsh-aurabot-qq](https://github.com/aureth-labs/dsh-aurabot-qq)，读取日期 2026-11-09。人格来源为 `personas/dafeiyu.md`；正文装入本项目 YAML 的 `identity`，仅将“大肥鱼”替换为“大象”，宿主权限和隐私边界独立保留。主动搭话参考 `src/features/companion.js`，适配本项目消息和持久化接口。
+来源为 [aureth-labs/dsh-aurabot-qq](https://github.com/aureth-labs/dsh-aurabot-qq)，固定提交 `1057a861e4e96aa2fe050000d238280a7901b9dc`。人格 v5 曾将 `personas/dafeiyu.md` 正文改名后装入 `identity`。v6 保留角色外貌和喜好，按身份、性格、表达和群私聊场景改写，沿用用户定制的服饰，移除缺乏运行支撑的能力描述，并将宿主表达规则独立组装。主动搭话参考 `src/features/companion.js`，适配本项目消息和持久化接口。
 
 ```text
 MIT License

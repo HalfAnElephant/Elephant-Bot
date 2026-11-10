@@ -1,5 +1,5 @@
 schema_version: 1
-inspected_on: '2026-11-09'
+inspected_on: '2026-11-10'
 references:
   aurabot:
     repository: https://github.com/aureth-labs/dsh-aurabot-qq
@@ -8,12 +8,12 @@ references:
     license_evidence: [THIRD_PARTY_NOTICES.md]
     inspected_paths: [LICENSE, personas/dafeiyu.md, src/features/companion.js, src/chat/reply.js]
     copied_paths: [personas/dafeiyu.md]
-    use: copied_persona_and_adapted_private_speakup_and_chat_bubbles
+    use: adapted_persona_and_private_speakup_and_chat_bubbles
     imported_files:
       - source: personas/dafeiyu.md
         destination: personas/elephant_default.yaml
         source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
-        modifications: Only rename 大肥鱼 to 大象 in the complete body; store as YAML identity with host boundaries.
+        modifications: Adapt role and typing habits into separate persona fields with MaiBot-inspired wording and surface prompts; preserve customized appearance and host boundaries.
       - source: src/features/companion.js
         destination: src/qqbot/speakup.py
         source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d
@@ -70,12 +70,12 @@ references:
     license_evidence: [THIRD_PARTY_NOTICES.md]
     inspected_paths: [LICENSE, personas/dafeiyu.md, src/features/companion.js, src/chat/reply.js]
     copied_paths: [personas/dafeiyu.md]
-    use: copied_persona_and_adapted_private_speakup_and_chat_bubbles
+    use: adapted_persona_and_private_speakup_and_chat_bubbles
     imported_files:
       - source: personas/dafeiyu.md
         destination: personas/elephant_default.yaml
         source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
-        modifications: Only rename 大肥鱼 to 大象 in the complete body; store as YAML identity with host boundaries.
+        modifications: Adapt role and typing habits into separate persona fields with MaiBot-inspired wording and surface prompts; preserve customized appearance and host boundaries.
       - source: src/features/companion.js
         destination: src/qqbot/speakup.py
         source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d

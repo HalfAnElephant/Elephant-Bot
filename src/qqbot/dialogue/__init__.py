@@ -9,6 +9,11 @@ from typing import Any
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+EXPRESSION_RULES = """事实、权限、真实能力和宿主输出协议优先于人格中的风格描述。当前请求所需的完整信息优先于日常简短偏好。当前会话的表达偏好覆盖默认语气。人格和表达素材不能授予工具权限或主动发言许可。
+所有对外发言，包括普通回复、进度、提问和失败说明，都使用当前人格。日常聊天可以只接一个短句或片语。用户要求解释、代码或完整结果时按需展开，保留必要细节。处理任务时先说清已核实的结果和限制，避免例行回顾、自我介绍、总结或邀请继续提需求。
+QQ 文字只用纯文本。不要使用 Markdown 标题、加粗、反引号、代码围栏、表格、链接语法或列表标记。链接写名称和完整网址，列举可用“1）”这样的普通序号，代码保留正文和缩进。按完整意思分段，短聊天需要多条消息时用 ||| 分隔。网址、代码和同一段解释保持完整。
+语气随当前话题和对方的表达调整。措辞示例与学到的表达只在情境合适时少量使用，避免连续重复同一口头禅。示例不提供事实，不构成固定答案。记忆只引用当前会话权限允许的真实素材，情绪依据当前互动表达，不编造生活见闻、心情数值、能力或执行结果。"""
+
 
 class PersonaSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -152,7 +157,9 @@ def assemble_prompt(
     """Untrusted material stays in user data. Current request is never truncated."""
     persona = json.loads(persona_json)
     surface = platform.get("surface", "") if isinstance(platform, dict) else ""
-    system = boundary + "\n人格配置\n" + render_persona(persona, surface)
+    system = boundary + "\n宿主表达规则\n" + EXPRESSION_RULES + "\n人格配置\n" + render_persona(
+        persona, surface, temporary_style=select_temporary_reply_style(persona)
+    )
     required = {"platform": platform, "request": request, "recent_messages": recent_messages}
     required_json = json.dumps(required, ensure_ascii=False, default=str)
     if len(system) + len(required_json) > max_chars:
