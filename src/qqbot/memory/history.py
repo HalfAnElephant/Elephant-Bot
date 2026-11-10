@@ -107,7 +107,7 @@ class HistoryMemoryService:
                     raise ValueError("memory_id required")
                 # Read-by-ID still runs the complete visibility, validity and evidence filters.
                 records = [record for record in self.social.visible(access) if record.memory_id == memory_id]
-            return {"records": [record.model_dump(mode="json") for record in records],
+            return {"records": [record.model_dump(mode="json", exclude={"embedding"}) for record in records],
                     "source_ids": sorted({source for record in records for source in record.source_event_ids}),
                     "retrieval": "hybrid" if options else "lexical"}
         else:

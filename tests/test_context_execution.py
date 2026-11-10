@@ -973,3 +973,59 @@ async def test_historical_reference_consumes_summary_source_index_with_fresh_aut
     assert previous.event_id not in {row['source'] for row in next_context['seed']['history']}
     await core.stop()
     core.db.close()
+
+
+async def test_process_keeps_eight_sourced_memories_without_serializing_vectors(
+    tmp_path, nap_config, nap_event, clock,
+):
+    import math
+
+    from qqbot.memory import MemoryRecord
+
+    core = core_for(tmp_path, nap_config, clock)
+    values = [math.sin(index + 1) for index in range(512)]
+    norm = math.sqrt(sum(value * value for value in values))
+    vector = tuple(value / norm for value in values)
+    ids, sources = [], []
+    try:
+        for index in range(8):
+            source = event(core, nap_event, 9300 + index, '序列化回归偏好 ' + str(index))
+            access = core.access(source)
+            record = MemoryRecord(
+                scope_type='principal_in_conversation', scope_id=source.conversation.key,
+                subject_ref=source.principal.key, predicate='serialization_' + str(index),
+                value_json=json.dumps(index), text=source.text, source_event_ids=(source.event_id,),
+                source_kind='user_explicit', confidence=1,
+                valid_from=clock.now(), created_at=clock.now(), last_verified_at=clock.now(),
+            )
+            core.social.candidate(access, record, explicit=True)
+            core.social.commit(access, record.memory_id, authorized=True)
+            core.social.store_embedding(access, record.memory_id, vector, 'fixture-encoder', 'fixture-version')
+            ids.append(record.memory_id)
+            sources.append(source)
+        current = event(core, nap_event, 9310, '序列化回归偏好')
+        await core.process(current)
+        with core.db.engine.connect() as conn:
+            context = json.loads(conn.execute(select(tasks.c.context_json).where(
+                tasks.c.source == current.event_id)).scalar_one())
+        memories = context['seed']['memories']
+        assert {record['memory_id'] for record in memories} == set(ids)
+        assert all('embedding' not in record for record in memories)
+        assert all(record['embedding_model_id'] == 'fixture-encoder' for record in memories)
+        assert all(record['embedding_version'] == 'fixture-version' for record in memories)
+        stored = core.social.retrieve(core.access(current), current.text)
+        assert all(record.embedding == vector for record in stored)
+        assert {record.memory_id: record.model_dump(mode='json', exclude={'embedding'}) for record in stored} == {
+            record['memory_id']: record for record in memories}
+        assert {source.event_id for source in sources} <= {item['id'] for item in context['source_manifest']}
+        budget = min(core.settings.context.max_request_bytes // 2, core.settings.model.context_window * 2)
+        request_bytes = len(current.text.encode())
+        assert len(json.dumps(context['seed'], ensure_ascii=False).encode()) + request_bytes <= budget
+        legacy_seed = {**context['seed'], 'memories': [record.model_dump(mode='json') for record in stored]}
+        assert len(json.dumps(legacy_seed, ensure_ascii=False).encode()) + request_bytes > budget
+        assert core.validate_context(core.access(current), context)
+        core.social.revoke_source(core.access(sources[0]), sources[0].event_id)
+        assert not core.validate_context(core.access(current), context)
+    finally:
+        await core.stop()
+        core.db.close()

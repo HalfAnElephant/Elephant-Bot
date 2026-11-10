@@ -1,0 +1,3827 @@
+{
+  "schema_version": "memory-retrieval-evaluation-v1",
+  "evaluation_date": "2026-11-10",
+  "report_item": "F08",
+  "scope": {
+    "data_classification": "synthetic",
+    "initial_documents": 30,
+    "correction_documents": 1,
+    "query_count": 18,
+    "synthetic_groups": [
+      "200",
+      "201"
+    ],
+    "synthetic_members": [
+      "300",
+      "301"
+    ],
+    "identifier_provenance": "Groups, members and all memory contents were authored for the isolated test. These are protocol fixture identifiers.",
+    "expectations_frozen_before_encoder_run": true,
+    "ranking_or_label_tuning_after_observation": false,
+    "production_configuration_changed": false,
+    "real_conversation_data_used": false,
+    "qq_messages_sent": 0,
+    "adapter_mode": "Synthetic OneBot normalization, account-online capability fixture and Core.process. Adapter connections and delivery workers were not started."
+  },
+  "encoder": {
+    "model": "BAAI/bge-small-zh-v1.5",
+    "revision": "7999e1d3359715c523056ef9478215996d62a620",
+    "device": "cpu",
+    "threads": 2,
+    "dimensions": 512,
+    "torch": "2.1.0.dev20230721",
+    "transformers": "4.30.2",
+    "encoder_python": "3.11.4",
+    "method": "CPU FP32 CLS pooling followed by L2 normalization; raw input without retrieval instruction",
+    "max_length_tokens": 512,
+    "evaluation_mode": true,
+    "gradient_tracking": false,
+    "trust_remote_code": false,
+    "local_files_only_during_inference": true,
+    "model_load_and_warmup_ms": 767.475,
+    "model_card": "https://huggingface.co/BAAI/bge-small-zh-v1.5/tree/7999e1d3359715c523056ef9478215996d62a620",
+    "files": {
+      "config.json": {
+        "bytes": 776,
+        "sha256": "3853a7979202c348751b753e36f579c41d8da7d36af617d3d907e1fc9b441f2a",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/config.json"
+      },
+      "tokenizer_config.json": {
+        "bytes": 367,
+        "sha256": "e6f3b96db926a37d4039995fbf5ad17de158dfb8f6343d607e4dbaad18d75f5a",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/tokenizer_config.json"
+      },
+      "tokenizer.json": {
+        "bytes": 439125,
+        "sha256": "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/tokenizer.json"
+      },
+      "vocab.txt": {
+        "bytes": 109540,
+        "sha256": "45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/vocab.txt"
+      },
+      "special_tokens_map.json": {
+        "bytes": 125,
+        "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/special_tokens_map.json"
+      },
+      "model.safetensors": {
+        "bytes": 95827648,
+        "sha256": "354763b9b1357bc9c44f62c6be2276321081ed2567773608c0d0785b61d5a026",
+        "source_url": "https://huggingface.co/BAAI/bge-small-zh-v1.5/resolve/7999e1d3359715c523056ef9478215996d62a620/model.safetensors"
+      }
+    },
+    "weights_removed_after_run": true,
+    "loopback_service_stopped_after_run": true
+  },
+  "environment": {
+    "retrieval_python": "3.13.9 (main, Nov 19 2025, 23:39:32) [Clang 21.1.4 ]",
+    "machine": "arm64",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "retrieval_model_context_window": 32768,
+    "seed_byte_budget": 65536,
+    "embedding_request_timeout_seconds": 1.5,
+    "dependencies_installed_for_evaluation": false
+  },
+  "source_versions": {
+    "actual_encoder_run_git_commit": "05cefa56ab470ea4cc0daf80dbf2aee19a97b723",
+    "actual_encoder_run_source_sha256": {
+      "src/qqbot/memory/__init__.py": "0ffb7a66c321852c719e2c7aed4bb37e78534bd93dfdff98500324e9dc3a68ff",
+      "src/qqbot/memory/history.py": "f73075b2330a1ce06bb781e9e8b6832aed8c0b1ff2deee99fe4aea94372479cb",
+      "src/qqbot/memory/embedding.py": "f2a57ff3bb5e0bb7ca4d306fe4c64a4df3dcb01501f1bd7b31c4dc293d18017e",
+      "src/qqbot/context/__init__.py": "8f9de38c159ac9b19c6ba111ae68051bfe7d20af733a0d6c24849ff77a4f08d1",
+      "src/qqbot/runtime.py": "7a432d69d67d5750d5cca0146f7abd35f499a95184cdb7835f9e9d635f2dc51f"
+    },
+    "serialization_fix_source_sha256": {
+      "src/qqbot/context/__init__.py": "6142d5ef77e320d01e4fc63bc0555769c9c55d2584db0c64e7ad59d24f95282f",
+      "src/qqbot/memory/history.py": "f4eb9587203185a2b4d2c24019b2f7b45944e38606280a3d5fdffd4b749c7e1f"
+    },
+    "dataset_sha256": "1a3eedc7d05a138d878b0eee494818f6050be02ea4fb94dd6c4100d3c42d9069",
+    "dataset_file_format": "UTF-8 json.dumps(dataset, ensure_ascii=False, indent=2) followed by one newline, preserving the embedded key order.",
+    "source_artifacts_sha256": {
+      "dataset.json": "1a3eedc7d05a138d878b0eee494818f6050be02ea4fb94dd6c4100d3c42d9069",
+      "metrics.json": "ca6ab1f2baaf2a6812064254c4e65b882fd190955ec14c8058fb86026cb042d6",
+      "retrieval-trace.jsonl": "55b7015e4b35de667ed0366f9646a20941f9a317f41245a1eefcb1a9907a6229",
+      "encoder-requests.jsonl": "da45c5abd177c8ed420df7afa3a080a34771d262ecb7ea2a59cb8e7d12fcbc8f",
+      "model-manifest.json": "9f869a1d5b43e5dd41d3700ba37c14a31eb6ffc709683465104ff79bf26c42ec",
+      "context-diagnostics.jsonl": "8561b4b54ffb160f005996abdbf2d979711392cb0e5e983c382a433ec16d94d2",
+      "self-check.json": "30e953667b2b48c94abe649906ec91d25b6f891c8798e07dbaf7f480256c9f4c",
+      "cleanup.json": "ae6b9220ab03e36fcfc264b3c2301601e3cbed34710160f510eb4a529d45915b",
+      "postfix-context-replay/metrics.json": "52eec9fd5181c9066215c27ad9825661be9e5754da63e3fc7dec16a3168dc887",
+      "postfix-context-replay/trace.jsonl": "8b1c14883b9cc138d0bbefee0d7ab94f426fc9078c6697a04c8076edaffbdced"
+    }
+  },
+  "dataset": {
+    "data_classification": "synthetic",
+    "expectations_frozen_before_encoder_run": true,
+    "documents": [
+      {
+        "id": "happy",
+        "group": "200",
+        "user": "300",
+        "predicate": "mood",
+        "text": "开心"
+      },
+      {
+        "id": "noise",
+        "group": "200",
+        "user": "300",
+        "predicate": "noise",
+        "text": "厌恶噪音"
+      },
+      {
+        "id": "city_shanghai",
+        "group": "200",
+        "user": "300",
+        "predicate": "city",
+        "text": "居住上海"
+      },
+      {
+        "id": "coffee_old",
+        "group": "200",
+        "user": "300",
+        "predicate": "coffee",
+        "text": "习惯饮用加糖咖啡"
+      },
+      {
+        "id": "dog",
+        "group": "200",
+        "user": "300",
+        "predicate": "pet",
+        "text": "喜欢大型犬"
+      },
+      {
+        "id": "job",
+        "group": "200",
+        "user": "300",
+        "predicate": "occupation",
+        "text": "从事软件开发"
+      },
+      {
+        "id": "sleep",
+        "group": "200",
+        "user": "300",
+        "predicate": "sleep",
+        "text": "通常凌晨一点休息"
+      },
+      {
+        "id": "contact",
+        "group": "200",
+        "user": "300",
+        "predicate": "contact",
+        "text": "希望通过邮件收到提醒"
+      },
+      {
+        "id": "sport",
+        "group": "200",
+        "user": "300",
+        "predicate": "sport",
+        "text": "偏爱游泳"
+      },
+      {
+        "id": "travel",
+        "group": "200",
+        "user": "300",
+        "predicate": "travel",
+        "text": "旅行更喜欢乘坐火车"
+      },
+      {
+        "id": "music",
+        "group": "200",
+        "user": "300",
+        "predicate": "music",
+        "text": "爱听古典交响乐"
+      },
+      {
+        "id": "diet",
+        "group": "200",
+        "user": "300",
+        "predicate": "diet",
+        "text": "茹素"
+      },
+      {
+        "id": "cuisine",
+        "group": "200",
+        "user": "300",
+        "predicate": "cuisine",
+        "text": "钟意火锅"
+      },
+      {
+        "id": "work",
+        "group": "200",
+        "user": "300",
+        "predicate": "work_start",
+        "text": "工作日九点上班"
+      },
+      {
+        "id": "color",
+        "group": "200",
+        "user": "300",
+        "predicate": "color",
+        "text": "衣服偏好深蓝色"
+      },
+      {
+        "id": "cilantro",
+        "group": "200",
+        "user": "300",
+        "predicate": "cilantro",
+        "text": "不喜欢香菜"
+      },
+      {
+        "id": "language",
+        "group": "200",
+        "user": "300",
+        "predicate": "language",
+        "text": "平时使用简体中文"
+      },
+      {
+        "id": "weather",
+        "group": "200",
+        "user": "300",
+        "predicate": "weather",
+        "text": "喜欢凉爽天气"
+      },
+      {
+        "id": "phone",
+        "group": "200",
+        "user": "300",
+        "predicate": "phone",
+        "text": "使用安卓手机"
+      },
+      {
+        "id": "books",
+        "group": "200",
+        "user": "300",
+        "predicate": "books",
+        "text": "爱读科幻小说"
+      },
+      {
+        "id": "b_mood",
+        "group": "200",
+        "user": "301",
+        "predicate": "mood",
+        "text": "心情低落"
+      },
+      {
+        "id": "b_city",
+        "group": "200",
+        "user": "301",
+        "predicate": "city",
+        "text": "居住北京"
+      },
+      {
+        "id": "b_coffee",
+        "group": "200",
+        "user": "301",
+        "predicate": "coffee",
+        "text": "喜欢含糖咖啡"
+      },
+      {
+        "id": "b_cilantro",
+        "group": "200",
+        "user": "301",
+        "predicate": "cilantro",
+        "text": "喜欢香菜"
+      },
+      {
+        "id": "b_diet",
+        "group": "200",
+        "user": "301",
+        "predicate": "diet",
+        "text": "爱吃烧烤荤食"
+      },
+      {
+        "id": "b_color",
+        "group": "200",
+        "user": "301",
+        "predicate": "color",
+        "text": "偏爱红色外套"
+      },
+      {
+        "id": "g2_city",
+        "group": "201",
+        "user": "300",
+        "predicate": "city",
+        "text": "居住广州"
+      },
+      {
+        "id": "g2_coffee",
+        "group": "201",
+        "user": "300",
+        "predicate": "coffee",
+        "text": "喝热拿铁而且加糖"
+      },
+      {
+        "id": "g2_diet",
+        "group": "201",
+        "user": "300",
+        "predicate": "diet",
+        "text": "喜欢海鲜"
+      },
+      {
+        "id": "g2_noise",
+        "group": "201",
+        "user": "300",
+        "predicate": "noise",
+        "text": "偏爱喧闹现场"
+      }
+    ],
+    "correction": {
+      "old_id": "coffee_old",
+      "id": "coffee_new",
+      "group": "200",
+      "user": "300",
+      "predicate": "coffee",
+      "text": "现在只喝无糖咖啡"
+    },
+    "queries": [
+      {
+        "id": "q_happy",
+        "group": "200",
+        "user": "300",
+        "query": "兴高采烈",
+        "relevant_memory_ids": [
+          "happy"
+        ]
+      },
+      {
+        "id": "q_noise",
+        "group": "200",
+        "user": "300",
+        "query": "讨厌吵闹",
+        "relevant_memory_ids": [
+          "noise"
+        ]
+      },
+      {
+        "id": "q_city_alias",
+        "group": "200",
+        "user": "300",
+        "query": "家在魔都",
+        "relevant_memory_ids": [
+          "city_shanghai"
+        ]
+      },
+      {
+        "id": "q_hotpot",
+        "group": "200",
+        "user": "300",
+        "query": "喜欢围炉涮菜",
+        "relevant_memory_ids": [
+          "cuisine"
+        ]
+      },
+      {
+        "id": "q_contact",
+        "group": "200",
+        "user": "300",
+        "query": "怎样给我发通知最合适",
+        "relevant_memory_ids": [
+          "contact"
+        ]
+      },
+      {
+        "id": "q_water_sport",
+        "group": "200",
+        "user": "300",
+        "query": "推荐适合我的水上锻炼",
+        "relevant_memory_ids": [
+          "sport"
+        ]
+      },
+      {
+        "id": "q_music",
+        "group": "200",
+        "user": "300",
+        "query": "我爱听什么类型的音乐",
+        "relevant_memory_ids": [
+          "music"
+        ]
+      },
+      {
+        "id": "q_negative_cilantro",
+        "group": "200",
+        "user": "300",
+        "query": "我会接受加芫荽的菜吗",
+        "relevant_memory_ids": [
+          "cilantro"
+        ]
+      },
+      {
+        "id": "q_corrected_coffee",
+        "group": "200",
+        "user": "300",
+        "query": "我现在的咖啡需要放糖吗",
+        "relevant_memory_ids": [
+          "coffee_new"
+        ]
+      },
+      {
+        "id": "q_negative_sugar",
+        "group": "200",
+        "user": "300",
+        "query": "我已经不喝加糖的黑咖了",
+        "relevant_memory_ids": [
+          "coffee_new"
+        ]
+      },
+      {
+        "id": "q_color",
+        "group": "200",
+        "user": "300",
+        "query": "穿衣更中意什么颜色",
+        "relevant_memory_ids": [
+          "color"
+        ]
+      },
+      {
+        "id": "q_person_b_city",
+        "group": "200",
+        "user": "301",
+        "query": "我住在什么城市",
+        "relevant_memory_ids": [
+          "b_city"
+        ]
+      },
+      {
+        "id": "q_person_b_coffee",
+        "group": "200",
+        "user": "301",
+        "query": "我会加糖喝咖啡吗",
+        "relevant_memory_ids": [
+          "b_coffee"
+        ]
+      },
+      {
+        "id": "q_group2_city",
+        "group": "201",
+        "user": "300",
+        "query": "我现在定居在哪座城市",
+        "relevant_memory_ids": [
+          "g2_city"
+        ]
+      },
+      {
+        "id": "q_group2_coffee",
+        "group": "201",
+        "user": "300",
+        "query": "我平常喝的拿铁是怎样的",
+        "relevant_memory_ids": [
+          "g2_coffee"
+        ]
+      },
+      {
+        "id": "q_vegetarian",
+        "group": "200",
+        "user": "300",
+        "query": "我饮食上会回避动物肉类吗",
+        "relevant_memory_ids": [
+          "diet"
+        ]
+      },
+      {
+        "id": "q_late_sleep",
+        "group": "200",
+        "user": "300",
+        "query": "习惯在深夜才就寝",
+        "relevant_memory_ids": [
+          "sleep"
+        ]
+      },
+      {
+        "id": "q_work_start",
+        "group": "200",
+        "user": "300",
+        "query": "每天上班开始的钟点",
+        "relevant_memory_ids": [
+          "work"
+        ]
+      }
+    ]
+  },
+  "actual_encoder_run": {
+    "evaluation_kind": "real_local_cpu_embedding_and_normal_core_context_consumption",
+    "initial_index": {
+      "indexed": 30,
+      "skipped": 0,
+      "failed": 0
+    },
+    "corrected_index": {
+      "indexed": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "model_request_counts": {
+      "initial_document_encoding": 30,
+      "corrected_document_encoding": 1,
+      "direct_cold_query_encoding": 18,
+      "normal_core_process_query_encoding": 18,
+      "failure_and_version_checks": 3,
+      "observed_http_requests_total": 70,
+      "cache_hit_extra_http_requests": 0,
+      "warmup_encoding_outside_http_count": 1
+    },
+    "normal_core_tasks_accepted": 18,
+    "normal_core_contexts_valid": 18,
+    "query_vectors_produced": 18,
+    "recall_at_k": {
+      "lexical": {
+        "1": {
+          "numerator": 11,
+          "denominator": 18,
+          "rate": 0.6111111111111112
+        },
+        "3": {
+          "numerator": 12,
+          "denominator": 18,
+          "rate": 0.6666666666666666
+        },
+        "5": {
+          "numerator": 12,
+          "denominator": 18,
+          "rate": 0.6666666666666666
+        }
+      },
+      "hybrid": {
+        "1": {
+          "numerator": 13,
+          "denominator": 18,
+          "rate": 0.7222222222222222
+        },
+        "3": {
+          "numerator": 16,
+          "denominator": 18,
+          "rate": 0.8888888888888888
+        },
+        "5": {
+          "numerator": 17,
+          "denominator": 18,
+          "rate": 0.9444444444444444
+        }
+      },
+      "seed": {
+        "1": {
+          "numerator": 13,
+          "denominator": 18,
+          "rate": 0.7222222222222222
+        },
+        "3": {
+          "numerator": 16,
+          "denominator": 18,
+          "rate": 0.8888888888888888
+        },
+        "5": {
+          "numerator": 17,
+          "denominator": 18,
+          "rate": 0.9444444444444444
+        }
+      }
+    },
+    "no_character_overlap_subset": {
+      "case_ids": [
+        "q_happy",
+        "q_city_alias",
+        "q_hotpot",
+        "q_water_sport",
+        "q_vegetarian",
+        "q_late_sleep"
+      ],
+      "query_count": 6,
+      "recall_at_k": {
+        "lexical": {
+          "1": {
+            "numerator": 0,
+            "denominator": 6,
+            "rate": 0.0
+          },
+          "3": {
+            "numerator": 0,
+            "denominator": 6,
+            "rate": 0.0
+          },
+          "5": {
+            "numerator": 0,
+            "denominator": 6,
+            "rate": 0.0
+          }
+        },
+        "hybrid": {
+          "1": {
+            "numerator": 1,
+            "denominator": 6,
+            "rate": 0.16666666666666666
+          },
+          "3": {
+            "numerator": 4,
+            "denominator": 6,
+            "rate": 0.6666666666666666
+          },
+          "5": {
+            "numerator": 5,
+            "denominator": 6,
+            "rate": 0.8333333333333334
+          }
+        },
+        "seed": {
+          "1": {
+            "numerator": 1,
+            "denominator": 6,
+            "rate": 0.16666666666666666
+          },
+          "3": {
+            "numerator": 4,
+            "denominator": 6,
+            "rate": 0.6666666666666666
+          },
+          "5": {
+            "numerator": 5,
+            "denominator": 6,
+            "rate": 0.8333333333333334
+          }
+        }
+      }
+    },
+    "isolation": {
+      "wrong_person_query_rate": {
+        "numerator": 0,
+        "denominator": 18,
+        "rate": 0.0
+      },
+      "wrong_group_query_rate": {
+        "numerator": 0,
+        "denominator": 18,
+        "rate": 0.0
+      },
+      "wrong_person_returned_record_rate": {
+        "numerator": 0,
+        "denominator": 88,
+        "rate": 0.0
+      },
+      "wrong_group_returned_record_rate": {
+        "numerator": 0,
+        "denominator": 88,
+        "rate": 0.0
+      },
+      "measurement_boundary": "Final model-facing seed records, with subject_ref and scope_id compared to the current synthetic event."
+    },
+    "latency_ms": {
+      "lexical_ms": {
+        "median": 2.105,
+        "p95": 3.201,
+        "max": 3.201
+      },
+      "cold_query_vector_ms": {
+        "median": 13.5045,
+        "p95": 15.413,
+        "max": 15.413
+      },
+      "cache_query_ms": {
+        "median": 0.2325,
+        "p95": 0.305,
+        "max": 0.305
+      },
+      "core_process_ms": {
+        "median": 314.6085,
+        "p95": 332.677,
+        "max": 332.677
+      }
+    },
+    "latency_method": "Monotonic wall clock. Median and nearest-rank p95 over 18 queries. For this sample count p95 equals the observed maximum. Cold query timings exclude encoder loading and warmup. Core.process includes its normal 200ms coalescing wait.",
+    "failure_contract": {
+      "timeout_ms": 1504.311,
+      "timeout_returned_lexical_options": true,
+      "fallback_equals_lexical": true,
+      "dimension_mismatch_rejected": true,
+      "model_version_mismatch_equals_lexical": true
+    },
+    "failure_injection_method": {
+      "timeout": "The loopback handler delayed the same genuine encoder response by two seconds. query_options returned lexical fallback at the 1.5-second deadline.",
+      "dimensions": "The real encoder returned 512 values while HTTPEmbedding expected 513. The response was rejected.",
+      "model_version": "A genuine query vector was retrieved with a deliberately different index-version identifier. Retrieval matched the lexical baseline."
+    },
+    "correction": {
+      "old_was_indexed": true,
+      "old_status": "superseded",
+      "old_embedding_cleared": true,
+      "old_seed_exposures": 0
+    },
+    "negation_and_correction_case_ids": [
+      "q_negative_cilantro",
+      "q_corrected_coffee",
+      "q_negative_sugar"
+    ],
+    "failed_at_5": [
+      {
+        "case_id": "q_vegetarian",
+        "query": "我饮食上会回避动物肉类吗",
+        "expected": [
+          "diet"
+        ],
+        "hybrid_ids": [
+          "city_shanghai",
+          "work",
+          "cilantro",
+          "dog",
+          "sport",
+          "noise",
+          "diet",
+          "coffee_new"
+        ],
+        "seed_ids": [
+          "city_shanghai",
+          "work",
+          "cilantro",
+          "dog",
+          "sport"
+        ],
+        "expected_text": "茹素",
+        "expected_hybrid_rank": 7,
+        "finding": "The expected memory was ranked seventh and the original seed retained five records. No expected label, ranking or model parameter was adjusted."
+      }
+    ],
+    "trace": [
+      {
+        "case_id": "q_happy",
+        "group": "200",
+        "user": "300",
+        "query": "兴高采烈",
+        "expected": [
+          "happy"
+        ],
+        "expected_lexical_overlap": {
+          "happy": 0
+        },
+        "lexical_ids": [],
+        "hybrid_ids": [
+          "happy",
+          "weather",
+          "dog",
+          "sport",
+          "contact",
+          "music",
+          "work",
+          "diet"
+        ],
+        "seed_ids": [
+          "happy",
+          "weather",
+          "dog",
+          "sport",
+          "contact"
+        ],
+        "seed_texts": [
+          "开心",
+          "喜欢凉爽天气",
+          "喜欢大型犬",
+          "偏爱游泳",
+          "希望通过邮件收到提醒"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "5d430aaaf2fe88c47f9b0a903e47c2535a53053c1e986ff694e2152c64b6f8d9",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "兴高采烈",
+            "elapsed_ms": 12.569,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 3.201,
+        "cold_query_vector_ms": 10.546,
+        "cache_query_ms": 0.229,
+        "core_process_ms": 299.07
+      },
+      {
+        "case_id": "q_noise",
+        "group": "200",
+        "user": "300",
+        "query": "讨厌吵闹",
+        "expected": [
+          "noise"
+        ],
+        "expected_lexical_overlap": {
+          "noise": 1
+        },
+        "lexical_ids": [
+          "noise"
+        ],
+        "hybrid_ids": [
+          "noise",
+          "cilantro",
+          "happy",
+          "sport",
+          "weather",
+          "work",
+          "dog",
+          "sleep"
+        ],
+        "seed_ids": [
+          "noise",
+          "cilantro",
+          "happy",
+          "sport",
+          "weather"
+        ],
+        "seed_texts": [
+          "厌恶噪音",
+          "不喜欢香菜",
+          "开心",
+          "偏爱游泳",
+          "喜欢凉爽天气"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "c2a80cef691f07b9fc013e3fb984942b3c9258d092d20ae40204f1d3891c2422",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "讨厌吵闹",
+            "elapsed_ms": 9.569,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.255,
+        "cold_query_vector_ms": 10.824,
+        "cache_query_ms": 0.224,
+        "core_process_ms": 289.649
+      },
+      {
+        "case_id": "q_city_alias",
+        "group": "200",
+        "user": "300",
+        "query": "家在魔都",
+        "expected": [
+          "city_shanghai"
+        ],
+        "expected_lexical_overlap": {
+          "city_shanghai": 0
+        },
+        "lexical_ids": [
+          "coffee_new"
+        ],
+        "hybrid_ids": [
+          "coffee_new",
+          "city_shanghai",
+          "dog",
+          "work",
+          "happy",
+          "weather",
+          "noise",
+          "job"
+        ],
+        "seed_ids": [
+          "coffee_new",
+          "city_shanghai",
+          "dog",
+          "work",
+          "happy"
+        ],
+        "seed_texts": [
+          "现在只喝无糖咖啡",
+          "居住上海",
+          "喜欢大型犬",
+          "工作日九点上班",
+          "开心"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "cf570b21f84937a636dddc9a2227cbaeeb7c0b94895001873baa6ced537ef6d1",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "家在魔都",
+            "elapsed_ms": 17.349,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.094,
+        "cold_query_vector_ms": 11.921,
+        "cache_query_ms": 0.228,
+        "core_process_ms": 314.768
+      },
+      {
+        "case_id": "q_hotpot",
+        "group": "200",
+        "user": "300",
+        "query": "喜欢围炉涮菜",
+        "expected": [
+          "cuisine"
+        ],
+        "expected_lexical_overlap": {
+          "cuisine": 0
+        },
+        "lexical_ids": [
+          "cilantro",
+          "dog",
+          "travel",
+          "weather"
+        ],
+        "hybrid_ids": [
+          "cilantro",
+          "dog",
+          "weather",
+          "travel",
+          "cuisine",
+          "happy",
+          "sport",
+          "city_shanghai"
+        ],
+        "seed_ids": [
+          "cilantro",
+          "dog",
+          "weather",
+          "travel",
+          "cuisine"
+        ],
+        "seed_texts": [
+          "不喜欢香菜",
+          "喜欢大型犬",
+          "喜欢凉爽天气",
+          "旅行更喜欢乘坐火车",
+          "钟意火锅"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "0953b5989e53492c469a2440f5d0b1419767f61bfb201f52dd9d08d61adfb9cc",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "喜欢围炉涮菜",
+            "elapsed_ms": 17.592,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.284,
+        "cold_query_vector_ms": 12.069,
+        "cache_query_ms": 0.258,
+        "core_process_ms": 314.449
+      },
+      {
+        "case_id": "q_contact",
+        "group": "200",
+        "user": "300",
+        "query": "怎样给我发通知最合适",
+        "expected": [
+          "contact"
+        ],
+        "expected_lexical_overlap": {
+          "contact": 1
+        },
+        "lexical_ids": [
+          "job",
+          "sleep",
+          "contact"
+        ],
+        "hybrid_ids": [
+          "contact",
+          "sleep",
+          "job",
+          "language",
+          "happy",
+          "color",
+          "phone",
+          "work"
+        ],
+        "seed_ids": [
+          "contact",
+          "sleep",
+          "job",
+          "language",
+          "happy"
+        ],
+        "seed_texts": [
+          "希望通过邮件收到提醒",
+          "通常凌晨一点休息",
+          "从事软件开发",
+          "平时使用简体中文",
+          "开心"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "b95e1ee44fd7571f66fb5a636edbd9e4ac53dc4a291bfe27a2a54fdd7f5423a3",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "怎样给我发通知最合适",
+            "elapsed_ms": 14.774,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.116,
+        "cold_query_vector_ms": 13.728,
+        "cache_query_ms": 0.235,
+        "core_process_ms": 311.171
+      },
+      {
+        "case_id": "q_water_sport",
+        "group": "200",
+        "user": "300",
+        "query": "推荐适合我的水上锻炼",
+        "expected": [
+          "sport"
+        ],
+        "expected_lexical_overlap": {
+          "sport": 0
+        },
+        "lexical_ids": [
+          "city_shanghai",
+          "work"
+        ],
+        "hybrid_ids": [
+          "city_shanghai",
+          "work",
+          "sport",
+          "weather",
+          "language",
+          "travel",
+          "color",
+          "dog"
+        ],
+        "seed_ids": [
+          "city_shanghai",
+          "work",
+          "sport",
+          "weather",
+          "language"
+        ],
+        "seed_texts": [
+          "居住上海",
+          "工作日九点上班",
+          "偏爱游泳",
+          "喜欢凉爽天气",
+          "平时使用简体中文"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "4e1e1fb2a9ad46459bb763a7bd95951f1776ee656979396b1e935796eb5af87c",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "推荐适合我的水上锻炼",
+            "elapsed_ms": 15.256,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.14,
+        "cold_query_vector_ms": 13.986,
+        "cache_query_ms": 0.232,
+        "core_process_ms": 317.32
+      },
+      {
+        "case_id": "q_music",
+        "group": "200",
+        "user": "300",
+        "query": "我爱听什么类型的音乐",
+        "expected": [
+          "music"
+        ],
+        "expected_lexical_overlap": {
+          "music": 4
+        },
+        "lexical_ids": [
+          "music",
+          "noise",
+          "dog",
+          "sport",
+          "books"
+        ],
+        "hybrid_ids": [
+          "music",
+          "dog",
+          "noise",
+          "books",
+          "sport",
+          "weather",
+          "phone",
+          "color"
+        ],
+        "seed_ids": [
+          "music",
+          "dog",
+          "noise",
+          "books",
+          "sport"
+        ],
+        "seed_texts": [
+          "爱听古典交响乐",
+          "喜欢大型犬",
+          "厌恶噪音",
+          "爱读科幻小说",
+          "偏爱游泳"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "0411238967f71b4ade52d3e82db48f1fb8cc6f9f48a079c3d4855484deec5772",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我爱听什么类型的音乐",
+            "elapsed_ms": 13.309,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.197,
+        "cold_query_vector_ms": 14.169,
+        "cache_query_ms": 0.239,
+        "core_process_ms": 309.107
+      },
+      {
+        "case_id": "q_negative_cilantro",
+        "group": "200",
+        "user": "300",
+        "query": "我会接受加芫荽的菜吗",
+        "expected": [
+          "cilantro"
+        ],
+        "expected_lexical_overlap": {
+          "cilantro": 1
+        },
+        "lexical_ids": [
+          "cilantro"
+        ],
+        "hybrid_ids": [
+          "cilantro",
+          "language",
+          "contact",
+          "noise",
+          "diet",
+          "weather",
+          "happy",
+          "color"
+        ],
+        "seed_ids": [
+          "cilantro",
+          "language",
+          "contact",
+          "noise",
+          "diet"
+        ],
+        "seed_texts": [
+          "不喜欢香菜",
+          "平时使用简体中文",
+          "希望通过邮件收到提醒",
+          "厌恶噪音",
+          "茹素"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "96b6bd2353ee679ab95210a366a458ae2b2d07a73e58d794e58b4564157c60eb",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我会接受加芫荽的菜吗",
+            "elapsed_ms": 14.42,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.054,
+        "cold_query_vector_ms": 13.322,
+        "cache_query_ms": 0.229,
+        "core_process_ms": 319.878
+      },
+      {
+        "case_id": "q_corrected_coffee",
+        "group": "200",
+        "user": "300",
+        "query": "我现在的咖啡需要放糖吗",
+        "expected": [
+          "coffee_new"
+        ],
+        "expected_lexical_overlap": {
+          "coffee_new": 7
+        },
+        "lexical_ids": [
+          "coffee_new"
+        ],
+        "hybrid_ids": [
+          "coffee_new",
+          "sleep",
+          "contact",
+          "cilantro",
+          "phone",
+          "language",
+          "work",
+          "happy"
+        ],
+        "seed_ids": [
+          "coffee_new",
+          "sleep",
+          "contact",
+          "cilantro",
+          "phone"
+        ],
+        "seed_texts": [
+          "现在只喝无糖咖啡",
+          "通常凌晨一点休息",
+          "希望通过邮件收到提醒",
+          "不喜欢香菜",
+          "使用安卓手机"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "96da87b1e785331fbda3df93030881de478c5b0674685c97348a0887d0a45d07",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我现在的咖啡需要放糖吗",
+            "elapsed_ms": 16.742,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.043,
+        "cold_query_vector_ms": 13.228,
+        "cache_query_ms": 0.224,
+        "core_process_ms": 324.99
+      },
+      {
+        "case_id": "q_negative_sugar",
+        "group": "200",
+        "user": "300",
+        "query": "我已经不喝加糖的黑咖了",
+        "expected": [
+          "coffee_new"
+        ],
+        "expected_lexical_overlap": {
+          "coffee_new": 3
+        },
+        "lexical_ids": [
+          "coffee_new",
+          "cilantro"
+        ],
+        "hybrid_ids": [
+          "coffee_new",
+          "cilantro",
+          "sleep",
+          "noise",
+          "sport",
+          "color",
+          "weather",
+          "happy"
+        ],
+        "seed_ids": [
+          "coffee_new",
+          "cilantro",
+          "sleep",
+          "noise",
+          "sport"
+        ],
+        "seed_texts": [
+          "现在只喝无糖咖啡",
+          "不喜欢香菜",
+          "通常凌晨一点休息",
+          "厌恶噪音",
+          "偏爱游泳"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "896aec0cf7b1b880e73e13fe84114360f9a3257179d5c3f0113a2b0792f0dd72",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我已经不喝加糖的黑咖了",
+            "elapsed_ms": 14.426,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.118,
+        "cold_query_vector_ms": 13.755,
+        "cache_query_ms": 0.23,
+        "core_process_ms": 325.068
+      },
+      {
+        "case_id": "q_color",
+        "group": "200",
+        "user": "300",
+        "query": "穿衣更中意什么颜色",
+        "expected": [
+          "color"
+        ],
+        "expected_lexical_overlap": {
+          "color": 2
+        },
+        "lexical_ids": [
+          "color",
+          "travel",
+          "cuisine",
+          "language"
+        ],
+        "hybrid_ids": [
+          "color",
+          "travel",
+          "language",
+          "cuisine",
+          "weather",
+          "happy",
+          "sport",
+          "sleep"
+        ],
+        "seed_ids": [
+          "color",
+          "travel",
+          "language",
+          "cuisine",
+          "weather"
+        ],
+        "seed_texts": [
+          "衣服偏好深蓝色",
+          "旅行更喜欢乘坐火车",
+          "平时使用简体中文",
+          "钟意火锅",
+          "喜欢凉爽天气"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "f87c8452cb0620364e194942af52fba016aa30b619e9c7829838abfe3f283b18",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "穿衣更中意什么颜色",
+            "elapsed_ms": 13.072,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.089,
+        "cold_query_vector_ms": 13.637,
+        "cache_query_ms": 0.233,
+        "core_process_ms": 315.146
+      },
+      {
+        "case_id": "q_person_b_city",
+        "group": "200",
+        "user": "301",
+        "query": "我住在什么城市",
+        "expected": [
+          "b_city"
+        ],
+        "expected_lexical_overlap": {
+          "b_city": 1
+        },
+        "lexical_ids": [
+          "b_city"
+        ],
+        "hybrid_ids": [
+          "b_city",
+          "b_mood",
+          "b_cilantro",
+          "b_diet",
+          "b_coffee",
+          "b_color"
+        ],
+        "seed_ids": [
+          "b_city",
+          "b_mood",
+          "b_cilantro",
+          "b_diet",
+          "b_coffee"
+        ],
+        "seed_texts": [
+          "居住北京",
+          "心情低落",
+          "喜欢香菜",
+          "爱吃烧烤荤食",
+          "喜欢含糖咖啡"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "bfc9107119956d596a43d8414fa57da7bc60f5ee948c780b671e7205b244baca",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我住在什么城市",
+            "elapsed_ms": 13.789,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 0.923,
+        "cold_query_vector_ms": 13.453,
+        "cache_query_ms": 0.249,
+        "core_process_ms": 308.654
+      },
+      {
+        "case_id": "q_person_b_coffee",
+        "group": "200",
+        "user": "301",
+        "query": "我会加糖喝咖啡吗",
+        "expected": [
+          "b_coffee"
+        ],
+        "expected_lexical_overlap": {
+          "b_coffee": 4
+        },
+        "lexical_ids": [
+          "b_coffee"
+        ],
+        "hybrid_ids": [
+          "b_coffee",
+          "b_cilantro",
+          "b_diet",
+          "b_mood",
+          "b_city",
+          "b_color"
+        ],
+        "seed_ids": [
+          "b_coffee",
+          "b_cilantro",
+          "b_diet",
+          "b_mood",
+          "b_city"
+        ],
+        "seed_texts": [
+          "喜欢含糖咖啡",
+          "喜欢香菜",
+          "爱吃烧烤荤食",
+          "心情低落",
+          "居住北京"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "53a5931363e044e553bafa927e3a13ad224681a34034ec96fea6c40e5dba18c0",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我会加糖喝咖啡吗",
+            "elapsed_ms": 14.247,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 0.904,
+        "cold_query_vector_ms": 13.351,
+        "cache_query_ms": 0.245,
+        "core_process_ms": 313.423
+      },
+      {
+        "case_id": "q_group2_city",
+        "group": "201",
+        "user": "300",
+        "query": "我现在定居在哪座城市",
+        "expected": [
+          "g2_city"
+        ],
+        "expected_lexical_overlap": {
+          "g2_city": 1
+        },
+        "lexical_ids": [
+          "g2_city",
+          "g2_noise"
+        ],
+        "hybrid_ids": [
+          "g2_city",
+          "g2_noise",
+          "g2_diet",
+          "g2_coffee"
+        ],
+        "seed_ids": [
+          "g2_city",
+          "g2_noise",
+          "g2_diet",
+          "g2_coffee"
+        ],
+        "seed_texts": [
+          "居住广州",
+          "偏爱喧闹现场",
+          "喜欢海鲜",
+          "喝热拿铁而且加糖"
+        ],
+        "seed_count": 4,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "ccf4fc3b95d897919818d4e03868e83895802ca24112aa93973a4a1446ef390b",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我现在定居在哪座城市",
+            "elapsed_ms": 11.643,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 0.755,
+        "cold_query_vector_ms": 13.556,
+        "cache_query_ms": 0.227,
+        "core_process_ms": 245.197
+      },
+      {
+        "case_id": "q_group2_coffee",
+        "group": "201",
+        "user": "300",
+        "query": "我平常喝的拿铁是怎样的",
+        "expected": [
+          "g2_coffee"
+        ],
+        "expected_lexical_overlap": {
+          "g2_coffee": 4
+        },
+        "lexical_ids": [
+          "g2_coffee"
+        ],
+        "hybrid_ids": [
+          "g2_coffee",
+          "g2_diet",
+          "g2_city",
+          "g2_noise"
+        ],
+        "seed_ids": [
+          "g2_coffee",
+          "g2_diet",
+          "g2_city",
+          "g2_noise"
+        ],
+        "seed_texts": [
+          "喝热拿铁而且加糖",
+          "喜欢海鲜",
+          "居住广州",
+          "偏爱喧闹现场"
+        ],
+        "seed_count": 4,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "0e32e06516927e1fe0ab314684d5b0c03a19c4cfe0c28b4fd49c4b8a8d838b75",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我平常喝的拿铁是怎样的",
+            "elapsed_ms": 17.399,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 0.941,
+        "cold_query_vector_ms": 14.882,
+        "cache_query_ms": 0.281,
+        "core_process_ms": 259.622
+      },
+      {
+        "case_id": "q_vegetarian",
+        "group": "200",
+        "user": "300",
+        "query": "我饮食上会回避动物肉类吗",
+        "expected": [
+          "diet"
+        ],
+        "expected_lexical_overlap": {
+          "diet": 0
+        },
+        "lexical_ids": [
+          "city_shanghai",
+          "work"
+        ],
+        "hybrid_ids": [
+          "city_shanghai",
+          "work",
+          "cilantro",
+          "dog",
+          "sport",
+          "noise",
+          "diet",
+          "coffee_new"
+        ],
+        "seed_ids": [
+          "city_shanghai",
+          "work",
+          "cilantro",
+          "dog",
+          "sport"
+        ],
+        "seed_texts": [
+          "居住上海",
+          "工作日九点上班",
+          "不喜欢香菜",
+          "喜欢大型犬",
+          "偏爱游泳"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "842694d0e26a462e974da24e7b6a50bab0d0b9b1db993a979eb9332de159904d",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "我饮食上会回避动物肉类吗",
+            "elapsed_ms": 15.449,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 3.092,
+        "cold_query_vector_ms": 15.413,
+        "cache_query_ms": 0.305,
+        "core_process_ms": 330.201
+      },
+      {
+        "case_id": "q_late_sleep",
+        "group": "200",
+        "user": "300",
+        "query": "习惯在深夜才就寝",
+        "expected": [
+          "sleep"
+        ],
+        "expected_lexical_overlap": {
+          "sleep": 0
+        },
+        "lexical_ids": [
+          "color",
+          "coffee_new"
+        ],
+        "hybrid_ids": [
+          "color",
+          "coffee_new",
+          "sleep",
+          "work",
+          "noise",
+          "city_shanghai",
+          "weather",
+          "contact"
+        ],
+        "seed_ids": [
+          "color",
+          "coffee_new",
+          "sleep",
+          "work",
+          "noise"
+        ],
+        "seed_texts": [
+          "衣服偏好深蓝色",
+          "现在只喝无糖咖啡",
+          "通常凌晨一点休息",
+          "工作日九点上班",
+          "厌恶噪音"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "4ddfefe313994a3439b3fcacbba463b526e3940c8ae24c49fd01b542b8870e49",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "习惯在深夜才就寝",
+            "elapsed_ms": 12.429,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.046,
+        "cold_query_vector_ms": 14.147,
+        "cache_query_ms": 0.237,
+        "core_process_ms": 317.946
+      },
+      {
+        "case_id": "q_work_start",
+        "group": "200",
+        "user": "300",
+        "query": "每天上班开始的钟点",
+        "expected": [
+          "work"
+        ],
+        "expected_lexical_overlap": {
+          "work": 4
+        },
+        "lexical_ids": [
+          "work",
+          "happy",
+          "city_shanghai",
+          "job",
+          "sleep",
+          "cuisine",
+          "weather"
+        ],
+        "hybrid_ids": [
+          "work",
+          "happy",
+          "sleep",
+          "job",
+          "city_shanghai",
+          "weather",
+          "cuisine",
+          "contact"
+        ],
+        "seed_ids": [
+          "work",
+          "happy",
+          "sleep",
+          "job",
+          "city_shanghai"
+        ],
+        "seed_texts": [
+          "工作日九点上班",
+          "开心",
+          "通常凌晨一点休息",
+          "从事软件开发",
+          "居住上海"
+        ],
+        "seed_count": 5,
+        "query_vector_produced": true,
+        "vector_dimensions": 512,
+        "vector_sha256": "08f2728b1c83326be2e16b2b39242a4d6135c877288d5c22f083278cfa8e5b14",
+        "cache_reused_options": true,
+        "cache_model_requests": 0,
+        "wrong_person_ids": [],
+        "wrong_group_ids": [],
+        "old_superseded_exposed": false,
+        "core_task_accepted": true,
+        "core_context_valid": true,
+        "core_process_model_requests": 1,
+        "core_encoder_requests": [
+          {
+            "input": "每天上班开始的钟点",
+            "elapsed_ms": 14.509,
+            "dimensions": 512
+          }
+        ],
+        "lexical_ms": 2.134,
+        "cold_query_vector_ms": 11.457,
+        "cache_query_ms": 0.23,
+        "core_process_ms": 332.677
+      }
+    ],
+    "encoder_http_trace": [
+      {
+        "path": "/embeddings",
+        "input": "开心",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.212487958,
+        "dimensions": 512,
+        "vector_sha256": "ae7e6e19fa40c5072de958c15ac5d3530c7bf0dc9a7aa3f95f816398d879f17b",
+        "norm": 0.9999999592712703,
+        "elapsed_ms": 18.965
+      },
+      {
+        "path": "/embeddings",
+        "input": "厌恶噪音",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.237943875,
+        "dimensions": 512,
+        "vector_sha256": "1c0974a46f82751ff38238cd973245d97fe94b8fb09ed82f7813b1b5f4325af3",
+        "norm": 0.9999999362504298,
+        "elapsed_ms": 8.149
+      },
+      {
+        "path": "/embeddings",
+        "input": "居住上海",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.251388958,
+        "dimensions": 512,
+        "vector_sha256": "c428f7510869782769100f65ca27f4c0855105c748d9b1834dc71f12de188ca1",
+        "norm": 0.9999999686456538,
+        "elapsed_ms": 6.181
+      },
+      {
+        "path": "/embeddings",
+        "input": "习惯饮用加糖咖啡",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.262455791,
+        "dimensions": 512,
+        "vector_sha256": "f120f28e24b590094f1876afc470798d3cdb580050c7f98b2750763413e7b4f5",
+        "norm": 0.9999999750059791,
+        "elapsed_ms": 6.749
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢大型犬",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.274233541,
+        "dimensions": 512,
+        "vector_sha256": "ee9a4e7cb6320d2a0a3a8612dac9c5e31eaedd88e365ab42405d1cf3752dd178",
+        "norm": 1.000000037310812,
+        "elapsed_ms": 6.546
+      },
+      {
+        "path": "/embeddings",
+        "input": "从事软件开发",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.286004625,
+        "dimensions": 512,
+        "vector_sha256": "889fab14dfeef86e64ec7fb8f8b4daf92588b03bcdc279befde60a9cd9f9ce46",
+        "norm": 0.999999971054532,
+        "elapsed_ms": 6.483
+      },
+      {
+        "path": "/embeddings",
+        "input": "通常凌晨一点休息",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.2973985,
+        "dimensions": 512,
+        "vector_sha256": "276c3c7670180006101c42b97ce8ecb296e4a1ed62b1ca022d5a8252a41d302d",
+        "norm": 0.999999996274333,
+        "elapsed_ms": 6.65
+      },
+      {
+        "path": "/embeddings",
+        "input": "希望通过邮件收到提醒",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.308811833,
+        "dimensions": 512,
+        "vector_sha256": "6b80c4e3eb48fc6b40375e3ea1d42126f23f42c1c5b00a76bcdcb8a28a7a67e5",
+        "norm": 0.9999999719468,
+        "elapsed_ms": 6.512
+      },
+      {
+        "path": "/embeddings",
+        "input": "偏爱游泳",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.320472583,
+        "dimensions": 512,
+        "vector_sha256": "66ee2fef414a65f00baba41bc0a84df91d54e1bf09165ab47fe7bfd6f6ae4826",
+        "norm": 1.0000000189051264,
+        "elapsed_ms": 6.363
+      },
+      {
+        "path": "/embeddings",
+        "input": "旅行更喜欢乘坐火车",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.331641541,
+        "dimensions": 512,
+        "vector_sha256": "5d43f3da5ed8089ae250c5d225d362b5ea8180e6b143aad2529a4e6fee45842f",
+        "norm": 0.9999999715304448,
+        "elapsed_ms": 6.64
+      },
+      {
+        "path": "/embeddings",
+        "input": "爱听古典交响乐",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.34312875,
+        "dimensions": 512,
+        "vector_sha256": "c6ec16a84b35da39d993434b744a5591feea72952df2ce6225d093083b367762",
+        "norm": 1.000000043560044,
+        "elapsed_ms": 6.467
+      },
+      {
+        "path": "/embeddings",
+        "input": "茹素",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.354613041,
+        "dimensions": 512,
+        "vector_sha256": "36a2f69e1dbde26813f52be6f61dfc14555eb74507fea02aaeddeabb7adb57db",
+        "norm": 1.000000057397261,
+        "elapsed_ms": 6.369
+      },
+      {
+        "path": "/embeddings",
+        "input": "钟意火锅",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.36617025,
+        "dimensions": 512,
+        "vector_sha256": "c0cad8e6696941cbcc52e8d0ade151dade879aa1526159aa287ccc824657de44",
+        "norm": 1.000000059700278,
+        "elapsed_ms": 6.588
+      },
+      {
+        "path": "/embeddings",
+        "input": "工作日九点上班",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.378051625,
+        "dimensions": 512,
+        "vector_sha256": "000daa3cf28b1996d37e2008b8be41a6bf1ae7f4b496ad5e9cfe741940a68469",
+        "norm": 0.9999999908004906,
+        "elapsed_ms": 6.524
+      },
+      {
+        "path": "/embeddings",
+        "input": "衣服偏好深蓝色",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.390048916,
+        "dimensions": 512,
+        "vector_sha256": "c11ae194b15ec922496df3cbdbbf8dc52ac2612f191c90bcabca6c7cc4b6eb3b",
+        "norm": 0.9999999608102904,
+        "elapsed_ms": 6.084
+      },
+      {
+        "path": "/embeddings",
+        "input": "不喜欢香菜",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.400953125,
+        "dimensions": 512,
+        "vector_sha256": "2e92a100ba9a2fb607f0a414e605d002a78fce60166116db1192e1d657960662",
+        "norm": 1.0000000552934853,
+        "elapsed_ms": 6.056
+      },
+      {
+        "path": "/embeddings",
+        "input": "平时使用简体中文",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.412591583,
+        "dimensions": 512,
+        "vector_sha256": "c55aac79a058741a67f04290c7c4106e8830fd6e25cf5b83fa608b4ff48e74de",
+        "norm": 0.9999999923289347,
+        "elapsed_ms": 6.181
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢凉爽天气",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.42358475,
+        "dimensions": 512,
+        "vector_sha256": "e4fda4fb72f4609744b0f776e92d6012b62af41e52db705df26d8fbad8db396b",
+        "norm": 1.0000000173978947,
+        "elapsed_ms": 6.029
+      },
+      {
+        "path": "/embeddings",
+        "input": "使用安卓手机",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.434399375,
+        "dimensions": 512,
+        "vector_sha256": "16b7b133b20dccde371f10f633332cd15ef1e53b4447156db5f290f30d9083d2",
+        "norm": 1.0000000200032202,
+        "elapsed_ms": 5.992
+      },
+      {
+        "path": "/embeddings",
+        "input": "爱读科幻小说",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.445236791,
+        "dimensions": 512,
+        "vector_sha256": "908b36c3b3fa444e3bdfe917ae7b4b28efa093a828e3de10d61702461662f9ad",
+        "norm": 1.0000000269895848,
+        "elapsed_ms": 6.003
+      },
+      {
+        "path": "/embeddings",
+        "input": "心情低落",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.456720916,
+        "dimensions": 512,
+        "vector_sha256": "32c43c6635ad4119933647eea91c27bf535c30df338a74fada244b20929cf964",
+        "norm": 1.0000000311626862,
+        "elapsed_ms": 6.646
+      },
+      {
+        "path": "/embeddings",
+        "input": "居住北京",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.468388333,
+        "dimensions": 512,
+        "vector_sha256": "5a522c09775f46593919f619cc9994c1459e7d292eb3bc13f9514b7f68e23a51",
+        "norm": 1.0000000614386184,
+        "elapsed_ms": 6.084
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢含糖咖啡",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.479399291,
+        "dimensions": 512,
+        "vector_sha256": "580c23c933551d5483c5371cc0b3834ed129e5552bc686fe7e677f84c9793ee5",
+        "norm": 1.0000000298347511,
+        "elapsed_ms": 6.037
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢香菜",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.490309708,
+        "dimensions": 512,
+        "vector_sha256": "22696e954fd94bd161c5a7a4681a4bc22017f2b0b16d6171cc1ba93ea232c051",
+        "norm": 1.0000000468498316,
+        "elapsed_ms": 5.949
+      },
+      {
+        "path": "/embeddings",
+        "input": "爱吃烧烤荤食",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.500994208,
+        "dimensions": 512,
+        "vector_sha256": "02187aa4234d531522aedc06eed410e29070691832947a64ad5bfcd67235f18d",
+        "norm": 0.9999999831419734,
+        "elapsed_ms": 6.0
+      },
+      {
+        "path": "/embeddings",
+        "input": "偏爱红色外套",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.51168875,
+        "dimensions": 512,
+        "vector_sha256": "7a1c36b5586e4761b90b399a7fd864d817508bde9691e3c650116be20ad72a5f",
+        "norm": 0.999999998164842,
+        "elapsed_ms": 6.052
+      },
+      {
+        "path": "/embeddings",
+        "input": "居住广州",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.523146833,
+        "dimensions": 512,
+        "vector_sha256": "2bb356776d4c942e0aa10b0c05891ef687d8ad8cb73ab6a618599342faf4f430",
+        "norm": 1.0000000460065452,
+        "elapsed_ms": 5.916
+      },
+      {
+        "path": "/embeddings",
+        "input": "喝热拿铁而且加糖",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.533836666,
+        "dimensions": 512,
+        "vector_sha256": "bbdab12c5ebf3937b353f58b47924eee8731da65638ce2994233207ef2c158f5",
+        "norm": 0.9999999477952123,
+        "elapsed_ms": 6.074
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢海鲜",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.544664875,
+        "dimensions": 512,
+        "vector_sha256": "b29a4b7c80e0a349242bb6869b3d1e2d1f3d5a87d8aff95eedb838a15f7b529e",
+        "norm": 1.0000000087550112,
+        "elapsed_ms": 6.41
+      },
+      {
+        "path": "/embeddings",
+        "input": "偏爱喧闹现场",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.556056875,
+        "dimensions": 512,
+        "vector_sha256": "c5e8ef050974eb38c9f636ef7a0cc061cf6f5f5d0c75dee2e77954fdb4ff6bfe",
+        "norm": 0.9999999522073412,
+        "elapsed_ms": 6.307
+      },
+      {
+        "path": "/embeddings",
+        "input": "现在只喝无糖咖啡",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.57044425,
+        "dimensions": 512,
+        "vector_sha256": "bbcf7186f56c95572fcd2b3d37d56b3245408d84b4939d845aa05834a2cca062",
+        "norm": 0.99999999281152,
+        "elapsed_ms": 6.463
+      },
+      {
+        "path": "/embeddings",
+        "input": "兴高采烈",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.58633375,
+        "dimensions": 512,
+        "vector_sha256": "5d430aaaf2fe88c47f9b0a903e47c2535a53053c1e986ff694e2152c64b6f8d9",
+        "norm": 1.0000000527668897,
+        "elapsed_ms": 6.443
+      },
+      {
+        "path": "/embeddings",
+        "input": "兴高采烈",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.845458166,
+        "dimensions": 512,
+        "vector_sha256": "5d430aaaf2fe88c47f9b0a903e47c2535a53053c1e986ff694e2152c64b6f8d9",
+        "norm": 1.0000000527668897,
+        "elapsed_ms": 12.569
+      },
+      {
+        "path": "/embeddings",
+        "input": "讨厌吵闹",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195256.94333125,
+        "dimensions": 512,
+        "vector_sha256": "c2a80cef691f07b9fc013e3fb984942b3c9258d092d20ae40204f1d3891c2422",
+        "norm": 0.9999999838488304,
+        "elapsed_ms": 6.723
+      },
+      {
+        "path": "/embeddings",
+        "input": "讨厌吵闹",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195257.196341083,
+        "dimensions": 512,
+        "vector_sha256": "c2a80cef691f07b9fc013e3fb984942b3c9258d092d20ae40204f1d3891c2422",
+        "norm": 0.9999999838488304,
+        "elapsed_ms": 9.569
+      },
+      {
+        "path": "/embeddings",
+        "input": "家在魔都",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195257.290768583,
+        "dimensions": 512,
+        "vector_sha256": "cf570b21f84937a636dddc9a2227cbaeeb7c0b94895001873baa6ced537ef6d1",
+        "norm": 0.9999999982888975,
+        "elapsed_ms": 7.493
+      },
+      {
+        "path": "/embeddings",
+        "input": "家在魔都",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195257.550347625,
+        "dimensions": 512,
+        "vector_sha256": "cf570b21f84937a636dddc9a2227cbaeeb7c0b94895001873baa6ced537ef6d1",
+        "norm": 0.9999999982888975,
+        "elapsed_ms": 17.349
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢围炉涮菜",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195257.665605708,
+        "dimensions": 512,
+        "vector_sha256": "0953b5989e53492c469a2440f5d0b1419767f61bfb201f52dd9d08d61adfb9cc",
+        "norm": 1.0000000220315886,
+        "elapsed_ms": 7.436
+      },
+      {
+        "path": "/embeddings",
+        "input": "喜欢围炉涮菜",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195257.924530875,
+        "dimensions": 512,
+        "vector_sha256": "0953b5989e53492c469a2440f5d0b1419767f61bfb201f52dd9d08d61adfb9cc",
+        "norm": 1.0000000220315886,
+        "elapsed_ms": 17.592
+      },
+      {
+        "path": "/embeddings",
+        "input": "怎样给我发通知最合适",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195258.040598041,
+        "dimensions": 512,
+        "vector_sha256": "b95e1ee44fd7571f66fb5a636edbd9e4ac53dc4a291bfe27a2a54fdd7f5423a3",
+        "norm": 0.9999999808136778,
+        "elapsed_ms": 6.975
+      },
+      {
+        "path": "/embeddings",
+        "input": "怎样给我发通知最合适",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195258.301341791,
+        "dimensions": 512,
+        "vector_sha256": "b95e1ee44fd7571f66fb5a636edbd9e4ac53dc4a291bfe27a2a54fdd7f5423a3",
+        "norm": 0.9999999808136778,
+        "elapsed_ms": 14.774
+      },
+      {
+        "path": "/embeddings",
+        "input": "推荐适合我的水上锻炼",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195258.412376208,
+        "dimensions": 512,
+        "vector_sha256": "4e1e1fb2a9ad46459bb763a7bd95951f1776ee656979396b1e935796eb5af87c",
+        "norm": 1.0000000334925268,
+        "elapsed_ms": 7.119
+      },
+      {
+        "path": "/embeddings",
+        "input": "推荐适合我的水上锻炼",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195258.675725833,
+        "dimensions": 512,
+        "vector_sha256": "4e1e1fb2a9ad46459bb763a7bd95951f1776ee656979396b1e935796eb5af87c",
+        "norm": 1.0000000334925268,
+        "elapsed_ms": 15.256
+      },
+      {
+        "path": "/embeddings",
+        "input": "我爱听什么类型的音乐",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195258.790780875,
+        "dimensions": 512,
+        "vector_sha256": "0411238967f71b4ade52d3e82db48f1fb8cc6f9f48a079c3d4855484deec5772",
+        "norm": 1.0000000953800672,
+        "elapsed_ms": 7.308
+      },
+      {
+        "path": "/embeddings",
+        "input": "我爱听什么类型的音乐",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.051296916,
+        "dimensions": 512,
+        "vector_sha256": "0411238967f71b4ade52d3e82db48f1fb8cc6f9f48a079c3d4855484deec5772",
+        "norm": 1.0000000953800672,
+        "elapsed_ms": 13.309
+      },
+      {
+        "path": "/embeddings",
+        "input": "我会接受加芫荽的菜吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.159622916,
+        "dimensions": 512,
+        "vector_sha256": "96b6bd2353ee679ab95210a366a458ae2b2d07a73e58d794e58b4564157c60eb",
+        "norm": 0.9999999687434793,
+        "elapsed_ms": 6.836
+      },
+      {
+        "path": "/embeddings",
+        "input": "我会接受加芫荽的菜吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.421439208,
+        "dimensions": 512,
+        "vector_sha256": "96b6bd2353ee679ab95210a366a458ae2b2d07a73e58d794e58b4564157c60eb",
+        "norm": 0.9999999687434793,
+        "elapsed_ms": 14.42
+      },
+      {
+        "path": "/embeddings",
+        "input": "我现在的咖啡需要放糖吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.53940125,
+        "dimensions": 512,
+        "vector_sha256": "96da87b1e785331fbda3df93030881de478c5b0674685c97348a0887d0a45d07",
+        "norm": 1.0000000206238409,
+        "elapsed_ms": 6.827
+      },
+      {
+        "path": "/embeddings",
+        "input": "我现在的咖啡需要放糖吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.803564916,
+        "dimensions": 512,
+        "vector_sha256": "96da87b1e785331fbda3df93030881de478c5b0674685c97348a0887d0a45d07",
+        "norm": 1.0000000206238409,
+        "elapsed_ms": 16.742
+      },
+      {
+        "path": "/embeddings",
+        "input": "我已经不喝加糖的黑咖了",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195259.924466875,
+        "dimensions": 512,
+        "vector_sha256": "896aec0cf7b1b880e73e13fe84114360f9a3257179d5c3f0113a2b0792f0dd72",
+        "norm": 1.0000000447046964,
+        "elapsed_ms": 7.19
+      },
+      {
+        "path": "/embeddings",
+        "input": "我已经不喝加糖的黑咖了",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195260.185843166,
+        "dimensions": 512,
+        "vector_sha256": "896aec0cf7b1b880e73e13fe84114360f9a3257179d5c3f0113a2b0792f0dd72",
+        "norm": 1.0000000447046964,
+        "elapsed_ms": 14.426
+      },
+      {
+        "path": "/embeddings",
+        "input": "穿衣更中意什么颜色",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195260.310211791,
+        "dimensions": 512,
+        "vector_sha256": "f87c8452cb0620364e194942af52fba016aa30b619e9c7829838abfe3f283b18",
+        "norm": 1.0000000518489964,
+        "elapsed_ms": 6.901
+      },
+      {
+        "path": "/embeddings",
+        "input": "穿衣更中意什么颜色",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195260.571087166,
+        "dimensions": 512,
+        "vector_sha256": "f87c8452cb0620364e194942af52fba016aa30b619e9c7829838abfe3f283b18",
+        "norm": 1.0000000518489964,
+        "elapsed_ms": 13.072
+      },
+      {
+        "path": "/embeddings",
+        "input": "我住在什么城市",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195260.684325541,
+        "dimensions": 512,
+        "vector_sha256": "bfc9107119956d596a43d8414fa57da7bc60f5ee948c780b671e7205b244baca",
+        "norm": 1.0000000640906548,
+        "elapsed_ms": 7.008
+      },
+      {
+        "path": "/embeddings",
+        "input": "我住在什么城市",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195260.945702666,
+        "dimensions": 512,
+        "vector_sha256": "bfc9107119956d596a43d8414fa57da7bc60f5ee948c780b671e7205b244baca",
+        "norm": 1.0000000640906548,
+        "elapsed_ms": 13.789
+      },
+      {
+        "path": "/embeddings",
+        "input": "我会加糖喝咖啡吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.050343625,
+        "dimensions": 512,
+        "vector_sha256": "53a5931363e044e553bafa927e3a13ad224681a34034ec96fea6c40e5dba18c0",
+        "norm": 1.0000000366266082,
+        "elapsed_ms": 6.801
+      },
+      {
+        "path": "/embeddings",
+        "input": "我会加糖喝咖啡吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.311883208,
+        "dimensions": 512,
+        "vector_sha256": "53a5931363e044e553bafa927e3a13ad224681a34034ec96fea6c40e5dba18c0",
+        "norm": 1.0000000366266082,
+        "elapsed_ms": 14.247
+      },
+      {
+        "path": "/embeddings",
+        "input": "我现在定居在哪座城市",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.420658,
+        "dimensions": 512,
+        "vector_sha256": "ccf4fc3b95d897919818d4e03868e83895802ca24112aa93973a4a1446ef390b",
+        "norm": 1.0000000058369383,
+        "elapsed_ms": 6.988
+      },
+      {
+        "path": "/embeddings",
+        "input": "我现在定居在哪座城市",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.679143083,
+        "dimensions": 512,
+        "vector_sha256": "ccf4fc3b95d897919818d4e03868e83895802ca24112aa93973a4a1446ef390b",
+        "norm": 1.0000000058369383,
+        "elapsed_ms": 11.643
+      },
+      {
+        "path": "/embeddings",
+        "input": "我平常喝的拿铁是怎样的",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.724585625,
+        "dimensions": 512,
+        "vector_sha256": "0e32e06516927e1fe0ab314684d5b0c03a19c4cfe0c28b4fd49c4b8a8d838b75",
+        "norm": 0.9999999765154012,
+        "elapsed_ms": 7.951
+      },
+      {
+        "path": "/embeddings",
+        "input": "我平常喝的拿铁是怎样的",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195261.98567225,
+        "dimensions": 512,
+        "vector_sha256": "0e32e06516927e1fe0ab314684d5b0c03a19c4cfe0c28b4fd49c4b8a8d838b75",
+        "norm": 0.9999999765154012,
+        "elapsed_ms": 17.399
+      },
+      {
+        "path": "/embeddings",
+        "input": "我饮食上会回避动物肉类吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195262.04694125,
+        "dimensions": 512,
+        "vector_sha256": "842694d0e26a462e974da24e7b6a50bab0d0b9b1db993a979eb9332de159904d",
+        "norm": 1.0000000138244092,
+        "elapsed_ms": 8.871
+      },
+      {
+        "path": "/embeddings",
+        "input": "我饮食上会回避动物肉类吗",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195262.316110708,
+        "dimensions": 512,
+        "vector_sha256": "842694d0e26a462e974da24e7b6a50bab0d0b9b1db993a979eb9332de159904d",
+        "norm": 1.0000000138244092,
+        "elapsed_ms": 15.449
+      },
+      {
+        "path": "/embeddings",
+        "input": "习惯在深夜才就寝",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195262.440125125,
+        "dimensions": 512,
+        "vector_sha256": "4ddfefe313994a3439b3fcacbba463b526e3940c8ae24c49fd01b542b8870e49",
+        "norm": 0.9999999546355813,
+        "elapsed_ms": 7.501
+      },
+      {
+        "path": "/embeddings",
+        "input": "习惯在深夜才就寝",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195262.702448708,
+        "dimensions": 512,
+        "vector_sha256": "4ddfefe313994a3439b3fcacbba463b526e3940c8ae24c49fd01b542b8870e49",
+        "norm": 0.9999999546355813,
+        "elapsed_ms": 12.429
+      },
+      {
+        "path": "/embeddings",
+        "input": "每天上班开始的钟点",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195262.817284458,
+        "dimensions": 512,
+        "vector_sha256": "08f2728b1c83326be2e16b2b39242a4d6135c877288d5c22f083278cfa8e5b14",
+        "norm": 0.9999999233118134,
+        "elapsed_ms": 7.198
+      },
+      {
+        "path": "/embeddings",
+        "input": "每天上班开始的钟点",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195263.083300416,
+        "dimensions": 512,
+        "vector_sha256": "08f2728b1c83326be2e16b2b39242a4d6135c877288d5c22f083278cfa8e5b14",
+        "norm": 0.9999999233118134,
+        "elapsed_ms": 14.509
+      },
+      {
+        "path": "/embeddings",
+        "input": "只为维度校验使用的合成文本",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195264.726478041,
+        "dimensions": 512,
+        "vector_sha256": "532257441337dd45df2fd08f6d6ee9c9d3681f827490cf8a52b07bbebfd9c297",
+        "norm": 0.9999999664240999,
+        "elapsed_ms": 17.965
+      },
+      {
+        "path": "/embeddings",
+        "input": "只为模型版本隔离使用的合成文本",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195264.759744416,
+        "dimensions": 512,
+        "vector_sha256": "da523de92e4adbf6a446cb9af488fabde4d19772f76e0c3cc7fd252b6e5b7ffa",
+        "norm": 1.000000012144194,
+        "elapsed_ms": 9.4
+      },
+      {
+        "path": "/timeout",
+        "input": "只为超时验收使用的合成检索句子",
+        "model": "BAAI/bge-small-zh-v1.5",
+        "started_monotonic": 195263.219445458,
+        "dimensions": 512,
+        "vector_sha256": "5ff45ed6c9391ce14ba95df7ae258f80f0189ad97bc09eb6405beb0ab2548dee",
+        "norm": 1.0000000172460706,
+        "elapsed_ms": 2033.155
+      }
+    ],
+    "structural_self_checks": {
+      "frozen_dataset_hash_unchanged": true,
+      "all_actual_encoder_dimensions_512": true,
+      "all_actual_encoder_vectors_unit_length": true,
+      "each_normal_core_request_uses_exact_query": true,
+      "query_vector_hash_matches_actual_encoder_log": true,
+      "repeated_real_encoding_is_deterministic": true,
+      "all_cache_hits_avoid_model_requests": true,
+      "no_weight_files_remain": true,
+      "encoder_request_count_matches_report": true
+    }
+  },
+  "serialization_fix": {
+    "change": "Exclude only embedding when serializing ContextService seed memories and HistoryMemoryService memory.search/get records for the model.",
+    "model_facing_paths": [
+      "src/qqbot/context/__init__.py",
+      "src/qqbot/memory/history.py"
+    ],
+    "preserved_evidence": [
+      "memory_id",
+      "scope_type",
+      "scope_id",
+      "subject_ref",
+      "predicate",
+      "value_json",
+      "text",
+      "source_event_ids",
+      "source_kind",
+      "confidence",
+      "status",
+      "valid_from",
+      "valid_until",
+      "created_at",
+      "last_verified_at",
+      "supersedes_id",
+      "sensitivity",
+      "embedding_model_id",
+      "embedding_version",
+      "extraction_model",
+      "prompt_version"
+    ],
+    "storage_and_retrieval_vectors_retained": true,
+    "before": {
+      "memory_counts": [
+        4,
+        5
+      ],
+      "median_embedding_byte_fraction": 0.8650176135735157,
+      "max_seed_bytes": 65359,
+      "observation": "Current production seed serializes each 512-dimensional memory embedding. Under the 32768-token model setting byte budget, these seeds retained 4 or 5 of up to 8 retrieved records. No code/config tuning was performed."
+    },
+    "after_saved_rank_replay": {
+      "evaluation_kind": "saved_real_encoder_rank_context_replay",
+      "new_encoder_requests": 0,
+      "queries": 18,
+      "replayed_retrieve_calls": 18,
+      "old_seed_counts": [
+        4,
+        5
+      ],
+      "new_seed_counts": [
+        4,
+        6,
+        8
+      ],
+      "full_seed_frozen_target_coverage": {
+        "numerator": 18,
+        "denominator": 18
+      },
+      "max_seed_bytes": 24376,
+      "all_sources_valid": true,
+      "all_embedding_metadata_preserved": true,
+      "original_actual_encoder_log_unchanged": true,
+      "byte_budget": 65536,
+      "interpretation": "The saved actual encoder ranking and stored source records were replayed through Core.process after the serialization fix. The original recall@1/3/5 and the seventh-place vegetarian rank are retained. Full-seed target coverage increased because the prompt retained more of the existing ranked records.",
+      "trace": [
+        {
+          "case_id": "q_happy",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "happy",
+            "weather",
+            "dog",
+            "sport",
+            "contact"
+          ],
+          "saved_actual_hybrid_ids": [
+            "happy",
+            "weather",
+            "dog",
+            "sport",
+            "contact",
+            "music",
+            "work",
+            "diet"
+          ],
+          "new_seed_ids": [
+            "happy",
+            "weather",
+            "dog",
+            "sport",
+            "contact",
+            "music",
+            "work",
+            "diet"
+          ],
+          "frozen_expected": [
+            "happy"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24019,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_noise",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "noise",
+            "cilantro",
+            "happy",
+            "sport",
+            "weather"
+          ],
+          "saved_actual_hybrid_ids": [
+            "noise",
+            "cilantro",
+            "happy",
+            "sport",
+            "weather",
+            "work",
+            "dog",
+            "sleep"
+          ],
+          "new_seed_ids": [
+            "noise",
+            "cilantro",
+            "happy",
+            "sport",
+            "weather",
+            "work",
+            "dog",
+            "sleep"
+          ],
+          "frozen_expected": [
+            "noise"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24011,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_city_alias",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "coffee_new",
+            "city_shanghai",
+            "dog",
+            "work",
+            "happy"
+          ],
+          "saved_actual_hybrid_ids": [
+            "coffee_new",
+            "city_shanghai",
+            "dog",
+            "work",
+            "happy",
+            "weather",
+            "noise",
+            "job"
+          ],
+          "new_seed_ids": [
+            "coffee_new",
+            "city_shanghai",
+            "dog",
+            "work",
+            "happy",
+            "weather",
+            "noise",
+            "job"
+          ],
+          "frozen_expected": [
+            "city_shanghai"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24035,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_hotpot",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "cilantro",
+            "dog",
+            "weather",
+            "travel",
+            "cuisine"
+          ],
+          "saved_actual_hybrid_ids": [
+            "cilantro",
+            "dog",
+            "weather",
+            "travel",
+            "cuisine",
+            "happy",
+            "sport",
+            "city_shanghai"
+          ],
+          "new_seed_ids": [
+            "cilantro",
+            "dog",
+            "weather",
+            "travel",
+            "cuisine",
+            "happy",
+            "sport",
+            "city_shanghai"
+          ],
+          "frozen_expected": [
+            "cuisine"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24014,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_contact",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "contact",
+            "sleep",
+            "job",
+            "language",
+            "happy"
+          ],
+          "saved_actual_hybrid_ids": [
+            "contact",
+            "sleep",
+            "job",
+            "language",
+            "happy",
+            "color",
+            "phone",
+            "work"
+          ],
+          "new_seed_ids": [
+            "contact",
+            "sleep",
+            "job",
+            "language",
+            "happy",
+            "color",
+            "phone",
+            "work"
+          ],
+          "frozen_expected": [
+            "contact"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24114,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_water_sport",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "city_shanghai",
+            "work",
+            "sport",
+            "weather",
+            "language"
+          ],
+          "saved_actual_hybrid_ids": [
+            "city_shanghai",
+            "work",
+            "sport",
+            "weather",
+            "language",
+            "travel",
+            "color",
+            "dog"
+          ],
+          "new_seed_ids": [
+            "city_shanghai",
+            "work",
+            "sport",
+            "weather",
+            "language",
+            "travel",
+            "color",
+            "dog"
+          ],
+          "frozen_expected": [
+            "sport"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24093,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_music",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "music",
+            "dog",
+            "noise",
+            "books",
+            "sport"
+          ],
+          "saved_actual_hybrid_ids": [
+            "music",
+            "dog",
+            "noise",
+            "books",
+            "sport",
+            "weather",
+            "phone",
+            "color"
+          ],
+          "new_seed_ids": [
+            "music",
+            "dog",
+            "noise",
+            "books",
+            "sport",
+            "weather",
+            "phone",
+            "color"
+          ],
+          "frozen_expected": [
+            "music"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24044,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_negative_cilantro",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "cilantro",
+            "language",
+            "contact",
+            "noise",
+            "diet"
+          ],
+          "saved_actual_hybrid_ids": [
+            "cilantro",
+            "language",
+            "contact",
+            "noise",
+            "diet",
+            "weather",
+            "happy",
+            "color"
+          ],
+          "new_seed_ids": [
+            "cilantro",
+            "language",
+            "contact",
+            "noise",
+            "diet",
+            "weather",
+            "happy",
+            "color"
+          ],
+          "frozen_expected": [
+            "cilantro"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24055,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_corrected_coffee",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "coffee_new",
+            "sleep",
+            "contact",
+            "cilantro",
+            "phone"
+          ],
+          "saved_actual_hybrid_ids": [
+            "coffee_new",
+            "sleep",
+            "contact",
+            "cilantro",
+            "phone",
+            "language",
+            "work",
+            "happy"
+          ],
+          "new_seed_ids": [
+            "coffee_new",
+            "sleep",
+            "contact",
+            "cilantro",
+            "phone",
+            "language",
+            "work",
+            "happy"
+          ],
+          "frozen_expected": [
+            "coffee_new"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24134,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_negative_sugar",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "coffee_new",
+            "cilantro",
+            "sleep",
+            "noise",
+            "sport"
+          ],
+          "saved_actual_hybrid_ids": [
+            "coffee_new",
+            "cilantro",
+            "sleep",
+            "noise",
+            "sport",
+            "color",
+            "weather",
+            "happy"
+          ],
+          "new_seed_ids": [
+            "coffee_new",
+            "cilantro",
+            "sleep",
+            "noise",
+            "sport",
+            "color",
+            "weather",
+            "happy"
+          ],
+          "frozen_expected": [
+            "coffee_new"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24376,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_color",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "color",
+            "travel",
+            "language",
+            "cuisine",
+            "weather"
+          ],
+          "saved_actual_hybrid_ids": [
+            "color",
+            "travel",
+            "language",
+            "cuisine",
+            "weather",
+            "happy",
+            "sport",
+            "sleep"
+          ],
+          "new_seed_ids": [
+            "color",
+            "travel",
+            "language",
+            "cuisine",
+            "weather",
+            "happy",
+            "sport",
+            "sleep"
+          ],
+          "frozen_expected": [
+            "color"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24074,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_person_b_city",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "b_city",
+            "b_mood",
+            "b_cilantro",
+            "b_diet",
+            "b_coffee"
+          ],
+          "saved_actual_hybrid_ids": [
+            "b_city",
+            "b_mood",
+            "b_cilantro",
+            "b_diet",
+            "b_coffee",
+            "b_color"
+          ],
+          "new_seed_ids": [
+            "b_city",
+            "b_mood",
+            "b_cilantro",
+            "b_diet",
+            "b_coffee",
+            "b_color"
+          ],
+          "frozen_expected": [
+            "b_city"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 22261,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_person_b_coffee",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "b_coffee",
+            "b_cilantro",
+            "b_diet",
+            "b_mood",
+            "b_city"
+          ],
+          "saved_actual_hybrid_ids": [
+            "b_coffee",
+            "b_cilantro",
+            "b_diet",
+            "b_mood",
+            "b_city",
+            "b_color"
+          ],
+          "new_seed_ids": [
+            "b_coffee",
+            "b_cilantro",
+            "b_diet",
+            "b_mood",
+            "b_city",
+            "b_color"
+          ],
+          "frozen_expected": [
+            "b_coffee"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 22264,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_group2_city",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "g2_city",
+            "g2_noise",
+            "g2_diet",
+            "g2_coffee"
+          ],
+          "saved_actual_hybrid_ids": [
+            "g2_city",
+            "g2_noise",
+            "g2_diet",
+            "g2_coffee"
+          ],
+          "new_seed_ids": [
+            "g2_city",
+            "g2_noise",
+            "g2_diet",
+            "g2_coffee"
+          ],
+          "frozen_expected": [
+            "g2_city"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 9920,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_group2_coffee",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "g2_coffee",
+            "g2_diet",
+            "g2_city",
+            "g2_noise"
+          ],
+          "saved_actual_hybrid_ids": [
+            "g2_coffee",
+            "g2_diet",
+            "g2_city",
+            "g2_noise"
+          ],
+          "new_seed_ids": [
+            "g2_coffee",
+            "g2_diet",
+            "g2_city",
+            "g2_noise"
+          ],
+          "frozen_expected": [
+            "g2_coffee"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 9923,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_vegetarian",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "city_shanghai",
+            "work",
+            "cilantro",
+            "dog",
+            "sport"
+          ],
+          "saved_actual_hybrid_ids": [
+            "city_shanghai",
+            "work",
+            "cilantro",
+            "dog",
+            "sport",
+            "noise",
+            "diet",
+            "coffee_new"
+          ],
+          "new_seed_ids": [
+            "city_shanghai",
+            "work",
+            "cilantro",
+            "dog",
+            "sport",
+            "noise",
+            "diet",
+            "coffee_new"
+          ],
+          "frozen_expected": [
+            "diet"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24039,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_late_sleep",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "color",
+            "coffee_new",
+            "sleep",
+            "work",
+            "noise"
+          ],
+          "saved_actual_hybrid_ids": [
+            "color",
+            "coffee_new",
+            "sleep",
+            "work",
+            "noise",
+            "city_shanghai",
+            "weather",
+            "contact"
+          ],
+          "new_seed_ids": [
+            "color",
+            "coffee_new",
+            "sleep",
+            "work",
+            "noise",
+            "city_shanghai",
+            "weather",
+            "contact"
+          ],
+          "frozen_expected": [
+            "sleep"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24125,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        },
+        {
+          "case_id": "q_work_start",
+          "evaluation_kind": "saved_real_encoder_rank_context_replay",
+          "old_seed_ids": [
+            "work",
+            "happy",
+            "sleep",
+            "job",
+            "city_shanghai"
+          ],
+          "saved_actual_hybrid_ids": [
+            "work",
+            "happy",
+            "sleep",
+            "job",
+            "city_shanghai",
+            "weather",
+            "cuisine",
+            "contact"
+          ],
+          "new_seed_ids": [
+            "work",
+            "happy",
+            "sleep",
+            "job",
+            "city_shanghai",
+            "weather",
+            "cuisine",
+            "contact"
+          ],
+          "frozen_expected": [
+            "work"
+          ],
+          "full_seed_contains_expected": true,
+          "seed_contains_vector_arrays": false,
+          "source_manifest_complete": true,
+          "context_valid": true,
+          "seed_bytes": 24078,
+          "byte_budget": 65536,
+          "embedding_metadata_preserved": true
+        }
+      ]
+    },
+    "focused_regressions": {
+      "passed": 2,
+      "tests": [
+        "tests/test_history_memory.py::test_model_facing_memory_tools_omit_vectors_and_keep_evidence",
+        "tests/test_context_execution.py::test_process_keeps_eight_sourced_memories_without_serializing_vectors"
+      ],
+      "verified": [
+        "memory.search/get omit the vector array and preserve all other fields",
+        "stored and retrieved records retain the original vector",
+        "normal Core.process retains eight sourced records within its byte budget",
+        "source manifests remain complete and source revocation invalidates context"
+      ]
+    }
+  },
+  "reproduction": {
+    "prerequisites": "Use an isolated checkout matching the recorded source hashes, its Python 3.13 application environment, and an existing compatible Python 3.11 torch/transformers environment. The run used existing dependencies.",
+    "steps": [
+      "Create a dedicated temporary workspace and set ELEPHANT_REPO to the isolated repository checkout. Run application scripts from the repository working directory so the default persona path resolves.",
+      "Write dataset.json from the embedded dataset using the recorded UTF-8 formatting, verify dataset_sha256, and write that hash followed by a newline to dataset.sha256.",
+      "Restore the portable scripts below by joining each lines array with newline and adding a trailing newline. Keep encoder_server.py and run_evaluation.py at the temporary workspace root, and the replay script in postfix-context-replay/.",
+      "Download the six public model files from encoder.files into workspace/model/ using curl with TLS verification. Verify every byte length and SHA-256. Save the encoder metadata as model-manifest.json.",
+      "For the historical before-fix phase, match actual_encoder_run_source_sha256. Start encoder_server.py with the existing encoder interpreter and HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1, TOKENIZERS_PARALLELISM=false. Wait for ready.json.",
+      "Run run_evaluation.py with the repository Python 3.13 interpreter. It creates an isolated synthetic DB, indexes source-backed records, performs the explicit correction, compares lexical/hybrid retrieval, measures normal Core.process seed consumption, and writes raw traces and metrics.",
+      "Stop the PID recorded in ready.json with SIGTERM after evaluation. Confirm its loopback port closed, then remove workspace/model/. Keep hashes and synthetic traces.",
+      "For after-fix context replay, use the serialization_fix_source_sha256 snapshot, the generated synthetic DB and saved real ranking. Run postfix-context-replay/replay.py with the application interpreter. The replay uses saved ranking with fresh source visibility checks and performs zero new embedding inference.",
+      "Keep the frozen relevance labels and report any changed or failed result. Different runtime builds and hardware may change floating-point hashes and latency. Reproduction should report measured outcomes."
+    ],
+    "portable_scripts": {
+      "encoder_server.py": {
+        "original_script_sha256": "3e68f0634fb72f409375f95721af6c56345a50477748fb774ce8cfd059d51b5f",
+        "portable_script_sha256": "3e68f0634fb72f409375f95721af6c56345a50477748fb774ce8cfd059d51b5f",
+        "portability_change": "The repository path is supplied through ELEPHANT_REPO. All evaluation, labels and ranking logic remain as executed.",
+        "lines": [
+          "\"\"\"Temporary CPU encoder. Inputs and outputs are solely the fixed synthetic evaluation.\"\"\"",
+          "import hashlib",
+          "import json",
+          "import os",
+          "import signal",
+          "import threading",
+          "import time",
+          "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer",
+          "from pathlib import Path",
+          "",
+          "import torch",
+          "from transformers import AutoModel, AutoTokenizer",
+          "",
+          "ROOT = Path(__file__).resolve().parent",
+          "MODEL = 'BAAI/bge-small-zh-v1.5'",
+          "started = time.monotonic()",
+          "torch.set_num_threads(2)",
+          "tokenizer = AutoTokenizer.from_pretrained(str(ROOT/'model'), local_files_only=True, trust_remote_code=False)",
+          "model = AutoModel.from_pretrained(str(ROOT/'model'), local_files_only=True, trust_remote_code=False,",
+          "                                  use_safetensors=True).to('cpu').eval()",
+          "lock = threading.Lock()",
+          "log_lock = threading.Lock()",
+          "",
+          "def encode(text):",
+          "    with lock, torch.no_grad():",
+          "        inputs = tokenizer([text], padding=True, truncation=True, max_length=512, return_tensors='pt')",
+          "        result = model(**inputs)[0][:, 0]",
+          "        result = torch.nn.functional.normalize(result, p=2, dim=1)",
+          "        return result[0].tolist()",
+          "",
+          "encode('仅供合成验收的预热文本')",
+          "load_ms = round((time.monotonic()-started)*1000,3)",
+          "",
+          "class Handler(BaseHTTPRequestHandler):",
+          "    def log_message(self, *_args):",
+          "        pass",
+          "",
+          "    def do_POST(self):",
+          "        started = time.monotonic()",
+          "        length = int(self.headers.get('Content-Length','0'))",
+          "        if self.path not in {'/embeddings','/timeout'} or not 0 < length < 65536:",
+          "            self.send_error(400)",
+          "            return",
+          "        body = json.loads(self.rfile.read(length))",
+          "        if body.get('model') != MODEL or not isinstance(body.get('input'),str):",
+          "            self.send_error(422)",
+          "            return",
+          "        record = {'path':self.path,'input':body['input'],'model':MODEL,'started_monotonic':started}",
+          "        if self.path == '/timeout':",
+          "            time.sleep(2)",
+          "        vector = encode(body['input'])",
+          "        record.update(dimensions=len(vector),vector_sha256=hashlib.sha256(json.dumps(vector).encode()).hexdigest(),",
+          "                      norm=sum(value*value for value in vector)**0.5,",
+          "                      elapsed_ms=round((time.monotonic()-started)*1000,3))",
+          "        payload=json.dumps({'object':'list','model':MODEL,'data':[{'index':0,'object':'embedding','embedding':vector}]}).encode()",
+          "        try:",
+          "            self.send_response(200)",
+          "            self.send_header('Content-Type','application/json')",
+          "            self.send_header('Content-Length',str(len(payload)))",
+          "            self.end_headers()",
+          "            self.wfile.write(payload)",
+          "        except (BrokenPipeError,ConnectionResetError):",
+          "            record['client_disconnected']=True",
+          "        with log_lock,(ROOT/'encoder-requests.jsonl').open('a') as output:",
+          "            output.write(json.dumps(record,ensure_ascii=False)+'\\n')",
+          "",
+          "server=ThreadingHTTPServer(('127.0.0.1',0),Handler)",
+          "(ROOT/'ready.json').write_text(json.dumps({'pid':os.getpid(),'port':server.server_port,'model_load_and_warmup_ms':load_ms,",
+          " 'torch':torch.__version__,'transformers':__import__('transformers').__version__,'model':MODEL,",
+          " 'revision':'7999e1d3359715c523056ef9478215996d62a620','device':'cpu','threads':2,'dimensions':512}))",
+          "print((ROOT/'ready.json').read_text(),flush=True)",
+          "signal.signal(signal.SIGTERM,lambda *_args: threading.Thread(target=server.shutdown,daemon=True).start())",
+          "try:",
+          "    server.serve_forever()",
+          "finally:",
+          "    server.server_close()"
+        ]
+      },
+      "run_evaluation.py": {
+        "original_script_sha256": "1f0a64b9701b44952ccb8c07dfafc70e6f543a25e4c54f3d2023960be4d1833a",
+        "portable_script_sha256": "ec0c592bca9cc75151d51a415b67e4c4ae88fcb15bc9ba8ce7521fdd19698086",
+        "portability_change": "The repository path is supplied through ELEPHANT_REPO. All evaluation, labels and ranking logic remain as executed.",
+        "lines": [
+          "\"\"\"Temporary real-encoder retrieval acceptance over frozen synthetic evidence only.\"\"\"",
+          "import asyncio",
+          "import hashlib",
+          "import json",
+          "import math",
+          "import os",
+          "import statistics",
+          "import subprocess",
+          "import time",
+          "from pathlib import Path",
+          "",
+          "import httpx",
+          "from sqlalchemy import func, select",
+          "",
+          "from qqbot.app import create_app",
+          "from qqbot.clock import FakeClock",
+          "from qqbot.config import AdapterConfig, MemoryConfig, ModelConfig, Settings",
+          "from qqbot.memory import MemoryRecord, keywords",
+          "from qqbot.memory.embedding import HTTPEmbedding",
+          "from qqbot.memory.history import HistoryMemoryService",
+          "from qqbot.storage.schema import outbox",
+          "from qqbot.storage.social_schema import social_records",
+          "from qqbot.storage.task_schema import tasks",
+          "",
+          "ROOT=Path(__file__).resolve().parent",
+          "REPO=Path(os.environ['ELEPHANT_REPO']).resolve()",
+          "MODEL='BAAI/bge-small-zh-v1.5'",
+          "VERSION='7999e1d3359715c523056ef9478215996d62a620:cpu-fp32:cls:l2:raw-input-v1'",
+          "DATA=json.loads((ROOT/'dataset.json').read_text())",
+          "",
+          "",
+          "def logs():",
+          "    path=ROOT/'encoder-requests.jsonl'",
+          "    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []",
+          "",
+          "",
+          "def measures(records):",
+          "    output={}",
+          "    for name in ['lexical_ids','hybrid_ids','seed_ids']:",
+          "        output[name.removesuffix('_ids')]={f'recall@{k}':sum(bool(set(row['expected'])&set(row[name][:k])) for row in records)/len(records)",
+          "            for k in [1,3,5]}",
+          "    return output",
+          "",
+          "",
+          "async def main():",
+          "    ready=json.loads((ROOT/'ready.json').read_text())",
+          "    endpoint=f\"http://127.0.0.1:{ready['port']}/embeddings\"",
+          "    os.environ['F08_LOCAL_EMBEDDING_KEY']='local-cpu-evaluation-not-a-secret'",
+          "    os.environ['F08_LOCAL_ADAPTER_TOKEN']='local-adapter-never-connected'",
+          "    settings=Settings(database=str(ROOT/'evaluation.db'),",
+          "        adapters=(AdapterConfig(instance_id='synthetic-nap',kind='onebot',bot_id='100',",
+          "            secret_env='F08_LOCAL_ADAPTER_TOKEN',allowed_groups=('200','201'),allowed_users=('300','301'),",
+          "            full_mode_enabled=True,full_mode_verified=True),),",
+          "        model=ModelConfig(endpoint='http://127.0.0.1:1/never-chat',model='never-called',api_key_env='F08_UNUSED_CHAT_KEY'),",
+          "        memory=MemoryConfig(maintenance_enabled=True,auto_extract=False,embedding_endpoint=endpoint,",
+          "            embedding_model=MODEL,embedding_version=VERSION,embedding_dimensions=512,embedding_key_env='F08_LOCAL_EMBEDDING_KEY'))",
+          "    clock=FakeClock()",
+          "    app=create_app(settings,clock=clock,run_background=False)",
+          "    core=app.state.core",
+          "    adapter=core.adapters['synthetic-nap']",
+          "    adapter.account_online=True",
+          "    serial=1000",
+          "    sources={}",
+          "    accesses={}",
+          "    all_docs={doc['id']:doc for doc in [*DATA['documents'],DATA['correction']]}",
+          "    source_meta={}",
+          "",
+          "    def event(group,user,text,*,invited=False):",
+          "        nonlocal serial",
+          "        serial+=1",
+          "        packet={'post_type':'message','message_type':'group','self_id':100,'group_id':int(group),'user_id':int(user),",
+          "            'message_id':serial,'time':int(clock.now().timestamp()),",
+          "            'message':([{'type':'at','data':{'qq':'100'}}] if invited else [])+[{'type':'text','data':{'text':text}}]}",
+          "        accepted,_=core.inbox.accept(adapter.normalize(packet))",
+          "        clock.advance(1)",
+          "        return accepted",
+          "",
+          "    def record(doc,source):",
+          "        now=clock.now()",
+          "        return MemoryRecord(memory_id=doc['id'],scope_type='principal_in_conversation',scope_id=source.conversation.key,",
+          "            subject_ref=source.principal.key,predicate=doc['predicate'],value_json=json.dumps(doc['text'],ensure_ascii=False),",
+          "            text=doc['text'],source_event_ids=(source.event_id,),source_kind='user_explicit',confidence=1,",
+          "            valid_from=now,created_at=now,last_verified_at=now)",
+          "",
+          "    async def index_pending():",
+          "        indexed=skipped=failed=0",
+          "        for access in accesses.values():",
+          "            for _ in range(5):",
+          "                good,skip,bad=await core.maintenance._index(access)",
+          "                indexed+=good",
+          "                skipped+=skip",
+          "                failed+=bad",
+          "                if not good and not skip and not bad:",
+          "                    break",
+          "        return {'indexed':indexed,'skipped':skipped,'failed':failed}",
+          "",
+          "    try:",
+          "        for doc in DATA['documents']:",
+          "            source=event(doc['group'],doc['user'],'合成自述：'+doc['text'])",
+          "            core.inbox.finish(source.event_id,expected_seq=source.ingest_seq)",
+          "            sources[doc['id']]=source",
+          "            accesses[(doc['group'],doc['user'])]=core.access(source)",
+          "            candidate=core.social.candidate(core.access(source),record(doc,source),explicit=True)",
+          "            core.social.commit(core.access(source),candidate.memory_id,authorized=True)",
+          "            source_meta[doc['id']]={'principal':source.principal.key,'conversation':source.conversation.key}",
+          "        initial_index=await index_pending()",
+          "        with core.db.engine.connect() as conn:",
+          "            old=json.loads(conn.execute(select(social_records.c.record_json).where(social_records.c.id=='coffee_old')).scalar_one())",
+          "        old_was_indexed=old['embedding'] is not None",
+          "        correction=DATA['correction']",
+          "        corrected_source=event(correction['group'],correction['user'],'合成明确纠正：'+correction['text'])",
+          "        core.inbox.finish(corrected_source.event_id,expected_seq=corrected_source.ingest_seq)",
+          "        correct_access=core.access(corrected_source)",
+          "        core.social.correct(correct_access,correction['old_id'],record(correction,corrected_source))",
+          "        source_meta[correction['id']]={'principal':corrected_source.principal.key,'conversation':corrected_source.conversation.key}",
+          "        corrected_index=await index_pending()",
+          "        with core.db.engine.connect() as conn:",
+          "            old=json.loads(conn.execute(select(social_records.c.record_json).where(social_records.c.id=='coffee_old')).scalar_one())",
+          "        probe=HistoryMemoryService(core.social,core.embedding)",
+          "        traces=[]",
+          "        with (ROOT/'retrieval-trace.jsonl').open('w') as trace_file:",
+          "            for case in DATA['queries']:",
+          "                access=accesses[(case['group'],case['user'])]",
+          "                query=case['query']",
+          "                started=time.monotonic()",
+          "                lexical=core.social.retrieve(access,query,limit=8)",
+          "                lexical_ms=(time.monotonic()-started)*1000",
+          "                started=time.monotonic()",
+          "                options=await probe.query_options(access,query)",
+          "                vector_query_ms=(time.monotonic()-started)*1000",
+          "                hybrid=core.social.retrieve(access,query,limit=8,**options)",
+          "                await asyncio.sleep(.01)",
+          "                before_cache=len(logs())",
+          "                started=time.monotonic()",
+          "                cached=await probe.query_options(access,query)",
+          "                cache_ms=(time.monotonic()-started)*1000",
+          "                await asyncio.sleep(.01)",
+          "                cache_requests=len(logs())-before_cache",
+          "                request_before=len(logs())",
+          "                target=event(case['group'],case['user'],query,invited=True)",
+          "                started=time.monotonic()",
+          "                await core.process(target)",
+          "                process_ms=(time.monotonic()-started)*1000",
+          "                await asyncio.sleep(.01)",
+          "                process_requests=logs()[request_before:]",
+          "                with core.db.engine.connect() as conn:",
+          "                    task=conn.execute(select(tasks).where(tasks.c.source==target.event_id)).mappings().first()",
+          "                context=json.loads(task['context_json']) if task else None",
+          "                seed=context['seed']['memories'] if context else []",
+          "                wrong_people=[item['memory_id'] for item in seed if item['subject_ref']!=target.principal.key]",
+          "                wrong_groups=[item['memory_id'] for item in seed if item['scope_id']!=target.conversation.key]",
+          "                overlap={mid:len(keywords(query)&keywords(all_docs[mid]['text'])) for mid in case['relevant_memory_ids']}",
+          "                row={'case_id':case['id'],'group':case['group'],'user':case['user'],'query':query,",
+          "                    'expected':case['relevant_memory_ids'],'expected_lexical_overlap':overlap,",
+          "                    'lexical_ids':[item.memory_id for item in lexical],'hybrid_ids':[item.memory_id for item in hybrid],",
+          "                    'seed_ids':[item['memory_id'] for item in seed],'seed_texts':[item['text'] for item in seed],",
+          "                    'seed_count':len(seed),'query_vector_produced':bool(options.get('embedding')),",
+          "                    'vector_dimensions':len(options.get('embedding',[])),",
+          "                    'vector_sha256':hashlib.sha256(json.dumps(options.get('embedding')).encode()).hexdigest(),",
+          "                    'cache_reused_options':cached==options,'cache_model_requests':cache_requests,",
+          "                    'wrong_person_ids':wrong_people,'wrong_group_ids':wrong_groups,",
+          "                    'old_superseded_exposed':'coffee_old' in [item['memory_id'] for item in seed],",
+          "                    'core_task_accepted':bool(task),'core_context_valid':bool(context and core.validate_context(core.access(target),context)),",
+          "                    'core_process_model_requests':len(process_requests),",
+          "                    'core_encoder_requests':[{'input':item['input'],'elapsed_ms':item['elapsed_ms'],'dimensions':item['dimensions']} for item in process_requests],",
+          "                    'lexical_ms':round(lexical_ms,3),'cold_query_vector_ms':round(vector_query_ms,3),",
+          "                    'cache_query_ms':round(cache_ms,3),'core_process_ms':round(process_ms,3)}",
+          "                traces.append(row)",
+          "                trace_file.write(json.dumps(row,ensure_ascii=False)+'\\n')",
+          "                trace_file.flush()",
+          "                if task:",
+          "                    core.tasks.cancel(task['public_id'],core.access(target))",
+          "                print('CASE',case['id'],'lex',row['lexical_ids'][:3],'hybrid',row['hybrid_ids'][:3],",
+          "                      'seed',row['seed_ids'][:3],'vector_ms',row['cold_query_vector_ms'],flush=True)",
+          "        zero_overlap=[row for row in traces if not any(row['expected_lexical_overlap'].values())]",
+          "        latencies={key:{'median':statistics.median(row[key] for row in traces),",
+          "            'p95':sorted(row[key] for row in traces)[math.ceil(.95*len(traces))-1],",
+          "            'max':max(row[key] for row in traces)}",
+          "            for key in ['lexical_ms','cold_query_vector_ms','cache_query_ms','core_process_ms']}",
+          "        async with httpx.AsyncClient() as client:",
+          "            slow=HTTPEmbedding(endpoint.removesuffix('/embeddings')+'/timeout',MODEL,VERSION,",
+          "                'local-cpu-evaluation-not-a-secret',512,client)",
+          "            slow_history=HistoryMemoryService(core.social,slow)",
+          "            started=time.monotonic()",
+          "            unavailable=await slow_history.query_options(correct_access,'只为超时验收使用的合成检索句子')",
+          "            timeout_ms=(time.monotonic()-started)*1000",
+          "            bad_dimension=HTTPEmbedding(endpoint,MODEL,VERSION,'local-cpu-evaluation-not-a-secret',513,client)",
+          "            wrong_vector=await bad_dimension.embed('只为维度校验使用的合成文本')",
+          "        baseline_ids=[item.memory_id for item in core.social.retrieve(correct_access,'我现在的咖啡需要放糖吗')]",
+          "        fallback_ids=[item.memory_id for item in core.social.retrieve(correct_access,'我现在的咖啡需要放糖吗',**unavailable)]",
+          "        mismatch_options=await probe.query_options(correct_access,'只为模型版本隔离使用的合成文本')",
+          "        mismatch_options={**mismatch_options,'version':'different-model-revision'}",
+          "        mismatched_ids=[item.memory_id for item in core.social.retrieve(correct_access,'我现在的咖啡需要放糖吗',**mismatch_options)]",
+          "        await asyncio.sleep(2.1)",
+          "        with core.db.engine.connect() as conn:",
+          "            sent_count=conn.execute(select(func.count()).select_from(outbox).where(outbox.c.state=='SENT')).scalar_one()",
+          "        report={'data_classification':'synthetic','queries':len(traces),'initial_documents':len(DATA['documents']),",
+          "            'model':ready,'manifest':json.loads((ROOT/'model-manifest.json').read_text()),",
+          "            'dataset_sha256':(ROOT/'dataset.sha256').read_text().strip(),",
+          "            'git_commit':subprocess.run(['git','rev-parse','HEAD'],cwd=REPO,capture_output=True,text=True,check=True).stdout.strip(),",
+          "            'source_sha256':{path:hashlib.sha256((REPO/path).read_bytes()).hexdigest() for path in",
+          "                ['src/qqbot/memory/__init__.py','src/qqbot/memory/history.py','src/qqbot/memory/embedding.py','src/qqbot/context/__init__.py','src/qqbot/runtime.py']},",
+          "            'initial_index':initial_index,'corrected_index':corrected_index,",
+          "            'correction':{'old_was_indexed':old_was_indexed,'old_status':old['status'],",
+          "                          'old_embedding_cleared':old['embedding'] is None,'old_seed_exposures':sum(row['old_superseded_exposed'] for row in traces)},",
+          "            'quality':measures(traces),'no_character_overlap':{'queries':len(zero_overlap),'quality':measures(zero_overlap)},",
+          "            'wrong_person_seed_records':sum(len(row['wrong_person_ids']) for row in traces),",
+          "            'wrong_group_seed_records':sum(len(row['wrong_group_ids']) for row in traces),",
+          "            'core_tasks_accepted':sum(row['core_task_accepted'] for row in traces),",
+          "            'valid_core_contexts':sum(row['core_context_valid'] for row in traces),",
+          "            'query_vectors_produced':sum(row['query_vector_produced'] for row in traces),",
+          "            'core_process_encoder_requests':sum(row['core_process_model_requests'] for row in traces),",
+          "            'cache_hit_encoder_requests':sum(row['cache_model_requests'] for row in traces),",
+          "            'latency_ms':latencies,'total_encoder_requests_observed':len(logs()),'qq_sent':sent_count,",
+          "            'failure_contract':{'timeout_ms':round(timeout_ms,3),'timeout_returned_lexical_options':unavailable=={},",
+          "                'fallback_equals_lexical':fallback_ids==baseline_ids,'dimension_mismatch_rejected':wrong_vector is None,",
+          "                'model_version_mismatch_equals_lexical':mismatched_ids==baseline_ids},",
+          "            'limitations':['Small handcrafted synthetic set with one frozen relevance target per query.',",
+          "                'Measured local CPU model and synthetic Core.process context consumption, not home provider or real QQ/model answers.',",
+          "                'Core.process includes its normal 200ms coalescing wait; cold vector timings exclude model loading and warmup.',",
+          "                'No model training, threshold tuning, expected-label adjustment or real conversation data.']}",
+          "        (ROOT/'metrics.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\\n')",
+          "        print('METRICS',json.dumps(report,ensure_ascii=False),flush=True)",
+          "    finally:",
+          "        await core.model_client.aclose()",
+          "        core.db.close()",
+          "",
+          "asyncio.run(main())"
+        ]
+      },
+      "postfix-context-replay/replay.py": {
+        "original_script_sha256": "f2c902107b96cb974d8d2ccd711a5c76c1bdc919ab74e770b2555f5754027ec5",
+        "portable_script_sha256": "ebc202991fccf945f5ae229800cc5b268e7c84ab833f6653a8786c0dd831b14a",
+        "portability_change": "The repository path is supplied through ELEPHANT_REPO. All evaluation, labels and ranking logic remain as executed.",
+        "lines": [
+          "\"\"\"Replay saved real-encoder rankings through new context serialization. No model inference.\"\"\"",
+          "import asyncio",
+          "import hashlib",
+          "import json",
+          "import os",
+          "import shutil",
+          "from datetime import datetime,timedelta",
+          "from pathlib import Path",
+          "",
+          "from sqlalchemy import select",
+          "",
+          "from qqbot.app import create_app",
+          "from qqbot.clock import FakeClock",
+          "from qqbot.config import AdapterConfig,ModelConfig,Settings",
+          "from qqbot.storage.task_schema import tasks",
+          "",
+          "ROOT=Path(__file__).resolve().parent",
+          "ORIGINAL=ROOT.parent",
+          "REPO=Path(os.environ['ELEPHANT_REPO']).resolve()",
+          "TRACES=[json.loads(line) for line in (ORIGINAL/'retrieval-trace.jsonl').read_text().splitlines()]",
+          "SAVED={(row['group'],row['user'],row['query']):row for row in TRACES}",
+          "",
+          "async def main():",
+          "    os.environ['F08_REPLAY_ADAPTER_TOKEN']='local-synthetic-adapter-never-connected'",
+          "    shutil.copy2(ORIGINAL/'evaluation.db',ROOT/'evaluation.db')",
+          "    settings=Settings(database=str(ROOT/'evaluation.db'),",
+          "        adapters=(AdapterConfig(instance_id='synthetic-nap',kind='onebot',bot_id='100',",
+          "            secret_env='F08_REPLAY_ADAPTER_TOKEN',allowed_groups=('200','201'),allowed_users=('300','301'),",
+          "            full_mode_enabled=True,full_mode_verified=True),),",
+          "        model=ModelConfig(endpoint='http://127.0.0.1:1/never-chat',model='never-called',api_key_env='F08_REPLAY_UNUSED_CHAT_KEY'))",
+          "    clock=FakeClock(datetime.fromisoformat('2026-11-10T00:10:00+00:00'))",
+          "    app=create_app(settings,clock=clock,run_background=False)",
+          "    core=app.state.core",
+          "    adapter=core.adapters['synthetic-nap']",
+          "    adapter.account_online=True",
+          "    original_retrieve=core.social.retrieve",
+          "    request_log_hash=hashlib.sha256((ORIGINAL/'encoder-requests.jsonl').read_bytes()).hexdigest()",
+          "    calls=[]",
+          "    def saved_retrieve(access,query='',**kwargs):",
+          "        key=(access.conversation.remote_conversation_id,access.principal.remote_user_id,query)",
+          "        if key not in SAVED:",
+          "            return original_retrieve(access,query,**kwargs)",
+          "        calls.append(key)",
+          "        visible={record.memory_id:record for record in core.social.visible(access)}",
+          "        return [visible[mid] for mid in SAVED[key]['hybrid_ids'] if mid in visible][:kwargs.get('limit',8)]",
+          "    core.social.retrieve=saved_retrieve",
+          "    results=[]",
+          "    try:",
+          "        with (ROOT/'trace.jsonl').open('w') as output:",
+          "            for index,old in enumerate(TRACES):",
+          "                packet={'post_type':'message','message_type':'group','self_id':100,",
+          "                    'group_id':int(old['group']),'user_id':int(old['user']),'message_id':20000+index,",
+          "                    'time':int(clock.now().timestamp()),'message':[{'type':'at','data':{'qq':'100'}},",
+          "                        {'type':'text','data':{'text':old['query']}}]}",
+          "                event,_=core.inbox.accept(adapter.normalize(packet))",
+          "                await core.process(event)",
+          "                with core.db.engine.connect() as conn:",
+          "                    task=conn.execute(select(tasks).where(tasks.c.source==event.event_id)).mappings().one()",
+          "                context=json.loads(task['context_json'])",
+          "                seed=context['seed']",
+          "                memories=seed['memories']",
+          "                ids=[memory['memory_id'] for memory in memories]",
+          "                source_ids={source for memory in memories for source in memory['source_event_ids']}",
+          "                row={'case_id':old['case_id'],'evaluation_kind':'saved_real_encoder_rank_context_replay',",
+          "                    'old_seed_ids':old['seed_ids'],'saved_actual_hybrid_ids':old['hybrid_ids'],'new_seed_ids':ids,",
+          "                    'frozen_expected':old['expected'],'full_seed_contains_expected':bool(set(ids)&set(old['expected'])),",
+          "                    'seed_contains_vector_arrays':any('embedding' in memory for memory in memories),",
+          "                    'source_manifest_complete':source_ids<={source['id'] for source in context['source_manifest']},",
+          "                    'context_valid':core.validate_context(core.access(event),context),",
+          "                    'seed_bytes':len(json.dumps(seed,ensure_ascii=False).encode()),",
+          "                    'byte_budget':min(settings.context.max_request_bytes//2,settings.model.context_window*2),",
+          "                    'embedding_metadata_preserved':all(memory['embedding_model_id']=='BAAI/bge-small-zh-v1.5'",
+          "                        and memory['embedding_version'].startswith('7999e1d3359715c523056ef9478215996d62a620:') for memory in memories)}",
+          "                assert ids==old['hybrid_ids'],row",
+          "                assert not row['seed_contains_vector_arrays'] and row['source_manifest_complete'] and row['context_valid'],row",
+          "                assert row['seed_bytes']+len(event.text.encode())<=row['byte_budget'],row",
+          "                results.append(row)",
+          "                output.write(json.dumps(row,ensure_ascii=False)+'\\n')",
+          "                output.flush()",
+          "                core.tasks.cancel(task['public_id'],core.access(event))",
+          "                clock.advance(1)",
+          "        assert hashlib.sha256((ORIGINAL/'encoder-requests.jsonl').read_bytes()).hexdigest()==request_log_hash",
+          "        report={'evaluation_kind':'saved_real_encoder_rank_context_replay','new_encoder_requests':0,",
+          "            'source_actual_model_run':str(ORIGINAL/'metrics.json'),'queries':len(results),'replayed_retrieve_calls':len(calls),",
+          "            'old_seed_counts':sorted({len(row['old_seed_ids']) for row in results}),",
+          "            'new_seed_counts':sorted({len(row['new_seed_ids']) for row in results}),",
+          "            'full_seed_frozen_target_coverage':{'numerator':sum(row['full_seed_contains_expected'] for row in results),'denominator':len(results)},",
+          "            'max_seed_bytes':max(row['seed_bytes'] for row in results),",
+          "            'all_sources_valid':all(row['source_manifest_complete'] and row['context_valid'] for row in results),",
+          "            'all_embedding_metadata_preserved':all(row['embedding_metadata_preserved'] for row in results),",
+          "            'original_actual_encoder_log_unchanged':True,",
+          "            'changed_source_sha256':{path:hashlib.sha256((REPO/path).read_bytes()).hexdigest() for path in",
+          "                ['src/qqbot/context/__init__.py','src/qqbot/memory/history.py']},",
+          "            'limitation':'This replays the previously observed real-model ranking and source records. It is not a new embedding inference or updated semantic recall measurement. Original recall@1/3/5 and failed rank remain unchanged.'}",
+          "        (ROOT/'metrics.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\\n')",
+          "        print(json.dumps(report,ensure_ascii=False,indent=2))",
+          "    finally:",
+          "        await core.stop()",
+          "        core.db.close()",
+          "",
+          "asyncio.run(main())"
+        ]
+      }
+    },
+    "cleanup": {
+      "weights_removed": true,
+      "encoder_port_closed": true,
+      "retained": "synthetic dataset, scripts, raw request/retrieval traces, temporary synthetic DB, metrics and public model-file hashes"
+    }
+  },
+  "limitations": [
+    "The corpus and 18 relevance expectations are handcrafted synthetic examples, with one expected memory per query. They are a small functional evaluation.",
+    "The real encoder was BAAI CPU inference on this macOS host. Home embedding service configuration and online supplier latency remain separate acceptance work.",
+    "Synthetic adapter capability state and local Core.process context creation were exercised. QQ transport and final generated answers were outside this run.",
+    "The original zero-character-overlap subset retained one top-five miss. The vegetarian target remains rank seven after serialization repair.",
+    "The later serialization replay reused actual ranking and stored source vectors. Its full-seed coverage is a context-retention result and adds no new model-quality measurement.",
+    "The runtime was an existing development build of torch. Exact package versions, source fingerprints, method and public model-file hashes are recorded for interpreting reproduction differences."
+  ]
+}

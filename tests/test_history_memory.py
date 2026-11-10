@@ -181,3 +181,25 @@ async def test_query_embedding_checks_permissions_before_network_or_cache(setup)
         else:
             raise AssertionError("denied query accessed embedding cache")
         assert embedding.calls == 1
+
+
+async def test_model_facing_memory_tools_omit_vectors_and_keep_evidence(setup):
+    social, access, event, record, _clock = setup
+    event('e')
+    memory = social.candidate(access, record(), explicit=True)
+    social.commit(access, memory.memory_id, authorized=True)
+    vector = (0.125,) * 512
+    social.store_embedding(access, memory.memory_id, vector, 'fixture-encoder', 'fixture-version')
+    stored = social.visible(access)[0]
+    expected = stored.model_dump(mode='json', exclude={'embedding'})
+    service = HistoryMemoryService(social)
+    for operation, arguments in [('memory.search', {'query': '小陈'}),
+                                 ('memory.get', {'memory_id': memory.memory_id})]:
+        result = await service.query(access, operation, arguments)
+        assert result['records'] == [expected]
+        assert 'embedding' not in result['records'][0]
+        assert result['source_ids'] == ['e']
+    assert social.visible(access)[0].embedding == vector
+    with social.db.engine.connect() as conn:
+        saved = json.loads(conn.execute(select(social_records.c.record_json)).scalar_one())
+    assert saved['embedding'] == list(vector)
