@@ -309,7 +309,37 @@
       "src/qqbot/harness/pi_bridge.ts": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835"
     }
   },
-  "final_inspection": {
+  "initial_pr_ci": {
+    "head": "daf29ed",
+    "run_id": 42779780422,
+    "url": "https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/42779780422",
+    "workflow_conclusion": "failure",
+    "python": {
+      "tests": "939",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "192.158"
+    },
+    "console_tests": 19,
+    "failure": "Ruff I001 in the scoped external-wait regression imports. Corrected in 192606d. Build was skipped.",
+    "codeql": {
+      "workflow_run": 42779780600,
+      "analyzer_jobs": "Both succeeded",
+      "gate": "One high finding in tests/test_official_artifact_delivery.py for a URL substring log assertion. Structured exact-host/path assertions replace it in80d4e19. Latest PR check results provide scan confirmation."
+    }
+  },
+  "weather_skill_publication": {
+    "report_revision": "be925edac98b13665a464f55b729e37a850d5c56",
+    "skill_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c",
+    "path": "skills/web-research/SKILL.md",
+    "previous_sha256": "1a0d69c45ddd53f3d66ebe9c629731cfb3b3dc658bfadd8b05ca2a28a0ee7923",
+    "sha256": "6135e66b6e21f8dffae4af6e78a6f43e8ca64f3bb63ba42e4b5a4a86b027e327",
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion/weather-metadata-be925ed",
+    "ready": true,
+    "publication": "Atomic current-skill publication. Existing task snapshots retained; new tasks select the new version. No process restart needed."
+  },
+  "post_contract_inspection": {
     "observed_at": "2026-11-10T08:03:15.555056+00:00",
     "report_revision": "3ca6aeaee36c081aa2555944ad935a0f59ce645a",
     "ready": true,
@@ -329,5 +359,34 @@
       "mismatches": [],
       "skill_version": "be62d5f875a3f3c79bf425be9317bbec619d499e87a78f4871c1490c1e7a2e53"
     }
-  }
+  },
+  "final_inspection": {
+    "observed_at": "2026-11-10T08:18:33.690779+00:00",
+    "report_revision": "be925edac98b13665a464f55b729e37a850d5c56",
+    "ready": true,
+    "database": "ok",
+    "loops_healthy": {
+      "execution": true,
+      "delivery": true,
+      "memory": true,
+      "expression": true,
+      "speakup": true
+    },
+    "disconnected_adapters": [],
+    "active_task_count": 0,
+    "retained_run_slots": 0,
+    "source_hash_verification_reused": "80 source files verified after input-contract deployment. The subsequent weather publication changes only the skill file and current snapshot.",
+    "worker_skill_report": {
+      "expected_skill_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c",
+      "recent_workers": [
+        {
+          "reported_at": "2026-11-10T08:17:42.999082+00:00",
+          "skill_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c",
+          "selected_current_version": true,
+          "loaded_skill_versions": []
+        }
+      ]
+    }
+  },
+  "final_pull_request": "https://github.com/HalfAnElephant/Elephant-Bot/pull/4"
 }

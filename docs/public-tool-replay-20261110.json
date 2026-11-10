@@ -2,7 +2,7 @@
   "schema_version": 1,
   "date": "2026-11-10",
   "scope": "Live public-tool isolated acceptance through Worker, Harness, permissions, persistence and local receiver. No QQ client delivery acceptance.",
-  "overall": "QUALIFIED acceptance. After generic authenticated-user input-contract fix3ca6aea, exactly one fresh production-budget case clarified and continued the same Task, queried only confirmed repository and returned exact PR readback with target-only final answer. Earlier scope-only fix failure and all previous failures remain recorded. Weather location/time metadata and broader semantic generalization remain limited.",
+  "overall": "QUALIFIED acceptance. Repository same-Task exact-target continuation passed after generic authenticated-input fix. One latest source-selection weather case now reports same-source explicit time/zone/units and approximate returned-grid coordinates, with matching fetched evidence. Earlier weather metadata and repository scope failures remain unchanged. Single-case coverage and minor district-center wording remain limitations.",
   "side_effects": {
     "qq_messages_sent": 0,
     "github_writes": 0
@@ -462,7 +462,8 @@
             }
           ],
           "local_delivery_count": null,
-          "assessment": "QUALIFIED success after necessary budget correction to 8192. 6 model calls, 26.96s. wttr.in/Jiading values match 13 C, feels 9 C, humidity 51%, NW 16 km/h, 1030 hPa, visibility 10 km. Retrieved 06:42:40Z. observation_time 05:38 AM lacks date and timezone, model UTC inference unverified. nearest Chiatang/Shanghai 31.388/121.240 versus request 31.38/121.25, administrative boundary unverified. Separate Pudong source excluded."
+          "assessment": "QUALIFIED success after necessary budget correction to 8192. 6 model calls, 26.96s. wttr.in/Jiading values match 13 C, feels 9 C, humidity 51%, NW 16 km/h, 1030 hPa, visibility 10 km. Retrieved 06:42:40Z. observation_time 05:38 AM lacks date and timezone, model UTC inference unverified. nearest Chiatang/Shanghai 31.388/121.240 versus request 31.38/121.25, administrative boundary unverified. Separate Pudong source excluded.",
+          "additional_review": "Strict metadata acceptance fails: original final explicitly says data date2026-11-10 and interprets bare05:38 as UTC by convention. Current-condition date/timezone were not established by the fetched bare observation_time. Numeric matches and host SUCCEEDED do not cure unsupported time claims. Original evidence and metrics retained."
         }
       ],
       "script": null
@@ -1883,6 +1884,689 @@
       "qq_messages_sent": 0,
       "github_writes": 0,
       "retry_policy": "Exactly one new task and one continuation after meaningful input-contract source change. No retries or prompt adjustment."
+    },
+    {
+      "run_id": "uwjunnpr",
+      "environment": {
+        "stable_commit": "daf29ed62366d65716b3dd096c863567ef9de31d+weather-metadata-skill",
+        "created_at": "2026-11-10T08:06:55.363681+00:00",
+        "python": "3.13.9 (main, Nov 19 2025, 22:47:49) [Clang 21.1.4 ]",
+        "httpx": "0.28.1",
+        "script_sha256": "2454eb3652487add0379b3c5b3a2da322108147a173b2bc556056a5fdb6900d0",
+        "source_sha256": {
+          "src/qqbot/harness/gateway.py": "72c2d0505e144ef2c6c01f7db12ee02bee683767ff2229531cb63af784311df1",
+          "src/qqbot/harness/research.py": "df9095ad3ac10d1648d536399d36e680194db3669513b4bb0b0ca19928b4c74d",
+          "src/qqbot/jobs/service.py": "5c95f0e905a629527450ea13b6dc5ffa8cadb3797f6a1d08bede2fa423edeffd",
+          "src/qqbot/jobs/worker.py": "12f38697f023adb082fb806bb1c17a1021d0974f6b58d5ab70051232929ce968",
+          "src/qqbot/capabilities/gateway.py": "f14500c6dc5616a431a1e3fbd3eec6eb384187589bb06189da688bd712dc31b1",
+          "skills/web-research/SKILL.md": "b123f9c0998671108203f5ee0e2f2fb3f8a77c12b947c85f5ccebe26e19e8197",
+          "skills/github/SKILL.md": "e199d998e1f0f817b4c1cc64ff6bf4bf3adc5311d615f5bf990861cd2b717a9e",
+          "src/qqbot/harness/pi_bridge.ts": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835",
+          "src/qqbot/harness/pi.py": "835b742f118cf57b52644c2d8c556344b202c885c5b3bccf56167ff6791d566c",
+          "src/qqbot/providers/__init__.py": "608e293ee5aa077910de87186ef1d78960886670f7023786a67c90fd12c73907"
+        },
+        "provider_model": "deepseek-v4.1-flash",
+        "provider_endpoint_origin": "https://opencode.ai",
+        "context_window": 1000000,
+        "pi_executable": "/opt/qqbot/node_modules/.bin/pi",
+        "credentials_source": "current Worker process environment, memory only",
+        "production_budget": {
+          "model_calls": 30,
+          "tool_calls": 80,
+          "active_seconds": 600,
+          "total_wall_seconds": 3600,
+          "output_tokens_per_call": 4096,
+          "completion_reserve": 1
+        },
+        "budget_source": "load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))",
+        "external_task_timeout_seconds": 300
+      },
+      "script": "import asyncio\nimport contextlib\nimport hashlib\nimport inspect\nimport json\nimport os\nimport shlex\nimport subprocess\nimport tempfile\nimport time\nfrom pathlib import Path\nfrom datetime import datetime, UTC\nfrom urllib.parse import urlsplit\nfrom types import SimpleNamespace\nfrom uuid import uuid4\n\nimport httpx\nfrom fastapi import FastAPI\nfrom sqlalchemy import select\n\nfrom qqbot.app import create_app\nfrom qqbot.clock import Clock\nfrom qqbot.config import AdapterConfig, ExecutionConfig, ModelConfig, Settings, SpeakUpConfig\nfrom qqbot.domain.execution import RunBudget\nfrom qqbot.domain.messages import DeliveryCheck, SendReceipt\nfrom qqbot.harness.pool import SessionPool\nfrom qqbot.harness.skills import SkillStore\nfrom qqbot.jobs.api import internal_router\nfrom qqbot.jobs.worker import GeneralRun, Spool, Worker\nfrom qqbot.permissions import PermissionPolicy, PermissionRule\nfrom qqbot.providers import ModelCapacity\nfrom qqbot.storage.task_schema import model_requests, runs, tasks, waits, observations, notifications, events\nfrom qqbot.storage.schema import outbox\n\n\ndef production_model():\n    pid = subprocess.check_output(['systemctl', 'show', 'elephant-worker-acceptance.service', '-p', 'MainPID', '--value'], text=True).strip()\n    argv = Path('/proc/' + pid + '/cmdline').read_bytes().decode().split('\\0')\n    def flag(name, default=None):\n        return argv[argv.index(name) + 1] if name in argv else default\n    for item in Path('/proc/' + pid + '/environ').read_bytes().split(b'\\0'):\n        if item.startswith(b'QQBOT_RUNNER_OPENAI_KEY='):\n            os.environ['QQBOT_RUNNER_OPENAI_KEY'] = item.split(b'=', 1)[1].decode()\n        elif item.startswith(b'GH_CONFIG_DIR='):\n            os.environ['GH_CONFIG_DIR'] = item.split(b'=',1)[1].decode()\n    if not os.environ.get('GH_CONFIG_DIR') or not Path('/usr/bin/gh').is_file():\n        raise RuntimeError('Worker GitHub read preconditions are unavailable')\n    if not os.environ.get('QQBOT_RUNNER_OPENAI_KEY'):\n        raise RuntimeError('Worker provider key is unavailable')\n    return flag('--model'), flag('--model-endpoint'), int(flag('--model-context-window', '32768')), flag('--pi')\n\n\nasync def main():\n    model, endpoint, window, pi = production_model()\n    assert all((model, endpoint, pi))\n    os.environ['ACCEPTANCE_INTERNAL_TOKEN'] = 'isolated-acceptance-internal-token-0000'\n    os.environ['ACCEPTANCE_NAP_TOKEN'] = 'fixture-unused'\n    os.umask(0o077)\n    with contextlib.nullcontext(tempfile.mkdtemp(prefix='elephant-public-tools-measured-', dir='/tmp')) as temporary:\n        root = Path(temporary)\n        (root/'script.py').write_text(Path(__file__).read_text())\n        source_names=['src/qqbot/harness/gateway.py','src/qqbot/harness/research.py','src/qqbot/jobs/service.py',\n                      'src/qqbot/jobs/worker.py','src/qqbot/capabilities/gateway.py','skills/web-research/SKILL.md','skills/github/SKILL.md','src/qqbot/harness/pi_bridge.ts','src/qqbot/harness/pi.py','src/qqbot/providers/__init__.py']\n        source_metadata={'stable_commit':'daf29ed62366d65716b3dd096c863567ef9de31d+weather-metadata-skill','created_at':datetime.now(UTC).isoformat(),\n            'python':__import__('sys').version,'httpx':httpx.__version__,\n            'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),\n            'source_sha256':{name:hashlib.sha256((Path.cwd()/name).read_bytes()).hexdigest() for name in source_names},\n            'provider_model':model,'provider_endpoint_origin':urlsplit(endpoint).scheme+'://'+str(urlsplit(endpoint).hostname),\n            'context_window':window,'pi_executable':pi,'credentials_source':'current Worker process environment, memory only'}\n        (root/'environment.json').write_text(json.dumps(source_metadata,ensure_ascii=False,indent=2))\n        print(json.dumps({'phase':'started','root':str(root),'stable_commit':source_metadata['stable_commit']}),flush=True)\n        from qqbot.config import load_settings, load_runtime_settings\n        production_settings = load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))\n        budget = production_settings.execution.interactive_budget\n        source_metadata['production_budget'] = budget.model_dump()\n        source_metadata['budget_source'] = \"load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))\"\n        source_metadata['external_task_timeout_seconds'] = 300\n        (root/'environment.json').write_text(json.dumps(source_metadata,ensure_ascii=False,indent=2))\n        policy = PermissionPolicy(preset='custom', default_effect='deny', rules=(PermissionRule(\n            id='acceptance-only', effect='allow', actions=('conversation.receive', 'history.read',\n                'history.source.read', 'memory.read', 'memory.source.read', 'expression.read', 'expression.use',\n                'task.create', 'task.execute', 'task.read', 'task.status', 'task.input', 'notification.send', 'model.request',\n                'skill.read', 'task.operations.read', 'web.search', 'web.fetch',\n                'github.cli.read','github.api.read','github.repo.read','github.pr.read','github.search.read','github.graphql.read'), resources=('*',)),))\n        settings = Settings(database=str(root / 'core.sqlite'), persona_path=str(Path.cwd() / 'personas/elephant_default.yaml'),\n            internal_token_env='ACCEPTANCE_INTERNAL_TOKEN',\n            adapters=(AdapterConfig(instance_id='fixture', kind='onebot', bot_id='100', secret_env='ACCEPTANCE_NAP_TOKEN'),),\n            model=ModelConfig(model=model, endpoint=endpoint, context_window=window), permissions=policy,\n            execution=ExecutionConfig(foreground_wait_ms=60000, interactive_budget=budget),\n            speak_up=SpeakUpConfig(enabled=False))\n        core = create_app(settings, run_background=False, clock=Clock()).state.core\n        service = core.tasks\n        normalizer = core.adapters['fixture']\n        class Receiver:\n            config = normalizer.config\n            account_online = True\n            count = 0\n            async def capabilities(self, target):\n                return await normalizer.capabilities(target)\n            async def validate_delivery(self, envelope):\n                return DeliveryCheck(allowed=True, reason='LOCAL_TEST_RECEIVER')\n            async def send(self, envelope):\n                self.count += 1\n                with (root/'local-receiver.jsonl').open('a') as sink:\n                    sink.write(json.dumps({'at':datetime.now(UTC).isoformat(),'text':envelope.text,'task_id':envelope.parent_task_id},ensure_ascii=False)+'\\n')\n                return SendReceipt(state='SENT', platform_message_id='local-' + str(self.count))\n            async def stop(self):\n                await normalizer.stop()\n        receiver = Receiver()\n        core.adapters['fixture'] = receiver\n        app = FastAPI()\n        app.include_router(internal_router(service, os.environ['ACCEPTANCE_INTERNAL_TOKEN']))\n        args = SimpleNamespace(workspace=str(root / 'runners'), archive=str(service.archive_root),\n            spool=str(root / 'state/spool'), pi=pi, skills_dir=str(Path.cwd() / 'skills'), model=model,\n            model_endpoint=endpoint, worker_id='acceptance-worker', runner_mode='local', model_context_window=window,\n            gh='/usr/bin/gh', repository=None)\n        def event(mid, text, user=300):\n            value = normalizer.normalize({'post_type': 'message', 'message_type': 'group',\n                'self_id': 100, 'user_id': user, 'group_id': 999999, 'message_id': mid,\n                'time': int(core.clock.now().timestamp()), 'message': [\n                    {'type': 'at', 'data': {'qq': '100'}}, {'type': 'text', 'data': {'text': text}}]})\n            accepted, _ = core.inbox.accept(value)\n            return accepted\n        outputs = []\n        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://core', timeout=10,\n                headers={'Authorization': 'Bearer ' + os.environ['ACCEPTANCE_INTERNAL_TOKEN']}) as client:\n            store = SkillStore(args.skills_dir, root / 'state/skillsets')\n            capacity = ModelCapacity(5, 1)\n            live_runners=[]\n            capability_calls=[]\n            def factory(claim, process, session):\n                runner=GeneralRun(args,claim,client,process,session,capacity)\n                live_runners.append(runner)\n                for capability_name,(capability,execute,classifier) in list(runner.gateway.registry.entries.items()):\n                    async def traced(arguments,context,_execute=execute,_name=capability_name):\n                        observation={'capability':_name,'task_id':context.task_id,'arguments':arguments,\n                                     'started_at':datetime.now(UTC).isoformat()}\n                        capability_calls.append(observation)\n                        try:\n                            value=_execute(arguments,context)\n                            value=await value if inspect.isawaitable(value) else value\n                            observation['completed_at']=datetime.now(UTC).isoformat()\n                            if isinstance(value,dict):\n                                observation['source_metadata']={key:value[key] for key in ['url','retrieved_at','sha256'] if key in value}\n                            return value\n                        except BaseException as error:\n                            observation['error_type']=type(error).__name__\n                            raise\n                    runner.gateway.registry.entries[capability_name]=(capability,traced,classifier)\n                return runner\n            pool = SessionPool(factory,max_resident=5,max_idle=2)\n            worker = Worker(client, args.worker_id, Spool(args.spool), None, pool=pool, skills=store)\n            async def execute(source,case_id):\n                task = core.submit_turn(source)\n                started = time.monotonic()\n                async with asyncio.timeout(300):\n                    assert await worker.once()\n                with service.db.engine.connect() as conn:\n                    saved = conn.execute(select(tasks).where(tasks.c.id == task['id'])).mappings().one()\n                    execution = conn.execute(select(runs).where(runs.c.task_id == task['id'])).mappings().one()\n                    calls = conn.execute(select(model_requests).where(model_requests.c.task_id == task['id'],\n                        model_requests.c.kind != 'tool')).mappings().all()\n                result = json.loads(saved['result_json']) if saved['result_json'] else {}\n                output = {'case_id':case_id,'goal':source.text,'task_id':task['id'],'task_result':result,'state': saved['state'], 'summary': result.get('summary'), 'process_id': execution['process_id'],\n                    'elapsed_ms': round((time.monotonic() - started) * 1000),\n                    'skill_version': json.loads(saved['context_json']).get('skill_version'),\n                    'requests': [{'kind': call['kind'], 'state': call['state'],\n                                  'usage': json.loads(call['usage_json']) if call['usage_json'] else None} for call in calls]}\n                outputs.append(output)\n                receiver_started=time.monotonic()\n                while time.monotonic()-receiver_started < 45:\n                    await core.outbox.dispatch_once(core.adapters, pre_send=core.pre_send)\n                    with service.db.engine.connect() as conn:\n                        deliveries = conn.execute(select(outbox.c.state).where(outbox.c.task_id == task['id'])).scalars().all()\n                    if deliveries and all(state == 'SENT' for state in deliveries):\n                        break\n                    await asyncio.sleep(.1)\n                output['local_delivery']={'states':deliveries,'all_sent':bool(deliveries) and all(state=='SENT' for state in deliveries),\n                    'waited_ms':round((time.monotonic()-receiver_started)*1000),'maximum_wait_seconds':45,\n                    'business_state_unchanged_by_receiver_timeout':True}\n                with service.db.engine.connect() as conn:\n                    output['state_after_local_delivery']=conn.execute(select(tasks.c.state).where(tasks.c.id==task['id'])).scalar_one()\n                    output['task_questions']=[dict(row) for row in conn.execute(select(waits).where(waits.c.task_id==task['id'])).mappings()]\n                    output['question_notifications']=[dict(row) for row in conn.execute(select(notifications).where(\n                        notifications.c.task_id==task['id'],notifications.c.purpose=='question')).mappings()]\n                    output['task_observations']=[dict(row) for row in conn.execute(select(observations).where(observations.c.task_id==task['id'])).mappings()]\n                    output['task_events']=[dict(row) for row in conn.execute(select(events).where(events.c.run_id==execution['id'])).mappings()]\n                    output['task_budget']=json.loads(conn.execute(select(tasks.c.budget_json).where(tasks.c.id==task['id'])).scalar_one())\n                gateways=[runner.gateway for runner in live_runners if runner.gateway.claim.get('task_id')==task['id']]\n                output['capability_calls']=[row for row in capability_calls if row['task_id']==task['id']]\n                output['gateway_observations']={key:value for gateway in gateways for key,value in gateway.observations.items()}\n                output['gateway_evidence']=[item for gateway in gateways for item in gateway.evidence]\n                output['content_archives']=[]\n                for gateway in gateways:\n                    for path in sorted(gateway.task_content.iterdir()):\n                        blob=path.read_bytes()\n                        try:\n                            payload=json.loads(blob)\n                        except (ValueError,UnicodeError):\n                            payload={'text':blob.decode(errors='replace')}\n                        output['content_archives'].append({'path':str(path),'bytes':len(blob),'sha256':hashlib.sha256(blob).hexdigest(),'payload':payload})\n                (root/(case_id+'.json')).write_text(json.dumps(output,ensure_ascii=False,indent=2))\n                (root/'results-partial.json').write_text(json.dumps(outputs,ensure_ascii=False,indent=2))\n                print(json.dumps({'phase':'case_complete','case_id':case_id,'state':output['state'],\n                    'questions':len(output['task_questions']),'business_model_requests':len(output['requests']),\n                    'local_all_sent':output['local_delivery']['all_sent'],'elapsed_ms':output['elapsed_ms']}),flush=True)\n                assert saved['state'] in {'SUCCEEDED', 'WAITING_INPUT', 'PARTIAL', 'BLOCKED', 'FAILED'}, {'state': saved['state'], 'result': result}\n                return output\n            try:\n                cases = [\n                    ('ambiguous-place', '帮我查一下朝阳现在的天气。'),\n                    ('current-weather', '请查询上海市嘉定区当前天气，说明数据日期和时间，只依据你本轮实际获取的气象资料回答，并给出来源。'),\n                    ('ambiguous-repository', '帮我列一下 elephant 仓库目前开放的 PR。'),\n                ]\n                cases = [cases[1]]\n                for mid, (case_id, text) in enumerate(cases, 100):\n                    result = await execute(event(mid, text),case_id)\n                    result['case_id'] = case_id\n                final={'status': 'measured', 'model': model, 'context_window': window,\n                    'results': outputs, 'qq_messages_sent': 0, 'remote_business_writes': 0,\n                    'data_classification': 'synthetic', 'scope': 'real provider with local receiver; semantic cases frozen before run'}\n                (root/'results.json').write_text(json.dumps(final,ensure_ascii=False,indent=2))\n                print(json.dumps({'phase':'complete','root':str(root),'cases':len(outputs)}),flush=True)\n            finally:\n                if len(outputs) < len(cases):\n                    (root/'incomplete.json').write_text(json.dumps({'status':'incomplete','results':outputs},ensure_ascii=False,indent=2))\n                    print(json.dumps({'phase':'incomplete','root':str(root),'cases':len(outputs)}),flush=True)\n                await pool.close()\n                await core.stop()\n                core.db.close()\n\n\nasyncio.run(asyncio.wait_for(main(), timeout=300))\n",
+      "cases": [
+        {
+          "case_id": "current-weather",
+          "synthetic_input": "请查询上海市嘉定区当前天气，说明数据日期和时间，只依据你本轮实际获取的气象资料回答，并给出来源。",
+          "task_id": "2e0811f0-d641-48c8-a0e4-679a9a5acd3f",
+          "record_sha256": "1fb4dd6fae9144086761f696b8f59a58ac01667f883e18834d2e091a81df8da4",
+          "restricted_record_path": "/tmp/elephant-public-tools-measured-uwjunnpr/current-weather.json",
+          "observed_task_state": "SUCCEEDED",
+          "result_status": "completed",
+          "agent_authored": true,
+          "elapsed_ms": 76078,
+          "summary": "已经查到了，用的是气象局嘉定站实况。\n\n数据：气温13.9℃，体感12.3℃，湿度48%，气压1029百帕，西北风2.1米/秒、微风。降水字段给的是9999，属于缺测代码，所以这次资料看不出有没有降水。|||\n时间：2026年11月10日16:00（站点 lastUpdate 标注，北京时间），我是在16:07左右拉取的。|||\n另一个源对了一下，Open-Meteo 同时次 2026-11-10 16:00（UTC+8，15分钟间隔）给 12.7℃、湿度51%、体感9.9℃，北偏西风7.4公里/小时、多云（WMO code 2），和站点观测差不多。|||\n来源：中国气象局天气网实况 https://weather.cma.cn/api/now/58365 ；https://api.open-meteo.com/v1/forecast?latitude=31.3753&longitude=121.2655&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m&timezone=Asia%2FShanghai",
+          "skillset_version": "0cb64282fc7cebf0e49c4b2f30f7e0acf4b2656f3bf2864096257d8d07ce0f9b",
+          "budget_used": {
+            "model_calls": 13,
+            "tool_calls": 16,
+            "active_seconds": 76.05658100000001
+          },
+          "questions_count": 0,
+          "capability_counts": {
+            "skills.read": 1,
+            "web.search": 1,
+            "web.fetch": 11
+          },
+          "capability_errors": {
+            "ValueError": 2
+          },
+          "request_metrics": [
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 3738,
+                "output_tokens": 45,
+                "reasoning_tokens": 0,
+                "elapsed_ms": 2360.63,
+                "ttft_ms": 2230.3,
+                "request_sha256": "c441bb93f1b76e3800b8ab394b93ce58a681906fa5be7ea911624f7013741fed"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 4495,
+                "output_tokens": 93,
+                "reasoning_tokens": 15,
+                "elapsed_ms": 2864.1,
+                "ttft_ms": 2135.27,
+                "request_sha256": "787f2f2e888667d171023b54d73dd3a0dee461c7ce42e09dfafd4b9e7e1b284c"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 4626,
+                "output_tokens": 75,
+                "reasoning_tokens": 6,
+                "elapsed_ms": 2478.74,
+                "ttft_ms": 1947.56,
+                "request_sha256": "963ed91e90cc0193af930c66ab14b5cd3dd9fc82316afe100c3d4bdab98edbab"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 4757,
+                "output_tokens": 78,
+                "reasoning_tokens": 0,
+                "elapsed_ms": 3038.77,
+                "ttft_ms": 2659.58,
+                "request_sha256": "78bab1f1693d194d35022d7ea077987f2491796a0cb24892bfe72a85afb0e3f6"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 7363,
+                "output_tokens": 489,
+                "reasoning_tokens": 287,
+                "elapsed_ms": 4370.7,
+                "ttft_ms": 1864.94,
+                "request_sha256": "899463e98e7d5b814ff7df012545a011f153b76ad96b2e5c9ca002a65a753512"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 8416,
+                "output_tokens": 399,
+                "reasoning_tokens": 255,
+                "elapsed_ms": 5019.96,
+                "ttft_ms": 2762.93,
+                "request_sha256": "fcab0ef98f0c446f9a41474472d841e4fe5dc5b618465fe77c1dd648f9e9d336"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 21944,
+                "output_tokens": 440,
+                "reasoning_tokens": 362,
+                "elapsed_ms": 5314.53,
+                "ttft_ms": 2420.38,
+                "request_sha256": "1cfbd693a0c8b34ff98332407a804674864ff47a783d6a5d8fb6ed0d9d3465bd"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 28952,
+                "output_tokens": 672,
+                "reasoning_tokens": 593,
+                "elapsed_ms": 6878.17,
+                "ttft_ms": 3056.92,
+                "request_sha256": "008bfcf95c2bd06d57752d4e16ecc703b22e6b59b20ac7e02454d1c9052b6460"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 29648,
+                "output_tokens": 280,
+                "reasoning_tokens": 206,
+                "elapsed_ms": 5314.09,
+                "ttft_ms": 2888.56,
+                "request_sha256": "0fa996368f0bd0a33e6b0bd843fd51e24477a0c4419df951d0c1a3888718c574"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 37036,
+                "output_tokens": 1239,
+                "reasoning_tokens": 1103,
+                "elapsed_ms": 10885.39,
+                "ttft_ms": 2849.69,
+                "request_sha256": "46346c32e9527452dff989d834bbed9d6b2692ca82a46900faf99e05c32fa29f"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 39056,
+                "output_tokens": 244,
+                "reasoning_tokens": 108,
+                "elapsed_ms": 5429.25,
+                "ttft_ms": 2922.93,
+                "request_sha256": "c517835ad63a7a1c8e9a23a6d8b950424f1d4f2459cad2afa81ee4838dcc5a79"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 39951,
+                "output_tokens": 1065,
+                "reasoning_tokens": 930,
+                "elapsed_ms": 9218.01,
+                "ttft_ms": 2947.37,
+                "request_sha256": "4b5cc732f1b19420afd8ffdfc1a868541ed8305a9d9637486e94ae554e5fc61c"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 41033,
+                "output_tokens": 271,
+                "reasoning_tokens": 0,
+                "elapsed_ms": 5126.93,
+                "ttft_ms": 3616.34,
+                "request_sha256": "474d6bd5bd1d0b34976a58926c4f0c6dab498797eeba01915f9ec54ce0eef44f"
+              }
+            }
+          ],
+          "local_delivery": {
+            "states": [
+              "SENT",
+              "SENT",
+              "SENT",
+              "SENT",
+              "SENT",
+              "SENT"
+            ],
+            "all_sent": true,
+            "waited_ms": 13035,
+            "maximum_wait_seconds": 45,
+            "business_state_unchanged_by_receiver_timeout": true
+          },
+          "fetched_source_evidence": [
+            {
+              "url": "https://api.open-meteo.com/v1/forecast?latitude=31.3753&longitude=121.2655&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m&timezone=Asia%2FShanghai",
+              "retrieved_at": "2026-11-10T08:07:15.050134+00:00",
+              "source_sha256": "16ce18134d205012ba1aa47c6ee7a2360f0f28d804981569c1d525482b34b732",
+              "content_archive_sha256": "1bff743b934835351ba0a0ec2f19167da1a2d19749857101dcce90f1f84f465e",
+              "restricted_archive_path": "/tmp/elephant-public-tools-measured-uwjunnpr/state/spool/content/2e0811f0-d641-48c8-a0e4-679a9a5acd3f/1bff743b934835351ba0a0ec2f19167da1a2d19749857101dcce90f1f84f465e",
+              "exact_json": {
+                "latitude": 31.3884,
+                "longitude": 121.25298,
+                "generationtime_ms": 0.22721290588378906,
+                "utc_offset_seconds": 28800,
+                "timezone": "Asia/Shanghai",
+                "timezone_abbreviation": "GMT+8",
+                "elevation": 7.0,
+                "current_units": {
+                  "time": "iso8601",
+                  "interval": "seconds",
+                  "temperature_2m": "°C",
+                  "relative_humidity_2m": "%",
+                  "apparent_temperature": "°C",
+                  "weather_code": "wmo code",
+                  "wind_speed_10m": "km/h",
+                  "wind_direction_10m": "°"
+                },
+                "current": {
+                  "time": "2026-11-10T16:00",
+                  "interval": 900,
+                  "temperature_2m": 12.7,
+                  "relative_humidity_2m": 51,
+                  "apparent_temperature": 9.9,
+                  "weather_code": 2,
+                  "wind_speed_10m": 7.4,
+                  "wind_direction_10m": 356
+                }
+              }
+            },
+            {
+              "url": "https://weather.cma.cn/api/now/58365",
+              "retrieved_at": "2026-11-10T08:07:57.153814+00:00",
+              "source_sha256": "6ac4be9f35bf745ac24784d675b34e5576f11f0970847da5a480e3c2b6999fca",
+              "content_archive_sha256": "743dce9a2a3687aa17db0bd945db2523fb0fd6c080604a0c2f94f7421b496231",
+              "restricted_archive_path": "/tmp/elephant-public-tools-measured-uwjunnpr/state/spool/content/2e0811f0-d641-48c8-a0e4-679a9a5acd3f/743dce9a2a3687aa17db0bd945db2523fb0fd6c080604a0c2f94f7421b496231",
+              "exact_json": {
+                "msg": "success",
+                "code": 0,
+                "data": {
+                  "location": {
+                    "id": "58365",
+                    "name": "嘉定",
+                    "path": "中国, 上海, 嘉定"
+                  },
+                  "now": {
+                    "precipitation": 9999.0,
+                    "temperature": 13.9,
+                    "pressure": 1029.0,
+                    "humidity": 48.0,
+                    "windDirection": "西北风",
+                    "windDirectionDegree": 310.0,
+                    "windSpeed": 2.1,
+                    "windScale": "微风",
+                    "feelst": 12.3
+                  },
+                  "alarm": [],
+                  "jieQi": "",
+                  "lastUpdate": "2026/11/10 16:00"
+                }
+              }
+            }
+          ],
+          "skill_read_sha256": [
+            "b123f9c0998671108203f5ee0e2f2fb3f8a77c12b947c85f5ccebe26e19e8197"
+          ],
+          "semantic_assessment": "FAIL strict weather metadata acceptance. Numeric values and location labels match fetched sources, and Open-Meteo has explicit date/timezone. Final CMA timezone claim is unsupported by fetched CMA content and was not qualified as unknown. Host SUCCEEDED is not metadata validation success.",
+          "claim_checks": [
+            {
+              "claim": "CMA station target is Jiading",
+              "status": "SUPPORTED_SOURCE_LABEL",
+              "evidence": "CMA data.location={id:58365,name:嘉定,path:中国, 上海, 嘉定}. This identifies source label, not independently verified administrative boundaries."
+            },
+            {
+              "claim": "CMA temperature13.9, feels12.3, humidity48, pressure1029, NW windSpeed2.1",
+              "status": "MATCHES_LITERAL_NUMERIC_FIELDS",
+              "evidence": "All corresponding CMA data.now fields match final summary. WindSpeed unit is not specified in fetched CMA JSON."
+            },
+            {
+              "claim": "CMA lastUpdate date/clock2026-11-10 16:00",
+              "status": "SUPPORTED_LITERAL_FIELD",
+              "evidence": "data.lastUpdate exactly 2026/11/10 16:00."
+            },
+            {
+              "claim": "CMA lastUpdate is explicitly marked Beijing time",
+              "status": "UNSUPPORTED",
+              "evidence": "Fetched CMA JSON has no timezone/UTC-offset field or documented lastUpdate semantics. No documentation for this source was fetched. Final text says 站点lastUpdate标注，北京时间, which the source does not show. Correct epistemic status is UNKNOWN."
+            },
+            {
+              "claim": "Retrieval about16:07 Beijing time",
+              "status": "SUPPORTED_RETRIEVAL_METADATA",
+              "evidence": "CMA retrieved_at2026-11-10T08:07:57.153814+00:00 converts to16:07:57 Asia/Shanghai. This cannot establish CMA observation timezone."
+            },
+            {
+              "claim": "Open-Meteo current2026-11-10 16:00 UTC+8, interval15min,12.7C,51%,9.9C,7.4kmh,code2",
+              "status": "SUPPORTED_LITERAL_FIELDS",
+              "evidence": "current.time2026-11-10T16:00, timezoneAsia/Shanghai, utc_offset_seconds28800, interval900 and current_units explicitly present. These fields establish only this source metadata, not CMA semantics."
+            },
+            {
+              "claim": "Open-Meteo exact administrative target",
+              "status": "UNVERIFIED_PRECISION",
+              "evidence": "Request31.3753/121.2655 returned grid31.3884/121.25298. No administrative boundary data fetched, final response omits an approximate-location qualifier."
+            },
+            {
+              "claim": "CMA precipitation9999 is a missing-data code",
+              "status": "SEMANTICS_UNVERIFIED",
+              "evidence": "9999.0 is literal fetched field; meaning was not documented in fetched material. Final appropriately avoids asserting rain but calls it a code without fetched semantics."
+            }
+          ]
+        }
+      ],
+      "baseline_commit": "daf29ed62366d65716b3dd096c863567ef9de31d",
+      "change_scope": "Only skills/web-research/SKILL.md observation-time and nearby-location evidence requirements, applied to isolated latest full-source stage.",
+      "frozen_stage_path": "/tmp/elephant-public-tool-weather-metadata-stage-20261110",
+      "production_directories_modified": false,
+      "qq_messages_sent": 0,
+      "github_writes": 0,
+      "retry_policy": "Exactly one fresh production-budget current-weather Task. No retries after final result."
+    },
+    {
+      "run_id": "ut1g7izp",
+      "environment": {
+        "stable_commit": "80d4e198e355468b6d4af16da7e863c711c97518+weather-source-selection-skill",
+        "created_at": "2026-11-10T08:12:12.310195+00:00",
+        "python": "3.13.9 (main, Nov 19 2025, 22:47:49) [Clang 21.1.4 ]",
+        "httpx": "0.28.1",
+        "script_sha256": "0ff6c9f5aba227236102788a457d885154057c13c7d11904029d46a6fbff7fa3",
+        "source_sha256": {
+          "src/qqbot/harness/gateway.py": "72c2d0505e144ef2c6c01f7db12ee02bee683767ff2229531cb63af784311df1",
+          "src/qqbot/harness/research.py": "df9095ad3ac10d1648d536399d36e680194db3669513b4bb0b0ca19928b4c74d",
+          "src/qqbot/jobs/service.py": "5c95f0e905a629527450ea13b6dc5ffa8cadb3797f6a1d08bede2fa423edeffd",
+          "src/qqbot/jobs/worker.py": "12f38697f023adb082fb806bb1c17a1021d0974f6b58d5ab70051232929ce968",
+          "src/qqbot/capabilities/gateway.py": "f14500c6dc5616a431a1e3fbd3eec6eb384187589bb06189da688bd712dc31b1",
+          "skills/web-research/SKILL.md": "6135e66b6e21f8dffae4af6e78a6f43e8ca64f3bb63ba42e4b5a4a86b027e327",
+          "skills/github/SKILL.md": "e199d998e1f0f817b4c1cc64ff6bf4bf3adc5311d615f5bf990861cd2b717a9e",
+          "src/qqbot/harness/pi_bridge.ts": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835",
+          "src/qqbot/harness/pi.py": "835b742f118cf57b52644c2d8c556344b202c885c5b3bccf56167ff6791d566c",
+          "src/qqbot/providers/__init__.py": "608e293ee5aa077910de87186ef1d78960886670f7023786a67c90fd12c73907"
+        },
+        "provider_model": "deepseek-v4.1-flash",
+        "provider_endpoint_origin": "https://opencode.ai",
+        "context_window": 1000000,
+        "pi_executable": "/opt/qqbot/node_modules/.bin/pi",
+        "credentials_source": "current Worker process environment, memory only",
+        "production_budget": {
+          "model_calls": 30,
+          "tool_calls": 80,
+          "active_seconds": 600,
+          "total_wall_seconds": 3600,
+          "output_tokens_per_call": 4096,
+          "completion_reserve": 1
+        },
+        "budget_source": "load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))",
+        "external_task_timeout_seconds": 300
+      },
+      "script": "import asyncio\nimport contextlib\nimport hashlib\nimport inspect\nimport json\nimport os\nimport shlex\nimport subprocess\nimport tempfile\nimport time\nfrom pathlib import Path\nfrom datetime import datetime, UTC\nfrom urllib.parse import urlsplit\nfrom types import SimpleNamespace\nfrom uuid import uuid4\n\nimport httpx\nfrom fastapi import FastAPI\nfrom sqlalchemy import select\n\nfrom qqbot.app import create_app\nfrom qqbot.clock import Clock\nfrom qqbot.config import AdapterConfig, ExecutionConfig, ModelConfig, Settings, SpeakUpConfig\nfrom qqbot.domain.execution import RunBudget\nfrom qqbot.domain.messages import DeliveryCheck, SendReceipt\nfrom qqbot.harness.pool import SessionPool\nfrom qqbot.harness.skills import SkillStore\nfrom qqbot.jobs.api import internal_router\nfrom qqbot.jobs.worker import GeneralRun, Spool, Worker\nfrom qqbot.permissions import PermissionPolicy, PermissionRule\nfrom qqbot.providers import ModelCapacity\nfrom qqbot.storage.task_schema import model_requests, runs, tasks, waits, observations, notifications, events\nfrom qqbot.storage.schema import outbox\n\n\ndef production_model():\n    pid = subprocess.check_output(['systemctl', 'show', 'elephant-worker-acceptance.service', '-p', 'MainPID', '--value'], text=True).strip()\n    argv = Path('/proc/' + pid + '/cmdline').read_bytes().decode().split('\\0')\n    def flag(name, default=None):\n        return argv[argv.index(name) + 1] if name in argv else default\n    for item in Path('/proc/' + pid + '/environ').read_bytes().split(b'\\0'):\n        if item.startswith(b'QQBOT_RUNNER_OPENAI_KEY='):\n            os.environ['QQBOT_RUNNER_OPENAI_KEY'] = item.split(b'=', 1)[1].decode()\n        elif item.startswith(b'GH_CONFIG_DIR='):\n            os.environ['GH_CONFIG_DIR'] = item.split(b'=',1)[1].decode()\n    if not os.environ.get('GH_CONFIG_DIR') or not Path('/usr/bin/gh').is_file():\n        raise RuntimeError('Worker GitHub read preconditions are unavailable')\n    if not os.environ.get('QQBOT_RUNNER_OPENAI_KEY'):\n        raise RuntimeError('Worker provider key is unavailable')\n    return flag('--model'), flag('--model-endpoint'), int(flag('--model-context-window', '32768')), flag('--pi')\n\n\nasync def main():\n    model, endpoint, window, pi = production_model()\n    assert all((model, endpoint, pi))\n    os.environ['ACCEPTANCE_INTERNAL_TOKEN'] = 'isolated-acceptance-internal-token-0000'\n    os.environ['ACCEPTANCE_NAP_TOKEN'] = 'fixture-unused'\n    os.umask(0o077)\n    with contextlib.nullcontext(tempfile.mkdtemp(prefix='elephant-public-tools-measured-', dir='/tmp')) as temporary:\n        root = Path(temporary)\n        (root/'script.py').write_text(Path(__file__).read_text())\n        source_names=['src/qqbot/harness/gateway.py','src/qqbot/harness/research.py','src/qqbot/jobs/service.py',\n                      'src/qqbot/jobs/worker.py','src/qqbot/capabilities/gateway.py','skills/web-research/SKILL.md','skills/github/SKILL.md','src/qqbot/harness/pi_bridge.ts','src/qqbot/harness/pi.py','src/qqbot/providers/__init__.py']\n        source_metadata={'stable_commit':'80d4e198e355468b6d4af16da7e863c711c97518+weather-source-selection-skill','created_at':datetime.now(UTC).isoformat(),\n            'python':__import__('sys').version,'httpx':httpx.__version__,\n            'script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),\n            'source_sha256':{name:hashlib.sha256((Path.cwd()/name).read_bytes()).hexdigest() for name in source_names},\n            'provider_model':model,'provider_endpoint_origin':urlsplit(endpoint).scheme+'://'+str(urlsplit(endpoint).hostname),\n            'context_window':window,'pi_executable':pi,'credentials_source':'current Worker process environment, memory only'}\n        (root/'environment.json').write_text(json.dumps(source_metadata,ensure_ascii=False,indent=2))\n        print(json.dumps({'phase':'started','root':str(root),'stable_commit':source_metadata['stable_commit']}),flush=True)\n        from qqbot.config import load_settings, load_runtime_settings\n        production_settings = load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))\n        budget = production_settings.execution.interactive_budget\n        source_metadata['production_budget'] = budget.model_dump()\n        source_metadata['budget_source'] = \"load_runtime_settings(load_settings('/etc/qqbot/core.yaml'))\"\n        source_metadata['external_task_timeout_seconds'] = 300\n        (root/'environment.json').write_text(json.dumps(source_metadata,ensure_ascii=False,indent=2))\n        policy = PermissionPolicy(preset='custom', default_effect='deny', rules=(PermissionRule(\n            id='acceptance-only', effect='allow', actions=('conversation.receive', 'history.read',\n                'history.source.read', 'memory.read', 'memory.source.read', 'expression.read', 'expression.use',\n                'task.create', 'task.execute', 'task.read', 'task.status', 'task.input', 'notification.send', 'model.request',\n                'skill.read', 'task.operations.read', 'web.search', 'web.fetch',\n                'github.cli.read','github.api.read','github.repo.read','github.pr.read','github.search.read','github.graphql.read'), resources=('*',)),))\n        settings = Settings(database=str(root / 'core.sqlite'), persona_path=str(Path.cwd() / 'personas/elephant_default.yaml'),\n            internal_token_env='ACCEPTANCE_INTERNAL_TOKEN',\n            adapters=(AdapterConfig(instance_id='fixture', kind='onebot', bot_id='100', secret_env='ACCEPTANCE_NAP_TOKEN'),),\n            model=ModelConfig(model=model, endpoint=endpoint, context_window=window), permissions=policy,\n            execution=ExecutionConfig(foreground_wait_ms=60000, interactive_budget=budget),\n            speak_up=SpeakUpConfig(enabled=False))\n        core = create_app(settings, run_background=False, clock=Clock()).state.core\n        service = core.tasks\n        normalizer = core.adapters['fixture']\n        class Receiver:\n            config = normalizer.config\n            account_online = True\n            count = 0\n            async def capabilities(self, target):\n                return await normalizer.capabilities(target)\n            async def validate_delivery(self, envelope):\n                return DeliveryCheck(allowed=True, reason='LOCAL_TEST_RECEIVER')\n            async def send(self, envelope):\n                self.count += 1\n                with (root/'local-receiver.jsonl').open('a') as sink:\n                    sink.write(json.dumps({'at':datetime.now(UTC).isoformat(),'text':envelope.text,'task_id':envelope.parent_task_id},ensure_ascii=False)+'\\n')\n                return SendReceipt(state='SENT', platform_message_id='local-' + str(self.count))\n            async def stop(self):\n                await normalizer.stop()\n        receiver = Receiver()\n        core.adapters['fixture'] = receiver\n        app = FastAPI()\n        app.include_router(internal_router(service, os.environ['ACCEPTANCE_INTERNAL_TOKEN']))\n        args = SimpleNamespace(workspace=str(root / 'runners'), archive=str(service.archive_root),\n            spool=str(root / 'state/spool'), pi=pi, skills_dir=str(Path.cwd() / 'skills'), model=model,\n            model_endpoint=endpoint, worker_id='acceptance-worker', runner_mode='local', model_context_window=window,\n            gh='/usr/bin/gh', repository=None)\n        def event(mid, text, user=300):\n            value = normalizer.normalize({'post_type': 'message', 'message_type': 'group',\n                'self_id': 100, 'user_id': user, 'group_id': 999999, 'message_id': mid,\n                'time': int(core.clock.now().timestamp()), 'message': [\n                    {'type': 'at', 'data': {'qq': '100'}}, {'type': 'text', 'data': {'text': text}}]})\n            accepted, _ = core.inbox.accept(value)\n            return accepted\n        outputs = []\n        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://core', timeout=10,\n                headers={'Authorization': 'Bearer ' + os.environ['ACCEPTANCE_INTERNAL_TOKEN']}) as client:\n            store = SkillStore(args.skills_dir, root / 'state/skillsets')\n            capacity = ModelCapacity(5, 1)\n            live_runners=[]\n            capability_calls=[]\n            def factory(claim, process, session):\n                runner=GeneralRun(args,claim,client,process,session,capacity)\n                live_runners.append(runner)\n                for capability_name,(capability,execute,classifier) in list(runner.gateway.registry.entries.items()):\n                    async def traced(arguments,context,_execute=execute,_name=capability_name):\n                        observation={'capability':_name,'task_id':context.task_id,'arguments':arguments,\n                                     'started_at':datetime.now(UTC).isoformat()}\n                        capability_calls.append(observation)\n                        try:\n                            value=_execute(arguments,context)\n                            value=await value if inspect.isawaitable(value) else value\n                            observation['completed_at']=datetime.now(UTC).isoformat()\n                            if isinstance(value,dict):\n                                observation['source_metadata']={key:value[key] for key in ['url','retrieved_at','sha256'] if key in value}\n                            return value\n                        except BaseException as error:\n                            observation['error_type']=type(error).__name__\n                            raise\n                    runner.gateway.registry.entries[capability_name]=(capability,traced,classifier)\n                return runner\n            pool = SessionPool(factory,max_resident=5,max_idle=2)\n            worker = Worker(client, args.worker_id, Spool(args.spool), None, pool=pool, skills=store)\n            async def execute(source,case_id):\n                task = core.submit_turn(source)\n                started = time.monotonic()\n                async with asyncio.timeout(300):\n                    assert await worker.once()\n                with service.db.engine.connect() as conn:\n                    saved = conn.execute(select(tasks).where(tasks.c.id == task['id'])).mappings().one()\n                    execution = conn.execute(select(runs).where(runs.c.task_id == task['id'])).mappings().one()\n                    calls = conn.execute(select(model_requests).where(model_requests.c.task_id == task['id'],\n                        model_requests.c.kind != 'tool')).mappings().all()\n                result = json.loads(saved['result_json']) if saved['result_json'] else {}\n                output = {'case_id':case_id,'goal':source.text,'task_id':task['id'],'task_result':result,'state': saved['state'], 'summary': result.get('summary'), 'process_id': execution['process_id'],\n                    'elapsed_ms': round((time.monotonic() - started) * 1000),\n                    'skill_version': json.loads(saved['context_json']).get('skill_version'),\n                    'requests': [{'kind': call['kind'], 'state': call['state'],\n                                  'usage': json.loads(call['usage_json']) if call['usage_json'] else None} for call in calls]}\n                outputs.append(output)\n                receiver_started=time.monotonic()\n                while time.monotonic()-receiver_started < 45:\n                    await core.outbox.dispatch_once(core.adapters, pre_send=core.pre_send)\n                    with service.db.engine.connect() as conn:\n                        deliveries = conn.execute(select(outbox.c.state).where(outbox.c.task_id == task['id'])).scalars().all()\n                    if deliveries and all(state == 'SENT' for state in deliveries):\n                        break\n                    await asyncio.sleep(.1)\n                output['local_delivery']={'states':deliveries,'all_sent':bool(deliveries) and all(state=='SENT' for state in deliveries),\n                    'waited_ms':round((time.monotonic()-receiver_started)*1000),'maximum_wait_seconds':45,\n                    'business_state_unchanged_by_receiver_timeout':True}\n                with service.db.engine.connect() as conn:\n                    output['state_after_local_delivery']=conn.execute(select(tasks.c.state).where(tasks.c.id==task['id'])).scalar_one()\n                    output['task_questions']=[dict(row) for row in conn.execute(select(waits).where(waits.c.task_id==task['id'])).mappings()]\n                    output['question_notifications']=[dict(row) for row in conn.execute(select(notifications).where(\n                        notifications.c.task_id==task['id'],notifications.c.purpose=='question')).mappings()]\n                    output['task_observations']=[dict(row) for row in conn.execute(select(observations).where(observations.c.task_id==task['id'])).mappings()]\n                    output['task_events']=[dict(row) for row in conn.execute(select(events).where(events.c.run_id==execution['id'])).mappings()]\n                    output['task_budget']=json.loads(conn.execute(select(tasks.c.budget_json).where(tasks.c.id==task['id'])).scalar_one())\n                gateways=[runner.gateway for runner in live_runners if runner.gateway.claim.get('task_id')==task['id']]\n                output['capability_calls']=[row for row in capability_calls if row['task_id']==task['id']]\n                output['gateway_observations']={key:value for gateway in gateways for key,value in gateway.observations.items()}\n                output['gateway_evidence']=[item for gateway in gateways for item in gateway.evidence]\n                output['content_archives']=[]\n                for gateway in gateways:\n                    for path in sorted(gateway.task_content.iterdir()):\n                        blob=path.read_bytes()\n                        try:\n                            payload=json.loads(blob)\n                        except (ValueError,UnicodeError):\n                            payload={'text':blob.decode(errors='replace')}\n                        output['content_archives'].append({'path':str(path),'bytes':len(blob),'sha256':hashlib.sha256(blob).hexdigest(),'payload':payload})\n                (root/(case_id+'.json')).write_text(json.dumps(output,ensure_ascii=False,indent=2))\n                (root/'results-partial.json').write_text(json.dumps(outputs,ensure_ascii=False,indent=2))\n                print(json.dumps({'phase':'case_complete','case_id':case_id,'state':output['state'],\n                    'questions':len(output['task_questions']),'business_model_requests':len(output['requests']),\n                    'local_all_sent':output['local_delivery']['all_sent'],'elapsed_ms':output['elapsed_ms']}),flush=True)\n                assert saved['state'] in {'SUCCEEDED', 'WAITING_INPUT', 'PARTIAL', 'BLOCKED', 'FAILED'}, {'state': saved['state'], 'result': result}\n                return output\n            try:\n                cases = [\n                    ('ambiguous-place', '帮我查一下朝阳现在的天气。'),\n                    ('current-weather', '请查询上海市嘉定区当前天气，说明数据日期和时间，只依据你本轮实际获取的气象资料回答，并给出来源。'),\n                    ('ambiguous-repository', '帮我列一下 elephant 仓库目前开放的 PR。'),\n                ]\n                cases = [cases[1]]\n                for mid, (case_id, text) in enumerate(cases, 100):\n                    result = await execute(event(mid, text),case_id)\n                    result['case_id'] = case_id\n                final={'status': 'measured', 'model': model, 'context_window': window,\n                    'results': outputs, 'qq_messages_sent': 0, 'remote_business_writes': 0,\n                    'data_classification': 'synthetic', 'scope': 'real provider with local receiver; semantic cases frozen before run'}\n                (root/'results.json').write_text(json.dumps(final,ensure_ascii=False,indent=2))\n                print(json.dumps({'phase':'complete','root':str(root),'cases':len(outputs)}),flush=True)\n            finally:\n                if len(outputs) < len(cases):\n                    (root/'incomplete.json').write_text(json.dumps({'status':'incomplete','results':outputs},ensure_ascii=False,indent=2))\n                    print(json.dumps({'phase':'incomplete','root':str(root),'cases':len(outputs)}),flush=True)\n                await pool.close()\n                await core.stop()\n                core.db.close()\n\n\nasyncio.run(asyncio.wait_for(main(), timeout=300))\n",
+      "cases": [
+        {
+          "case_id": "current-weather",
+          "synthetic_input": "请查询上海市嘉定区当前天气，说明数据日期和时间，只依据你本轮实际获取的气象资料回答，并给出来源。",
+          "task_id": "e65ed82a-db47-42bc-ad4a-302d16af120b",
+          "record_sha256": "185f60a39734955ea34f61ed51ac2f1b211d147bc0301cf69f244be522b40a79",
+          "restricted_record_path": "/tmp/elephant-public-tools-measured-ut1g7izp/current-weather.json",
+          "observed_task_state": "SUCCEEDED",
+          "result_status": "completed",
+          "agent_authored": true,
+          "elapsed_ms": 21898,
+          "summary": "查好了。嘉定区现在约 12.7℃，体感 9.9℃，多云，云量 57%，湿度 51%，没有降水；风从北边来，风速约 7.4 公里/小时。数据时间是 2026年11月10日16:00（Asia/Shanghai），我本轮取数是在 16:12 左右。|||\n来源：Open-Meteo 预报接口 https://api.open-meteo.com/v1/forecast 。这是模型网格数据（网格点约在北纬31.3884、东经121.2530），跟嘉定区中心坐标略有偏差，所以按“嘉定附近”来理解更准确。",
+          "skillset_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c",
+          "budget_used": {
+            "model_calls": 5,
+            "tool_calls": 4,
+            "active_seconds": 21.877688
+          },
+          "questions_count": 0,
+          "capability_counts": {
+            "skills.read": 1,
+            "web.fetch": 2
+          },
+          "capability_errors": {},
+          "request_metrics": [
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 3728,
+                "output_tokens": 46,
+                "reasoning_tokens": 0,
+                "elapsed_ms": 2724.4,
+                "ttft_ms": 2402.61,
+                "request_sha256": "67b1ad7946542a9f8d09f5fd7765d0e93b750510fd23bed64dfbdda670b882f8"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 4636,
+                "output_tokens": 186,
+                "reasoning_tokens": 115,
+                "elapsed_ms": 3155.58,
+                "ttft_ms": 2062.32,
+                "request_sha256": "28df6c215afa5bf06b76d5e23a3a0da02d2897c169020b83bfd6d713e6a2dc00"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 4883,
+                "output_tokens": 132,
+                "reasoning_tokens": 39,
+                "elapsed_ms": 2942.78,
+                "ttft_ms": 2094.78,
+                "request_sha256": "2ded872b640b25cf1df314b85407eb5f317e32e994ad8c0913028e223c42a18b"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 5923,
+                "output_tokens": 198,
+                "reasoning_tokens": 56,
+                "elapsed_ms": 3394.67,
+                "ttft_ms": 2308.87,
+                "request_sha256": "6b260ecf7feb99de3c0c55fae121340e8d8ab51d456cb3d1ef660aad2a83e49e"
+              }
+            },
+            {
+              "kind": "business",
+              "state": "COMPLETED",
+              "usage": {
+                "input_tokens": 6717,
+                "output_tokens": 386,
+                "reasoning_tokens": 234,
+                "elapsed_ms": 5208.66,
+                "ttft_ms": 1799.11,
+                "request_sha256": "ab98c61d14c84dae2bc3167da1639700aa1c829ce4c10ab07201eb80a54a817e"
+              }
+            }
+          ],
+          "local_delivery": {
+            "states": [
+              "SENT",
+              "SENT",
+              "SENT"
+            ],
+            "all_sent": true,
+            "waited_ms": 4591,
+            "maximum_wait_seconds": 45,
+            "business_state_unchanged_by_receiver_timeout": true
+          },
+          "fetched_source_evidence": [
+            {
+              "url": "https://api.open-meteo.com/v1/forecast?latitude=31.38575&longitude=121.24465&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,is_day&timezone=auto",
+              "retrieved_at": "2026-11-10T08:12:29.089733+00:00",
+              "source_sha256": "2075c6a16316562d451d774bcbc0677a5074f0b334a775f8c95a98c61121df27",
+              "content_archive_sha256": "43a28044c5402e6d21582cee2ec058b8be6d6e2ab5577ca292e6fa9213989524",
+              "restricted_archive_path": "/tmp/elephant-public-tools-measured-ut1g7izp/state/spool/content/e65ed82a-db47-42bc-ad4a-302d16af120b/43a28044c5402e6d21582cee2ec058b8be6d6e2ab5577ca292e6fa9213989524",
+              "exact_json": {
+                "latitude": 31.3884,
+                "longitude": 121.25298,
+                "generationtime_ms": 0.22149085998535156,
+                "utc_offset_seconds": 28800,
+                "timezone": "Asia/Shanghai",
+                "timezone_abbreviation": "GMT+8",
+                "elevation": 9.0,
+                "current_units": {
+                  "time": "iso8601",
+                  "interval": "seconds",
+                  "temperature_2m": "°C",
+                  "relative_humidity_2m": "%",
+                  "apparent_temperature": "°C",
+                  "precipitation": "mm",
+                  "weather_code": "wmo code",
+                  "cloud_cover": "%",
+                  "wind_speed_10m": "km/h",
+                  "wind_direction_10m": "°",
+                  "is_day": ""
+                },
+                "current": {
+                  "time": "2026-11-10T16:00",
+                  "interval": 900,
+                  "temperature_2m": 12.7,
+                  "relative_humidity_2m": 51,
+                  "apparent_temperature": 9.9,
+                  "precipitation": 0.0,
+                  "weather_code": 2,
+                  "cloud_cover": 57,
+                  "wind_speed_10m": 7.4,
+                  "wind_direction_10m": 356,
+                  "is_day": 1
+                }
+              }
+            },
+            {
+              "url": "https://geocoding-api.open-meteo.com/v1/search?name=Jiading&count=5&language=zh&format=json",
+              "retrieved_at": "2026-11-10T08:12:24.079984+00:00",
+              "source_sha256": "fd5def4b8ce6cddfef97c4f57b4466fd3b449cc4820b96beafa7dcbbc520642a",
+              "content_archive_sha256": "6c91cfe0ec936f0916554c930949be726f880a7bb8d82280e8e5cea8041e91a1",
+              "restricted_archive_path": "/tmp/elephant-public-tools-measured-ut1g7izp/state/spool/content/e65ed82a-db47-42bc-ad4a-302d16af120b/6c91cfe0ec936f0916554c930949be726f880a7bb8d82280e8e5cea8041e91a1",
+              "exact_json": {
+                "results": [
+                  {
+                    "id": 1806508,
+                    "name": "Jiading",
+                    "latitude": 31.38575,
+                    "longitude": 121.24465,
+                    "elevation": 9.0,
+                    "feature_code": "PPLA4",
+                    "country_code": "CN",
+                    "admin1_id": 1796231,
+                    "admin2_id": 12324204,
+                    "timezone": "Asia/Shanghai",
+                    "population": 1886100,
+                    "country_id": 1814991,
+                    "country": "中国",
+                    "admin1": "上海市",
+                    "admin2": "上海市"
+                  },
+                  {
+                    "id": 1806509,
+                    "name": "嘉定",
+                    "latitude": 25.39215,
+                    "longitude": 114.92201,
+                    "elevation": 143.0,
+                    "feature_code": "PPLA3",
+                    "country_code": "CN",
+                    "admin1_id": 1806222,
+                    "admin2_id": 1810636,
+                    "timezone": "Asia/Shanghai",
+                    "country_id": 1814991,
+                    "country": "中国",
+                    "admin1": "江西",
+                    "admin2": "赣州市"
+                  },
+                  {
+                    "id": 1887476,
+                    "name": "加丁",
+                    "latitude": 18.32722,
+                    "longitude": 109.25639,
+                    "elevation": 28.0,
+                    "feature_code": "PPL",
+                    "country_code": "CN",
+                    "admin1_id": 1809054,
+                    "admin2_id": 1796539,
+                    "timezone": "Asia/Shanghai",
+                    "country_id": 1814991,
+                    "country": "中国",
+                    "admin1": "海南",
+                    "admin2": "三亚市"
+                  },
+                  {
+                    "id": 1906128,
+                    "name": "Jiading",
+                    "latitude": 25.91944,
+                    "longitude": 107.67056,
+                    "elevation": 1241.0,
+                    "feature_code": "PPL",
+                    "country_code": "CN",
+                    "admin1_id": 1809445,
+                    "admin2_id": 1798280,
+                    "timezone": "Asia/Shanghai",
+                    "country_id": 1814991,
+                    "country": "中国",
+                    "admin1": "贵州",
+                    "admin2": "黔南布依族苗族自治州"
+                  },
+                  {
+                    "id": 6254438,
+                    "name": "甲頂",
+                    "latitude": 23.02778,
+                    "longitude": 120.22333,
+                    "elevation": 10.0,
+                    "feature_code": "PPL",
+                    "country_code": "TW",
+                    "admin1_id": 7280291,
+                    "admin2_id": 1668352,
+                    "admin3_id": 1665220,
+                    "admin4_id": 11698534,
+                    "timezone": "Asia/Taipei",
+                    "country_id": 1668284,
+                    "country": "台湾",
+                    "admin1": "臺灣省 or 台灣省",
+                    "admin2": "臺南市",
+                    "admin3": "永康區",
+                    "admin4": "尚頂里"
+                  }
+                ],
+                "generationtime_ms": 0.23496151
+              }
+            }
+          ],
+          "skill_read_sha256": [
+            "6135e66b6e21f8dffae4af6e78a6f43e8ca64f3bb63ba42e4b5a4a86b027e327"
+          ],
+          "semantic_assessment": "PASS this single case for source-backed time, timezone, units and approximate spatial precision. Weather is explicitly approximate model-grid data, not a verified district-wide station observation. Minor center-coordinate wording remains broader than geocoding evidence.",
+          "claim_checks": [
+            {
+              "claim": "Shanghai Jiading request point selection",
+              "status": "SUPPORTED_PLACE_LABEL",
+              "evidence": "Fetched geocoding result id1806508,nameJiading,admin1上海市,country中国,latitude31.38575,longitude121.24465; other similarly named results excluded by Shanghai qualifier."
+            },
+            {
+              "claim": "Data date/time2026-11-10 16:00 Asia/Shanghai",
+              "status": "SUPPORTED_SAME_SOURCE",
+              "evidence": "Forecast current.time2026-11-10T16:00, timezoneAsia/Shanghai, utc_offset_seconds28800, current_units.timeiso8601. Final calls it data time and keeps retrieval separate."
+            },
+            {
+              "claim": "Retrieval about16:12",
+              "status": "SUPPORTED_RETRIEVAL_METADATA",
+              "evidence": "Forecast retrieved_at2026-11-10T08:12:29.089733+00:00 corresponds to16:12:29 Asia/Shanghai."
+            },
+            {
+              "claim": "12.7C,feels9.9C,humidity51%,cloud57%,precipitation0,wind7.4kmh from north",
+              "status": "SUPPORTED_SAME_SOURCE_VALUES_UNITS",
+              "evidence": "current values match; current_units explicitly C,%,mm,km/h and degrees; wind_direction356 degrees supports approximately north. No undocumented CMA units or missing-value codes used."
+            },
+            {
+              "claim": "Approximate model-grid point31.3884/121.2530 near Jiading",
+              "status": "SUPPORTED_RETURNED_COORDINATES_AND_QUALIFIER",
+              "evidence": "Response latitude31.3884 longitude121.25298 rounds to final coordinates. Final explicitly says model-grid data and 嘉定附近, distinguishing it from requested point31.38575/121.24465. No precise administrative boundary claim needed for nearby-grid qualification."
+            },
+            {
+              "claim": "Requested point is exact Jiading district center",
+              "status": "WORDING_UNVERIFIED",
+              "evidence": "Source identifies populated administrative-place geocoding point, not independently established geometric district center. Final says 中心坐标 but immediately qualifies approximate nearby-grid precision; retain this wording limitation."
+            }
+          ]
+        }
+      ],
+      "baseline_commit": "80d4e198e355468b6d4af16da7e863c711c97518",
+      "change_scope": "Existing web-research skill source-selection paragraph, preferring explicit time/zone/units and approximate model-grid metadata bound to the same source. No host code/parser/API integration.",
+      "frozen_stage_path": "/tmp/elephant-public-tool-weather-source-stage-20261110",
+      "production_directories_modified": false,
+      "qq_messages_sent": 0,
+      "github_writes": 0,
+      "retry_policy": "Exactly one fresh production-budget current-weather Task after materially changed source-selection guidance. No retries."
     }
   ],
   "limitations": [
@@ -1894,7 +2578,9 @@
     "Initial continuation fixture failure retained; isolated task.input permission correction then resumed the same task with cumulative budget intact.",
     "Clarification happened after broad discovery. Corrected continuation read the exact supplied repository and succeeded, but final summary repeated off-target historical PRs and tools made additional off-target reads.",
     "Scope-sentence skill change failed its single live semantic continuation check. Confirmed repository answer was present in model-visible user message under continuation inputs, while original broad goal and stale candidate checkpoint remained. No raw upstream payload capture for this new case; evidence supports a model-facing interpretation/priority failure rather than an input-storage loss, without proving provider payload bytes.",
-    "Generic input-contract fix passed one independent live case after the scope-only skill attempt failed. This demonstrates the exercised continuation, not a statistical guarantee of all repository disambiguation. Raw upstream payload/SSE not captured for the latest case; persisted model-visible Pi grouping and first request hash retained."
+    "Generic input-contract fix passed one independent live case after the scope-only skill attempt failed. This demonstrates the exercised continuation, not a statistical guarantee of all repository disambiguation. Raw upstream payload/SSE not captured for the latest case; persisted model-visible Pi grouping and first request hash retained.",
+    "Latest weather Task completed at host level but semantic metadata check fails. CMA source clock has no fetched timezone semantics, Open-Meteo coordinate precision is unqualified, and source-specific timezone cannot be transferred between sources. No further task/model probes were attempted.",
+    "Latest weather source-selection case satisfies explicit same-source time/zone/unit and approximate-grid requirements. Geocoding is not an independent geometric district-center or administrative-boundary verification. All earlier failures including uwjunnpr unsupported CMA timezone and wttr bare observation-time inference remain retained. This one success does not establish general weather-answer reliability."
   ],
   "reproduction": {
     "included_script": "Each of the last probe-budget and production-budget run records contains its exact full synthetic harness script. Production budget is read with load_runtime_settings(load_settings(...)); external whole-run timeout 300 seconds. Requires authorized Linux Worker acceptance environment, current credentials and matching frozen source revision.",
