@@ -16,4 +16,4 @@ Use installed interpreters and existing repository commands. Check a required de
 
 A new small UTF-8 file can use `workspace.write` with `path` and `text`. It creates a new file and rejects overwriting an existing path. For edits and binary generation, use a bounded process in the task workspace. Preserve existing data and validate the actual result through its normal entry point. Read generated outputs back before declaring them usable.
 
-When files are requested, write them under `outputs/` and pass their relative paths in `task_outcome.attachments`. The host verifies and archives their actual bytes. A successful command only proves that command's exit status. Requested tests and artifact checks still determine task completion.
+When files are requested, follow `goal_spec.requested_outputs` exactly and use `outputs/` for other artifacts. Pass their relative paths in `task_outcome.attachments`. The host verifies and archives their actual bytes. A successful command only proves that command's exit status. Requested tests and artifact checks still determine task completion.
