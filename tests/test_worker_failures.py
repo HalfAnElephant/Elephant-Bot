@@ -292,7 +292,8 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
                 return True
             for _ in range(7):
                 await asyncio.sleep(1)
-                clock.advance(6)
+                # Advance beyond the original lease without racing the five-second renewal tick.
+                clock.advance(4)
             return await super().stop()
 
     pool = SessionPool(lambda claim, pid, _sid: LongStop(tmp_path / pid, claim, service, pid, error="plain"))
