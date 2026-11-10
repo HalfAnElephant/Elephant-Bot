@@ -56,7 +56,7 @@ jobs:
           sha256sum --check SHA256SUMS
           test "$(cat REVISION)" = "$RELEASE_SHA"
           flags=()
-          if [[ "$RELEASE_TAG" =~ [a-zA-Z] ]]; then
+          if [[ "${RELEASE_TAG#v}" =~ [a-zA-Z] ]]; then
             flags+=(--prerelease --latest=false)
           fi
           gh release create "$RELEASE_TAG" ./* --verify-tag --generate-notes --draft --title "$RELEASE_TAG" "${flags[@]}"
