@@ -60,8 +60,20 @@ export default function (pi: ExtensionAPI) {
         contextWindow: binding.model_window, maxTokens: binding.output_tokens,
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
     });
+    // A marker can survive a crash or queue clearing before its user message is persisted.
+    deliveredInputs.clear();
+    const pendingInputs = new Set<string>();
     for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === "qqbot-input") deliveredInputs.add(entry.data.id);
+      if (entry.type === "custom" && entry.customType === "qqbot-input") pendingInputs.add(entry.data.id);
+      else if (entry.type === "message" && entry.message.role === "user") {
+        const content = JSON.stringify(entry.message.content);
+        for (const id of pendingInputs) {
+          if (content.includes(id)) {
+            deliveredInputs.add(id);
+            pendingInputs.delete(id);
+          }
+        }
+      }
     }
     const userUpdates = (binding.task_state?.user_updates || []).filter(
       (item: any) => !deliveredInputs.has(item.id));
