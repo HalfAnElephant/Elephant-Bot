@@ -23,6 +23,8 @@ class GitService:
         env.update({name: os.environ[name] for name in (
             "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
         ) if name in os.environ})
+        if proxy := os.environ.get("QQBOT_GIT_HTTPS_PROXY"):
+            env.update(HTTPS_PROXY=proxy, https_proxy=proxy)
         if authenticate:
             token = self.credentials(context).get("GH_TOKEN") or self.credentials(context).get("GH_ENTERPRISE_TOKEN")
             if token:

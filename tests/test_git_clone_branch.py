@@ -48,11 +48,16 @@ async def test_branch_validation_precedes_process_or_network(tmp_path, branch, o
     assert calls == []
 
 
-async def test_transport_uses_only_trusted_proxy_environment(tmp_path, monkeypatch):
+@pytest.mark.parametrize("git_proxy", [None, "http://127.0.0.1:17890"])
+async def test_transport_uses_only_trusted_proxy_environment(tmp_path, monkeypatch, git_proxy):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
     monkeypatch.setenv("NO_PROXY", "localhost")
     monkeypatch.setenv("GH_TOKEN", "parent-token-must-stay-out")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "unrelated-secret")
+    if git_proxy:
+        monkeypatch.setenv("QQBOT_GIT_HTTPS_PROXY", git_proxy)
+    else:
+        monkeypatch.delenv("QQBOT_GIT_HTTPS_PROXY", raising=False)
     captured = {}
 
     async def start(*argv, **kwargs):
@@ -67,6 +72,8 @@ async def test_transport_uses_only_trusted_proxy_environment(tmp_path, monkeypat
     service = GitService(lambda context: {})
     result = await service._run(["--version"], tmp_path, context)
     assert result["exit_code"] == 0
-    assert captured["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert captured["HTTPS_PROXY"] == (git_proxy or "http://127.0.0.1:7890")
+    if git_proxy:
+        assert captured["https_proxy"] == git_proxy
     assert captured["NO_PROXY"] == "localhost"
     assert "GH_TOKEN" not in captured and "AWS_SECRET_ACCESS_KEY" not in captured
