@@ -21,6 +21,7 @@ def wants_background(text):
 def plan_turn(turn, settings, *, background=False, permission_version=0, context=None):
     detached = background or wants_background(turn.text)
     checks, outputs = [], []
+    explicit_root_outputs = set()
     github = bool(re.search(r"\b(?:PR|Issue|GitHub|CI)\b|仓库|github\.com", turn.text, re.IGNORECASE))
     weather = bool(re.search(r"天气|气温|温度|下雨|预报|\bweather\b", turn.text, re.IGNORECASE)) or (
         (context or {}).get("seed", {}).get("topic", {}).get("kind") == "weather"
@@ -43,6 +44,11 @@ def plan_turn(turn, settings, *, background=False, permission_version=0, context
             path = PurePosixPath(filename)
             if not path.is_absolute() and ".." not in path.parts:
                 outputs.append(str(path))
+                if filename.startswith("./"):
+                    explicit_root_outputs.add(str(path))
+        qualified_names = {PurePosixPath(path).name for path in outputs if "/" in path}
+        outputs = [path for path in outputs if "/" in path or path not in qualified_names
+                   or path in explicit_root_outputs]
         if outputs or re.search(r"文件|PDF|DOCX|XLSX|PPTX|电子表格|幻灯片", turn.text, re.IGNORECASE):
             checks.append("artifact")
     fresh_query = bool(re.search(r"查询|查一下|查查|帮我查|列出|现在|当前|今天|明天|有哪些", turn.text))
