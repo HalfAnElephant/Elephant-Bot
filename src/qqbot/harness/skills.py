@@ -14,7 +14,8 @@ from uuid import uuid4
 
 MAX_SKILL_BYTES = 20 * 1024 * 1024
 SKILLSETS = Path('/opt/qqbot/skillsets')
-DEFAULT_SKILLS = Path(__file__).resolve().parents[3] / 'skills'
+# Source bundles and wheel installs both run from the configured deployment directory.
+DEFAULT_SKILLS = Path.cwd() / 'skills'
 
 
 class SkillVersionUnavailable(ValueError):

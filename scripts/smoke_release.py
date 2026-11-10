@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from qqbot.app import create_app
 from qqbot.config import load_settings
 from qqbot.dialogue import PersonaStore, render_persona
+from qqbot.harness.skills import DEFAULT_SKILLS, SkillStore
 
 
 def main():
@@ -21,6 +22,10 @@ def main():
     for name in ("alembic.ini", "uv.lock", "package-lock.json", "deploy/qqbot.service"):
         assert Path(name).is_file(), f"Source bundle is missing {name}"
     assert os.access("scripts/pi-runner-launch", os.X_OK)
+    assert DEFAULT_SKILLS == Path.cwd() / "skills"
+    with tempfile.TemporaryDirectory() as versions:
+        snapshot = SkillStore(DEFAULT_SKILLS, Path(versions)).select()
+        assert "history-memory/SKILL.md" in snapshot.hashes
 
     settings = load_settings("configs/example.yaml")
     persona, _ = PersonaStore(settings.persona_path).snapshot("release-smoke")
