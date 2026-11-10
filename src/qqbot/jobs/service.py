@@ -792,7 +792,11 @@ class TaskService:
             if kind == "external":
                 condition = WaitCondition.model_validate_json(json.dumps(condition)).model_dump(mode="json")
             else:
-                condition = {"expected_responders": [task["requester"]],
+                expected = [task["requester"]]
+                event = InboundEvent.model_validate_json(task["event_json"])
+                if event.principal.identity_namespace == "admin_api" and event.conversation.surface == Surface.PRIVATE:
+                    expected.extend(json.loads(task["context_json"]).get("additional_expected_responders", ()))
+                condition = {"expected_responders": list(dict.fromkeys(expected)),
                              "collaboration_scope": "explicit_reply"}
             self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
                                "important", question_id)

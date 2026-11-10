@@ -1,0 +1,384 @@
+{
+  "date": "2026-11-10",
+  "dataset": "evals/fixtures/social-semantic.jsonl",
+  "data_classification": "synthetic",
+  "scope": "SpeechPolicy and configured Jev1 with fixed context snapshots; zero QQ sends",
+  "generalization": "14 handwritten cases are insufficient for real-group quality estimates",
+  "metadata": {
+    "created_at": "2026-11-10T04:16:00.241026+00:00",
+    "git_commit": "ef2fb5980c2836a9b80cf3e0be6b134e6b9717fb",
+    "source_sha256": {
+      "evals/social_replay.py": "aac899ea27dda7bc4cf2d8e7f81910323f305adef80e9702f845bf378855ceab",
+      "src/qqbot/policy/judge.py": "ad0584a769c285fecbe3a622f3a480da21df56ad7de963525b23a16f20ffc188",
+      "src/qqbot/policy/__init__.py": "756c60295b6095ee808b79a2bf6f30f474ab8b7a7a67aad2d855991aaca2dbbb",
+      "src/qqbot/domain/social.py": "823338ed2f9225353b848984cd1c3020ae66e155abf6a0e6b601f01a5757493e",
+      "src/qqbot/runtime.py": "21605f3f6697452c55705bf280264e84d7ae01d3465106f7a872cc4b96088dba"
+    },
+    "dataset_sha256": "3b046dfd97c85710e7764c591746efbd8e465e87a783cef914d776946ae72900",
+    "judge_config": {
+      "kind": "jev",
+      "endpoint": "http://today.eoty.cn:26168/v1/chat/completions",
+      "model": "jev1",
+      "api_key_env": "QQBOT_JUDGE_KEY",
+      "thresholds": {
+        "invites_participation": 0.8,
+        "continues_bot_topic": 0.85,
+        "useful_contribution": 0.75,
+        "private_exchange": 0.2,
+        "wait_useful_contribution": 0.65
+      },
+      "participation": {
+        "cooldown_seconds": 60,
+        "min_human_messages": 3,
+        "require_member_response": true,
+        "max_recent_bot_ratio": 0.2,
+        "max_rechecks": 2,
+        "activity_window_seconds": 60,
+        "activity_max_events": 20,
+        "participation_budget_ratio": 0.2
+      }
+    },
+    "judge_config_sha256": "4a83a3f53e48e4b283fa6f95aa76374eb87dba3404cc46e45ccd7e78919edb24",
+    "skills_source_version": "79f20d965a063493968d8fc7e1f676ed0b1ad5f4afca38611a9ffb4addf888a2",
+    "context_version": "speech-context-v2",
+    "execution_channel": "network",
+    "policy_scope": "SpeechPolicy with supplied state; dynamic reservation counters are outside this replay",
+    "qq_send_operations": 0,
+    "uncommitted_source_snapshot": true
+  },
+  "runs": [
+    {
+      "run": "real-judge-test",
+      "split": "test",
+      "cases": 7,
+      "requests": 36,
+      "usage_known_requests": 36,
+      "usage_unknown_requests": 0,
+      "usage_total": {
+        "prompt_tokens": 24882
+      },
+      "metrics": {
+        "model_requests_per_100_messages": 514.2857142857143,
+        "request_measurement_coverage": 7,
+        "decision_p95_ms": 1072.106,
+        "duration_measurement_coverage": 7,
+        "prohibited_violations": 0,
+        "total": 7,
+        "test_total": 7,
+        "unjudged_messages": 0,
+        "label_action_counts": {
+          "must_reply": {
+            "SPEAK": 1,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "may_reply": {
+            "SPEAK": 2,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "should_wait": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 1
+          },
+          "should_ignore": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 3
+          }
+        },
+        "should_wait_recall": {
+          "numerator": 0,
+          "denominator": 1,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.7934567085261071
+          ]
+        },
+        "must_reply_recall": {
+          "numerator": 1,
+          "denominator": 1,
+          "rate": 1.0,
+          "wilson_95": [
+            0.20654329147389294,
+            1
+          ]
+        },
+        "ignore_false_trigger_rate": {
+          "numerator": 0,
+          "denominator": 3,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.5615060804490177
+          ]
+        },
+        "speech_precision": {
+          "numerator": 3,
+          "denominator": 3,
+          "rate": 1.0,
+          "wilson_95": [
+            0.43849391955098227,
+            1
+          ]
+        },
+        "real_provider_evaluation": true,
+        "social_enabled": false,
+        "evaluation_kind": "provider_judge_semantic_replay",
+        "model_requests_total": 36
+      }
+    },
+    {
+      "run": "real-judge-test-2",
+      "split": "test",
+      "cases": 7,
+      "requests": 36,
+      "usage_known_requests": 36,
+      "usage_unknown_requests": 0,
+      "usage_total": {
+        "prompt_tokens": 24882
+      },
+      "metrics": {
+        "model_requests_per_100_messages": 514.2857142857143,
+        "request_measurement_coverage": 7,
+        "decision_p95_ms": 1586.985,
+        "duration_measurement_coverage": 7,
+        "prohibited_violations": 0,
+        "total": 7,
+        "test_total": 7,
+        "unjudged_messages": 0,
+        "label_action_counts": {
+          "must_reply": {
+            "SPEAK": 1,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "may_reply": {
+            "SPEAK": 2,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "should_wait": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 1
+          },
+          "should_ignore": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 3
+          }
+        },
+        "should_wait_recall": {
+          "numerator": 0,
+          "denominator": 1,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.7934567085261071
+          ]
+        },
+        "must_reply_recall": {
+          "numerator": 1,
+          "denominator": 1,
+          "rate": 1.0,
+          "wilson_95": [
+            0.20654329147389294,
+            1
+          ]
+        },
+        "ignore_false_trigger_rate": {
+          "numerator": 0,
+          "denominator": 3,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.5615060804490177
+          ]
+        },
+        "speech_precision": {
+          "numerator": 3,
+          "denominator": 3,
+          "rate": 1.0,
+          "wilson_95": [
+            0.43849391955098227,
+            1
+          ]
+        },
+        "real_provider_evaluation": true,
+        "social_enabled": false,
+        "evaluation_kind": "provider_judge_semantic_replay",
+        "model_requests_total": 36
+      }
+    },
+    {
+      "run": "real-judge-test-3",
+      "split": "test",
+      "cases": 7,
+      "requests": 36,
+      "usage_known_requests": 36,
+      "usage_unknown_requests": 0,
+      "usage_total": {
+        "prompt_tokens": 24882
+      },
+      "metrics": {
+        "model_requests_per_100_messages": 514.2857142857143,
+        "request_measurement_coverage": 7,
+        "decision_p95_ms": 1541.491,
+        "duration_measurement_coverage": 7,
+        "prohibited_violations": 0,
+        "total": 7,
+        "test_total": 7,
+        "unjudged_messages": 0,
+        "label_action_counts": {
+          "must_reply": {
+            "SPEAK": 1,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "may_reply": {
+            "SPEAK": 2,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "should_wait": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 1
+          },
+          "should_ignore": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 3
+          }
+        },
+        "should_wait_recall": {
+          "numerator": 0,
+          "denominator": 1,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.7934567085261071
+          ]
+        },
+        "must_reply_recall": {
+          "numerator": 1,
+          "denominator": 1,
+          "rate": 1.0,
+          "wilson_95": [
+            0.20654329147389294,
+            1
+          ]
+        },
+        "ignore_false_trigger_rate": {
+          "numerator": 0,
+          "denominator": 3,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.5615060804490177
+          ]
+        },
+        "speech_precision": {
+          "numerator": 3,
+          "denominator": 3,
+          "rate": 1.0,
+          "wilson_95": [
+            0.43849391955098227,
+            1
+          ]
+        },
+        "real_provider_evaluation": true,
+        "social_enabled": false,
+        "evaluation_kind": "provider_judge_semantic_replay",
+        "model_requests_total": 36
+      }
+    },
+    {
+      "run": "real-judge-development",
+      "split": "development",
+      "cases": 7,
+      "requests": 36,
+      "usage_known_requests": 36,
+      "usage_unknown_requests": 0,
+      "usage_total": {
+        "prompt_tokens": 24858
+      },
+      "metrics": {
+        "model_requests_per_100_messages": 514.2857142857143,
+        "request_measurement_coverage": 7,
+        "decision_p95_ms": 1102.627,
+        "duration_measurement_coverage": 7,
+        "prohibited_violations": 0,
+        "total": 7,
+        "test_total": 7,
+        "unjudged_messages": 0,
+        "label_action_counts": {
+          "must_reply": {
+            "SPEAK": 1,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "may_reply": {
+            "SPEAK": 2,
+            "WAIT": 0,
+            "IGNORE": 0
+          },
+          "should_wait": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 1
+          },
+          "should_ignore": {
+            "SPEAK": 0,
+            "WAIT": 0,
+            "IGNORE": 3
+          }
+        },
+        "should_wait_recall": {
+          "numerator": 0,
+          "denominator": 1,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.7934567085261071
+          ]
+        },
+        "must_reply_recall": {
+          "numerator": 1,
+          "denominator": 1,
+          "rate": 1.0,
+          "wilson_95": [
+            0.20654329147389294,
+            1
+          ]
+        },
+        "ignore_false_trigger_rate": {
+          "numerator": 0,
+          "denominator": 3,
+          "rate": 0.0,
+          "wilson_95": [
+            0,
+            0.5615060804490177
+          ]
+        },
+        "speech_precision": {
+          "numerator": 3,
+          "denominator": 3,
+          "rate": 1.0,
+          "wilson_95": [
+            0.43849391955098227,
+            1
+          ]
+        },
+        "real_provider_evaluation": true,
+        "social_enabled": false,
+        "evaluation_kind": "provider_judge_semantic_replay",
+        "model_requests_total": 36
+      }
+    }
+  ],
+  "known_difference": "The should_wait case was classified IGNORE in all four runs; no thresholds were tuned against this holdout."
+}

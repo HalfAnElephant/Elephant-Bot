@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import and_, func, insert, or_, select, update
 
-from qqbot.context import ContextService, InputBudgetExceeded, merge_manifest
+from qqbot.context import ContextService, InputBudgetExceeded, digest, merge_manifest
 from qqbot.conversation import ConversationWindow
 from qqbot.dialogue import PersonaStore
 from qqbot.dialogue.planner import plan_turn, wants_background
@@ -670,7 +670,7 @@ class Core:
     def context_for(self, event, access=None, *, turn=None, invited=None, memory_options=None):
         self.contexts.settings = self.settings
         access = access or self.access(event)
-        return self.contexts.build(
+        context = self.contexts.build(
             access,
             turn or self.contexts.turn(event),
             memory_options=memory_options,
@@ -682,6 +682,26 @@ class Core:
             if invited is None
             else invited,
         )
+        if event.principal.identity_namespace == "admin_api" and event.conversation.surface == Surface.PRIVATE:
+            ref = event.conversation
+            with self.db.engine.connect() as c:
+                raw = c.execute(select(inbox.c.event_json).where(
+                    inbox.c.conversation_id == ref.key, inbox.c.event_type == "message.created",
+                    func.json_extract(inbox.c.event_json, "$.principal.adapter_instance_id") == ref.adapter_instance_id,
+                    func.json_extract(inbox.c.event_json, "$.principal.remote_user_id") == ref.remote_conversation_id,
+                    func.json_extract(inbox.c.event_json, "$.principal.identity_namespace") != "admin_api",
+                    func.json_extract(inbox.c.event_json, "$.sender_is_bot") == 0,
+                ).order_by(inbox.c.seq.desc()).limit(1)).scalar_one_or_none()
+                if raw:
+                    source = InboundEvent.model_validate_json(raw)
+                    if (source.conversation == ref and source.principal.remote_user_id != ref.bot_identity_id
+                            and self.tasks._input_event_valid(c, source)
+                            and self.permissions.check(access, "history.source.read", "event:" + source.event_id).allowed):
+                        context["additional_expected_responders"] = [source.principal.key]
+                        context["source_manifest"] = merge_manifest(context.get("source_manifest", ()), [{
+                            "kind": "inbox", "id": source.event_id, "digest": digest(raw),
+                        }])
+        return context
 
     def submit_turn(
         self,
