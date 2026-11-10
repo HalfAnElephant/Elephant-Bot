@@ -47,7 +47,7 @@ def api_arguments(argv):
                 value = attached if separator else next(arguments, None)
                 if value is None:
                     raise ValueError("GitHub API option requires a value")
-                options.extend((name, value))
+                options.append(name + "=" + value)
             elif name in boolean_flags:
                 options.append(item)
             else:
@@ -63,7 +63,7 @@ def api_arguments(argv):
                     value = cluster.lstrip("=") if cluster else next(arguments, None)
                     if value is None:
                         raise ValueError("GitHub API option requires a value")
-                    options.extend((name, value))
+                    options.append(name + "=" + value)
                     break
                 options.append(name)
         else:
@@ -72,11 +72,108 @@ def api_arguments(argv):
         raise ValueError("GitHub API requires exactly one resolvable endpoint")
     return ["api", endpoints[0], *options]
 
+
+def normalize_argv(argv):
+    if argv[:1] == ["api"] and argv != ["api", "--help"]:
+        return api_arguments(argv)
+    if len(argv) < 2 or (argv[0] not in {"pr", "issue"}
+                        and argv[:2] not in (["workflow", "run"], ["run", "rerun"])):
+        return argv
+    if argv[1] not in {"create", "edit", "close", "reopen", "comment", "review", "merge", "run", "rerun"}:
+        return argv
+    values = {"--repo", "--hostname", "--body", "--body-file", "--title", "--base", "--head", "--comment",
+              "--reason", "--ref", "--field", "--raw-field", "--match-head-commit", "--subject", "--job",
+              "--add-label", "--remove-label", "--add-assignee", "--remove-assignee", "--add-project",
+              "--remove-project", "--milestone", "--assignee", "--label", "--project", "--reviewer"}
+    booleans = {"--approve", "--request-changes", "--draft", "--edit-last", "--delete-last", "--create-if-none",
+                "--editor", "--web", "--yes", "--auto", "--disable-auto", "--admin", "--delete-branch",
+                "--squash", "--merge", "--rebase", "--failed", "--debug", "--help"}
+    aliases = {"R": "--repo", "b": "--body", "F": "--body-file", "t": "--title", "B": "--base",
+               "H": "--head", "c": "--comment", "e": "--editor", "w": "--web", "m": "--milestone",
+               "l": "--label", "p": "--project", "a": "--assignee", "r": "--reviewer"}
+    if argv[1] == "review":
+        aliases.update(a="--approve", r="--request-changes")
+    elif argv[1] == "close":
+        aliases.update(r="--reason", d="--delete-branch")
+    elif argv[:2] == ["workflow", "run"]:
+        aliases.update(r="--ref", F="--field", f="--raw-field")
+        booleans.add("--json")
+    elif argv[:2] == ["run", "rerun"]:
+        aliases["j"] = "--job"
+    elif argv[:2] == ["pr", "create"]:
+        aliases["d"] = "--draft"
+    positional, options = [], []
+    arguments = iter(argv[2:])
+    for item in arguments:
+        if item == "--":
+            positional.extend(arguments)
+            break
+        if item.startswith("--"):
+            name, separator, attached = item.partition("=")
+            if name in values:
+                value = attached if separator else next(arguments, None)
+                if value is None:
+                    raise ValueError("GitHub option requires a value")
+                options.append(name + "=" + value)
+            elif name in booleans and not separator:
+                options.append(name)
+            else:
+                raise ValueError("cannot resolve GitHub target with an unknown option")
+        elif item.startswith("-"):
+            cluster = item[1:]
+            while cluster:
+                name = aliases.get(cluster[0])
+                if name is None:
+                    raise ValueError("cannot resolve GitHub target with an unknown option")
+                cluster = cluster[1:]
+                if name in values:
+                    value = cluster.lstrip("=") if cluster else next(arguments, None)
+                    if value is None:
+                        raise ValueError("GitHub option requires a value")
+                    options.append(name + "=" + value)
+                    break
+                options.append(name)
+        else:
+            positional.append(item)
+    return [*argv[:2], *positional, *options]
+
+
+def api_payload(argv, stdin=""):
+    argv = api_arguments(argv)
+    inputs = flag_values(argv, "--input")
+    if inputs:
+        if inputs != ["-"]:
+            return None
+        try:
+            body = json.loads(stdin)
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+    body = {}
+    for option in argv[2:]:
+        name, separator, entry = option.partition("=")
+        if not separator or name not in {"--field", "--raw-field"}:
+            continue
+        key, separator, value = entry.partition("=")
+        if not separator or key in body:
+            return None
+        if name == "--field":
+            if value == "@-":
+                value = stdin
+            elif value.startswith("@"):
+                return None
+            elif value in {"true", "false", "null"}:
+                value = json.loads(value)
+            elif re.fullmatch(r"-?\d+", value):
+                value = int(value)
+        body[key] = value
+    return body
+
+
 def classify(argv, context, stdin=""):
     if not argv or any(not isinstance(item, str) or "\x00" in item for item in argv):
         raise ValueError("argv must contain nonempty string arguments")
-    if argv[0] == "api" and argv != ["api", "--help"]:
-        argv = api_arguments(argv)
+    argv = normalize_argv(argv)
     repo_values = flag_values(argv, "--repo", "-R")
     repository = repo_values[-1] if repo_values else context.repository
     host_values = flag_values(argv, "--hostname")
@@ -84,6 +181,8 @@ def classify(argv, context, stdin=""):
     if repository and len(repository.split("/")) == 3:
         host, repository = repository.split("/", 1)
     targets = argv[1:2] if argv[0] == "api" else argv[2:3]
+    if len(argv) > 1 and argv[1] in {"create", "edit", "close", "reopen", "comment", "review", "merge", "run", "rerun"}:
+        targets = [item for item in argv[2:] if not item.startswith("-")]
     for item in targets:
         parsed = urlsplit(item)
         if parsed.scheme or parsed.netloc:
@@ -105,6 +204,8 @@ def classify(argv, context, stdin=""):
         if number and repository:
             resources += (f"{argv[0]}:{host}/{repository}#{number}",)
     family, command = argv[0], argv[1] if len(argv) > 1 else ""
+    if family in {"pr", "issue", "workflow", "run"} and len(targets) > 1:
+        return Action("github.unclassified", resources, "unknown")
     if (len(argv) <= 3 and argv[-1] == "--help") or argv in (["--version"], ["version"]):
         return Action("github.cli.read", resources)
     if family == "api":
@@ -112,13 +213,14 @@ def classify(argv, context, stdin=""):
         if endpoint.startswith("-"):
             return Action("github.unclassified", resources, "unknown")
         endpoint = endpoint.replace("{owner}/{repo}", repository or "{owner}/{repo}")
-        if "%" in endpoint or "/../" in endpoint or "/./" in endpoint:
+        if "%" in urlsplit(endpoint).path or any(part in {".", ".."} for part in urlsplit(endpoint).path.split("/")):
             return Action("github.unclassified", resources, "unknown")
-        match = re.search(r"(?:^|/)repos/([^/]+/[^/]+)(?:/|$)", endpoint)
+        endpoint_path = urlsplit(endpoint).path
+        match = re.search(r"(?:^|/)repos/([^/]+/[^/]+)(?:/|$)", endpoint_path)
         if match:
             repository = match[1].lower()
             resources = (f"repo:{host}/{repository}",)
-            target = re.search(r"/(pulls|issues)/(\d+)(?:/|$)", endpoint)
+            target = re.search(r"/(pulls|issues)/(\d+)(?:/|$)", endpoint_path)
             if target:
                 kind = "pr" if target[1] == "pulls" else "issue"
                 resources += (f"{kind}:{host}/{repository}#{target[2]}",)
@@ -126,12 +228,10 @@ def classify(argv, context, stdin=""):
         method = flag_values(argv, "-X", "--method")
         method = method[-1].upper() if method else ("POST" if fields or flag_values(argv, "--input") else "GET")
         if endpoint.rstrip("/").endswith("graphql"):
-            query = next((value.split("=", 1)[1] for value in fields if value.startswith("query=")), "")
-            if not query and flag_values(argv, "--input"):
-                try:
-                    query = json.loads(stdin).get("query", "")
-                except (ValueError, AttributeError):
-                    pass
+            payload = api_payload(argv, stdin)
+            query = payload.get("query", "") if payload else ""
+            if not isinstance(query, str):
+                return Action("github.unclassified", resources, "unknown")
             # Multiple operations, directives, file input and aliases require richer resolution.
             clean = re.sub(r'"(?:\\.|[^"\\])*"|#[^\n]*', '""', query).strip()
             if clean.startswith("mutation"):
@@ -141,9 +241,10 @@ def classify(argv, context, stdin=""):
             ):
                 return Action("github.graphql.read", (f"github:{host}",))
             return Action("github.unclassified", resources, "unknown")
-        suffix = endpoint.split("?")[0].split("/")
-        kind = next((kind for segment, kind in (("pulls", "pr"), ("issues", "issue"),
-            ("runs", "run"), ("workflows", "workflow"), ("releases", "release")) if segment in suffix), "api")
+        suffix = endpoint_path[match.end():].strip("/").split("/") if match else []
+        kind = {"pulls": "pr", "issues": "issue", "releases": "release"}.get(suffix[0] if suffix else "", "api")
+        if len(suffix) > 1 and suffix[0] == "actions":
+            kind = {"runs": "run", "workflows": "workflow"}.get(suffix[1], "api")
         effect = "read" if method in {"GET", "HEAD", "OPTIONS"} else "write"
         operation = "read" if effect == "read" else method.lower()
         if effect == "write":
@@ -152,6 +253,14 @@ def classify(argv, context, stdin=""):
                 operation = "create"
             elif kind in {"pr", "issue"} and suffix[-1] == "comments" and method == "POST":
                 operation = "comment"
+            elif kind in {"pr", "issue"} and re.search(r"/(?:pulls|issues)/\d+$", endpoint_path) and method == "PATCH":
+                body = api_payload(argv, stdin)
+                if body and set(body) <= {"body", "title"}:
+                    operation = "edit"
+                elif body and set(body) <= {"state", "state_reason"}:
+                    operation = {"closed": "close", "open": "reopen"}.get(body.get("state"))
+            elif kind == "workflow" and suffix[-1] == "dispatches" and method == "POST":
+                operation = "run"
             elif kind == "pr" and suffix[-1] == "merge" and method == "PUT":
                 operation = "merge"
             elif kind == "run" and suffix[-1] in {"rerun", "cancel"} and method == "POST":
@@ -159,15 +268,11 @@ def classify(argv, context, stdin=""):
             if operation is None and "reviews" not in suffix:
                 return Action("github.unclassified", resources, "unknown")
         if "reviews" in suffix and effect == "write":
-            body = dict(value.split("=", 1) for value in fields if "=" in value)
-            try:
-                body.update(json.loads(stdin) if stdin else {})
-            except (ValueError, TypeError):
-                pass
+            body = api_payload(argv, stdin) or {}
             operation = "review." + {"APPROVE": "approve", "REQUEST_CHANGES": "request_changes",
                                       "COMMENT": "comment"}.get(body.get("event"), "create")
         if kind == "api":
-            return Action("github.unclassified", resources, "unknown")
+            return Action("github.api.read", resources if match else (f"github:{host}",)) if effect == "read" else Action("github.unclassified", resources, "unknown")
         return Action(f"github.{kind}.{operation}", resources, effect)
     if family in {"pr", "issue", "repo", "run", "workflow", "release", "project"} and command in {
         "list", "view", "diff", "checks", "status", "search"
@@ -214,20 +319,22 @@ class GitHubCLI:
             action = classify(argv, context, stdin)
             repository = next((resource.removeprefix("repo:" + context.host + "/")
                                for resource in action.resources if resource.startswith("repo:")), None)
-            number = argv[2] if len(argv) > 2 and argv[2].isdigit() else None
+            number = next((resource.rsplit("#", 1)[1] for resource in action.resources
+                           if resource.startswith("pr:")), None)
             if not repository or not number:
                 raise ValueError("commit-bound review requires explicit repository and PR number")
-            bodies = flag_values(argv, "--body", "-b")
-            body = stdin if flag_values(argv, "--body-file", "-F") == ["-"] else (bodies[-1] if bodies else "")
+            normalized = normalize_argv(argv)
+            bodies = flag_values(normalized, "--body")
+            body = stdin if flag_values(normalized, "--body-file") == ["-"] else (bodies[-1] if bodies else "")
             event = {"approve": "APPROVE", "request_changes": "REQUEST_CHANGES", "comment": "COMMENT"}[
                 action.name.rsplit(".", 1)[-1]]
             argv = ["api", f"repos/{repository}/pulls/{number}/reviews", "--method", "POST", "--input", "-"]
             stdin = json.dumps({"event": event, "body": body, "commit_id": reviewed}, ensure_ascii=False)
-        checked = api_arguments(argv) if argv[:1] == ["api"] and argv != ["api", "--help"] else argv
+        checked = normalize_argv(argv)
         if argv[:1] == ["api"]:
             classify(argv, context, stdin)
-        for value in flag_values(checked, "--input", "--body-file", "--template-file", "-F"):
-            if value != "-" and "=" not in value:
+        for value in flag_values(checked, "--input", "--body-file", "--template-file"):
+            if value != "-":
                 raise ValueError("file input must use literal stdin or stdin_ref")
         for value in flag_values(checked, "--field", "-F"):
             if "=@" in value and not value.endswith("=@-"):
