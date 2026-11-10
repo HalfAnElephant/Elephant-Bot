@@ -1,5 +1,6 @@
 """Check the installed wheel while running from the extracted source bundle."""
 
+import json
 import os
 import tempfile
 from importlib.resources import files
@@ -22,8 +23,8 @@ def main():
     assert os.access("scripts/pi-runner-launch", os.X_OK)
 
     settings = load_settings("configs/example.yaml")
-    persona = PersonaStore(settings.persona_path).snapshot("release-smoke")
-    assert render_persona(persona)
+    persona, _ = PersonaStore(settings.persona_path).snapshot("release-smoke")
+    assert render_persona(json.loads(persona))
     with tempfile.TemporaryDirectory() as folder:
         settings = settings.model_copy(update={
             "database": str(Path(folder) / "core.db"),
