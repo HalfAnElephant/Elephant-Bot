@@ -595,7 +595,7 @@ async def test_locked_pi_continuation_and_restored_updates_are_injected_once(com
         await runner.run("continue with the user's input", keep_alive=True)
         second = state.requests[-1]["payload"]["messages"]
         latest_user = next(message for message in reversed(second) if message["role"] == "user")
-        text = latest_user["content"]
+        text = "".join(part["text"] for part in latest_user["content"] if part["type"] == "text")
         assert text.startswith("原始用户目标：")
         materials, supplement = text.split("本轮已核验的用户补充", 1)
         assert decision["text"] not in materials and old_decision["text"] not in materials
