@@ -1418,7 +1418,7 @@ class Core:
                             )
                             if report is not None:
                                 saved = json.loads(self.state(event.conversation.key)["state_json"])
-                                saved["memory_maintenance"] = {"at": self.clock.now().isoformat(), **asdict(report)}
+                                saved["memory_maintenance"] = {"at": self.clock.now().isoformat(), **report.model_dump(mode="json")}
                                 self.save_state(event.conversation.key, state_json=json.dumps(saved))
                         else:
                             await self.expressions.maintenance_once(access, self.expression_learner)

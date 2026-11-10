@@ -245,6 +245,28 @@ async def test_failed_conversation_does_not_starve_other_maintenance(
         app.state.db.close()
 
 
+async def test_core_persists_real_memory_maintenance_report(tmp_path, nap_config, nap_event, clock):
+    settings = Settings(
+        database=str(tmp_path / "core.db"), adapters=(nap_config,),
+        memory={"maintenance_enabled": True, "raw_retention_days": None},
+    )
+    app = create_app(settings, clock=clock, run_background=False)
+    core = app.state.core
+    event = core.adapters["nap"].normalize(nap_event)
+    accepted, _ = core.inbox.accept(event)
+    try:
+        await core.maintenance_once("memory")
+        report = json.loads(core.state(accepted.conversation.key)["state_json"])["memory_maintenance"]
+        assert report["at"] == clock.now().isoformat()
+        assert report["state"] == "DONE"
+        assert report["summary_seq"] == accepted.ingest_seq
+        assert report["extraction_state"] == "SKIPPED"
+        assert report["rejections"] == []
+    finally:
+        await core.stop()
+        app.state.db.close()
+
+
 def test_ready_reports_temporary_database_failure_and_recovery(tmp_path, monkeypatch):
     from sqlalchemy.exc import OperationalError
 
