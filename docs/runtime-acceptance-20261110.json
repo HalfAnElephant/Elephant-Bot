@@ -360,7 +360,53 @@
       "skill_version": "be62d5f875a3f3c79bf425be9317bbec619d499e87a78f4871c1490c1e7a2e53"
     }
   },
-  "final_inspection": {
+  "final_pull_request": "https://github.com/HalfAnElephant/Elephant-Bot/pull/4",
+  "validated_pr_head_before_marker_fix": {
+    "head": "112e216640dbb470bd5165778ee4601b8c64f95b",
+    "ci_run": 42781634359,
+    "ci_url": "https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/42781634359",
+    "correctness": "success",
+    "build_and_smoke": "success",
+    "codeql_run": 42781634511,
+    "codeql_analyzers": "success",
+    "codeql_gate": "success"
+  },
+  "input_marker_deployment": {
+    "report_revision": "6b084ae3b11698932363036f12c02cf4dcb9e1cd",
+    "path": "src/qqbot/harness/pi_bridge.ts",
+    "previous_sha256": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835",
+    "sha256": "38ce1f7f11b2897043c996bd405c1cee096d625f0b21e70b8e90bb9a57c68c07",
+    "skill_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c",
+    "preserved_parallel_sha256": {
+      "src/qqbot/runtime.py": "8e49ada1e5ac9d48489abc442008333f6fae7e3e8ff7c59bfc27f89ca8eeaff3",
+      "src/qqbot/harness/gateway.py": "67e973c326cb14e8b1b6870a49bc6c829e0f212f493e7583cd7ff62233d9314d",
+      "src/qqbot/jobs/service.py": "23db1a85a0757473b1a75fa97db07899fe1af711bbe229f5a8515633a1dcf488"
+    },
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion/input-marker-6b084ae",
+    "ready": true,
+    "restart": "Worker only, after verifying zero reserved run slots. Core state and all pinned skill snapshots retained."
+  },
+  "input_marker_compatibility": {
+    "scope": "Locked real Pi under the production parallel-source overlay. Orphan marker after crash, two prequeued markers consumed by separate user messages, and same-process clear_queue recovery.",
+    "checks": [
+      {
+        "tests": "2",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "4.676"
+      },
+      {
+        "tests": "1",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+        "time": "1.703"
+      }
+    ],
+    "reuse": "The other 274 successful compatibility cases retain their existing evidence. Existing cold/warm projection cases were extended and rechecked, and one queue-clear regression was added. Total distinct compatibility cases now277."
+  },
+  "post_weather_inspection": {
     "observed_at": "2026-11-10T08:18:33.690779+00:00",
     "report_revision": "be925edac98b13665a464f55b729e37a850d5c56",
     "ready": true,
@@ -388,5 +434,22 @@
       ]
     }
   },
-  "final_pull_request": "https://github.com/HalfAnElephant/Elephant-Bot/pull/4"
+  "final_inspection": {
+    "observed_at": "2026-11-10T08:32:07.106184+00:00",
+    "report_revision": "6b084ae3b11698932363036f12c02cf4dcb9e1cd",
+    "ready": true,
+    "database": "ok",
+    "loops_healthy": {
+      "execution": true,
+      "delivery": true,
+      "memory": true,
+      "expression": true,
+      "speakup": true
+    },
+    "disconnected_adapters": [],
+    "active_task_count": 0,
+    "retained_run_slots": 0,
+    "source_verification": "The prior80-file comparison remains applicable except for pi_bridge.ts. The final bridge and all three parallel-source hashes were checked during this deployment.",
+    "skill_version": "b74aa3b2a4bf7810a52f7797a6c4e98e57cccb98b44307e44a6069b6cd846b0c"
+  }
 }

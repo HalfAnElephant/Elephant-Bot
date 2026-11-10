@@ -265,3 +265,5 @@ home 已同步 Core、Worker、固定 launcher/entry 与只读技能版本，数
 输入契约复查同时修复了外部等待观察被误判为缺少用户原文的问题。观察必须关联同一任务的 external wait，并符合既有内容指纹来源规则，才能进入独立的持久化外部观察字段。用户补充缺失、删除或撤权继续拒绝，旧误判标记按全部来源重新计算。新版 Core、Worker 与固定技能集已同步，`REPORT_REVISION` 为 `3ca6aea`，保留原并行修改。生产源码组合验证共覆盖 276 项，复用 274 项成功结果，修正两项新增断言对 Pi 文本块格式的期待后，仅重验这两项并通过。最初夹具未对齐的中止与失败记录保留在运行验收证据中。最终 PR 仍须满足 main 的两项必过检查。
 
 后续天气技能已以固定版本 `b74aa3b2` 发布，Worker 心跳报告选中相同版本，`REPORT_REVISION` 更新为 `be925ed`。源字段与格点含义按 [Open-Meteo 文档](https://open-meteo.com/en/docs) 核对。PR 首轮 Python 为 939 passed、0 skipped，控制台 19 项通过，Ruff 的导入排序使工作流失败、构建跳过。另有一项 CodeQL 测试日志子串断言告警，两处均已修正，最终头部状态以 [PR #4 检查](https://github.com/HalfAnElephant/Elephant-Bot/pull/4/checks) 为准。
+
+`112e216` 的 Correctness、Build and smoke test 与 CodeQL gate 随后全部通过。最终恢复审查还发现输入 marker 先于真实用户消息落盘的边界，已在 `6b084ae` 修复。每次新绑定从当前分支的实际用户消息重建交付集合，只有已匹配的 marker 被消费，孤立 marker 继续恢复。三个定点用例覆盖冷恢复补入一次、两个排队 marker 分别持久化后的去重，以及同一进程 clear_queue 后的补入。其余 274 项兼容结果复用，共覆盖 277 个独立用例。该更新已同步 home 并单独重启 Worker，三个并行源码指纹保持，`REPORT_REVISION` 为 `6b084ae`。最新头部继续接受 PR 必过检查。
