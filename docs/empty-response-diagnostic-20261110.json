@@ -1,0 +1,108 @@
+{
+  "request_sha256": "9b12a3dcf5cf0a99a28e3e8866b59a992b5c5532acac4c9717a2a985a8ae0384",
+  "tools_executed": 0,
+  "proxy_passthrough_bytes": 20356,
+  "http_requests": 1,
+  "source_sha256": "608e293ee5aa077910de87186ef1d78960886670f7023786a67c90fd12c73907",
+  "wire_request_sha256": "9b12a3dcf5cf0a99a28e3e8866b59a992b5c5532acac4c9717a2a985a8ae0384",
+  "http_status": 200,
+  "content_type": "text/event-stream",
+  "content_encoding": null,
+  "usage": {
+    "coverage": "reported",
+    "raw": {
+      "prompt_tokens": 7973,
+      "completion_tokens": 435,
+      "total_tokens": 8408,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 17
+      },
+      "cost": 0,
+      "opencode": {
+        "billing_source": "go",
+        "list_cost": 0.0029139,
+        "allowance": 0.00174834,
+        "tokens": {
+          "input": 7973,
+          "output": 435,
+          "reasoning": 17,
+          "cache_read": 0,
+          "cache_write_5m": 0,
+          "cache_write_1h": 0
+        }
+      }
+    },
+    "input_tokens": 7973,
+    "output_tokens": 435,
+    "uncached_input_tokens": 7973,
+    "cached_read_tokens": 0,
+    "cached_write_tokens": null,
+    "reasoning_tokens": 17,
+    "cost": null,
+    "request_bytes": 33038,
+    "input_tokens_estimated": 16519,
+    "tools_bytes": 3701,
+    "request_sha256": "9b12a3dcf5cf0a99a28e3e8866b59a992b5c5532acac4c9717a2a985a8ae0384",
+    "stable_prefix_sha256": "275cd2c934c323fde53f97c24a4bba871d77c6ac9683d57dbc63925bc45ffa53",
+    "elapsed_ms": 4694.83,
+    "ttft_ms": 2232.94,
+    "provider_model": "deepseek-v4.1-flash"
+  },
+  "raw-upstream.sse": {
+    "bytes": 20356,
+    "sha256": "8d5e7faa59edbfc2f6818848797bc8d02910cdb44658e5df8690ca7e0262a861"
+  },
+  "proxy-forwarded.sse": {
+    "bytes": 20356,
+    "sha256": "8d5e7faa59edbfc2f6818848797bc8d02910cdb44658e5df8690ca7e0262a861"
+  },
+  "stream_fields": {
+    "frames": 97,
+    "choice_indexes": [
+      0
+    ],
+    "delta_keys": {
+      "role": 1,
+      "content": 89,
+      "reasoning_content": 7
+    },
+    "content_characters": 1151,
+    "reasoning_characters": 88,
+    "tool_names": [],
+    "finish_reasons": [
+      "stop"
+    ],
+    "error_frames": 0
+  },
+  "raw_equals_forwarded": true,
+  "offline_pi_replay": {
+    "stopReason": "stop",
+    "rawStopReason": "stop",
+    "blocks": [
+      {
+        "type": "thinking",
+        "chars": 88
+      },
+      {
+        "type": "text",
+        "chars": 1151
+      }
+    ],
+    "error": null,
+    "network_requests": 0
+  },
+  "schema_version": 1,
+  "date": "2026-11-10",
+  "scope": "One model request, exact frozen final payload, no tools executed. Raw SSE remains in a root-only diagnostic directory.",
+  "historical_budget_explanation": {
+    "model_calls": 8,
+    "completion_reserve": 1,
+    "business_limit": 7,
+    "final_request_tools_disabled": true,
+    "payload_reconstruction_matched_original": true
+  },
+  "assessment": "This single capture contains standard text and is parsed correctly offline. It does not reproduce or establish the cause of the historical thinking-only response. No provider, proxy or Pi patch follows from this result."
+}

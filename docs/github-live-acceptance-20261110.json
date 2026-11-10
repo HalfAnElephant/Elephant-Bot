@@ -1,0 +1,362 @@
+{
+  "source_commit": "7e0addb",
+  "repository": "HalfAnElephant/HalfAnElephant.github.io",
+  "started_at": "2026-11-10T05:34:16.858629+00:00",
+  "completed_at": "2026-11-10T06:01:12.811415+00:00",
+  "actor": "HalfAnElephant",
+  "cli_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
+  "default_branch": "main",
+  "default_head_before": "880595121438e1f108884781e9149d284b5dfb16",
+  "default_head_after": "880595121438e1f108884781e9149d284b5dfb16",
+  "branches": {
+    "base": "elephant-acceptance/20261110T052854-9a0d4d-base",
+    "user": "elephant-acceptance/20261110T052854-9a0d4d-user",
+    "bot": "elephant-acceptance/20261110T052854-9a0d4d-bot",
+    "driver": "elephant-acceptance/20261110T052854-9a0d4d-driver"
+  },
+  "heads": {
+    "user_head": "26ff1f0128ad5247997ecab5b357121674820837",
+    "driver_head": "99ad4961b52d981b14255443b7659973cfd2ec65"
+  },
+  "objects": {
+    "orphan_base": {
+      "branch": "elephant-acceptance/20261110T052854-9a0d4d-base",
+      "sha": "be4c17cb4f910fbe61077dc2b39b5d81e0bffdfa",
+      "tree_sha": "3b6313ea497cbee45fdfa0ed3f567d086c631f02"
+    },
+    "issue": {
+      "number": 17,
+      "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/issues/17"
+    },
+    "user_pr": {
+      "number": 18,
+      "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/18"
+    },
+    "workflow_run": {
+      "id": 42765635872,
+      "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/actions/runs/42765635872",
+      "acceptance_effect": "dispatch_accepted",
+      "conclusion": "success"
+    },
+    "bot_pr": {
+      "number": 19,
+      "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/19",
+      "author": "github-actions[bot]",
+      "head_sha": "26ff1f0128ad5247997ecab5b357121674820837"
+    },
+    "approval": {
+      "id": 5837450559,
+      "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/19#pullrequestreview-5837450559",
+      "actor": "HalfAnElephant",
+      "commit_id": "26ff1f0128ad5247997ecab5b357121674820837",
+      "state": "APPROVED"
+    },
+    "comments": [
+      {
+        "step": "issue-comment",
+        "id": 6760201672,
+        "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/issues/17#issuecomment-6760201672",
+        "actor": "HalfAnElephant"
+      },
+      {
+        "step": "issue-close",
+        "id": 6760204060,
+        "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/issues/17#issuecomment-6760204060",
+        "actor": "HalfAnElephant"
+      },
+      {
+        "step": "pr-comment",
+        "id": 6760281580,
+        "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/18#issuecomment-6760281580",
+        "actor": "HalfAnElephant"
+      },
+      {
+        "step": "pr-close",
+        "id": 6760284166,
+        "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/18#issuecomment-6760284166",
+        "actor": "HalfAnElephant"
+      },
+      {
+        "step": "bot-pr-close",
+        "id": 6760293723,
+        "url": "https://github.com/HalfAnElephant/HalfAnElephant.github.io/pull/19#issuecomment-6760293723",
+        "actor": "HalfAnElephant"
+      }
+    ]
+  },
+  "safe_workflow_sha256": "6f46e4321395e985369ed6427d124e08a80e188de93cad8496e65b9eac80ff9d",
+  "ledger_summary": [
+    {
+      "id": "20261110T052854-9a0d4d:clone",
+      "state": "UNKNOWN",
+      "action": "git.clone",
+      "updated_at": "2026-11-10T05:36:24.195968+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:bootstrap-tree",
+      "state": "VERIFIED",
+      "action": "github.acceptance.bootstrap-tree",
+      "updated_at": "2026-11-10T05:44:48.443018+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:bootstrap-commit",
+      "state": "VERIFIED",
+      "action": "github.acceptance.bootstrap-commit",
+      "updated_at": "2026-11-10T05:44:50.825882+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:bootstrap-ref",
+      "state": "VERIFIED",
+      "action": "github.acceptance.bootstrap-ref",
+      "updated_at": "2026-11-10T05:46:01.770530+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:clone-branch",
+      "state": "UNKNOWN",
+      "action": "git.clone",
+      "updated_at": "2026-11-10T05:48:02.592111+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:clone-branch-proxy",
+      "state": "VERIFIED",
+      "action": "git.clone",
+      "updated_at": "2026-11-10T05:53:57.627647+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:edit-commit-start",
+      "state": "VERIFIED",
+      "action": "workspace.process.start",
+      "updated_at": "2026-11-10T05:53:57.640906+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:push-user",
+      "state": "VERIFIED",
+      "action": "git.push",
+      "updated_at": "2026-11-10T05:54:02.997777+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:push-bot",
+      "state": "VERIFIED",
+      "action": "git.push",
+      "updated_at": "2026-11-10T05:54:08.592971+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:push-driver",
+      "state": "VERIFIED",
+      "action": "git.push",
+      "updated_at": "2026-11-10T05:54:12.927116+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:issue-create",
+      "state": "VERIFIED",
+      "action": "github.issue.create",
+      "updated_at": "2026-11-10T05:54:17.042240+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:issue-edit",
+      "state": "VERIFIED",
+      "action": "github.issue.edit",
+      "updated_at": "2026-11-10T05:54:21.924812+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:issue-comment",
+      "state": "VERIFIED",
+      "action": "github.issue.comment",
+      "updated_at": "2026-11-10T05:54:32.271031+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:issue-close",
+      "state": "VERIFIED",
+      "action": "github.issue.close",
+      "updated_at": "2026-11-10T05:54:41.522018+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-create",
+      "state": "VERIFIED",
+      "action": "github.pr.create",
+      "updated_at": "2026-11-10T05:54:47.764671+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-edit",
+      "state": "UNKNOWN",
+      "action": "github.pr.edit",
+      "updated_at": "2026-11-10T05:54:55.646485+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-edit-rest",
+      "state": "VERIFIED",
+      "action": "github.pr.edit",
+      "updated_at": "2026-11-10T06:00:04.294039+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-comment",
+      "state": "VERIFIED",
+      "action": "github.pr.comment",
+      "updated_at": "2026-11-10T06:00:13.801494+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-close",
+      "state": "VERIFIED",
+      "action": "github.pr.close",
+      "updated_at": "2026-11-10T06:00:24.463065+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:workflow-dispatch",
+      "state": "VERIFIED",
+      "action": "github.workflow.run",
+      "updated_at": "2026-11-10T06:00:35.910333+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:pr-approve",
+      "state": "VERIFIED",
+      "action": "github.pr.review.approve",
+      "updated_at": "2026-11-10T06:00:55.371920+00:00"
+    },
+    {
+      "id": "20261110T052854-9a0d4d:bot-pr-close",
+      "state": "VERIFIED",
+      "action": "github.pr.close",
+      "updated_at": "2026-11-10T06:01:04.789752+00:00"
+    }
+  ],
+  "git_patch_sha256": "d7db3490c3a2721a1121b8bb965a451197f4eab41f2da9ad6645eb6083cd96e5",
+  "git_service_commit": "0e48034",
+  "clone_proof": {
+    "branch": "elephant-acceptance/20261110T052854-9a0d4d-base",
+    "is_shallow": true,
+    "synthetic_only": true
+  },
+  "known_failures": [
+    {
+      "operation": "20261110T052854-9a0d4d:clone",
+      "state": "UNKNOWN",
+      "cause": "direct Git HTTPS full-history clone exceeded fixed 120 second limit",
+      "remote_mutation": false,
+      "replayed": false
+    },
+    {
+      "operation": "20261110T052854-9a0d4d:clone-branch",
+      "state": "UNKNOWN",
+      "cause": "direct Git HTTPS shallow clone exceeded fixed 120 second limit; GitHub.com info/refs also timed out",
+      "remote_mutation": false,
+      "replayed": false
+    },
+    {
+      "operation": "20261110T052854-9a0d4d:pr-edit",
+      "state": "UNKNOWN",
+      "cause": "gh 2.46 PR edit preflight requests removed Projects classic field",
+      "exit_code": 1,
+      "original_replayed": false,
+      "equivalent_operation": "20261110T052854-9a0d4d:pr-edit-rest"
+    }
+  ],
+  "reconciliations": [
+    {
+      "operation": "20261110T052854-9a0d4d:bootstrap-ref",
+      "method": "read-only exact ref/SHA verification after conservative encoded-path read rejection",
+      "post_replayed": false
+    }
+  ],
+  "runtime": {
+    "user": "qqbot-worker",
+    "gh_credential_binding": "existing Worker credential store",
+    "gh_cli_isolation": "Linux bubblewrap",
+    "local_execution": "ProcessService bubblewrap",
+    "ledger": "isolated SQLiteActionLedger",
+    "source": "GitHub source at 7e0addb, GitService at 0e48034",
+    "git_proxy": "existing trusted loopback proxy from Worker process environment",
+    "acceptance_driver": "trusted script invoking production ToolGateway and verifier, not a model-generated QQ task",
+    "proxy_environment_during_acceptance": "HTTPS_PROXY",
+    "production_git_route_variable": "QQBOT_GIT_HTTPS_PROXY maps the same trusted loopback route only to the Git subprocess"
+  },
+  "checks": {
+    "cli-version": "ok",
+    "identity": "ok",
+    "repository": "ok",
+    "default-before": "ok",
+    "workflow-permissions": "ok",
+    "bootstrap-tree-readback": "ok",
+    "bootstrap-tree": "verified",
+    "bootstrap-commit-readback": "ok",
+    "bootstrap-commit": "verified",
+    "clone-branch-proxy": "verified",
+    "edit-commit-start": "verified",
+    "edit-commit-wait": "ok",
+    "edit-commit": "verified",
+    "push-user": "verified",
+    "push-bot": "verified",
+    "push-driver": "verified",
+    "issue-create": "verified",
+    "issue-edit": "verified",
+    "issue-comment": "verified",
+    "issue-close": "verified",
+    "pr-create": "verified",
+    "pr-edit-failure-readback": "ok",
+    "pr-edit-rest": "verified",
+    "pr-comment": "verified",
+    "pr-close": "verified",
+    "pagination": "ok",
+    "workflow-dispatch": "verified",
+    "workflow-observe": "ok",
+    "bot-pr-readback": "ok",
+    "pr-approve": "verified",
+    "bot-pr-close": "verified",
+    "default-after": "ok",
+    "issue-final": "ok",
+    "user-pr-final": "ok",
+    "bot-pr-final": "ok"
+  },
+  "scope": {
+    "issue_and_pr": "temporary objects closed",
+    "approval": "bot-authored PR, real user review",
+    "workflow": "safe driver on dedicated branch, accepted and later observed success",
+    "branches": "retained for review",
+    "default_branch_unchanged": true,
+    "merged": false,
+    "pages_deployment": false,
+    "pull_request_base": "elephant-acceptance/20261110T052854-9a0d4d-base",
+    "website_files_in_test_pr": false
+  },
+  "final_state": {
+    "issue": {
+      "number": 17,
+      "state": "closed"
+    },
+    "user_pr": {
+      "number": 18,
+      "state": "closed",
+      "merged": false
+    },
+    "bot_pr": {
+      "number": 19,
+      "state": "closed",
+      "merged": false
+    }
+  },
+  "completed": true,
+  "workflow_dispatch_proof": {
+    "actor": "HalfAnElephant",
+    "workflow_id": 195056223,
+    "ref": "elephant-acceptance/20261110T052854-9a0d4d-driver",
+    "head_sha": "99ad4961b52d981b14255443b7659973cfd2ec65",
+    "old_run_ids": [],
+    "new_run_id": 42765635872,
+    "event": "workflow_dispatch",
+    "head_branch": "elephant-acceptance/20261110T052854-9a0d4d-driver",
+    "accepted_status": "queued",
+    "accepted_conclusion": null,
+    "effect": "dispatch_accepted",
+    "later_observed_conclusion": "success"
+  },
+  "approval_proof": {
+    "actor": "HalfAnElephant",
+    "pull_number": 19,
+    "head_sha": "26ff1f0128ad5247997ecab5b357121674820837",
+    "old_review_ids": [],
+    "new_review_id": 5837450559,
+    "reviewed_head_sha": "26ff1f0128ad5247997ecab5b357121674820837",
+    "current_head_sha": "26ff1f0128ad5247997ecab5b357121674820837",
+    "head_changed": false,
+    "state": "APPROVED"
+  }
+}

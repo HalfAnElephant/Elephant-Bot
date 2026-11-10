@@ -1,0 +1,333 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-10",
+  "ci": {
+    "run_id": 42772713712,
+    "url": "https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/42772713712",
+    "implementation_commit": "757ccc8ccc6cb6ffd6d9f8feef08728ebb7b4b4e",
+    "jobs": [
+      "Correctness",
+      "Build and smoke test"
+    ],
+    "conclusion": "success",
+    "pytest": [
+      {
+        "tests": "934",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "0",
+        "time": "172.410"
+      }
+    ],
+    "console_tests": 19
+  },
+  "initial_install": {
+    "implementation_commit": "7e0addb2fe59a774fe06cdd12e88f37d196c3fd2",
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion",
+    "schema": "0010",
+    "raw_retention_before_days": 30,
+    "raw_retention_after_days": null,
+    "new_directory_group_write_removed_before_installation": true,
+    "isolation_checks_passed": 18
+  },
+  "followup": {
+    "report_revision": "4c23a0f57c4de75c943dcdfae8a32815656940cc",
+    "preserved_parallel_source_paths": [
+      "src/qqbot/runtime.py",
+      "src/qqbot/harness/gateway.py",
+      "src/qqbot/jobs/service.py"
+    ],
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion/followup",
+    "skill_version": "aefdbfdbab1e441c9b7d6221eaf19459daddefcefaf710381b22f15487fe918a",
+    "git_proxy": "existing loopback Mihomo, scoped to Git transport",
+    "ready": {
+      "ready": true,
+      "database": "ok",
+      "background": {
+        "enabled": true,
+        "running": true,
+        "healthy": true,
+        "error_type": null,
+        "loops": {
+          "execution": {
+            "critical": true,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T06:39:51.723277+00:00",
+            "last_success": "2026-11-10T06:39:51.729708+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 120,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "delivery": {
+            "critical": true,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T06:39:51.729765+00:00",
+            "last_success": "2026-11-10T06:39:51.730462+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 120,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "memory": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T06:39:50.744119+00:00",
+            "last_success": "2026-11-10T06:39:50.864478+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "expression": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T06:39:50.770099+00:00",
+            "last_success": "2026-11-10T06:39:50.864506+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "speakup": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T06:39:50.790095+00:00",
+            "last_success": "2026-11-10T06:39:50.806505+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          }
+        },
+        "degraded": []
+      },
+      "disconnected": [],
+      "external_acceptance": "not_implied_by_readiness"
+    },
+    "source_sha256": {
+      "skills/document-report/SKILL.md": "1c3105a506297a841ea7d109037b1a5b91fce05339aa59e58f98f1238849ce4e",
+      "skills/github/SKILL.md": "33b3b8dbb9fc969b9f8d310151fa6d6b0264bb2e258baaaac0385b28697e8144",
+      "skills/web-research/SKILL.md": "1a0d69c45ddd53f3d66ebe9c629731cfb3b3dc658bfadd8b05ca2a28a0ee7923",
+      "skills/workspace-dev/SKILL.md": "149b93f82438aa8270e05b05c5318cf403c5d705e230ec260369403c1b57d215",
+      "src/qqbot/capabilities/git.py": "d8c4874013666e454ffaa98c78681220277d6f829c798714585bea324406aa1f",
+      "src/qqbot/dialogue/planner.py": "52937ce8f65f5a9d0fd0c16cb76c8ce94c0e0f7399476daa545698094ad0f9e9",
+      "src/qqbot/runtime.py": "8e49ada1e5ac9d48489abc442008333f6fae7e3e8ff7c59bfc27f89ca8eeaff3",
+      "src/qqbot/harness/gateway.py": "67e973c326cb14e8b1b6870a49bc6c829e0f212f493e7583cd7ff62233d9314d",
+      "src/qqbot/jobs/service.py": "2917ac45a538c1ff5479911acd6bdd4df66d4bb282627e0fbe7423bfc9ce627f"
+    }
+  },
+  "artifact_fix": {
+    "report_revision": "757ccc8ccc6cb6ffd6d9f8feef08728ebb7b4b4e",
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion/artifact-acl-fix",
+    "skill_version": "b1d45f578b9b882935dfe5d8662d789f1db0050638ae7636ffdbf57c687eec01",
+    "updated_sha256": {
+      "skills/github/SKILL.md": "4c08bdc387c628c773e8a2cb8e19d8f20ca1ac24c7762fc1e8c2ee1b57f3cde3",
+      "src/qqbot/harness/artifacts.py": "013931d2f915cfa36b6211c6d0bd3cdbdc624de2543c985fa453cbf36603f0a9"
+    },
+    "ready": true,
+    "restart": "Worker only; durable Core state retained"
+  },
+  "parallel_compatibility": {
+    "pytest_passed": 217,
+    "scope": "Images, task control, routing, Worker failures, supervision and context with the deployed parallel group-error source changes overlaid on this report branch.",
+    "full_ci_scope": "The report branch code. The separately overlaid three source files are identified by hash in the deployment record."
+  },
+  "deployment_tracking": "REPORT_REVISION identifies report changes. The three listed parallel source files are preserved and separately fingerprinted.",
+  "main_protection": {
+    "strict": true,
+    "required_checks": [
+      "Correctness",
+      "Build and smoke test"
+    ],
+    "observed_via": "GitHub branches/main/protection API",
+    "admin_enforcement": false
+  },
+  "pre_contract_inspection": {
+    "observed_at": "2026-11-10T07:40:44.121147+00:00",
+    "ready": true,
+    "database": "ok",
+    "loops_healthy": {
+      "execution": true,
+      "delivery": true,
+      "memory": true,
+      "expression": true,
+      "speakup": true
+    },
+    "disconnected_adapters": [],
+    "active_task_count": 0,
+    "retained_run_slots": 0,
+    "source_integrity": {
+      "checked": 80,
+      "mismatches": []
+    }
+  },
+  "input_contract_deployment": {
+    "implementation_commit": "3ca6aeaee36c081aa2555944ad935a0f59ce645a",
+    "previous_source_sha256": {
+      "src/qqbot/harness/pi_bridge.ts": "1e7a5c52be1d3f6d4df7f27f25aa8fc19495695c8797f37b54270fb05a06f09a",
+      "src/qqbot/jobs/service.py": "2917ac45a538c1ff5479911acd6bdd4df66d4bb282627e0fbe7423bfc9ce627f",
+      "skills/github/SKILL.md": "4c08bdc387c628c773e8a2cb8e19d8f20ca1ac24c7762fc1e8c2ee1b57f3cde3"
+    },
+    "source_sha256": {
+      "src/qqbot/harness/pi_bridge.ts": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835",
+      "src/qqbot/jobs/service.py": "23db1a85a0757473b1a75fa97db07899fe1af711bbe229f5a8515633a1dcf488",
+      "skills/github/SKILL.md": "e199d998e1f0f817b4c1cc64ff6bf4bf3adc5311d615f5bf990861cd2b717a9e"
+    },
+    "preserved_parallel_source_paths": [
+      "src/qqbot/runtime.py",
+      "src/qqbot/harness/gateway.py",
+      "src/qqbot/jobs/service.py"
+    ],
+    "parallel_merge": "Only report input-contract hunks are added to the existing deployed task service. Runtime and gateway remain byte-identical.",
+    "backup": "/root/elephant-deploy-backups/20261110T053232Z-report-completion/input-contract-3ca6aea",
+    "skill_version": "be62d5f875a3f3c79bf425be9317bbec619d499e87a78f4871c1490c1e7a2e53",
+    "preserved_unchanged_sha256": {
+      "src/qqbot/runtime.py": "8e49ada1e5ac9d48489abc442008333f6fae7e3e8ff7c59bfc27f89ca8eeaff3",
+      "src/qqbot/harness/gateway.py": "67e973c326cb14e8b1b6870a49bc6c829e0f212f493e7583cd7ff62233d9314d"
+    },
+    "ready": {
+      "ready": true,
+      "database": "ok",
+      "background": {
+        "enabled": true,
+        "running": true,
+        "healthy": true,
+        "error_type": null,
+        "loops": {
+          "execution": {
+            "critical": true,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T08:01:41.622825+00:00",
+            "last_success": "2026-11-10T08:01:41.640512+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 120,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "delivery": {
+            "critical": true,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T08:01:41.640601+00:00",
+            "last_success": "2026-11-10T08:01:41.642362+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 120,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "memory": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T08:01:41.403486+00:00",
+            "last_success": "2026-11-10T08:01:41.535662+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "expression": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T08:01:41.453649+00:00",
+            "last_success": "2026-11-10T08:01:41.535688+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          },
+          "speakup": {
+            "critical": false,
+            "state": "IDLE",
+            "failures": 0,
+            "heartbeat": "2026-11-10T08:01:41.471772+00:00",
+            "last_success": "2026-11-10T08:01:41.492116+00:00",
+            "last_error": null,
+            "last_error_at": null,
+            "stall_seconds": 600,
+            "stalled": false,
+            "exited": false,
+            "healthy": true
+          }
+        },
+        "degraded": []
+      },
+      "disconnected": [],
+      "external_acceptance": "not_implied_by_readiness"
+    },
+    "restart": "Core and Worker restarted after proving no reserved run slots"
+  },
+  "input_contract_compatibility": {
+    "unique_tests_passed": 276,
+    "full_scope": {
+      "tests": "276",
+      "failures": "2",
+      "errors": "0",
+      "skipped": "0",
+      "time": "114.397"
+    },
+    "targeted_recheck": {
+      "tests": "2",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "4.465"
+    },
+    "reuse": "274 successful results reused. Two new model-request assertions were corrected to read locked-provider text blocks, then those two tests passed. Production source inputs remained unchanged.",
+    "scope": "Report source plus the preserved production runtime/gateway/task-service changes and the current parallel test fixtures. Includes new cold/warm input priority and external-observation provenance/restoration checks.",
+    "prior_interrupted_attempt": "18 failures and 196 passes before interruption. Seventeen failures came from old group-error fixtures and one from a new external-supplement fixture missing its explicit /补充 task prefix. Corrected fixtures were incorporated into the subsequent 276-case batch. No interrupted result counts as passed.",
+    "source_sha256": {
+      "src/qqbot/runtime.py": "8e49ada1e5ac9d48489abc442008333f6fae7e3e8ff7c59bfc27f89ca8eeaff3",
+      "src/qqbot/harness/gateway.py": "67e973c326cb14e8b1b6870a49bc6c829e0f212f493e7583cd7ff62233d9314d",
+      "src/qqbot/jobs/service.py": "23db1a85a0757473b1a75fa97db07899fe1af711bbe229f5a8515633a1dcf488",
+      "src/qqbot/harness/pi_bridge.ts": "9add8bae6c24b068c9db5c6af38342f71d6c4666c72b7eb46e79cacf6d0dc835"
+    }
+  },
+  "final_inspection": {
+    "observed_at": "2026-11-10T08:03:15.555056+00:00",
+    "report_revision": "3ca6aeaee36c081aa2555944ad935a0f59ce645a",
+    "ready": true,
+    "database": "ok",
+    "loops_healthy": {
+      "execution": true,
+      "delivery": true,
+      "memory": true,
+      "expression": true,
+      "speakup": true
+    },
+    "disconnected_adapters": [],
+    "active_task_count": 0,
+    "retained_run_slots": 0,
+    "source_integrity": {
+      "checked": 80,
+      "mismatches": [],
+      "skill_version": "be62d5f875a3f3c79bf425be9317bbec619d499e87a78f4871c1490c1e7a2e53"
+    }
+  }
+}

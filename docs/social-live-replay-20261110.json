@@ -1,0 +1,348 @@
+{
+  "schema_version": "social-live-replay-evaluation-v1",
+  "evaluation_date": "2026-11-10",
+  "report_item": "F13",
+  "evaluation_kind": "deidentified_real_group_text_under_controlled_eligibility",
+  "data_scope": {
+    "source": "read-only SQLite backup of the running Core database",
+    "actual_group_count": 3,
+    "recent_candidate_limit_per_group": 120,
+    "selected_candidates": 18,
+    "evaluated_cases": 14,
+    "uncertain_skipped": 4,
+    "development_group_count": 1,
+    "test_group_count": 2,
+    "actual_group_split_disjoint": true,
+    "context_builder": "Core.judge_context with FakeClock at each source received_at and historical Inbox seq cutoff",
+    "maximum_context_messages": 12,
+    "maximum_recent_bot_messages": 4,
+    "snapshot_policy_scope": "Capture-time persona, visibility, permissions and per-group threshold overrides with historical message order",
+    "group_or_user_identifiers_in_public_report": false,
+    "real_text_in_public_report": false
+  },
+  "annotation": {
+    "source": "Codex model annotation",
+    "human_reviewed": false,
+    "user_reviewed": false,
+    "human_gold": false,
+    "process": "Codex read each bounded deidentified context and recorded a rationale before provider calls. Four ambiguous cases retained uncertain and were excluded.",
+    "labels_frozen_before_provider_calls": true,
+    "provider_calls_before_freeze": 0,
+    "label_counts_evaluated": {
+      "must_reply": 3,
+      "should_ignore": 11
+    },
+    "uncertain_count": 4,
+    "rationales_retained_in_restricted_evidence": true,
+    "coverage_gaps": [
+      "No reliable may_reply open-invitation positives in the fixed recent sample.",
+      "No reliable should_wait positives in the fixed recent sample."
+    ]
+  },
+  "privacy": {
+    "processing_location": "root-only temporary directory on home",
+    "root_directory_mode": "0o700",
+    "deidentification": [
+      "Structured message/source IDs randomized and cohort/member names replaced by aliases.",
+      "Textual numeric identifiers, URLs, emails, IP addresses, account aliases and selected identifying project/domain names redacted before provider calls.",
+      "Timestamps rebased while preserving relative order and intervals.",
+      "Raw media references removed; non-text type markers preserved.",
+      "Codex reviewed the bounded text contexts and retained ambiguous cases as uncertain."
+    ],
+    "provider_credentials": "Selected judge key captured from the Core process into the isolated worker memory/environment. The worker exited after the two runs.",
+    "credentials_in_public_report": false,
+    "unkeyed_private_text_hashes_in_public_report": false
+  },
+  "configuration_and_code": {
+    "judge_kind": "jev",
+    "judge_model": "jev1",
+    "context_schema": "speech-context-v2",
+    "signals_schema": "judgment-v2",
+    "signal_count": 6,
+    "actual_core_judge_configuration_used": true,
+    "group_threshold_overrides_preserved": true,
+    "thresholds_changed_for_evaluation": false,
+    "eligibility_state": {
+      "mode": "actual copied social mode",
+      "new_human_messages": "copied configured min_human_messages",
+      "cooldown": "unblocked",
+      "remaining_budget": "unrestricted snapshot",
+      "recent_bot_ratio": 0,
+      "unanswered_proactive": 0,
+      "dynamic_send_reservations_replayed": false,
+      "purpose": "Measure text-semantic participation under given eligibility without changing production settings."
+    },
+    "source_snapshot_git_commit": null,
+    "capture_source_sha256": {
+      "evals/social_replay.py": "aac899ea27dda7bc4cf2d8e7f81910323f305adef80e9702f845bf378855ceab",
+      "src/qqbot/policy/judge.py": "ad0584a769c285fecbe3a622f3a480da21df56ad7de963525b23a16f20ffc188",
+      "src/qqbot/runtime.py": "21605f3f6697452c55705bf280264e84d7ae01d3465106f7a872cc4b96088dba",
+      "src/qqbot/policy/__init__.py": "756c60295b6095ee808b79a2bf6f30f474ab8b7a7a67aad2d855991aaca2dbbb"
+    },
+    "evaluation_source_sha256": {
+      "evals/social_replay.py": "aac899ea27dda7bc4cf2d8e7f81910323f305adef80e9702f845bf378855ceab",
+      "src/qqbot/policy/judge.py": "ad0584a769c285fecbe3a622f3a480da21df56ad7de963525b23a16f20ffc188",
+      "src/qqbot/policy/__init__.py": "756c60295b6095ee808b79a2bf6f30f474ab8b7a7a67aad2d855991aaca2dbbb",
+      "src/qqbot/domain/social.py": "823338ed2f9225353b848984cd1c3020ae66e155abf6a0e6b601f01a5757493e",
+      "src/qqbot/runtime.py": "21605f3f6697452c55705bf280264e84d7ae01d3465106f7a872cc4b96088dba"
+    },
+    "skills_source_version": "79f20d965a063493968d8fc7e1f676ed0b1ad5f4afca38611a9ffb4addf888a2",
+    "python_version": "3.13.9",
+    "httpx_version": "0.28.1"
+  },
+  "execution": {
+    "runs_per_split": {
+      "development": 1,
+      "test": 1
+    },
+    "http_budget": 144,
+    "actual_http_requests": 66,
+    "model_judged_cases": 11,
+    "hard_gate_explicit_cases_without_provider_calls": 3,
+    "judge_abstentions": 0,
+    "http_error_requests": 0,
+    "labels_or_thresholds_changed_after_observation": false,
+    "production_code_or_configuration_modified": false,
+    "qq_messages_sent": 0,
+    "background_core_or_adapter_connections_started": false
+  },
+  "metrics_by_split": {
+    "development": {
+      "evaluated_cases": 5,
+      "group_count": 1,
+      "label_counts": {
+        "must_reply": 2,
+        "should_ignore": 3
+      },
+      "actual_http_requests": 18,
+      "http_requests_per_100_cases": 360.0,
+      "request_measurement_coverage": 5,
+      "duration_measurement_coverage": 5,
+      "decision_p95_ms": 2814.029,
+      "decision_median_ms": 759.959,
+      "must_reply_recall": {
+        "numerator": 2,
+        "denominator": 2,
+        "rate": 1.0,
+        "wilson_95": [
+          0.34237195288961925,
+          1
+        ]
+      },
+      "ignore_false_trigger_rate": {
+        "numerator": 0,
+        "denominator": 3,
+        "rate": 0.0,
+        "wilson_95": [
+          0,
+          0.5615060804490177
+        ]
+      },
+      "speech_precision": {
+        "numerator": 2,
+        "denominator": 2,
+        "rate": 1.0,
+        "wilson_95": [
+          0.34237195288961925,
+          1
+        ]
+      },
+      "should_wait_recall": null,
+      "label_action_counts": {
+        "must_reply": {
+          "SPEAK": 2,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "may_reply": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "should_wait": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "should_ignore": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 3
+        }
+      },
+      "judge_status_counts": {
+        "not_called": 2,
+        "success": 3,
+        "abstained": 0
+      },
+      "usage_object_known_requests": 18,
+      "usage_object_unknown_requests": 0,
+      "usage_field_request_coverage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "observed_usage_total": {
+        "prompt_tokens": 39780
+      },
+      "completion_tokens_total": null,
+      "total_tokens_total": null,
+      "estimated_cost": null,
+      "annotation_disagreements": 0,
+      "policy_scope": "Core SpeechPolicy with actual copied thresholds and controlled eligible state"
+    },
+    "test": {
+      "evaluated_cases": 9,
+      "group_count": 2,
+      "label_counts": {
+        "should_ignore": 8,
+        "must_reply": 1
+      },
+      "actual_http_requests": 48,
+      "http_requests_per_100_cases": 533.3333333333334,
+      "request_measurement_coverage": 9,
+      "duration_measurement_coverage": 9,
+      "decision_p95_ms": 1501.076,
+      "decision_median_ms": 1131.091,
+      "must_reply_recall": {
+        "numerator": 1,
+        "denominator": 1,
+        "rate": 1.0,
+        "wilson_95": [
+          0.20654329147389294,
+          1
+        ]
+      },
+      "ignore_false_trigger_rate": {
+        "numerator": 0,
+        "denominator": 8,
+        "rate": 0.0,
+        "wilson_95": [
+          0,
+          0.3244156195108769
+        ]
+      },
+      "speech_precision": {
+        "numerator": 1,
+        "denominator": 1,
+        "rate": 1.0,
+        "wilson_95": [
+          0.20654329147389294,
+          1
+        ]
+      },
+      "should_wait_recall": null,
+      "label_action_counts": {
+        "must_reply": {
+          "SPEAK": 1,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "may_reply": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "should_wait": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 0
+        },
+        "should_ignore": {
+          "SPEAK": 0,
+          "WAIT": 0,
+          "IGNORE": 8
+        }
+      },
+      "judge_status_counts": {
+        "not_called": 1,
+        "success": 8,
+        "abstained": 0
+      },
+      "usage_object_known_requests": 48,
+      "usage_object_unknown_requests": 0,
+      "usage_field_request_coverage": {
+        "prompt_tokens": 48,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "observed_usage_total": {
+        "prompt_tokens": 104238
+      },
+      "completion_tokens_total": null,
+      "total_tokens_total": null,
+      "estimated_cost": null,
+      "annotation_disagreements": 0,
+      "policy_scope": "Core SpeechPolicy with actual copied thresholds and controlled eligible state"
+    }
+  },
+  "usage": {
+    "requests_with_usage_object": 66,
+    "requests_without_usage_object": 0,
+    "field_request_coverage": {
+      "prompt_tokens": 66,
+      "completion_tokens": 0,
+      "total_tokens": 0
+    },
+    "observed_prompt_tokens": 144018,
+    "completion_tokens": null,
+    "total_tokens": null,
+    "estimated_cost": null,
+    "interpretation": "The provider reported prompt-token usage. Completion-token and total-token fields were unavailable, and no price estimate is inferred."
+  },
+  "failures_and_gaps": {
+    "observed_policy_label_disagreements": 0,
+    "uncertain_cases_excluded": 4,
+    "positive_proactive_examples": 0,
+    "wait_examples": 0,
+    "technical_reconstruction_issue": "The first snapshot-only create_app call lacked the repository working directory for Alembic. Re-running context construction from the unchanged source stage directory resolved it before any provider call."
+  },
+  "restricted_evidence": {
+    "host_alias": "home",
+    "directory": "/tmp/elephant-social-live-20261110-xc5jvikz",
+    "required_identity": "root",
+    "raw_snapshot": "/tmp/elephant-social-live-20261110-xc5jvikz/core.db",
+    "raw_contexts": "/tmp/elephant-social-live-20261110-xc5jvikz/raw-candidates.jsonl",
+    "frozen_annotations": "/tmp/elephant-social-live-20261110-xc5jvikz/all-annotations-frozen.jsonl",
+    "labeled_deidentified_dataset": "/tmp/elephant-social-live-20261110-xc5jvikz/deidentified-labeled.jsonl",
+    "uncertain_annotations": "/tmp/elephant-social-live-20261110-xc5jvikz/uncertain.jsonl",
+    "development_trace": "/tmp/elephant-social-live-20261110-xc5jvikz/development/trace.jsonl",
+    "test_trace": "/tmp/elephant-social-live-20261110-xc5jvikz/test/trace.jsonl",
+    "integrity": {
+      "algorithm": "HMAC-SHA256",
+      "private_key_file": "/tmp/elephant-social-live-20261110-xc5jvikz/integrity-key.bin",
+      "public_key_material_included": false,
+      "artifacts": {
+        "core.db": "f3e8d4000b82021d4ef2b973ee2b490ecdd3008591b7a9a00229c6df641db3d8",
+        "raw-candidates.jsonl": "86fa2c0ff7d36c76941443b2ea1b24ac19c9e1b7fc309c8122bc56f84ff9b095",
+        "deidentified-candidates.jsonl": "79c08c73111b846b201c73d2dd0c8bbb34f805cfac6c5ed6bae36f4f16f78be2",
+        "all-annotations-frozen.jsonl": "a618ab31a773d37b9d549719a9998bcf3540aeaf7af3686bc111d6f6630c5824",
+        "deidentified-labeled.jsonl": "8fe90ddce198e611808bed56ac05fa5b6a1c3d6a425c49235d9868cfa72363f5",
+        "uncertain.jsonl": "940bfeb351112ae2f7123b6ac4ed116698a654026fd0bbf99b0cbb28a2520543",
+        "settings-snapshot.json": "977cecb032a6ea3a365fa433958b961ab0914e11f6e02ebe09442ad82e242c0e",
+        "persona-default.yaml": "c83b8ff1fae4e4f9472febe2ddf65a693ba9693cbf3f1c4e52b70eb7dbac09d6",
+        "private-metadata.json": "6327b47fd90bdf094b7e7223b4391bf0824423d58514c6688fd5794006a219f4",
+        "private-cohort-map.json": "d9c2dbb319598a55d319d3d40cf42d4b18a0a7cb7ecab53e343335d4f7d2d390",
+        "freeze.json": "e4be4034c404a57fc787d166f144fa53564dcc188ed577efceafca3f24c42bff",
+        "development/trace.jsonl": "a001db395ef14104a2058f74c8a056565c7b0d70b5b0505d5b4418b06b1c35ae",
+        "development/metrics.json": "640d24894dbabd0cd0f3960256df55b3a9e18c642b2f71d4f26a1330baab6af2",
+        "test/trace.jsonl": "960f3f19e9f9a52c8927a55b78b4c495cbadb906799471ade7166902b2016cdd",
+        "test/metrics.json": "271893e338a81d231a3369fde8d2d027754fd0dff56466e6afe4f7331bafaa9e",
+        "worker-final.json": "1be2d1dd95bd38bca1339ddcbb0135a37e96277ca3b08e7024a732b8172b975f",
+        "persona-global.json": "a6840f7ecf894a6925de96e445bd4cecb53ae91bdd2bdbc95bace7d0477f976d",
+        "persona-overrides.json": "cea9dd02cd3ba27ba76324668af9248d3488d6ed406cfacabd7cdc1fc3920fc8"
+      }
+    }
+  },
+  "limitations": [
+    "Annotations were produced by Codex and have not been reviewed by the user or a human annotator. They are not a human gold dataset.",
+    "The small purposive sample is dominated by point-to-point chat and discussions that should be ignored. No may_reply or should_wait positive coverage was established.",
+    "All must_reply cases used the explicit-invitation hard gate. Provider judgments in this run covered only should_ignore cases, so the reported recall does not measure positive judge semantics.",
+    "Eligibility standardized cooldown, budget and recent-activity gates. These results do not reconstruct live dynamic sending decisions or authorize production activation.",
+    "Capture-time persona, permissions and policies were applied to historical message order. Earlier policy and authorization changes were not reconstructed.",
+    "Overlapping context windows are correlated. Wilson intervals and p95 are descriptive for this small sample, without population-level accuracy or latency claims.",
+    "Known-bot exclusion followed stored event flags. Automated-account utterances may remain among the recorded participants.",
+    "Images and other media were represented by type markers, and deidentification may remove some contextual detail.",
+    "The production database and configuration were read-only inputs. The replay and all raw evidence were isolated in a root-restricted temporary directory."
+  ]
+}

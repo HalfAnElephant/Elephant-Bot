@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-10",
+  "scope": "Authorized dedicated OneBot private conversation. Recipient identity is omitted from public evidence.",
+  "normal_entry_artifact_task": {
+    "task_public_id": "T-601a3c4c-b41",
+    "target": "authorized private acceptance conversation",
+    "deliveries": [
+      {
+        "delivery_id": "f5cee3ba-978b-4da8-8750-dd8f7dfb5a42",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "310639036",
+          "error_code": null
+        },
+        "artifact": null
+      },
+      {
+        "delivery_id": "94f93968-2715-4928-9518-be2535bcdc65",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "1596348547",
+          "error_code": null
+        },
+        "artifact": null
+      },
+      {
+        "delivery_id": "9861ff23-06d4-4929-835f-225987c12d97",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "5a8d6645f95b09df4de35ea1c783c368_9c9c2336-dcd4-11f1-8313-75b91e7d0d33",
+          "error_code": null
+        },
+        "artifact": {
+          "id": "4edcc4a0-a104-4682-8106-0daf14c42710",
+          "relative_path": "outputs/acceptance.txt",
+          "mime_type": "text/plain",
+          "size": 42,
+          "sha256": "03562d36ddd2250eccd3cadc1c04bec5919e00254a11a46d1934a4907d0b84e0"
+        },
+        "readback": {
+          "action": "get_private_file_url",
+          "status": "ok",
+          "retcode": 0,
+          "download_host": "49.86.42.91",
+          "download_http": 200,
+          "download_bytes": 42,
+          "download_sha256": "03562d36ddd2250eccd3cadc1c04bec5919e00254a11a46d1934a4907d0b84e0"
+        }
+      },
+      {
+        "delivery_id": "ae2127b1-d1be-4ead-aaae-ab2e9de2a7e8",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "2085769445",
+          "error_code": null
+        },
+        "artifact": {
+          "id": "266af6ed-5786-431c-8623-a5086b1da01a",
+          "relative_path": "outputs/acceptance.png",
+          "mime_type": "image/png",
+          "size": 136,
+          "sha256": "caf1219271e5341c9665336f4e84a7c407ed5bd6bce4f2f0f994ba47ee9cc8f3"
+        },
+        "readback": {
+          "action": "get_msg",
+          "status": "ok",
+          "retcode": 0,
+          "image_count": 1,
+          "message_type": "private",
+          "target_id": ""
+        }
+      }
+    ],
+    "qq_client_open_confirmed": false
+  },
+  "normal_entry_question_continuation": {
+    "public_id": "T-c1367546-424",
+    "task_id": "c1367546-4246-409f-8275-460695362519",
+    "state": "SUCCEEDED",
+    "created_at": "2026-11-10T07:10:35.693725+00:00",
+    "requester_identity_kept": true,
+    "run_count": 2,
+    "runs": [
+      {
+        "run_id": "d0f0fc99-29b0-41fe-b3e6-0f2d920d4203",
+        "fencing_token": 1,
+        "reason": "initial",
+        "slot_reserved": 0,
+        "quiescent_at": "2026-11-10T07:10:46.266549+00:00",
+        "runner_stopped_at": null
+      },
+      {
+        "run_id": "f5a473f6-2b62-4928-9c25-b9ce9cab87c8",
+        "fencing_token": 2,
+        "reason": "continuation",
+        "slot_reserved": 0,
+        "quiescent_at": "2026-11-10T07:17:31.323606+00:00",
+        "runner_stopped_at": null
+      }
+    ],
+    "waits": [
+      {
+        "wait_id": "157d67f3d64e3d57c9b5ed53051447e9620f4dc447e5d4fc364f913d348a4788",
+        "state": "CONSUMED",
+        "delivered_at": "2026-11-10T07:10:43.883018+00:00",
+        "expires_at": "2026-11-10T08:10:43.883018+00:00"
+      }
+    ],
+    "reply": {
+      "text": "验收继续",
+      "surface": "private",
+      "author_matches_authorized_recipient": true,
+      "reply_to_present": false,
+      "received_at": "2026-11-10T07:17:12.682240+00:00",
+      "inbox_state": "DONE",
+      "consumed_input_count": 1,
+      "state": "CONSUMED"
+    },
+    "deliveries": [
+      {
+        "delivery_id": "c6edc843-c2a5-4bc2-b205-56665296252d",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "861958687",
+          "error_code": null
+        }
+      },
+      {
+        "delivery_id": "22fb720d-3379-4f30-9dbc-33ab62a07311",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "1746967702",
+          "error_code": null
+        }
+      },
+      {
+        "delivery_id": "87d6eef8-45c7-4443-b47d-f3ba8e2116db",
+        "state": "SENT",
+        "receipt": {
+          "state": "SENT",
+          "platform_message_id": "463966813",
+          "error_code": null
+        }
+      }
+    ],
+    "result": {
+      "agent_authored": true,
+      "status": "completed",
+      "summary": "收到啦，你发的词原样回显：验收继续\n\n这条 QQ 续接验收完成了，不再追问。",
+      "artifacts": [],
+      "evidence": [],
+      "limitations": [],
+      "observation_refs": [],
+      "effect_refs": []
+    }
+  },
+  "cross_uid_archive_check": {
+    "worker_uid": 995,
+    "core_uid": 993,
+    "worker_umask": "0077",
+    "creation_mode": "0640",
+    "actual_mode": "0o640",
+    "default_reader_acl_preserved": true,
+    "core_hash_matches": true,
+    "unrelated_uid_denied": true,
+    "source_sha256": "013931d2f915cfa36b6211c6d0bd3cdbdc624de2543c985fa453cbf36603f0a9"
+  },
+  "failure_history": [
+    {
+      "task": "T-710446a1-42c",
+      "result": "FAILED",
+      "cause": "Natural-language planner collected both bare artifact names and later explicit paths. Explicit-path deduplication fixed. A model-written sample generator also had byte-escape problems."
+    },
+    {
+      "task": "T-bfe30680-52b",
+      "initial_state": "NEEDS_RECONCILIATION",
+      "cause": "0600 archive creation clipped the default named Core-reader ACL mask. Original bytes and result spool preserved.",
+      "recovery": "After enabling the existing reader ACL only on the two verified exports, root stop and Worker STOPPED evidence allowed reconciliation of the same stored result. No model rerun.",
+      "reconciled_task_state": "SUCCEEDED",
+      "delivery_result": "Four FAILED/STALE_CONTEXT. Global memory epoch changed from 53 to 57 while the result awaited recovery. These rows are retained as failed deliveries."
+    },
+    {
+      "task": "T-c5953046-495",
+      "result": "Initial user-answer window elapsed. A subsequent fresh question was used for the successful real input continuation."
+    }
+  ],
+  "limitations": [
+    "QQ client manual-open confirmation was not separately received. Native file download and image message readback are recorded.",
+    "Official QQ application credentials were not available for live sending. Protocol and safety fixtures cover that adapter.",
+    "All outbound acceptance traffic used the dedicated recipient provided by the user."
+  ]
+}
