@@ -267,11 +267,12 @@ async def test_twelve_second_tool_detaches_same_run_and_short_chat_starts(execut
 
 @pytest.mark.asyncio
 async def test_external_wait_has_no_model_poll_and_wakes_once(execution):
+    from sqlalchemy import update
+
     from qqbot.capabilities.gateway import CapabilityRegistry
     from qqbot.capabilities.types import Action, Capability
-    from qqbot.jobs.waiters import ExternalWaiters
     from qqbot.harness.gateway import RunGateway
-    from sqlalchemy import update
+    from qqbot.jobs.waiters import ExternalWaiters
     service, event, access = execution
     task = service.accept(event, access, "wait for CI")
     claim = service.claim("w")
