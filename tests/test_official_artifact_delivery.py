@@ -140,8 +140,11 @@ async def test_larger_local_files_use_authenticated_prepare_and_credential_free_
     assert [request.url.query for request in calls if request.method == "PUT"] == [
         b"part=0&sign=secret", b"part=1&sign=secret",
     ]
-    assert "uploads.cos.ap-guangzhou.myqcloud.com/file" in caplog.text
-    assert "api.bot.qq.com" in caplog.text
+    logged_urls = [value for record in caplog.records
+                   if record.name == "httpx" and isinstance(record.args, tuple)
+                   for value in record.args if isinstance(value, httpx.URL)]
+    assert any(url.host == "uploads.cos.ap-guangzhou.myqcloud.com" and url.path == "/file" for url in logged_urls)
+    assert any(url.host == "api.bot.qq.com" for url in logged_urls)
     for secret in ("sign=secret", "private-cookie", "QQBot fixture", "file_info"):
         assert secret not in caplog.text
     with db.engine.connect() as c:
