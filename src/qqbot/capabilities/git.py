@@ -162,6 +162,10 @@ class GitService:
         operation = arguments["operation"]
         if operation not in {"clone", "fetch", "push"}:
             raise ValueError("unsupported Git transport operation")
+        branch = arguments.get("branch")
+        if (operation == "push" or operation == "clone" and branch is not None) and (
+                not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_/-]*", branch) or "//" in branch):
+            raise ValueError("invalid " + operation + " branch")
         path = self._relative_path(arguments.get("path", "repository" if operation == "clone" else "."))
         url = "https://" + context.host + "/" + context.repository + ".git"
         async with self.locks.setdefault(context.workspace, asyncio.Lock()):
@@ -177,7 +181,10 @@ class GitService:
                             pass
                         else:
                             raise ValueError("clone destination already exists")
-                        result = await self._run(["clone", "--template=", "--", url, "repository"], root,
+                        clone_argv = ["clone", "--template="]
+                        if branch is not None:
+                            clone_argv += ["--depth=1", "--single-branch", "--branch", branch]
+                        result = await self._run([*clone_argv, "--", url, "repository"], root,
                                                  context, authenticate=True)
                         if result["exit_code"] == 0:
                             os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
@@ -204,11 +211,9 @@ class GitService:
                         finally:
                             os.close(objects_fd)
                         if operation == "push":
-                            commit, branch = arguments["commit"], arguments["branch"]
+                            commit = arguments["commit"]
                             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
                                 raise ValueError("push requires full commit hash")
-                            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_/-]*", branch) or "//" in branch:
-                                raise ValueError("invalid push branch")
                             result = await self._run(["push", "--porcelain", "--", url,
                                 commit + ":refs/heads/" + branch], root, context, authenticate=True)
                             observed = await self._run(["ls-remote", "--refs", "--", url, "refs/heads/" + branch],
