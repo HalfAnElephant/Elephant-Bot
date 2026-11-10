@@ -120,7 +120,7 @@ def test_deleted_user_supplement_to_external_wait_is_not_an_observation(external
 
     service, event, access, task = external_wait
     answer = event.model_copy(update={"event_id": "supplement", "platform_message_id": "m2",
-        "segments": (TextSegment(text="Use the new target"),)})
+        "segments": (TextSegment(text=f"/补充 {task['public_id']} Use the new target"),)})
     archive(service, answer, 2)
     service.add_input(task["public_id"], answer, access, answer.text)
     assert service.observe_waiter({"wait_id": "external", "revision": 1, "observation": "closed",
