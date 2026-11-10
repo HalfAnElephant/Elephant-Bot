@@ -7,7 +7,7 @@ description: Query or change GitHub repositories, pull requests, issues, reviews
 
 Resolve the repository from explicit URLs, stable resource references and the user's established target. Verify ambiguous repository names with the installed GitHub account before choosing a target. Preserve the actual host, owner, repository, PR or issue number and reviewed head SHA. A follow-up such as “只看我创建的” refines the current task. Resolve “我” to the account bound to the requester, and ask when that binding is unknown.
 
-When the available context and search results leave multiple possible repositories, use `task_ask_user` alone and keep the task waiting for the exact owner/repository. Save the candidate names and completed read-only discovery in its checkpoint. After the answer, continue the same task against the confirmed target and list its PRs or perform its requested work.
+When the available context and search results leave multiple possible repositories, use `task_ask_user` alone and keep the task waiting for the exact owner/repository. Save the candidate names and completed read-only discovery in its checkpoint. After the answer, continue the same task against the confirmed target and list its PRs or perform its requested work. An explicit owner/repository answer replaces the candidate scope. Stop candidate discovery and query and report only the confirmed repository unless the user requests a comparison.
 
 Call the trusted account adapter through `capability_invoke` with `name` set to `gh.exec`. Its `arguments` accept literal `argv`, optional literal `stdin`, `stdin_ref`, `reviewed_head_sha`, and `timeout_ms` up to 120000. Pass argument arrays directly. Credentials and the account remain with the host.
 
