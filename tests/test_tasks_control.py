@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -626,6 +627,7 @@ def test_private_wait_and_unavailable_answers(setup):
 
 def test_external_wait_supplement_does_not_satisfy_condition(setup):
     from qqbot.domain.messages import TextSegment
+    from qqbot.ingress.service import Inbox
 
     service, event, access, _clock = setup
     task = service.accept(event, access, "Wait for external check")
@@ -638,6 +640,7 @@ def test_external_wait_supplement_does_not_satisfy_condition(setup):
         "status": "waiting_external", "summary": "Waiting"})
     answer = event.model_copy(update={"event_id": "supplement", "mentions_bot": True,
         "segments": (TextSegment(text=f"/补充 {task['public_id']} Additional context"),)})
+    answer, _ = Inbox(service.db).accept(answer)
     assert service.question_for(answer) is None
     with pytest.raises(PermissionError, match="explicit task input"):
         service.add_input(task["public_id"], answer, access, "context", "external-question")
@@ -645,9 +648,13 @@ def test_external_wait_supplement_does_not_satisfy_condition(setup):
     assert service.get(task["public_id"], access)["state"] == "WAITING_EXTERNAL"
     assert service.claim("worker") is None
     assert service.observe_waiter({"wait_id": "external-question", "revision": 1,
-        "source_id": "observation", "observation": "closed"})["woken"]
+        "source_id": "external:" + hashlib.sha256(b"external-questionclosed").hexdigest(), "observation": "closed"})["woken"]
     resumed = service.claim("worker")
     assert {item["text"] for item in resumed["continuation"]["inputs"]} == {"Additional context", "closed"}
+    assert not resumed["context"].get("invalid_task_state")
+    assert [item["text"] for item in resumed["task_state"]["user_updates"]] == ["Additional context"]
+    assert [item["text"] for item in resumed["task_state"]["external_observations"]] == ["closed"]
+    assert service.authorize(resumed["run_id"], resumed["fencing_token"], "worker", {"action": "model.request"})["allowed"]
 
 
 @pytest.mark.parametrize("revocation", ["forgotten", "redacted"])

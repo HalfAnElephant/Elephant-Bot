@@ -270,6 +270,8 @@ async def test_external_wait_has_no_model_poll_and_wakes_once(execution):
     from qqbot.capabilities.gateway import CapabilityRegistry
     from qqbot.capabilities.types import Action, Capability
     from qqbot.jobs.waiters import ExternalWaiters
+    from qqbot.harness.gateway import RunGateway
+    from sqlalchemy import update
     service, event, access = execution
     task = service.accept(event, access, "wait for CI")
     claim = service.claim("w")
@@ -289,9 +291,28 @@ async def test_external_wait_has_no_model_poll_and_wakes_once(execution):
     await observer.once()
     await observer.once()
     assert calls == [task["id"]]
+    with service.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+            context_json=json.dumps({"invalid_task_state": True})))
     continuation = service.claim("w")
     assert continuation["task_id"] == task["id"]
     assert "success" in continuation["continuation"]["inputs"][0]["text"]
+    assert not continuation["context"].get("invalid_task_state")
+    assert continuation["task_state"]["user_updates"] == []
+    assert len(continuation["task_state"]["external_observations"]) == 1
+    RunGateway(service.archive_root.parent, "m", "key", "https://invalid", call=None).bind(continuation)
+    assert service.authorize(continuation["run_id"], continuation["fencing_token"], "w", {"action": "model.request"})["allowed"]
+    service.ask(continuation["run_id"], continuation["fencing_token"], "w", {
+        "question_id": "next-ci", "kind": "external", "text": "Waiting for the next check",
+        "checkpoint": "First CI result retained", "condition": {
+            "capability": "ci.read", "arguments": {}, "path": "status", "equals": "completed"}})
+    service.submit(continuation["run_id"], continuation["fencing_token"], "w", {
+        "status": "waiting_external", "summary": "Waiting"})
+    await observer.once()
+    restored = service.claim("w")
+    assert len(restored["continuation"]["inputs"]) == 1
+    assert len(restored["task_state"]["external_observations"]) == 2
+    assert restored["task_state"]["external_observations"][0] == continuation["task_state"]["external_observations"][0]
 
 
 def test_question_timeout_starts_after_delivery(execution, clock):

@@ -1,14 +1,15 @@
+import hashlib
 import json
 
 import pytest
 import test_tasks_control
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 
 from qqbot.domain.messages import TextSegment
 from qqbot.memory import SocialService
 from qqbot.memory.history import HistoryMemoryService
 from qqbot.storage.schema import inbox
-from qqbot.storage.task_schema import inputs, runs, tasks
+from qqbot.storage.task_schema import inputs, runs, tasks, waits
 
 setup = test_tasks_control.setup
 
@@ -73,6 +74,65 @@ def test_claim_rebuilds_consumed_user_decisions_without_duplicate_storage(setup)
     assert claim["task_state"]["user_updates"] == [{"id": "decision", "text": update_event.text,
         "source_id": "u2", "state": "CONSUMED", "created_at": clock.now().isoformat()}]
     assert claim["task_state"]["goal"]["text"] == "按用户要求调整"
+
+
+@pytest.fixture
+def external_wait(setup):
+    service, event, access, _ = setup
+    archive(service, event)
+    task = service.accept(event, access, "Wait for the external check")
+    claim = service.claim("worker")
+    service.ask(claim["run_id"], claim["fencing_token"], "worker", {
+        "kind": "external", "question_id": "external", "text": "Waiting",
+        "checkpoint": "No effects", "condition": {
+            "capability": "github.issue.read", "arguments": {}, "path": "state", "equals": "closed"}})
+    service.submit(claim["run_id"], claim["fencing_token"], "worker", {
+        "status": "waiting_external", "summary": "Waiting"})
+    return service, event, access, task
+
+
+@pytest.mark.parametrize("invalid", ["digest", "task", "kind"])
+def test_external_observation_requires_matching_source_and_owned_wait(external_wait, tmp_path, invalid):
+    from qqbot.harness.gateway import RunGateway
+
+    service, _event, _access, _task = external_wait
+    payload = {"wait_id": "external", "revision": 1, "observation": "closed", "source_id": "forged"}
+    with pytest.raises(ValueError, match="source does not match"):
+        service.observe_waiter(payload)
+    payload["source_id"] = "external:" + hashlib.sha256(b"externalclosed").hexdigest()
+    assert service.observe_waiter(payload)["woken"]
+    with service.db.transaction() as conn:
+        if invalid == "digest":
+            conn.execute(update(inputs).values(text="forged observation"))
+        elif invalid == "task":
+            conn.execute(update(waits).values(task_id="different-task"))
+        else:
+            conn.execute(update(waits).values(kind="input"))
+    claim = service.claim("worker")
+    assert claim["task_state"]["external_observations"] == []
+    assert claim["context"]["invalid_task_state"]
+    with pytest.raises(PermissionError, match="revoked"):
+        RunGateway(tmp_path, "m", "key", "https://invalid", call=None).bind(claim)
+
+
+def test_deleted_user_supplement_to_external_wait_is_not_an_observation(external_wait, tmp_path):
+    from qqbot.harness.gateway import RunGateway
+
+    service, event, access, task = external_wait
+    answer = event.model_copy(update={"event_id": "supplement", "platform_message_id": "m2",
+        "segments": (TextSegment(text="Use the new target"),)})
+    archive(service, answer, 2)
+    service.add_input(task["public_id"], answer, access, answer.text)
+    assert service.observe_waiter({"wait_id": "external", "revision": 1, "observation": "closed",
+        "source_id": "external:" + hashlib.sha256(b"externalclosed").hexdigest()})["woken"]
+    with service.db.transaction() as conn:
+        conn.execute(delete(inbox).where(inbox.c.id == answer.event_id))
+    claim = service.claim("worker")
+    assert claim["task_state"]["user_updates"] == []
+    assert len(claim["task_state"]["external_observations"]) == 1
+    assert claim["context"]["invalid_task_state"]
+    with pytest.raises(PermissionError, match="revoked"):
+        RunGateway(tmp_path, "m", "key", "https://invalid", call=None).bind(claim)
 
 
 def test_cold_restore_rejects_revoked_consumed_update(setup, tmp_path):

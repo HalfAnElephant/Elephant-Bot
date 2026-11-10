@@ -574,25 +574,44 @@ async def test_locked_pi_explicit_skill_is_loaded_or_stops_before_model(compacti
         await runner.stop()
 
 
-async def test_locked_pi_continuation_and_restored_updates_are_injected_once(compaction_session):
+@pytest.mark.parametrize("cold", [False, True])
+async def test_locked_pi_continuation_and_restored_updates_are_injected_once(compaction_session, cold):
     state = compaction_session
     runner, gateway = state.runner, state.gateway
     await runner.run("initial goal", keep_alive=True)
+    if cold:
+        await runner.stop()
+        runner = PiRunnerAdapter(runner.executable, runner.workspace, provider="qqbot", model="offline",
+            timeout=25, session_id=runner.session_path.stem, gateway=gateway, gateway_url=runner.gateway_url)
     decision = {"id": "continued-input", "text": "CONTINUATION_DECISION_SENTINEL"}
     old_decision = {"id": "older-input", "text": "RESTORED_DECISION_SENTINEL"}
-    task_state = {"goal": {}, "checkpoint": None, "user_updates": [old_decision, decision]}
-    continuation = {"checkpoint": "Awaited user input", "inputs": [decision]}
-    gateway.bind({**state.claim, "run_id": "second-run", "task_state": task_state, "continuation": continuation})
-    await runner.run("continue with the user's input", keep_alive=True)
-    second = state.requests[-1]["payload"]["messages"]
-    latest_user = next(message for message in reversed(second) if message["role"] == "user")
-    assert json.dumps(latest_user).count(decision["text"]) == 1
-    assert json.dumps(latest_user).count(old_decision["text"]) == 1
-    gateway.bind({**state.claim, "run_id": "third-run", "task_state": task_state, "continuation": continuation})
-    await runner.run("restore the same durable input state", keep_alive=True)
-    third = state.requests[-1]["payload"]["messages"]
-    latest_user = next(message for message in reversed(third) if message["role"] == "user")
-    assert decision["text"] not in json.dumps(latest_user)
-    assert old_decision["text"] not in json.dumps(latest_user)
-    assert json.dumps(third).count(decision["text"]) == 1
-    assert json.dumps(third).count(old_decision["text"]) == 1
+    observation = {"id": "external-input", "text": "EXTERNAL_OBSERVATION_SENTINEL"}
+    old_observation = {"id": "external-old", "text": "RESTORED_OBSERVATION_SENTINEL"}
+    task_state = {"goal": {}, "checkpoint": None, "user_updates": [old_decision, decision],
+                  "external_observations": [old_observation, observation]}
+    continuation = {"checkpoint": "Awaited user input for the old target", "inputs": [decision, observation]}
+    try:
+        gateway.bind({**state.claim, "run_id": "second-run", "task_state": task_state, "continuation": continuation})
+        await runner.run("continue with the user's input", keep_alive=True)
+        second = state.requests[-1]["payload"]["messages"]
+        latest_user = next(message for message in reversed(second) if message["role"] == "user")
+        text = latest_user["content"]
+        assert text.startswith("原始用户目标：")
+        materials, supplement = text.split("本轮已核验的用户补充", 1)
+        assert decision["text"] not in materials and old_decision["text"] not in materials
+        assert f"用户补充[{decision['id']}]：\n{decision['text']}" in supplement
+        assert supplement.index(old_decision["text"]) < supplement.index(decision["text"])
+        assert text.count(observation["text"]) == 1 and observation["text"] in materials
+        assert text.count(old_observation["text"]) == 1 and old_observation["text"] in materials
+        assert "用户补充[external-input]" not in text
+        assert text.count(decision["text"]) == 1 and text.count(old_decision["text"]) == 1
+        gateway.bind({**state.claim, "run_id": "third-run", "task_state": task_state, "continuation": continuation})
+        await runner.run("restore the same durable input state", keep_alive=True)
+        third = state.requests[-1]["payload"]["messages"]
+        latest_user = next(message for message in reversed(third) if message["role"] == "user")
+        for item in (old_decision, decision, old_observation, observation):
+            assert item["text"] not in json.dumps(latest_user)
+            assert json.dumps(third).count(item["text"]) == 1
+    finally:
+        if cold:
+            await runner.stop()

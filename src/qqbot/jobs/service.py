@@ -304,22 +304,33 @@ class TaskService:
             from qqbot.storage.schema import inbox as history_inbox
             task_inputs = c.execute(select(inputs.c.id, inputs.c.text, inputs.c.source_id, inputs.c.state,
                 inputs.c.created_at, history_inbox.c.event_json,
-                history_inbox.c.conversation_id.label("source_conversation")).outerjoin(history_inbox,
-                    history_inbox.c.id == inputs.c.source_id).where(inputs.c.task_id == row["id"])
-                .order_by(history_inbox.c.seq, inputs.c.created_at, inputs.c.id)).mappings().all()
+                history_inbox.c.conversation_id.label("source_conversation"),
+                waits.c.id.label("external_wait_id")).outerjoin(history_inbox,
+                    history_inbox.c.id == inputs.c.source_id).outerjoin(waits,
+                    (waits.c.id == inputs.c.question_id) & (waits.c.task_id == inputs.c.task_id)
+                    & (waits.c.kind == "external")).where(inputs.c.task_id == row["id"])
+                .order_by(history_inbox.c.seq, inputs.c.created_at, waits.c.revision, inputs.c.id)).mappings().all()
             task_access = self._access_for(row)
-            visible_updates, update_sources = [], []
+            visible_updates, external_observations, update_sources = [], [], []
             invalid_task_state = False
             for item in task_inputs:
+                values = {key: value for key, value in item.items()
+                          if key not in {"event_json", "source_conversation", "external_wait_id"}}
                 if (item["event_json"] and item["source_conversation"] == row["conversation"]
                         and self._input_event_valid(c, InboundEvent.model_validate_json(item["event_json"]))
                         and self.permissions.check(task_access, "history.source.read", "event:" + item["source_id"]).allowed):
-                    visible_updates.append({key: value for key, value in item.items() if key not in {"event_json", "source_conversation"}})
+                    visible_updates.append(values)
                     update_sources.append({"kind": "inbox", "id": item["source_id"],
                         "digest": digest(item["event_json"]), "actions": ["history.source.read"]})
-            invalid_task_state = len(visible_updates) != len(task_inputs)
-            if update_sources or invalid_task_state:
+                elif (not item["event_json"] and item["external_wait_id"]
+                      and item["source_id"] == "external:" + hashlib.sha256(
+                          (item["external_wait_id"] + item["text"]).encode()).hexdigest()):
+                    external_observations.append(values)
+                else:
+                    invalid_task_state = True
+            if task_inputs:
                 context = json.loads(row["context_json"])
+                context.pop("invalid_task_state", None)
                 if invalid_task_state:
                     context["invalid_task_state"] = True
                 context["source_manifest"] = merge_manifest(context.get("source_manifest", []), update_sources)
@@ -353,7 +364,7 @@ class TaskService:
                 "execution_priority": row["execution_priority"],
                 "continuation": {"checkpoint": checkpoint, "inputs": [dict(r) for r in continuation]},
                 "task_state": {"goal": json.loads(row["goal_json"]), "checkpoint": checkpoint,
-                    "user_updates": visible_updates},
+                    "user_updates": visible_updates, "external_observations": external_observations},
                 "protocol_version": row["protocol_version"],
                 "profile": row["profile"],
                 "lease_expires_at": lease,
@@ -1323,6 +1334,9 @@ class TaskService:
     def observe_waiter(self, payload):
         if not isinstance(payload["observation"], str) or len(payload["observation"].encode()) > 65536:
             raise ValueError("invalid external observation")
+        expected_source = "external:" + hashlib.sha256((payload["wait_id"] + payload["observation"]).encode()).hexdigest()
+        if payload["source_id"] != expected_source:
+            raise ValueError("external observation source does not match content")
         with self.db.transaction() as c:
             wait = c.execute(select(waits).where(waits.c.id == payload["wait_id"],
                 waits.c.revision == payload["revision"])).mappings().first()

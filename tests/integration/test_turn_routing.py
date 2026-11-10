@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -164,7 +165,7 @@ async def test_natural_external_wait_supplement_keeps_waiting_for_observation(co
         assert conn.execute(select(tasks.c.state)).scalar_one() == "WAITING_EXTERNAL"
         assert conn.execute(select(inputs.c.text)).scalar_one() == "只看我创建的"
     assert core.tasks.observe_waiter({"wait_id": "router-external", "revision": 1,
-        "source_id": "router-observation", "observation": "closed"})["woken"]
+        "source_id": "external:" + hashlib.sha256(b"router-externalclosed").hexdigest(), "observation": "closed"})["woken"]
     resumed = core.tasks.claim("worker")
     assert resumed["task_id"] == claim["task_id"]
     assert {item["text"] for item in resumed["continuation"]["inputs"]} == {"只看我创建的", "closed"}
