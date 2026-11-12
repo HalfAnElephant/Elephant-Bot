@@ -498,7 +498,8 @@ class RunGateway:
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)
-                        return {"accepted": True}
+                        return {"accepted": True, "committed": False,
+                            "next_action": "Give the final assistant report and end this turn. The host commits only after turn_finished; querying task status now cannot verify settlement."}
                     if self.notify_before_tools and not self.progress_announced:
                         raise ValueError("先单独调用 task_notify，简短告知用户准备做什么，提示被接受后再调用工具。")
                     if name == "content_read":

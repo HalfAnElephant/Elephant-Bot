@@ -10,7 +10,7 @@ from qqbot.runtime.scheduler import Scheduler
 def scheduler_for(once):
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.core = SimpleNamespace(tasks=SimpleNamespace(max_active=1))
-    scheduler.worker = SimpleNamespace(once=once)
+    scheduler.worker = SimpleNamespace(once=once, begin_shutdown=lambda: None)
     async def sweep():
         pass
     scheduler.pool = SimpleNamespace(sweep=sweep, close=sweep)

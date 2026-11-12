@@ -185,6 +185,7 @@ class Scheduler:
         return completed
 
     async def close(self):
+        self.worker.begin_shutdown()
         if self.job_maintenance is not None:
             self.job_maintenance.cancel()
             await asyncio.gather(self.job_maintenance, return_exceptions=True)

@@ -20,4 +20,6 @@ systemd 单位使用 `ExitType=cgroup`、`KillMode=control-group`、`RemainAfter
 
 使用实际运行 daemon 的普通账号，并安装 Ubuntu 的 systemd（支持 `ExitType=cgroup`，systemd 250+）和 bubblewrap。管理员运行 `deploy/elephant-job-user-setup.sh ACCOUNT` 开启 linger 与 user manager。它不授予 daemon sudo 权限，不创建 root Job。控制命令使用该账号的 `/run/user/UID/bus`，daemon 账号必须与 user manager 账号一致。没有 user manager、bubblewrap 或 Linux 时，能力握手明确拒绝持久 Job，不退化成声称可跨重启的子进程。
 
-正式启用前，在真实服务账号下验证一个写测试文件并等待的有期限 Job：记录 job_id/InvocationID，重启 daemon，确认同一单位和进程仍执行、没有第二次写入。等待完成并回读退出码与日志。再测试带子进程的 Job 取消、期限到达、错误退出、任务隔离和 user-manager/bubblewrap 不可用。文件检查应使用相同 workspace。离线 fake-systemd 契约测试不替代这些主机验收。
+配置脚本同时写入 daemon drop-in，依赖指定 UID 的 user manager，并把它的运行目录挂入 `ProtectHome=tmpfs` 沙箱。`ProtectHome=true` 下即使 user manager 已运行也可能无法连接，不能只在服务外以同账号执行命令判断可用性。
+
+正式启用前，在真实 daemon 内验证一个写测试文件并等待的有期限 Job：记录 job_id/InvocationID，重启 daemon，确认同一单位和进程仍执行、没有第二次写入。等待完成并回读退出码与日志。再测试带子进程的 Job 取消、期限到达、错误退出、任务隔离和 user-manager/bubblewrap 不可用。文件检查应使用相同 workspace。离线 fake-systemd 契约测试不替代这些主机验收。

@@ -82,6 +82,10 @@ class Worker:
         self.pool = pool
         self.replay_lock = asyncio.Lock()
         self.event_lock = asyncio.Lock()
+        self.shutting_down = False
+
+    def begin_shutdown(self):
+        self.shutting_down = True
 
     async def call(self, operation, **payload):
         response = await self.client.post(
@@ -279,6 +283,8 @@ class Worker:
         return harness.stopped_verified
 
     async def once(self):
+        if self.shutting_down:
+            return False
         async with self.replay_lock:
             await self.replay()
         claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
@@ -369,6 +375,10 @@ class Worker:
             committed = await self.deliver_result(payload, path)
             return committed
         except asyncio.CancelledError:
+            if self.shutting_down:
+                # The next daemon recovers the original run from durable evidence.
+                await self.stop_execution(harness, execution)
+                raise
             if heartbeat is None:
                 heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             stopped = await self.stop_execution(harness, execution)

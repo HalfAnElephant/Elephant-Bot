@@ -313,3 +313,7 @@ async def test_finalizer_cannot_export_a_child_path_as_its_own_file(discovery):
         response = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/child.txt"]})
     assert response.status_code == 422 and "verified child artifacts" in response.json()["detail"]
     assert not gateway.artifacts
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, "task_outcome", {"status": "completed"})
+    assert response.json()["accepted"] and response.json()["committed"] is False
+    assert "end this turn" in response.json()["next_action"]

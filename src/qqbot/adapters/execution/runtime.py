@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from qqbot.contracts.execution import JobScope, JobStart
 from qqbot.domain import InboundEvent
+from qqbot.domain.tasks import TaskResult
 from qqbot.storage.action_schema import operations
 from qqbot.storage.job_schema import jobs
 from qqbot.storage.task_schema import inputs, runs, tasks
@@ -138,8 +139,12 @@ class JobRuntime:
                     jobs.c.state.not_in(_JOB_TERMINAL))).first()
                 if active or unsettled:
                     continue
-                conn.execute(update(tasks).where(tasks.c.id == task['id'], tasks.c.state == 'CANCEL_REQUESTED')
-                    .values(state='CANCELLED'))
+                previous = TaskResult.model_validate_json(task['result_json']) if task['result_json'] else TaskResult(
+                    status='failed', agent_authored=False, summary='任务进程已确认停止。')
+                result = previous.model_copy(update={'status': 'failed', 'agent_authored': False,
+                                                     'summary': '任务进程已确认停止。'})
+                self.task_service._record_host_terminal(conn, task, 'CANCELLED', result,
+                    'job-cancel-result:' + task['id'])
                 graph = getattr(self.task_service, 'graph', None)
                 if graph:
                     graph.event(conn, task, 'finished', {'state': 'CANCELLED', 'public_summary': '任务进程已确认停止。'},

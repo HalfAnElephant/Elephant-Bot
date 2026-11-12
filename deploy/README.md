@@ -42,7 +42,7 @@ Provision the daemon account with root-only
 `deploy/elephant-job-user-setup.sh qqbot`. This enables its systemd user manager
 and linger, so Jobs survive daemon restarts. See
 [Job operations](../docs/operations/persistent-jobs.md) for receipts and acceptance.
-The setup script writes `/etc/qqbot/jobs.env` with the actual account UID; the service reads these XDG/DBus variables to select that manager. Do not grant the daemon sudo.
+The setup script writes `/etc/qqbot/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes only its `/run/user/UID` directory through the `ProtectHome=tmpfs` sandbox. Keep the remaining home directories hidden. Do not grant the daemon sudo.
 
 Install `bubblewrap` and validate user namespaces under the actual service account.
 Workspace processes and Jobs have a cleared environment, isolated mount/PID/network

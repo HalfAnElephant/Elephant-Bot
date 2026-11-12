@@ -236,6 +236,18 @@ class TaskService:
             if self.permissions.check(access, "notification.send", "conversation:" + root["conversation"]).allowed:
                 self._notification(conn, root, None, result.summary, "result", "important", final_id)
 
+    def _record_host_terminal(self, conn, task, state, result, event_id, *, run_id=None):
+        conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, result_json=result.model_dump_json()))
+        if task["root_task_id"] and hasattr(self, "graph"):
+            settled = {**dict(task), "state": state}
+            self.graph.event(conn, settled, "child_result", {"result": result.model_dump(mode="json")},
+                attempt_id=run_id, event_id=event_id, wake=True)
+            if task["parent_task_id"]:
+                parent = conn.execute(select(tasks).where(tasks.c.id == task["parent_task_id"])).mappings().one()
+                if parent["kind"] != "goal":
+                    self.graph.wake_parent(conn, parent)
+        self.wakeup.set()
+
     def recover(self):
         now = self.clock.now().isoformat()
         with self.db.transaction() as c:
@@ -257,13 +269,20 @@ class TaskService:
                     if waiting["kind"] == "external":
                         reason = "external_timeout"
                     c.execute(update(waits).where(waits.c.id == waiting["id"]).values(state="EXPIRED"))
-                    c.execute(update(tasks).where(tasks.c.id == waiting["task_id"]).values(state="BLOCKED", stop_reason=reason))
+                    task = c.execute(select(tasks).where(tasks.c.id == waiting["task_id"])).mappings().one()
+                    previous = TaskResult.model_validate_json(task["result_json"]) if task["result_json"] else TaskResult(
+                        status="blocked", agent_authored=False, summary="The wait ended.")
+                    result = previous.model_copy(update={"status": "blocked", "agent_authored": False,
+                        "summary": "The wait ended before a qualifying input or external observation arrived."})
+                    c.execute(update(tasks).where(tasks.c.id == task["id"]).values(stop_reason=reason))
+                    self._record_host_terminal(c, task, "BLOCKED", result, "host-wait-expired:" + waiting["id"],
+                        run_id=waiting["run_id"])
             for task in c.execute(select(tasks).where(tasks.c.state == "QUEUED", tasks.c.deadline <= now,
                                                       tasks.c.failure_notice_json.is_(None))).mappings().all():
                 result = TaskResult(status="failed", agent_authored=False,
                                     summary="The execution deadline expired before the queued request started.")
-                c.execute(update(tasks).where(tasks.c.id == task["id"]).values(
-                    state="EXPIRED", stop_reason="deadline", result_json=result.model_dump_json()))
+                c.execute(update(tasks).where(tasks.c.id == task["id"]).values(stop_reason="deadline"))
+                self._record_host_terminal(c, task, "EXPIRED", result, "host-queued-expired:" + task["id"])
                 self._queue_failure_notice(c, task, result, "EXPIRED")
             self._settle_exhausted_roots(c)
 
