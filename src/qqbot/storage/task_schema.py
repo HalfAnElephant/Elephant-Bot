@@ -26,7 +26,7 @@ runs = Table(
     "task_runs",
     metadata,
     Column("id", String, primary_key=True),
-    Column("task_id", String, nullable=False),
+    Column("task_id", String, nullable=True),
     Column("worker", String, nullable=False),
     Column("fencing", Integer, nullable=False),
     Column("lease", String, nullable=False),
@@ -154,3 +154,29 @@ observations = Table(
     Column("data_json", Text, nullable=False),
 )
 EXECUTION_TABLES = (*EXECUTION_TABLES, observations)
+
+for column in (
+    Column("kind", String, nullable=False, server_default="work"),
+    Column("owner_id", String), Column("root_task_id", String), Column("parent_task_id", String),
+    Column("origin_dialogue_id", String), Column("coordinator_session_id", String),
+    Column("session_id", String), Column("goal_revision", Integer, nullable=False, server_default="0"),
+    Column("dispatch_key", String), Column("delegation_key", String), Column("rework_of_task_id", String),
+    Column("binding_json", Text, nullable=False, server_default="{}"), Column("wait_json", Text),
+):
+    tasks.append_column(column)
+for column in (
+    Column("session_id", String), Column("role", String, nullable=False, server_default="worker"),
+    Column("purpose", String, nullable=False, server_default="work"),
+    Column("session_generation", Integer, nullable=False, server_default="1"),
+    Column("basis_goal_revision", Integer, nullable=False, server_default="0"),
+    Column("request_json", Text, nullable=False, server_default="{}"),
+    Column("budget_json", Text, nullable=False, server_default="{}"),
+    Column("state", String, nullable=False, server_default="RUNNING"), Column("receipt_json", Text),
+):
+    runs.append_column(column)
+for column in (
+    Column("kind", String, nullable=False, server_default="followup"), Column("actor", String),
+    Column("goal_revision", Integer, nullable=False, server_default="0"),
+    Column("persisted_at", String), Column("consumed_at", String),
+):
+    inputs.append_column(column)

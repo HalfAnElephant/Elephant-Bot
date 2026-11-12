@@ -10,7 +10,8 @@ from sqlalchemy import select
 from test_qq_agent_rich import rich_setup as _rich_setup
 
 from qqbot.jobs.api import internal_router
-from qqbot.jobs.worker import GeneralRun, ModelCapacity
+from qqbot.jobs.worker import GeneralRun
+from qqbot.providers import ModelCapacity
 from qqbot.storage.local_media_schema import qq_local_media
 from qqbot.storage.schema import outbox
 

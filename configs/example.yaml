@@ -9,7 +9,7 @@ permissions:
   default_effect: allow
   rules: []
 execution:
-  max_active: 4
+  max_active: 8
   sustained_limit: 2
   foreground_wait_ms: 5000
   warm_max: 4
@@ -25,11 +25,7 @@ model:
   model: null
   api_key_env: QQBOT_MODEL_KEY
   context_window: 1000000 # Set the actual window supported by your model
-# Set adapter credentials before adding an adapter. Configure optional restrictions through permissions.
-# - instance_id: napcat_test
-#   kind: onebot
-#   bot_id: '12345'
-#   secret_env: QQBOT_ONEBOT_TOKEN
+# Set QQ official credentials before adding an adapter. Configure restrictions through permissions.
 # - instance_id: official_test
 #   kind: official
 #   bot_id: bot_identity
@@ -37,6 +33,9 @@ model:
 #   secret_env: QQBOT_OFFICIAL_SECRET
 #   full_mode_enabled: false
 #   full_mode_verified: false
+
+owner:
+  preferences: '' # Explicit name, language, or communication preferences; leave empty for no extra preference.
 
 # Optional trusted OpenViking service. No remote calls until endpoint is configured.
 memory:

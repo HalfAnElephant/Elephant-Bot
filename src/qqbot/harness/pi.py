@@ -107,8 +107,6 @@ class PiRunnerAdapter:
         model="gpt-4o-mini",
         api_key=None,
         timeout=1800,
-        research=None,
-        research_url=None,
         session_id=None,
         gateway=None,
         gateway_url=None,
@@ -116,7 +114,6 @@ class PiRunnerAdapter:
         self.executable = str(Path(executable).resolve(strict=True))
         self.workspace = Path(workspace).resolve()
         self.provider, self.model, self.api_key, self.timeout = provider, model, api_key, timeout
-        self.research, self.research_url = research, research_url
         self.gateway, self.gateway_url = gateway, gateway_url
         self.quiescent_verified = False
         self.run_timeout = None
@@ -162,15 +159,6 @@ class PiRunnerAdapter:
         if self.gateway:
             argv.remove("--no-tools")
             argv += ["--no-builtin-tools", "--extension", str(Path(__file__).with_name("pi_bridge.ts"))]
-        elif self.research:
-            argv.remove("--no-tools")
-            argv += [
-                "--no-builtin-tools",
-                "--tools",
-                "research_search,research_fetch,research_write",
-                "--extension",
-                str(Path(__file__).with_name("research_extension.ts")),
-            ]
         return argv
 
     async def start(self):
@@ -203,30 +191,6 @@ class PiRunnerAdapter:
                 "models": [{"id": self.model, "name": self.model, "reasoning": False, "input": ["text"],
                     "contextWindow": self.gateway.model_window, "maxTokens": max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}))
-        if self.research:
-            env["QQBOT_RESEARCH_URL"] = self.research_url
-            env["QQBOT_TOOL_TOKEN"] = self.research.tool_token
-            model_config = {
-                "providers": {
-                    "qqbot": {
-                        "baseUrl": self.research_url + "/v1",
-                        "api": "openai-completions",
-                        "apiKey": self.research.model_token,
-                        "models": [
-                            {
-                                "id": self.model,
-                                "name": self.model,
-                                "reasoning": False,
-                                "input": ["text"],
-                                "contextWindow": 32768,
-                                "maxTokens": 4096,
-                                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                            }
-                        ],
-                    }
-                }
-            }
-            (profile / "models.json").write_text(json.dumps(model_config))
         if self.api_key:
             if self.provider != "openai":
                 raise ValueError("only explicit openai credentials are supported")
@@ -301,8 +265,6 @@ class PiRunnerAdapter:
 
     def safe_diagnostic(self, text):
         secrets = [self.api_key]
-        if self.research:
-            secrets += [self.research.model_token, self.research.tool_token, self.research.upstream_key]
         if self.gateway:
             secrets += [self.gateway.model_token, self.gateway.tool_token, self.gateway.key, self.gateway.process_token]
         for secret in filter(None, secrets):
@@ -380,11 +342,14 @@ class PiRunnerAdapter:
                             self.actual_session_file = str(actual)
                             if not await self.gateway.drain():
                                 raise RuntimeError("run I/O has not drained")
+                            if self.gateway.claim.get("session_id") and not self.gateway.session_receipt:
+                                raise RuntimeError("pi settled without a durable session receipt")
+                            self.last_receipt = self.gateway.session_receipt
                         self.quiescent_verified, settled = True, True
                         outcome = (self.gateway.outcome or {}) if self.gateway else {}
                         status = (self.gateway.claim.get("notification_status") if self.gateway else None) or outcome.get("status", "completed")
                         if self.gateway and self.gateway.waiting:
-                            status = "waiting_input"
+                            status = self.gateway.wait_kind or "waiting_input"
                         elif self.gateway and any(value in {"unknown", "partial", "dispatched", "prepared"} for value in self.gateway.effects.values()):
                             status = "partial" if status == "completed" else status
                         return TaskResult(status=status, summary=text[:10000] or "Waiting checkpoint persisted.",
@@ -431,8 +396,6 @@ class PiRunnerAdapter:
         if self.gateway:
             self.gateway.revoke()
             await self.gateway.processes.close_run(self.gateway.context)
-        if self.research:
-            self.research.revoke()
         process = self.process
         if not process:
             self.stopped_verified = drained

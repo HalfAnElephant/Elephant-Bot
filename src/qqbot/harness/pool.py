@@ -38,8 +38,8 @@ class SessionPool:
         return stopped
 
     async def acquire(self, claim):
-        key = claim.get("context", {}).get("key") or "task:" + claim["task_id"]
-        if claim.get("plan", {}).get("workspace_ref") or claim.get("delivery") == "DETACHED":
+        key = claim.get("session_id") or claim.get("context", {}).get("key") or "task:" + claim["task_id"]
+        if not claim.get("session_id") and (claim.get("plan", {}).get("workspace_ref") or claim.get("delivery") == "DETACHED"):
             key = "task:" + claim["task_id"]
         async with self.lock:
             limits = claim.get("context", {}).get("pool")
@@ -65,7 +65,7 @@ class SessionPool:
                 idle = sorted((e for e in self.entries.values() if e["state"] == "IDLE"), key=lambda e: e["used"])
                 if not idle or not await self._evict(idle[0]):
                     raise RuntimeError("resident process capacity exhausted; active and unknown processes retained")
-            process_id, session_id = str(uuid4()), str(uuid4())
+            process_id, session_id = str(uuid4()), claim.get("session_id") or str(uuid4())
             runner = self.factory(claim, process_id, session_id)
             entry = {"id": process_id, "key": key, "state": "BUSY", "used": time.monotonic(), "runner": runner}
             self.entries[process_id] = entry
@@ -101,6 +101,14 @@ class SessionPool:
     async def sweep(self):
         async with self.lock:
             await self._sweep()
+
+    async def retire_sessions(self, session_ids):
+        """Stop obsolete idle sessions while their busy runs finish the stop protocol."""
+        async with self.lock:
+            for entry in list(self.entries.values()):
+                if entry["key"] in session_ids and entry["state"] != "BUSY":
+                    await self._evict(entry)
+            return not any(entry["key"] in session_ids for entry in self.entries.values())
 
     async def close(self):
         async with self.lock:

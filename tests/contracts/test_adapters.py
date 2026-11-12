@@ -1,19 +1,15 @@
 import asyncio
 import json
-import time
 from datetime import timedelta
 from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from qqbot.adapters.onebot_v11.adapter import OneBotAdapter, segments
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.app import create_app
 from qqbot.config import Settings
-from qqbot.domain import MediaSegment, ObservationMode, OutboundEnvelope, TextSegment, UnknownSegment
+from qqbot.domain import ObservationMode, OutboundEnvelope
 from qqbot.outbox.service import Outbox
 from qqbot.storage.schema import inbox, outbox
 
@@ -31,51 +27,15 @@ def envelope(event, clock, kind="chat"):
         expires_at=clock.now()+timedelta(seconds=300))
 
 
-def test_A01_A03_A06(nap_config, official_config, incoming, clock, nap_event, official_event, db):
-    nap = OneBotAdapter(nap_config, "d", incoming, clock)
+def test_official_events_are_deduplicated(official_config, incoming, clock, official_event, db):
     qq = OfficialAdapter(official_config, "d", incoming, clock)
-    event = nap.normalize(nap_event)
+    event = qq.normalize(official_event)
     for i in range(10):
         accepted, new = incoming.accept(event)
         assert new == (i == 0)
         assert accepted.ingest_seq == 1
-    official = qq.normalize(official_event)
-    assert event.conversation.key != official.conversation.key
-    assert event.principal.key != official.principal.key
-    chain = segments('[CQ:at,qq=100]a&#91;b[CQ:image,file=temp][CQ:future,x=y]')
-    assert isinstance(chain[1], TextSegment) and chain[1].text == 'a[b'
-    assert isinstance(chain[2], MediaSegment) and chain[2].attachment_ref.startswith("unresolved:")
-    assert isinstance(chain[3], UnknownSegment)
-    recall = nap.normalize({"post_type":"notice", "notice_type":"group_recall", "self_id":100,
-        "user_id":300,"group_id":200,"message_id":400,"time":int(clock.now().timestamp())})
-    assert recall.event_type == "message.recalled"
     with db.engine.connect() as c:
         assert c.execute(select(func.count()).select_from(inbox)).scalar() == 1
-
-
-@pytest.mark.parametrize("data, expected", [
-    ({"file": "local.jpg", "url": "https://gchat.qpic.cn/pic?token=one&size=2"},
-     "https://gchat.qpic.cn/pic?token=one&size=2"),
-    ({"file": "https://gchat.qpic.cn/fallback"}, "https://gchat.qpic.cn/fallback"),
-    ({"file": "base64://large-image"}, None),
-    ({"file": "file:///tmp/local.jpg"}, None),
-    ({"url": "https://example.com/" + "x" * 8192}, None),
-    ({"url": {"invalid": "value"}}, None),
-])
-def test_onebot_image_source_survives_inbox_recovery(nap_config, incoming, clock, nap_event, data, expected):
-    nap = OneBotAdapter(nap_config, "d", incoming, clock)
-    event = nap.normalize({**nap_event, "message": [{"type": "image", "data": data}]})
-    assert event.segments[0].image_url == expected
-    assert event.segments[0].attachment_ref.startswith("unresolved:")
-    incoming.accept(event)
-    assert incoming.pending()[0].segments[0].image_url == expected
-
-
-def test_onebot_cq_image_url_decodes_and_non_images_keep_no_source():
-    chain = segments("[CQ:image,file=local.jpg,url=https://gchat.qpic.cn/pic?a=1&amp;b=2&#44;3]")
-    assert chain[0].image_url == "https://gchat.qpic.cn/pic?a=1&b=2,3"
-    chain = segments([{"type": "record", "data": {"url": "https://example.com/audio"}}])
-    assert chain[0].type == "audio" and chain[0].image_url is None
 
 
 async def test_A02_signature_replay_and_challenge(official_config, incoming, clock, official_event, db):
@@ -172,36 +132,41 @@ async def test_D02_D03_unknown_and_expired(official_config, incoming, clock, off
     await qq.stop()
 
 
-def test_A04_real_local_websocket(tmp_path, nap_config, clock, nap_event):
-    settings = Settings(interactive_execution_enabled=False, database=str(tmp_path/"ws.db"), adapters=(nap_config,))
-    app = create_app(settings, clock=clock)
-    headers = {"authorization":"Bearer test-secret", "x-self-id":"100"}
-    with TestClient(app) as client:
-        with client.websocket_connect("/onebot/nap", headers=headers) as ws:
-            for _ in range(10):
-                ws.send_json(nap_event)
-            request = ws.receive_json()
-            assert request["action"] == "send_group_msg"
-            assert [part["type"] for part in request["params"]["message"]] == ["text"]
-            ws.send_json({"echo": request["echo"],"status":"ok","retcode":0,"data":{"message_id":999}})
-        assert app.state.adapters["nap"].context_gap
-        for _ in range(100):
-            with app.state.db.engine.connect() as conn:
-                if conn.execute(select(outbox.c.state)).scalar_one() == "SENT":
-                    break
-            time.sleep(0.01)
-        else:
-            pytest.fail("first WebSocket acknowledgement was not committed")
-        clock.advance(3)
-        with client.websocket_connect("/onebot/nap", headers=headers) as ws:
-            event = {**nap_event, "message_id":401}
-            ws.send_json({"echo":request["echo"],"status":"ok","retcode":0,"data":{"message_id":1000}})
-            ws.send_json(event)
-            current = ws.receive_json()
-            assert current["echo"] != request["echo"]
-            ws.send_json({"echo":current["echo"],"status":"ok","retcode":0,"data":{"message_id":1001}})
-        with app.state.db.engine.connect() as c:
-            assert c.execute(select(func.count()).select_from(inbox)).scalar() == 2
+async def test_removed_adapter_deliveries_become_terminal_before_official_queue_continues(
+    official_config, incoming, clock, official_event, db
+):
+    calls = []
+
+    async def transport(request):
+        calls.append(request)
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        return httpx.Response(200, json={"id": "official-sent"})
+
+    qq = OfficialAdapter(official_config, "d", incoming, clock, httpx.AsyncClient(transport=httpx.MockTransport(transport)))
+    event = qq.normalize(official_event)
+    retired_target = event.conversation.model_copy(update={"adapter_instance_id": "removed-napcat"})
+    outgoing = Outbox(db, clock)
+    retired_ids = []
+    with db.transaction() as conn:
+        for index in range(50):
+            stale = event.model_copy(update={"event_id": f"legacy-{index}", "conversation": retired_target})
+            retired_ids.append(outgoing.enqueue(conn, envelope(stale, clock)))
+    clock.advance(1)
+    with db.transaction() as conn:
+        official_id = outgoing.enqueue(conn, envelope(event.model_copy(update={"event_id": "official-after-retired"}), clock))
+
+    await outgoing.dispatch_once({"qq": qq})
+    with db.engine.connect() as conn:
+        assert set(conn.execute(select(outbox.c.state).where(outbox.c.id.in_(retired_ids))).scalars()) == {"FAILED"}
+        assert conn.execute(select(outbox.c.receipt_json).where(outbox.c.id == retired_ids[0])).scalar_one()
+        assert conn.execute(select(outbox.c.state).where(outbox.c.id == official_id)).scalar_one() == "PENDING"
+
+    await outgoing.dispatch_once({"qq": qq})
+    with db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state).where(outbox.c.id == official_id)).scalar_one() == "SENT"
+    assert calls[-1].url.path.endswith("messages")
+    await qq.stop()
 
 
 def test_full_and_at_dual_notification_updates_invitation_once(official_config, incoming, clock, official_event):
@@ -219,11 +184,11 @@ def test_full_and_at_dual_notification_updates_invitation_once(official_config, 
 
 
 @pytest.mark.parametrize("budget, expected", [(0, 8), (1, 1)])
-async def test_outbox_unlimited_default_and_explicit_limit(nap_config, incoming, clock, nap_event, db, budget, expected):
+async def test_outbox_unlimited_default_and_explicit_limit(official_config, incoming, clock, official_event, db, budget, expected):
     from qqbot.domain import DeliveryCheck, SendReceipt
 
-    nap = OneBotAdapter(nap_config, "d", incoming, clock)
-    event = nap.normalize(nap_event)
+    qq = OfficialAdapter(official_config, "d", incoming, clock)
+    event = qq.normalize(official_event)
     sent = []
 
     class Adapter:
@@ -239,11 +204,10 @@ async def test_outbox_unlimited_default_and_explicit_limit(nap_config, incoming,
         for index in range(8):
             outgoing.enqueue(c, envelope(event.model_copy(update={"event_id": str(index)}), clock))
     options = {"budget": budget} if budget else {}
-    await outgoing.dispatch_once({"nap": Adapter()}, **options)
-    await outgoing.dispatch_once({"nap": Adapter()}, **options)
+    await outgoing.dispatch_once({"qq": Adapter()}, **options)
     assert len(sent) == 1
     for _ in range(7):
         clock.advance(3)
-        await outgoing.dispatch_once({"nap": Adapter()}, **options)
+        await outgoing.dispatch_once({"qq": Adapter()}, **options)
     assert len(sent) == len(set(sent)) == expected
     assert Settings().send_budget_per_minute == 0

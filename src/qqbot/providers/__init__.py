@@ -92,22 +92,15 @@ def normalize_usage(raw):
 
 
 class ModelCapacity:
-    def __init__(self, total=4, reserved=1):
-        if not 1 <= reserved < total:
-            raise ValueError("new interactions need a reserved model slot")
+    def __init__(self, total=4, reserved=0):
+        if total < 1 or reserved != 0:
+            raise ValueError("all roles share one model capacity without reserved slots")
         self.total = asyncio.Semaphore(total)
-        self.sustained = asyncio.Semaphore(total - reserved)
 
     @asynccontextmanager
     async def slot(self, background):
-        if background:
-            await self.sustained.acquire()
-        try:
-            async with self.total:
-                yield
-        finally:
-            if background:
-                self.sustained.release()
+        async with self.total:
+            yield
 
 
 class ProviderAdapter:

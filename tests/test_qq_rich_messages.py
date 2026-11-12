@@ -159,14 +159,11 @@ def test_keyboard_json_restart_roundtrip(db,clock):
     assert message_body(restored)["keyboard"] == keyboard.to_payload()
 
 
-async def test_template_disabled_and_onebot_rejects_rich(official_config,nap_config,incoming,clock):
-    from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
+async def test_template_disabled_for_official_adapter(official_config,incoming,clock):
     from qqbot.domain.official import TemplateMarkdown
     qq=adapter(official_config.model_copy(update={"markdown_enabled":False}),incoming,clock,lambda r:httpx.Response(500))
     item=envelope(clock,official_content=OfficialContent(template_markdown=TemplateMarkdown(template_id="a")))
     assert (await qq.validate_delivery(item)).reason == "MARKDOWN_DISABLED"
-    nap=OneBotAdapter(nap_config,"d",incoming,clock)
-    assert (await nap.validate_delivery(item)).reason == "UNSUPPORTED_RICH_CONTENT"
 
 
 async def test_offline_outbox_remains_pending_until_reconnect(db,clock):

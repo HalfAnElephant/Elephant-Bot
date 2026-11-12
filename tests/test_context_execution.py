@@ -4,6 +4,7 @@ import json
 import pytest
 from sqlalchemy import select, update
 
+from conftest import official_payload
 from qqbot.app import create_app
 from qqbot.config import Settings
 from qqbot.permissions import PermissionRule
@@ -12,39 +13,32 @@ from qqbot.storage.task_schema import tasks
 
 
 def event(core, payload, message_id, text):
-    value = core.adapters["nap"].normalize(
-        {
-            **payload,
-            "message_id": message_id,
-            "message": [{"type": "at", "data": {"qq": "100"}}, {"type": "text", "data": {"text": text}}],
-        }
-    )
+    value = core.adapters["qq"].normalize(official_payload(payload, message_id=message_id, text=text))
     return core.inbox.accept(value)[0]
 
 
-def core_for(tmp_path, nap_config, clock, **settings):
+def core_for(tmp_path, official_config, clock, **settings):
     core = create_app(
-        Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,), **settings),
+        Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), **settings),
         clock=clock,
         run_background=False,
     ).state.core
-    core.adapters["nap"].account_online = True
     return core
 
 
-def image_event(core, payload, message_id, url=None):
-    value = core.adapters["nap"].normalize({
-        **payload, "message_id": message_id,
-        "message": [{"type": "image", "data": {"file": "image.png", "url": url}}],
-    })
+def image_event(core, payload, message_id, url=None, *, private=False):
+    value = core.adapters["qq"].normalize(official_payload(
+        payload, message_id=message_id, text="", private=private,
+        attachments=[{"filename": "image.png", "content_type": "image/png", "url": url}],
+    ))
     return core.inbox.accept(value)[0]
 
 
 async def test_images_survive_image_only_and_merged_turns_without_leaking_urls_to_seed(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    picture = image_event(core, nap_event, 1800, "https://example.com/secret-image.png")
+    core = core_for(tmp_path, official_config, clock)
+    picture = image_event(core, official_event, 1800, "https://example.com/secret-image.png")
     turn = core.contexts.turn(picture)
     assert turn.text == "[图片]"
     context = core.contexts.build(core.access(picture), turn)
@@ -53,8 +47,8 @@ async def test_images_survive_image_only_and_merged_turns_without_leaking_urls_t
     }]
     assert "secret-image" not in json.dumps(context["seed"])
     assert core.validate_context(core.access(picture), context)
-    text = event(core, nap_event, 1801, "这张图写了什么")
-    unresolved = image_event(core, nap_event, 1802)
+    text = event(core, official_event, 1801, "这张图写了什么")
+    unresolved = image_event(core, official_event, 1802)
     merged = core.contexts.turn(picture, (text, unresolved))
     assert merged.text == "[图片]\n这张图写了什么\n[图片]"
     context = core.contexts.build(core.access(picture), merged)
@@ -68,11 +62,11 @@ async def test_images_survive_image_only_and_merged_turns_without_leaking_urls_t
 
 
 async def test_reply_restores_image_outside_recent_history_and_respects_revocation(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock, context={"recent_messages": 1})
-    picture = image_event(core, nap_event, 1810, "https://example.com/old.png")
-    later = event(core, nap_event, 1811, "https://github.com/org/repo 的 PR")
+    core = core_for(tmp_path, official_config, clock, context={"recent_messages": 1})
+    picture = image_event(core, official_event, 1810, "https://example.com/old.png")
+    later = event(core, official_event, 1811, "https://github.com/org/repo 的 PR")
     without_reply = core.contexts.build(core.access(later), core.contexts.turn(later))
     assert without_reply["images"] == []
     reply = later.model_copy(update={"reply_to": picture.platform_message_id})
@@ -89,11 +83,11 @@ async def test_reply_restores_image_outside_recent_history_and_respects_revocati
 
 
 async def test_image_history_obeys_source_permissions_and_notice_only(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    picture = image_event(core, nap_event, 1820, "https://example.com/denied.png")
-    text = event(core, nap_event, 1821, "看看上面的图片")
+    core = core_for(tmp_path, official_config, clock)
+    picture = image_event(core, official_event, 1820, "https://example.com/denied.png")
+    text = event(core, official_event, 1821, "看看上面的图片")
     context = core.contexts.build(core.access(text), core.contexts.turn(text))
     assert context["images"][0]["source"] == picture.event_id
     notice = core.contexts.build(core.access(text), core.contexts.turn(text), notice_only=True)
@@ -109,12 +103,10 @@ async def test_image_history_obeys_source_permissions_and_notice_only(
 
 
 async def test_process_image_only_private_message_creates_image_task(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    payload = {key: value for key, value in nap_event.items() if key != "group_id"}
-    payload["message_type"] = "private"
-    picture = image_event(core, payload, 1830, "https://example.com/private.png")
+    core = core_for(tmp_path, official_config, clock)
+    picture = image_event(core, official_event, 1830, "https://example.com/private.png", private=True)
     await core.process(picture)
     with core.db.engine.connect() as conn:
         task = conn.execute(select(tasks)).mappings().one()
@@ -132,13 +124,13 @@ async def test_process_image_only_private_message_creates_image_task(
 
 
 async def test_process_coalesces_invited_text_and_image_into_one_task(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    text = event(core, nap_event, 1831, "帮我读一下这张截图")
+    core = core_for(tmp_path, official_config, clock)
+    text = event(core, official_event, 1831, "帮我读一下这张截图")
     processing = asyncio.create_task(core.process(text))
     await asyncio.sleep(0.02)
-    picture = image_event(core, nap_event, 1832, "https://example.com/screenshot.png")
+    picture = image_event(core, official_event, 1832, "https://example.com/screenshot.png")
     await processing
     with core.db.engine.connect() as conn:
         task = conn.execute(select(tasks)).mappings().one()
@@ -155,13 +147,13 @@ async def test_process_coalesces_invited_text_and_image_into_one_task(
     core.db.close()
 
 
-async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config.model_copy(update={"allowed_groups": ()}), clock)
+async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config.model_copy(update={"allowed_groups": ()}), clock)
     assert not hasattr(core, "generate")
-    first = event(core, nap_event, 800, "帮我查询")
+    first = event(core, official_event, 800, "帮我查询")
     processing = asyncio.create_task(core.process(first))
     await asyncio.sleep(0.02)
-    second = event(core, nap_event, 801, "https://github.com/org/repo 的 PR")
+    second = event(core, official_event, 801, "https://github.com/org/repo 的 PR")
     await processing
     with core.db.engine.connect() as conn:
         task = conn.execute(select(tasks)).mappings().one()
@@ -185,9 +177,9 @@ async def test_normal_and_merged_tool_request_use_same_pi_entrypoint(tmp_path, n
     core.db.close()
 
 
-async def test_disabled_operation_notice_reaches_task_context(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock, execution={"notify_before_tools": False})
-    value = event(core, nap_event, 899, "查询现在的 Issue")
+async def test_disabled_operation_notice_reaches_task_context(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock, execution={"notify_before_tools": False})
+    value = event(core, official_event, 899, "查询现在的 Issue")
     await core.process(value)
     with core.db.engine.connect() as conn:
         context = json.loads(conn.execute(select(tasks.c.context_json)).scalar_one())
@@ -196,9 +188,9 @@ async def test_disabled_operation_notice_reaches_task_context(tmp_path, nap_conf
     core.db.close()
 
 
-async def test_disabled_interactive_has_no_direct_model_fallback(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock, interactive_execution_enabled=False)
-    value = event(core, nap_event, 802, "你好")
+async def test_disabled_interactive_has_no_direct_model_fallback(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock, interactive_execution_enabled=False)
+    value = event(core, official_event, 802, "你好")
     await core.process(value)
     with core.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.id)).first() is None
@@ -209,10 +201,10 @@ async def test_disabled_interactive_has_no_direct_model_fallback(tmp_path, nap_c
 
 
 async def test_context_delivered_assistant_scope_and_permission_revocation(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 803, "之前的问题")
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 803, "之前的问题")
     with core.db.transaction() as conn:
         sent = core.outbox.enqueue_text(
             conn, target=first.conversation, text="已送达的回答", origin_kind="chat", origin_id=first.event_id
@@ -223,7 +215,7 @@ async def test_context_delivered_assistant_scope_and_permission_revocation(
         core.outbox.enqueue_text(
             conn, target=first.conversation, text="未送达的草稿", origin_kind="chat", origin_id="pending"
         )
-    second = event(core, nap_event, 804, "继续")
+    second = event(core, official_event, 804, "继续")
     access = core.access(second)
     context = core.contexts.build(access, core.contexts.turn(second))
     texts = [item["text"] for item in context["seed"]["history"]]
@@ -258,16 +250,16 @@ async def test_context_delivered_assistant_scope_and_permission_revocation(
     core.db.close()
 
 
-async def test_context_topic_epoch_and_recalled_anchor(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 805, "你好")
+async def test_context_topic_epoch_and_recalled_anchor(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 805, "你好")
     access = core.access(first)
     original = core.contexts.build(access, core.contexts.turn(first))
-    second = event(core, nap_event, 806, "继续说")
+    second = event(core, official_event, 806, "继续说")
     continued = core.contexts.build(core.access(second), core.contexts.turn(second))
     assert original["key"] == continued["key"]
     clock.advance(1801)
-    third = event(core, nap_event, 807, "新的话题")
+    third = event(core, official_event, 807, "新的话题")
     fresh = core.contexts.build(core.access(third), core.contexts.turn(third))
     assert fresh["topic"] != original["topic"]
     core.social.revoke_source(access, first.event_id)
@@ -278,13 +270,13 @@ async def test_context_topic_epoch_and_recalled_anchor(tmp_path, nap_config, nap
     core.db.close()
 
 
-async def test_member_cancel_happens_before_pi_fact_explanation(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 808, "你好")
+async def test_member_cancel_happens_before_pi_fact_explanation(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 808, "你好")
     await core.process(first)
     with core.db.engine.connect() as conn:
         original = conn.execute(select(tasks)).mappings().one()
-    cancel = event(core, nap_event, 809, "/取消 " + original["public_id"])
+    cancel = event(core, official_event, 809, "/取消 " + original["public_id"])
     await core.process(cancel)
     with core.db.engine.connect() as conn:
         original = conn.execute(select(tasks).where(tasks.c.id == original["id"])).mappings().one()
@@ -302,12 +294,12 @@ async def test_member_cancel_happens_before_pi_fact_explanation(tmp_path, nap_co
 
 @pytest.mark.parametrize("receipt", ["SENT", "FAILED", "UNKNOWN", "PENDING"])
 async def test_only_confirmed_delivery_keeps_warm_context_epoch(
-    tmp_path, nap_config, nap_event, clock, receipt
+    tmp_path, official_config, official_event, clock, receipt
 ):
     from uuid import uuid4
 
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 810, "你好")
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 810, "你好")
     await core.process(first)
     with core.db.engine.connect() as conn:
         task = dict(conn.execute(select(tasks).where(tasks.c.source == first.event_id)).mappings().one())
@@ -321,7 +313,7 @@ async def test_only_confirmed_delivery_keeps_warm_context_epoch(
             .where(outbox.c.origin_id == notification_id)
             .values(state=receipt, sent_at=clock.now().isoformat() if receipt == "SENT" else None)
         )
-    second = event(core, nap_event, 811, "接着说")
+    second = event(core, official_event, 811, "接着说")
     next_context = core.contexts.build(core.access(second), core.contexts.turn(second))
     assert (next_context["key"] == original["key"]) == (receipt == "SENT")
     history_text = [item["text"] for item in next_context["seed"]["history"]]
@@ -331,13 +323,13 @@ async def test_only_confirmed_delivery_keeps_warm_context_epoch(
 
 
 async def test_seed_source_closure_survives_history_trimming_and_revokes(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 812, "最初的资料")
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 812, "最初的资料")
     original = core.contexts.build(core.access(first), core.contexts.turn(first))
     for index in range(core.settings.context.recent_messages + 1):
-        later = event(core, nap_event, 813 + index, "后续消息")
+        later = event(core, official_event, 813 + index, "后续消息")
     refreshed = core.contexts.build(core.access(later), core.contexts.turn(later))
     assert refreshed["key"] == original["key"]
     assert first.event_id not in {item["source"] for item in refreshed["seed"]["history"]}
@@ -352,12 +344,12 @@ async def test_seed_source_closure_survives_history_trimming_and_revokes(
 
 
 async def test_topic_references_weather_followup_and_return_to_displayed_pr(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
     from uuid import uuid4
 
-    core = core_for(tmp_path, nap_config, clock)
-    first = event(core, nap_event, 840, "列出 https://github.com/org/repo 的 PR")
+    core = core_for(tmp_path, official_config, clock)
+    first = event(core, official_event, 840, "列出 https://github.com/org/repo 的 PR")
     await core.process(first)
     with core.db.engine.connect() as conn:
         task = dict(conn.execute(select(tasks).where(tasks.c.source == first.event_id)).mappings().one())
@@ -376,19 +368,19 @@ async def test_topic_references_weather_followup_and_return_to_displayed_pr(
             .where(outbox.c.origin_id == notification_id)
             .values(state="SENT", sent_at=clock.now().isoformat(), platform_message_id="pr-list-message")
         )
-    weather = event(core, nap_event, 841, "帮我查嘉定今天的天气")
+    weather = event(core, official_event, 841, "帮我查嘉定今天的天气")
     weather_context = core.contexts.build(core.access(weather), core.contexts.turn(weather))
     assert weather_context["topic"] != original["topic"]
     assert weather_context["seed"]["topic"]["entities"] == ["location:嘉定"]
     assert not any("大段 PR diff" in item["text"] for item in weather_context["seed"]["history"])
-    tomorrow = event(core, nap_event, 842, "那明天呢")
+    tomorrow = event(core, official_event, 842, "那明天呢")
     tomorrow_context = core.contexts.build(core.access(tomorrow), core.contexts.turn(tomorrow))
     assert tomorrow_context["topic"] == weather_context["topic"]
     assert "location:嘉定" in tomorrow_context["seed"]["topic"]["entities"]
     tomorrow_task = core.submit_turn(tomorrow)
     assert json.loads(tomorrow_task["goal_json"])["success_checks"] == ["observation"]
     assert "web" in json.loads(tomorrow_task["plan_json"])["capability_hints"]
-    back = event(core, nap_event, 843, "回到刚才第二个 PR，帮我看一下")
+    back = event(core, official_event, 843, "回到刚才第二个 PR，帮我看一下")
     returned = core.contexts.build(core.access(back), core.contexts.turn(back))
     assert returned["topic"] == original["topic"]
     assert returned["selected_reference"]["resource_id"] == "pr:github.com/org/repo#52"
@@ -402,7 +394,7 @@ async def test_topic_references_weather_followup_and_return_to_displayed_pr(
     assert "hard_input_tokens" not in returned["limits"]
     assert returned["model_context_window"] == 32768
     # Reply-to returns the actual prior topic even while weather is most recent.
-    reply = event(core, nap_event, 844, "继续这个")
+    reply = event(core, official_event, 844, "继续这个")
     reply = reply.model_copy(update={"reply_to": "pr-list-message"})
     replied = core.contexts.build(core.access(reply), core.contexts.turn(reply))
     assert replied["topic"] == original["topic"]
@@ -425,7 +417,7 @@ async def test_topic_references_weather_followup_and_return_to_displayed_pr(
         ("看看这个 PR，没问题就 approve", (), ()),
     ],
 )
-def test_planner_preserves_explicit_output_and_success_contracts(nap_config, clock, text, outputs, checks):
+def test_planner_preserves_explicit_output_and_success_contracts(official_config, clock, text, outputs, checks):
     from qqbot.dialogue.planner import plan_turn
     from qqbot.domain import ConversationRef, PrincipalRef, Surface
     from qqbot.domain.execution import TurnInput
@@ -433,12 +425,12 @@ def test_planner_preserves_explicit_output_and_success_contracts(nap_config, clo
     turn = TurnInput(
         conversation=ConversationRef(
             deployment_id="d",
-            adapter_instance_id="nap",
-            bot_identity_id="100",
+            adapter_instance_id="qq",
+            bot_identity_id="bot",
             surface=Surface.GROUP,
             remote_conversation_id="200",
         ),
-        principal=PrincipalRef(adapter_instance_id="nap", identity_namespace="qq", remote_user_id="300"),
+        principal=PrincipalRef(adapter_instance_id="qq", identity_namespace="qq_app:app", remote_user_id="300"),
         text=text,
         source_event_ids=("e",),
         anchor_event_id="e",
@@ -449,9 +441,9 @@ def test_planner_preserves_explicit_output_and_success_contracts(nap_config, clo
     assert plan.runner == "pi"
 
 
-async def test_background_command_preserves_file_contract(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock, tasks_enabled=True)
-    request = event(core, nap_event, 850, "/研究 生成 reports/结论.pdf 文件")
+async def test_background_command_preserves_file_contract(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock, tasks_enabled=True)
+    request = event(core, official_event, 850, "/研究 生成 reports/结论.pdf 文件")
     await core.process(request)
     with core.db.engine.connect() as conn:
         task = conn.execute(select(tasks).where(tasks.c.source == request.event_id)).mappings().one()
@@ -465,18 +457,18 @@ async def test_background_command_preserves_file_contract(tmp_path, nap_config, 
 
 
 def test_admin_create_task_uses_planner_context_and_idempotent_source(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(
-        Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,), tasks_enabled=True),
+        Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), tasks_enabled=True),
         clock=clock,
         run_background=False,
     )
     core = app.state.core
-    source = event(core, nap_event, 860, "建立会话")
+    source = event(core, official_event, 860, "建立会话")
     auth = {"Authorization": "Bearer admin-test-token", "Idempotency-Key": "file-goal"}
     body = {"conversation_id": source.conversation.key, "goal": "生成 reports/报告.pdf 文件"}
     with TestClient(app) as client:
@@ -493,11 +485,11 @@ def test_admin_create_task_uses_planner_context_and_idempotent_source(
         assert core.validate_context(core.tasks._access_for(task), context)
 
 
-async def test_memory_source_permission_invalidates_old_seed(tmp_path, nap_config, nap_event, clock):
-    core = core_for(tmp_path, nap_config, clock)
-    remember = event(core, nap_event, 861, "/记住 小陈")
+async def test_memory_source_permission_invalidates_old_seed(tmp_path, official_config, official_event, clock):
+    core = core_for(tmp_path, official_config, clock)
+    remember = event(core, official_event, 861, "/记住 小陈")
     await core.process(remember)
-    request = event(core, nap_event, 862, "小陈")
+    request = event(core, official_event, 862, "小陈")
     access = core.access(request)
     context = core.contexts.build(access, core.contexts.turn(request))
     assert context["seed"]["memories"]
@@ -522,18 +514,18 @@ async def test_memory_source_permission_invalidates_old_seed(tmp_path, nap_confi
 
 
 def test_admin_retry_preserves_goal_contract_with_fresh_context(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(
-        Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,), tasks_enabled=True),
+        Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), tasks_enabled=True),
         clock=clock,
         run_background=False,
     )
     core = app.state.core
-    source = event(core, nap_event, 863, "建立会话")
+    source = event(core, official_event, 863, "建立会话")
     auth = {"Authorization": "Bearer admin-test-token", "Idempotency-Key": "first-file-goal"}
     body = {"conversation_id": source.conversation.key, "goal": "生成 reports/报告.pdf 文件"}
     with TestClient(app) as client:
@@ -568,13 +560,13 @@ def test_admin_retry_preserves_goal_contract_with_fresh_context(
 
 @pytest.mark.parametrize("characters", [9000, 65000])
 async def test_oversized_input_queues_bounded_pi_explanation_and_delivers(
-    tmp_path, nap_config, nap_event, clock, characters
+    tmp_path, official_config, official_event, clock, characters
 ):
     from qqbot.domain import InboundEvent, SendReceipt
 
-    core = core_for(tmp_path, nap_config, clock, context={"max_request_bytes": 8192})
+    core = core_for(tmp_path, official_config, clock, context={"max_request_bytes": 8192})
     marker = "ORIGINAL_OVERSIZED_INPUT_"
-    request = event(core, nap_event, 870, marker + "x" * characters)
+    request = event(core, official_event, 870, marker + "x" * characters)
     await core.process(request)
     with core.db.engine.connect() as conn:
         task = dict(conn.execute(select(tasks)).mappings().one())
@@ -620,8 +612,7 @@ async def test_oversized_input_queues_bounded_pi_explanation_and_delivers(
         sent.append(envelope.text)
         return SendReceipt(state="SENT", platform_message_id="notice-message")
 
-    core.adapters["nap"].websocket = object()
-    core.adapters["nap"].send = send
+    core.adapters["qq"].send = send
     await core.outbox.dispatch_once(core.adapters, pre_send=core.pre_send)
     assert sent == [narrative]
     await core.stop()
@@ -629,13 +620,13 @@ async def test_oversized_input_queues_bounded_pi_explanation_and_delivers(
 
 
 async def test_oversized_merged_turn_is_one_notice_and_keeps_both_sources(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock, context={"max_request_bytes": 8192})
-    first = event(core, nap_event, 871, "first-private-part " + "a" * 4500)
+    core = core_for(tmp_path, official_config, clock, context={"max_request_bytes": 8192})
+    first = event(core, official_event, 871, "first-private-part " + "a" * 4500)
     processing = asyncio.create_task(core.process(first))
     await asyncio.sleep(0.02)
-    second = event(core, nap_event, 872, "second-private-part " + "b" * 4500)
+    second = event(core, official_event, 872, "second-private-part " + "b" * 4500)
     await processing
     with core.db.engine.connect() as conn:
         task = conn.execute(select(tasks)).mappings().one()
@@ -694,7 +685,7 @@ def test_config_allows_explicit_threshold_with_output_headroom():
 
 @pytest.mark.parametrize("interactive", [True, False])
 def test_status_identifies_worker_execution_without_claiming_core_key_proves_model(
-    tmp_path, nap_config, clock, monkeypatch, interactive
+    tmp_path, official_config, clock, monkeypatch, interactive
 ):
     from fastapi.testclient import TestClient
 
@@ -705,7 +696,7 @@ def test_status_identifies_worker_execution_without_claiming_core_key_proves_mod
     app = create_app(
         Settings(
             database=str(tmp_path / "core.db"),
-            adapters=(nap_config,),
+            adapters=(official_config,),
             interactive_execution_enabled=interactive,
             model=ModelConfig(
                 model="core-metadata",
@@ -763,16 +754,16 @@ def test_ambiguous_displayed_ordinal_does_not_choose_an_invented_target(clock):
     ],
 )
 async def test_natural_background_uses_background_switch_independently(
-    tmp_path, nap_config, nap_event, clock, interactive, background_enabled, accepted
+    tmp_path, official_config, official_event, clock, interactive, background_enabled, accepted
 ):
     core = core_for(
         tmp_path,
-        nap_config,
+        official_config,
         clock,
         interactive_execution_enabled=interactive,
         tasks_enabled=background_enabled,
     )
-    request = event(core, nap_event, 873, "这件事后台慢慢做，帮我整理资料")
+    request = event(core, official_event, 873, "这件事后台慢慢做，帮我整理资料")
     await core.process(request)
     with core.db.engine.connect() as conn:
         rows = conn.execute(select(tasks)).mappings().all()
@@ -790,14 +781,14 @@ async def test_natural_background_uses_background_switch_independently(
 
 
 async def test_background_only_still_cancels_immediately_and_queues_control_explanation(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
-    core = core_for(tmp_path, nap_config, clock, interactive_execution_enabled=False, tasks_enabled=True)
-    request = event(core, nap_event, 874, "后台慢慢做")
+    core = core_for(tmp_path, official_config, clock, interactive_execution_enabled=False, tasks_enabled=True)
+    request = event(core, official_event, 874, "后台慢慢做")
     await core.process(request)
     with core.db.engine.connect() as conn:
         original = conn.execute(select(tasks)).mappings().one()
-    cancel = event(core, nap_event, 875, "/取消 " + original["public_id"])
+    cancel = event(core, official_event, 875, "/取消 " + original["public_id"])
     await core.process(cancel)
     with core.db.engine.connect() as conn:
         assert (
@@ -807,7 +798,7 @@ async def test_background_only_still_cancels_immediately_and_queues_control_expl
         notice = conn.execute(select(tasks).where(tasks.c.source == cancel.event_id)).mappings().one()
     assert notice["delivery"] == "ATTACHED"
     assert json.loads(notice["context_json"])["control_response"] is True
-    ordinary = event(core, nap_event, 876, "你好")
+    ordinary = event(core, official_event, 876, "你好")
     with pytest.raises(ValueError, match="交互执行未启用"):
         core.submit_turn(ordinary)
     await core.stop()
@@ -829,12 +820,12 @@ async def test_background_only_still_cancels_immediately_and_queues_control_expl
     ],
 )
 async def test_resolved_pool_limits_reach_context_and_core_resident_gate(
-    tmp_path, nap_config, nap_event, clock, execution, expected
+    tmp_path, official_config, official_event, clock, execution, expected
 ):
     from qqbot.config import ExecutionConfig
 
-    core = core_for(tmp_path, nap_config, clock, execution=ExecutionConfig(**execution))
-    request = event(core, nap_event, 877, "你好")
+    core = core_for(tmp_path, official_config, clock, execution=ExecutionConfig(**execution))
+    request = event(core, official_event, 877, "你好")
     context = core.context_for(request)
     assert context["pool"] == expected
     assert core.tasks.max_resident == expected["max_resident"]
@@ -870,13 +861,13 @@ def test_rain_followup_does_not_create_a_fictional_location(clock):
     assert reference is None and reason == "matching_subject"
 
 
-async def test_python_documentation_history_does_not_enter_github_topic(tmp_path, nap_config, nap_event, clock):
+async def test_python_documentation_history_does_not_enter_github_topic(tmp_path, official_config, official_event, clock):
     from qqbot.context.topics import entities
 
-    core = core_for(tmp_path, nap_config, clock)
-    research = event(core, nap_event, 1800, "请阅读 https://docs.python.org/3/library/asyncio-task.html 并整理文档")
+    core = core_for(tmp_path, official_config, clock)
+    research = event(core, official_event, 1800, "请阅读 https://docs.python.org/3/library/asyncio-task.html 并整理文档")
     assert entities(research.text) == ("general", [])
-    question = event(core, nap_event, 1801, "看下 yourtj hub 有哪些 PR")
+    question = event(core, official_event, 1801, "看下 yourtj hub 有哪些 PR")
     context = core.contexts.build(core.access(question), core.contexts.turn(question))
     assert not any("docs.python.org" in item["text"] for item in context["seed"]["history"])
     assert entities("查看 https://github.com/org/repo 的 PR")[1] == ["repo:github.com/org/repo"]
@@ -885,12 +876,12 @@ async def test_python_documentation_history_does_not_enter_github_topic(tmp_path
     core.db.close()
 
 
-async def test_one_million_window_keeps_relevant_large_history(tmp_path, nap_config, nap_event, clock):
+async def test_one_million_window_keeps_relevant_large_history(tmp_path, official_config, official_event, clock):
     from qqbot.config import ModelConfig
 
-    core = core_for(tmp_path, nap_config, clock, model=ModelConfig(context_window=1000000))
-    earlier = event(core, nap_event, 1802, "https://github.com/org/repo 的 PR 背景：" + "相关细节。" * 5000)
-    current = event(core, nap_event, 1803, "继续查看 https://github.com/org/repo 的 PR")
+    core = core_for(tmp_path, official_config, clock, model=ModelConfig(context_window=1000000))
+    earlier = event(core, official_event, 1802, "https://github.com/org/repo 的 PR 背景：" + "相关细节。" * 5000)
+    current = event(core, official_event, 1803, "继续查看 https://github.com/org/repo 的 PR")
     context = core.contexts.build(core.access(current), core.contexts.turn(current))
     assert any(item["text"] == earlier.text for item in context["seed"]["history"])
     assert context["limits"]["soft_compaction_input_tokens"] == 900000
@@ -901,15 +892,15 @@ async def test_one_million_window_keeps_relevant_large_history(tmp_path, nap_con
 
 
 async def test_expired_failure_notice_delivers_but_original_and_cancelled_results_do_not(
-    tmp_path, nap_config, nap_event, clock
+    tmp_path, official_config, official_event, clock
 ):
     from datetime import timedelta
 
     from qqbot.domain import OutboundEnvelope, SendReceipt
     from qqbot.storage.task_schema import notifications
 
-    core = core_for(tmp_path, nap_config, clock)
-    request = event(core, nap_event, 1900, "查看 PR")
+    core = core_for(tmp_path, official_config, clock)
+    request = event(core, official_event, 1900, "查看 PR")
     task = core.submit_turn(request)
     original = core.tasks.claim("worker")
     with core.db.transaction() as conn:
@@ -940,8 +931,7 @@ async def test_expired_failure_notice_delivers_but_original_and_cancelled_result
         sent.append(envelope.text)
         return SendReceipt(state="SENT", platform_message_id="expired-failure-notice")
 
-    core.adapters["nap"].websocket = object()
-    core.adapters["nap"].send = send
+    core.adapters["qq"].send = send
     await core.outbox.dispatch_once(core.adapters, pre_send=core.pre_send)
     assert sent == [summary]
     await core.stop()

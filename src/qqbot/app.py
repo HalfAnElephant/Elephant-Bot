@@ -1,16 +1,15 @@
 import asyncio
+import logging
 import os
 import secrets
-import socket
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
-from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
 from qqbot.adapters.qq_official.interaction_delivery import handle_callback
 from qqbot.adapters.qq_official.interactions import InteractionStore
@@ -25,18 +24,11 @@ from qqbot.clock import Clock
 from qqbot.configuration import ConfigurationStore
 from qqbot.domain import ConversationRef
 from qqbot.ingress.service import Inbox
-from qqbot.jobs.api import internal_router
 from qqbot.observability import configure_logging
 from qqbot.permissions import PermissionSubject
 from qqbot.runtime import Core
 from qqbot.storage.db import Database
 from qqbot.storage.schema import conversations, inbox, outbox
-
-
-class InternalServer(uvicorn.Server):
-    @contextmanager
-    def capture_signals(self):
-        yield
 
 
 def create_app(settings, *, clock=None, run_background=True, official_client=None, model_client=None):
@@ -48,11 +40,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     db = Database(settings.database)
     incoming = Inbox(db)
     adapters = {
-        cfg.instance_id: (
-            OneBotAdapter(cfg, settings.deployment_id, incoming, clock)
-            if cfg.kind == "onebot"
-            else OfficialAdapter(cfg, settings.deployment_id, incoming, clock, official_client)
-        )
+        cfg.instance_id: OfficialAdapter(cfg, settings.deployment_id, incoming, clock, official_client)
         for cfg in settings.adapters if cfg.enabled
     }
     core = Core(settings, db, clock, adapters, model_client)
@@ -60,36 +48,22 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
 
     @asynccontextmanager
     async def lifespan(app):
-        loop = server_task = server = listener = None
-        socket_path = None
+        loop = None
         try:
             for adapter in adapters.values():
                 await adapter.start()
-            if (settings.tasks_enabled or settings.interactive_execution_enabled) and run_background:
-                token = os.environ.get(settings.internal_token_env, "")
-                internal = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-                internal.include_router(internal_router(core.tasks, token))
-                socket_path = Path(settings.internal_socket).resolve()
-                socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                if socket_path.exists():
-                    raise RuntimeError(
-                        "internal socket already exists; reconcile the old Core before removing it"
-                    )
-                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                listener.bind(str(socket_path))
-                os.chmod(socket_path, 0o660)
-                listener.listen(16)
-                server = InternalServer(uvicorn.Config(internal, log_level="warning", access_log=False))
-                server_task = asyncio.create_task(server.serve(sockets=[listener]))
-                for _ in range(100):
-                    if server.started:
-                        break
-                    if server_task.done():
-                        await server_task
-                    await asyncio.sleep(0.01)
-                if not server.started:
-                    raise RuntimeError("internal listener failed to start")
             loop = asyncio.create_task(core.run()) if run_background else None
+            app.state.core_task = loop
+            if loop:
+                def core_finished(task):
+                    if task.cancelled() or core.stopping:
+                        return
+                    error = task.exception()
+                    app.state.core_error = type(error).__name__ if error else "UnexpectedExit"
+                    logging.getLogger(__name__).error(
+                        "Core background task exited", extra={"data": {"error_type": app.state.core_error}},
+                    )
+                loop.add_done_callback(core_finished)
             app.state.ready = True
             yield
         finally:
@@ -99,17 +73,6 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             if loop:
                 loop.cancel()
                 await asyncio.gather(loop, return_exceptions=True)
-            if server:
-                server.should_exit = True
-            if server_task:
-                try:
-                    await asyncio.wait_for(asyncio.shield(server_task), timeout=3)
-                except TimeoutError:
-                    server_task.cancel()
-                    await asyncio.gather(server_task, return_exceptions=True)
-            if listener:
-                listener.close()
-                socket_path.unlink(missing_ok=True)
             for adapter in adapters.values():
                 await adapter.stop()
             db.close()
@@ -138,6 +101,17 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
     async def unavailable(request, exc):
         return JSONResponse({"detail": "object unavailable"}, status_code=404)
 
+    def background_health():
+        loops = core.supervisor.snapshot()
+        task = getattr(app.state, "core_task", None)
+        running = not run_background or (task is not None and not task.done())
+        healthy = running and all(state["healthy"] for state in loops.values() if state["critical"])
+        return {
+            "enabled": run_background, "running": running, "healthy": healthy,
+            "error_type": getattr(app.state, "core_error", None), "loops": loops,
+            "degraded": [name for name, state in loops.items() if not state["healthy"] or state["failures"]],
+        }
+
     @app.get("/healthz")
     @app.get("/health/live")
     def health():
@@ -145,20 +119,22 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
 
     @app.get("/health/ready")
     def ready():
-        with db.engine.connect() as c:
-            c.exec_driver_sql("SELECT 1")
-        disconnected = [
-            a.config.instance_id
-            for a in adapters.values()
-            if isinstance(a, OneBotAdapter) and not a.account_online
-        ]
+        database_ready = True
+        try:
+            with db.engine.connect() as c:
+                c.exec_driver_sql("SELECT 1")
+        except SQLAlchemyError:
+            database_ready = False
+        background = background_health()
+        is_ready = app.state.ready and database_ready and background["healthy"]
         return JSONResponse(
             {
-                "ready": app.state.ready and not disconnected,
-                "disconnected": disconnected,
+                "ready": is_ready,
+                "database": "ok" if database_ready else "unavailable",
+                "background": background,
                 "external_acceptance": "not_implied_by_readiness",
             },
-            status_code=503 if disconnected or not app.state.ready else 200,
+            status_code=200 if is_ready else 503,
         )
 
     def admin(request: Request):
@@ -211,6 +187,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             delivery_states = c.execute(select(outbox.c.state, func.count()).group_by(outbox.c.state)).all()
         return {
             "inbox_pending": pending,
+            "background": background_health(),
             "deliveries": dict(delivery_states),
             "model_configured": None,
             "model_execution": "worker_pi"
@@ -222,8 +199,6 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
                 {
                     "id": key,
                     "kind": a.config.kind,
-                    "connected": bool(getattr(a, "websocket", None)),
-                    "context_gap": getattr(a, "context_gap", None),
                     "full_event_observed": getattr(a, "full_event_observed", None),
                 }
                 for key, a in adapters.items()
@@ -243,34 +218,14 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         with db.engine.connect() as c:
             rows = [dict(r._mapping) for r in c.execute(select(conversations).limit(200))]
         refs = {row["id"]: ConversationRef.model_validate_json(row["ref_json"]) for row in rows}
-        names = {}
-
-        async def resolve_names(instance_id, adapter):
-            selected = [ref for ref in refs.values() if ref.adapter_instance_id == instance_id]
-            if selected and isinstance(adapter, OneBotAdapter):
-                names[instance_id] = await adapter.resolve_conversation_names(selected)
-
-        await asyncio.gather(*(resolve_names(key, adapter) for key, adapter in adapters.items()))
         result = []
         for row in rows:
             ref = refs[row["id"]]
-            name = names.get(ref.adapter_instance_id, {}).get((ref.surface, ref.remote_conversation_id))
-            name = name or ("群聊" if ref.surface == "group" else "私聊")
+            name = "群聊" if ref.surface == "group" else "私聊"
             result.append({**row, "policy": core.policy_view(row["id"]), "display_name": name,
                            "remote_id": ref.remote_conversation_id,
                            "display_label": f"{name}（{ref.remote_conversation_id}）"})
         return result
-
-    @app.websocket("/onebot/{instance_id}")
-    async def onebot(websocket: WebSocket, instance_id: str):
-        adapter = adapters.get(instance_id)
-        if not isinstance(adapter, OneBotAdapter):
-            await websocket.close(code=1008)
-            return
-        try:
-            await adapter.handle_socket(websocket)
-        except (WebSocketDisconnect, TimeoutError, ValueError, KeyError):
-            return
 
     @app.post("/webhooks/qq/{instance_id}")
     async def official(request: Request, instance_id: str):

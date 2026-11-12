@@ -39,11 +39,10 @@ class TaskService:
         if access.principal != event.principal or access.conversation != event.conversation:
             raise PermissionError("identity mismatch")
         self.permissions.require(access, "task.create", "conversation:" + access.conversation.key)
-        if profile not in {"pi", "pi_research"}:
+        if profile != "pi":
             raise ValueError("unsupported runner")
         goal = goal if isinstance(goal, TaskGoal) else TaskGoal(text=goal)
         plan = plan or ExecutionPlan()
-        now = self.clock.now()
         with self.db.transaction() as c:
             old = c.execute(select(tasks).where(tasks.c.source == event.event_id)).mappings().first()
             if old:
@@ -57,8 +56,16 @@ class TaskService:
                 if count >= limit:
                     raise ValueError("task queue full")
             task_id = str(uuid4())
-            deadline = (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat()
-            row = {"id": task_id, "public_id": "T-" + task_id[:12], "source": event.event_id,
+            row = self.new_task(task_id, event, access, goal, plan, context=context,
+                                retry_of_task_id=retry_of_task_id)
+            c.execute(insert(tasks).values(**row))
+            self.wakeup.set()
+            return row
+
+    def new_task(self, task_id, event, access, goal, plan, *, context=None, retry_of_task_id=None):
+        now = self.clock.now()
+        deadline = (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat()
+        return {"id": task_id, "public_id": "T-" + task_id[:12], "source": event.event_id,
                        "conversation": event.conversation.key, "requester": event.principal.key,
                        "event_json": event.model_dump_json(), "goal": goal.text, "profile": "pi", "state": "QUEUED",
                        "created_at": now.isoformat(), "deadline": deadline, "fencing": 0,
@@ -73,9 +80,6 @@ class TaskService:
                            "scope": access.conversation.key, "budget": plan.budget.model_dump(),
                            "policy_version": self.permissions.check(access, "task.create", "conversation:" + access.conversation.key).policy_version,
                            "expires_at": deadline})}
-            c.execute(insert(tasks).values(**row))
-            self.wakeup.set()
-            return row
 
     def detach_due(self):
         with self.db.transaction() as c:
@@ -100,6 +104,8 @@ class TaskService:
         )
         if not row:
             raise KeyError(public_id)
+        if row["owner_id"] and row["requester"] != access.principal.key:
+            raise PermissionError("task belongs to another subject")
         self.permissions.require(access, "task.read", "task:" + row["id"])
         return row
 
@@ -126,6 +132,10 @@ class TaskService:
         with self.db.transaction() as c:
             row = self._visible(c, public_id, access)
             self.permissions.require(access, "task.cancel", "task:" + row["id"])
+            if row["root_task_id"] and hasattr(self, "graph"):
+                self.graph.cancel_tree(c, row)
+                state = c.execute(select(tasks.c.state).where(tasks.c.id == row["id"])).scalar_one()
+                return {"public_id": public_id, "state": state}
             state = row["state"]
             if state not in TERMINAL:
                 state = "CANCELLED" if state in {"QUEUED", "WAITING_INPUT", "WAITING_EXTERNAL"} else "CANCEL_REQUESTED"
@@ -160,6 +170,8 @@ class TaskService:
         return ExecutionPlan.model_validate_json(task["plan_json"]).budget, task["deadline"]
 
     def _queue_failure_notice(self, conn, task, result, state):
+        if task["root_task_id"]:
+            return state
         if task["failure_notice_json"] or state == "CANCELLED":
             return state
         context = json.loads(task["context_json"])
@@ -218,8 +230,6 @@ class TaskService:
                 select(func.count()).select_from(runs).where(runs.c.slot_reserved == 1)
             ).scalar_one() >= self.max_active:
                 return None
-            sustained = c.execute(select(func.count()).select_from(runs.join(tasks, runs.c.task_id == tasks.c.id))
-                .where(runs.c.slot_reserved == 1, tasks.c.delivery == "DETACHED")).scalar_one()
             history = tasks.alias("history")
             last_run = (
                 select(func.max(runs.c.lease))
@@ -233,9 +243,8 @@ class TaskService:
             candidates = (
                 c.execute(
                     select(tasks)
-                    .where(tasks.c.state == "QUEUED", tasks.c.protocol_version <= protocol_version,
-                           tasks.c.delivery == "ATTACHED" if sustained >= self.sustained_limit else True)
-                    .order_by(tasks.c.delivery.asc(), last_run.asc().nulls_first(), tasks.c.created_at, tasks.c.id)
+                    .where(tasks.c.state == "QUEUED", tasks.c.kind != "goal", tasks.c.protocol_version <= protocol_version)
+                    .order_by(last_run.asc().nulls_first(), tasks.c.created_at, tasks.c.id)
                 )
                 .mappings()
                 .all()
@@ -243,8 +252,24 @@ class TaskService:
             occupied = {json.loads(value).get("workspace_ref") for value in c.execute(
                 select(tasks.c.plan_json).join(runs, runs.c.task_id == tasks.c.id).where(runs.c.slot_reserved == 1)
             ).scalars()}
-            row = next((item for item in candidates if not json.loads(item["plan_json"]).get("workspace_ref")
-                        or json.loads(item["plan_json"])["workspace_ref"] not in occupied), None)
+            busy_sessions = set(c.execute(select(runs.c.session_id).where(runs.c.slot_reserved == 1)).scalars())
+            row = None
+            for item in candidates:
+                if getattr(self, "job_workspace_available", None) and not self.job_workspace_available(item):
+                    continue
+                workspace = json.loads(item["plan_json"]).get("workspace_ref")
+                if workspace and workspace in occupied or item["session_id"] and item["session_id"] in busy_sessions:
+                    continue
+                if item["root_task_id"] and hasattr(self, "graph"):
+                    root = self.graph.root(c, item)
+                    if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
+                        continue
+                    count = c.execute(select(func.count()).select_from(runs.join(tasks, runs.c.task_id == tasks.c.id))
+                        .where(runs.c.slot_reserved == 1, runs.c.role == "worker", tasks.c.root_task_id == root["id"])).scalar_one()
+                    if count >= self.graph.settings.orchestration.child_parallelism:
+                        continue
+                row = item
+                break
             if not row:
                 return None
             self.permissions.require(self._access_for(row), "task.execute", "task:" + row["id"])
@@ -255,6 +280,7 @@ class TaskService:
             started = self.clock.now()
             lease = (started + timedelta(seconds=30)).isoformat()
             plan = ExecutionPlan.model_validate_json(row["plan_json"])
+            session_id = row["session_id"] or str(uuid4())
             budget = self._notification_budget(row) if row["failure_notice_json"] else plan.budget
             if row["failure_notice_json"]:
                 plan = plan.model_copy(update={"budget": budget, "capability_hints": ()})
@@ -262,7 +288,7 @@ class TaskService:
             c.execute(
                 update(tasks)
                 .where(tasks.c.id == row["id"], tasks.c.state == "QUEUED")
-                .values(state="RUNNING", fencing=fencing)
+                .values(state="RUNNING", fencing=fencing, session_id=session_id)
             )
             c.execute(
                 insert(runs).values(
@@ -272,7 +298,9 @@ class TaskService:
                     fencing=fencing,
                     lease=lease,
                     slot_reserved=1,
-                    session=f"{run_id}/sessions/{run_id}.jsonl",
+                    session=f"{session_id}/sessions/{session_id}.jsonl",
+                    session_id=session_id, role="worker", purpose="work",
+                    basis_goal_revision=row["goal_revision"],
                     last_seq=0,
                     parent_run_id=parent,
                     run_reason="notification" if row["failure_notice_json"] else "continuation" if parent else "initial",
@@ -283,7 +311,6 @@ class TaskService:
                 inputs.c.task_id == row["id"], inputs.c.state == "READY")).mappings().all()
             checkpoint = c.execute(select(waits.c.checkpoint).where(waits.c.task_id == row["id"],
                 waits.c.state == "CONSUMED").order_by(waits.c.revision.desc()).limit(1)).scalar_one_or_none()
-            c.execute(update(inputs).where(inputs.c.id.in_([r["id"] for r in continuation])).values(state="CONSUMED"))
             references = json.loads(row["goal_json"]).get("target_refs", [])
             repository = host = None
             for reference in references:
@@ -292,7 +319,7 @@ class TaskService:
                     if len(parts) == 3:
                         host, repository = parts[0], "/".join(parts[1:])
                         break
-            public_answer_events = bool(self.stream_eligibility and self.stream_eligibility(
+            public_answer_events = bool(not row["root_task_id"] and self.stream_eligibility and self.stream_eligibility(
                 InboundEvent.model_validate_json(row["event_json"])))
             if public_answer_events:
                 c.execute(insert(stream_runs).values(run_id=run_id, task_id=row["id"], state="ACTIVE", cursor_seq=0))
@@ -312,7 +339,11 @@ class TaskService:
                 "plan": plan.model_dump(mode="json"),
                 "active_seconds_remaining": 30 if row["failure_notice_json"] else max(0, budget.active_seconds
                     - json.loads(row["budget_json"]).get("active_seconds", 0)),
-                "context": json.loads(row["context_json"]),
+                "context": {**json.loads(row["context_json"]), "key": session_id, "session_id": session_id,
+                    "role": "worker", "purpose": "work", "source_input_ids": ["task:" + row["id"], *[r["id"] for r in continuation]]},
+                "binding": json.loads(row["binding_json"]), "role": "worker", "purpose": "work",
+                "root_task_id": row["root_task_id"], "parent_task_id": row["parent_task_id"],
+                "basis_goal_revision": row["goal_revision"],
                 "delivery": row["delivery"],
                 "continuation": {"checkpoint": checkpoint, "inputs": [dict(r) for r in continuation]},
                 "protocol_version": row["protocol_version"],
@@ -320,8 +351,8 @@ class TaskService:
                 "lease_expires_at": lease,
                 "deadline": deadline,
                 "permission_snapshot": json.loads(row["permission_json"]),
-                "session_id": run_id,
-                "session_relative_path": f"{run_id}/sessions/{run_id}.jsonl",
+                "session_id": session_id,
+                "session_relative_path": f"{session_id}/sessions/{session_id}.jsonl",
             }
 
     def _lease(self, c, run_id, fencing_token, worker_id):
@@ -360,7 +391,7 @@ class TaskService:
             c.execute(update(runs).where(runs.c.id == run["id"]).values(lease=lease))
             return {"state": state, "lease_expires_at": lease, "delivery": task["delivery"]}
 
-    def submit(self, run_id, fencing_token, worker_id, result, stopped=True, quiescent=False, process=None):
+    def submit(self, run_id, fencing_token, worker_id, result, stopped=True, quiescent=False, process=None, receipt=None):
         result = TaskResult.model_validate_json(json.dumps(result))
         if not stopped and not quiescent:
             raise ValueError("runner must be stopped or proven quiescent")
@@ -375,6 +406,18 @@ class TaskService:
                     return {"state": task["state"]}
                 raise PermissionError("result conflicts with committed run")
             run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if task["root_task_id"] and result.agent_authored:
+                proof = json.loads(run["receipt_json"]) if run["receipt_json"] else receipt
+                if not proof or proof.get("kind") not in {"turn_finished", "run_yielded"}:
+                    raise PermissionError("task needs a durable Harness boundary receipt")
+                self._session_receipt(c, run, task, proof)
+                root = self.graph.root(c, task)
+                current_run = c.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
+                revision_pending = current_run["basis_goal_revision"] != root["goal_revision"] or bool(c.execute(
+                    select(inputs.c.id).where(inputs.c.task_id == task["id"], inputs.c.kind != "notify",
+                        inputs.c.consumed_at.is_(None))).first())
+            else:
+                revision_pending = False
             notification_run = run["run_reason"] == "notification"
             _budget, deadline = self._run_limits(run, task)
             failure_after_stop = result.status == "failed" and stopped and task["state"] in {"RUNNING", "CANCEL_REQUESTED"}
@@ -402,27 +445,33 @@ class TaskService:
                     raise ValueError("requested outputs missing: " + ", ".join(sorted(missing)))
                 self._verify_checks(c, goal.success_checks, result, task["id"])
             wait = c.execute(select(waits).where(waits.c.run_id == run_id, waits.c.state == "INTENT")).mappings().first()
-            if result.status.startswith("waiting_") and not wait:
+            child_wait = bool(task["wait_json"] and json.loads(task["wait_json"]).get("attempt_id") == run_id)
+            if result.status.startswith("waiting_") and not wait and not child_wait:
                 raise ValueError("waiting result requires a durable wait intent")
             if not stopped and (not process or process.get("id") != run["process_id"] or process.get("epoch") != run["process_epoch"] or process.get("generation") != run["binding_generation"]):
                 raise PermissionError("quiescence proof does not match the active process binding")
             if task["protocol_version"] == 1 and result.status == "completed" and (not result.artifacts or not result.evidence):
                 raise ValueError("legacy research completion requires exported artifacts and evidence")
-            state = ("WAITING_INPUT" if wait["kind"] == "input" else "WAITING_EXTERNAL") if wait else {
+            state = "WAITING_CHILDREN" if child_wait else ("WAITING_INPUT" if wait["kind"] == "input" else "WAITING_EXTERNAL") if wait else {
                 "completed": "SUCCEEDED", "partial": "PARTIAL", "blocked": "BLOCKED", "failed": "FAILED"
             }[result.status]
             if task["stop_reason"] in {"user_cancel", "revoked"}:
-                state = "CANCELLED"
+                state = ("CANCELLED" if not getattr(self, "job_tree_quiescent", None)
+                         or self.job_tree_quiescent(task) else "CANCEL_REQUESTED")
             elif notification_run:
                 state = json.loads(task["context_json"]).get("failure_state", "FAILED")
             elif task["stop_reason"] == "deadline" or task["deadline"] <= now:
                 state = "EXPIRED"
+            if revision_pending and state not in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED"}:
+                state = "QUEUED"
+                c.execute(update(inputs).where(inputs.c.task_id == task["id"], inputs.c.consumed_at.is_(None)).values(state="READY"))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, result_json=result.model_dump_json()))
             values = {"slot_reserved": 0, "quiescent_at": now, "result_json": result.model_dump_json()}
             if stopped:
                 values["runner_stopped_at"] = now
             if process:
                 values.update(process_id=process["id"], process_epoch=process["epoch"], binding_generation=process["generation"])
+            values["state"] = "YIELDED" if wait or child_wait else "FINISHED"
             c.execute(update(runs).where(runs.c.id == run_id).values(**values))
             if run["process_id"]:
                 from qqbot.storage.task_schema import processes, sessions
@@ -434,10 +483,18 @@ class TaskService:
                     identity = json.loads(c.execute(select(processes.c.identity_json).where(processes.c.id == run["process_id"])).scalar_one())
                     identity.update(actual_session_id=process["actual_session_id"], actual_session_file=process.get("actual_session_file"))
                     c.execute(update(processes).where(processes.c.id == run["process_id"]).values(identity_json=json.dumps(identity)))
-            if wait:
+            if child_wait:
+                condition = json.loads(task["wait_json"])
+                condition["yielded"] = True
+                c.execute(update(tasks).where(tasks.c.id == task["id"]).values(wait_json=json.dumps(condition)))
+                self.graph.wake_parent(c, {**dict(task), "state": "WAITING_CHILDREN", "wait_json": json.dumps(condition)})
+            elif wait:
                 c.execute(update(waits).where(waits.c.id == wait["id"]).values(state="WAITING"))
                 self._wake(c, task["id"], wait["id"])
                 state = c.execute(select(tasks.c.state).where(tasks.c.id == task["id"])).scalar_one()
+            elif task["root_task_id"] and state != "QUEUED":
+                settled_task = {**dict(task), "state": state}
+                self.graph.settled(c, settled_task, run_id, result.model_dump(mode="json"))
             elif not result.agent_authored:
                 state = self._queue_failure_notice(c, task, result, state)
             elif state == "CANCELLED":
@@ -607,6 +664,8 @@ class TaskService:
                 state = {"deadline": "EXPIRED", "user_cancel": "CANCELLED", "revoked": "CANCELLED"}.get(
                     task["stop_reason"], "FAILED"
                 )
+            if state == "CANCELLED" and getattr(self, "job_tree_quiescent", None) and not self.job_tree_quiescent(task):
+                state = "CANCEL_REQUESTED"
             c.execute(
                 update(tasks)
                 .where(tasks.c.id == task_id)
@@ -650,7 +709,9 @@ class TaskService:
             self._require_stopped_process(c, _run)
             reason = task["stop_reason"]
             state = "EXPIRED" if reason == "deadline" else "CANCELLED" if reason in {"user_cancel", "revoked"} else "FAILED"
-            if _run["run_reason"] == "notification" and state != "CANCELLED":
+            if state == "CANCELLED" and getattr(self, "job_tree_quiescent", None) and not self.job_tree_quiescent(task):
+                state = "CANCEL_REQUESTED"
+            if _run["run_reason"] == "notification" and state not in {"CANCELLED", "CANCEL_REQUESTED"}:
                 state = json.loads(task["context_json"]).get("failure_state", "FAILED")
             result = TaskResult(status="failed", agent_authored=False,
                                 summary="Execution was stopped after " + (reason or "run authority changed") + ".")
@@ -731,8 +792,12 @@ class TaskService:
             condition = payload.get("condition", {})
             if kind == "external":
                 condition = WaitCondition.model_validate_json(json.dumps(condition)).model_dump(mode="json")
-            self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
-                               "important", question_id)
+            if not task["root_task_id"]:
+                self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
+                                   "important", question_id)
+            elif kind == "input":
+                self.graph.event(c, task, "needs_input", {"question_id": question_id,
+                    "public_text": payload["text"]}, attempt_id=run_id, event_id="question:" + question_id, wake=True)
             now = self.clock.now()
             revision = task["continuation_revision"] + 1
             c.execute(insert(waits).values(id=question_id, task_id=task["id"], run_id=run_id,
@@ -753,6 +818,11 @@ class TaskService:
             raise PermissionError("input identity mismatch")
         with self.db.transaction() as c:
             task = self._visible(c, public_id, access)
+            if task["requester"] != event.principal.key:
+                raise PermissionError("task input requires the original authenticated subject")
+            if task["root_task_id"]:
+                return self.add_graph_input(c, task, event, access, text,
+                                            kind="answer" if question_id else "followup", question_id=question_id)
             self.permissions.require(access, "task.input", "task:" + task["id"])
             old = c.execute(select(inputs).where(inputs.c.source_id == event.event_id)).mappings().first()
             if old:
@@ -792,7 +862,8 @@ class TaskService:
     def question_for(self, event):
         with self.db.engine.connect() as c:
             query = select(waits.c.id, tasks.c.public_id).join(tasks, tasks.c.id == waits.c.task_id).where(
-                tasks.c.conversation == event.conversation.key, waits.c.kind == "input",
+                tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
+                waits.c.kind == "input",
                 waits.c.state.in_(["INTENT", "WAITING"]), tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]))
             if event.reply_to:
                 query = query.where(waits.c.notification_id.in_(select(outbox_table.c.origin_id).where(
@@ -827,6 +898,8 @@ class TaskService:
             resources = payload.get("resources") or [payload.get("resource", "task:" + task["id"])]
             context = json.loads(task["context_json"])
             access = self._access_for(task)
+            if hasattr(self, "graph"):
+                self.graph.check_authority(c, task, payload)
             if self.context_validator and context and not self.context_validator(access, context):
                 raise PermissionError("context sources or authorization changed")
             if context.get("control_response") and action not in {"model.request", "task.execute", "notification.send"}:
@@ -893,6 +966,14 @@ class TaskService:
                 if used.get(key, 0) >= limit:
                     raise ValueError("task " + key + " budget exhausted")
             used[key] = used.get(key, 0) + 1
+            if task["root_task_id"] and task["root_task_id"] != task["id"]:
+                root = self.graph.root(c, task)
+                root_used = json.loads(root["budget_json"])
+                root_limit = json.loads(root["plan_json"])["budget"][key]
+                if root_used.get(key, 0) >= root_limit:
+                    raise ValueError("root " + key + " budget exhausted")
+                root_used[key] = root_used.get(key, 0) + 1
+                c.execute(update(tasks).where(tasks.c.id == root["id"]).values(budget_json=json.dumps(root_used)))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(budget_json=json.dumps(used)))
             c.execute(insert(model_requests).values(id=request_id, task_id=task["id"], run_id=run_id,
                 kind=kind, state="RESERVED", created_at=self.clock.now().isoformat()))
@@ -937,8 +1018,14 @@ class TaskService:
                 c.execute(insert(processes).values(id=process_id, session_id=session_id, worker=worker_id,
                     epoch=payload["epoch"], generation=payload["generation"], state="BUSY",
                     identity_json=json.dumps(payload.get("identity", {})), last_used=self.clock.now().isoformat()))
-                c.execute(insert(sessions).values(id=session_id, scope_key=payload["scope_key"],
-                    session_file=payload["session_file"], manifest_json=task["context_json"], active_run_id=run_id, epoch=1))
+                previous_session = c.execute(select(sessions).where(sessions.c.id == session_id)).mappings().first()
+                if previous_session:
+                    if previous_session["active_run_id"] not in {None, run_id} or previous_session["session_file"] != payload["session_file"]:
+                        raise PermissionError("persisted session has another writer or file")
+                    c.execute(update(sessions).where(sessions.c.id == session_id).values(active_run_id=run_id))
+                else:
+                    c.execute(insert(sessions).values(id=session_id, scope_key=payload["scope_key"],
+                        session_file=payload["session_file"], manifest_json=task["context_json"], active_run_id=run_id, epoch=1))
             c.execute(update(runs).where(runs.c.id == run_id).values(process_id=process_id,
                 process_epoch=payload["epoch"], binding_generation=payload["generation"], session=payload["session_file"]))
             return {"bound": True}
@@ -1133,3 +1220,129 @@ class TaskService:
             changed = c.execute(update(inputs).where(inputs.c.id == payload["input_id"],
                 inputs.c.task_id == task["id"], inputs.c.question_id.is_(None), inputs.c.state == "PENDING").values(state="STEERED"))
             return {"accepted": bool(changed.rowcount)}
+
+    def add_graph_input(self, conn, task, event, access, text, *, kind="followup", question_id=None, source_id=None):
+        from qqbot.storage.agent_schema import leader_inbox
+        if kind not in {"followup", "answer", "notify"}:
+            raise ValueError("invalid task input kind")
+        if (task["requester"] != event.principal.key or access.principal != event.principal
+                or task["conversation"] != event.conversation.key or access.conversation != event.conversation):
+            raise PermissionError("task input requires its authenticated subject")
+        self.permissions.require(access, "task.input", "task:" + task["id"])
+        if task["state"] in TERMINAL | {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
+            raise PermissionError("task is closed")
+        source_id = source_id or event.event_id
+        old = conn.execute(select(inputs).where(inputs.c.source_id == source_id)).mappings().first()
+        if old:
+            if old["task_id"] != task["id"] or old["text"] != text or old["kind"] != kind:
+                raise ValueError("conflicting task input replay")
+            return {"accepted": True, "input_id": old["id"], "state": old["state"]}
+        wait = None
+        if kind == "answer":
+            if not question_id:
+                raise ValueError("answer requires an open question_id")
+            wait = conn.execute(select(waits).where(waits.c.id == question_id, waits.c.task_id == task["id"],
+                waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
+            if not wait:
+                raise PermissionError("question is no longer open for this task")
+        root = self.graph.root(conn, task)
+        revision = root["goal_revision"] + (kind != "notify")
+        now = self.clock.now().isoformat()
+        input_id = str(uuid4())
+        conn.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=question_id,
+            source_id=source_id, text=text, state="READY" if task["state"] == "QUEUED" else "PENDING", created_at=now,
+            kind=kind, actor=event.principal.key, goal_revision=revision))
+        if kind != "notify":
+            conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(goal_revision=revision))
+            children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
+                tasks.c.kind != "goal", tasks.c.id != task["id"], tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
+            for child in children:
+                conn.execute(insert(inputs).values(id=str(uuid4()), task_id=child["id"], question_id=None,
+                    source_id=source_id + ":" + child["id"], text=text, state="READY" if child["state"] == "QUEUED" else "PENDING",
+                    created_at=now, kind=kind, actor=event.principal.key, goal_revision=revision))
+            if not children:
+                event_id = self.graph.event(conn, root, "followup", {"input_id": input_id, "text": text})
+                conn.execute(insert(leader_inbox).values(id=str(uuid4()), target_session_id=root["coordinator_session_id"],
+                    root_task_id=root["id"], event_id=event_id, resume_reason="followup", source_revision=revision, created_at=now))
+        if wait:
+            self._wake(conn, task["id"], question_id)
+        self.wakeup.set()
+        return {"accepted": True, "input_id": input_id, "state": "PENDING", "goal_revision": revision}
+
+    def _session_receipt(self, conn, run, task, payload):
+        if (payload.get("session_id") != run["session_id"] or payload.get("run_id") != run["id"]
+                or not isinstance(payload.get("session_revision"), str)):
+            raise PermissionError("receipt does not match the worker session")
+        ids = payload.get("input_ids")
+        if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
+            raise ValueError("input receipt needs explicit IDs")
+        known = set(conn.execute(select(inputs.c.id).where(inputs.c.task_id == task["id"])).scalars())
+        if set(ids) - known - {"task:" + task["id"]}:
+            raise PermissionError("receipt names another task's input")
+        now = self.clock.now().isoformat()
+        kind = payload.get("kind")
+        if kind not in {"input_persisted", "input_consumed", "turn_finished", "run_yielded"}:
+            raise ValueError("invalid receipt kind")
+        values = {"persisted_at": now}
+        if kind in {"input_consumed", "turn_finished", "run_yielded"}:
+            values.update(consumed_at=now, state="CONSUMED")
+        conn.execute(update(inputs).where(inputs.c.id.in_(ids), inputs.c.task_id == task["id"]).values(**values))
+        if kind in {"turn_finished", "run_yielded"}:
+            if payload.get("inflight") != 0 or payload.get("tools_paired") is not True:
+                raise PermissionError("Harness still has activity")
+            conn.execute(update(runs).where(runs.c.id == run["id"]).values(receipt_json=json.dumps(payload)))
+        if task["root_task_id"] and kind != "input_persisted":
+            root = self.graph.root(conn, task)
+            unconsumed = conn.execute(select(inputs.c.id).where(inputs.c.task_id == task["id"],
+                inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))).first()
+            if not unconsumed:
+                conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(goal_revision=root["goal_revision"]))
+                conn.execute(update(runs).where(runs.c.id == run["id"]).values(basis_goal_revision=root["goal_revision"]))
+            remaining = conn.execute(select(inputs.c.id).where(inputs.c.task_id.in_(select(tasks.c.id).where(
+                tasks.c.root_task_id == root["id"], tasks.c.kind != "goal")), inputs.c.kind != "notify",
+                inputs.c.consumed_at.is_(None))).first()
+            if not remaining:
+                conn.execute(update(inputs).where(inputs.c.task_id == root["id"], inputs.c.kind != "notify").values(
+                    persisted_at=now, consumed_at=now, state="CONSUMED"))
+        return {"accepted": True}
+
+    def session_receipt(self, run_id, fencing_token, worker_id, payload):
+        with self.db.transaction() as conn:
+            run, task = self._lease(conn, run_id, fencing_token, worker_id)
+            return self._session_receipt(conn, run, task, payload)
+
+    def task_operation(self, run_id, fencing_token, worker_id, payload):
+        from qqbot.domain.agents import TaskInputSpec
+        with self.db.transaction() as conn:
+            _run, task = self._lease(conn, run_id, fencing_token, worker_id)
+            self.graph.check_authority(conn, task, {"action": "task.execute"})
+            access = self._access_for(task)
+            operation, arguments = payload["operation"], payload.get("arguments", {})
+            if operation == "tasks.submit":
+                raise PermissionError("Worker cannot create new root goals")
+            if operation == "tasks.spawn":
+                return self.graph.spawn(conn, task, arguments, access)
+            if operation == "tasks.wait":
+                return self.graph.wait(conn, task, arguments, run_id)
+            if operation == "tasks.report_progress":
+                return self.graph.progress(conn, task, run_id, arguments, payload["call_id"])
+            rows = conn.execute(select(tasks).where(tasks.c.root_task_id == task["root_task_id"])).mappings().all()
+            if operation == "tasks.list":
+                return [self.graph.status(conn, row) for row in rows]
+            ref = arguments.get("task_ref")
+            target = next((row for row in rows if ref in {row["id"], row["public_id"]}), None)
+            if not target:
+                raise PermissionError("task reference is outside this tree")
+            if operation == "tasks.status":
+                return self.graph.status(conn, target)
+            if operation == "tasks.send_input":
+                spec = TaskInputSpec.model_validate_json(json.dumps(arguments))
+                if spec.kind != "notify":
+                    raise PermissionError("Worker messages cannot impersonate user revisions or answers")
+                event = InboundEvent.model_validate_json(task["event_json"])
+                return self.add_graph_input(conn, target, event, access, spec.text, kind="notify",
+                    source_id="notify:" + payload["call_id"])
+            if operation == "tasks.cancel" and target["parent_task_id"] == task["id"]:
+                self.graph.cancel_tree(conn, target)
+                return {"accepted": True}
+            raise PermissionError("task operation is not allowed for this Worker")

@@ -5,17 +5,18 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from conftest import official_payload
 from qqbot.app import create_app
 from qqbot.config import ModelConfig, Settings
 from qqbot.storage.schema import inbox, outbox
 from qqbot.storage.task_schema import tasks
 
 
-def configured(tmp_path, nap_config, clock, monkeypatch):
+def configured(tmp_path, official_config, clock, monkeypatch):
     monkeypatch.setenv("MODEL_TEST_KEY", "fixture-only")
     settings = Settings(
         database=str(tmp_path / "core.db"),
-        adapters=(nap_config,),
+        adapters=(official_config,),
         model=ModelConfig(
             endpoint="https://model.fixture/chat", model="fixture", api_key_env="MODEL_TEST_KEY"
         ),
@@ -23,13 +24,9 @@ def configured(tmp_path, nap_config, clock, monkeypatch):
     return create_app(settings, clock=clock, run_background=False)
 
 
-def new_event(core, payload, message_id, text):
-    event = core.adapters["nap"].normalize(
-        {
-            **payload,
-            "message_id": message_id,
-            "message": [{"type": "at", "data": {"qq": "100"}}, {"type": "text", "data": {"text": text}}],
-        }
+def new_event(core, payload, message_id, text, *, user_id=None):
+    event = core.adapters["qq"].normalize(
+        official_payload(payload, message_id=message_id, text=text, user_id=user_id)
     )
     return core.inbox.accept(event)[0]
 
@@ -58,26 +55,15 @@ def notification(core, event, text):
 
 
 async def test_recall_after_pi_submission_invalidates_sources(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
-    value = new_event(core, nap_event, 500, "please answer")
+    value = new_event(core, official_event, 500, "please answer")
     await core.process(value)
     context = json.loads(accepted(core, value)["context_json"])
     assert core.validate_context(core.access(value), context)
-    recall = core.adapters["nap"].normalize(
-        {
-            "post_type": "notice",
-            "notice_type": "group_recall",
-            "self_id": 100,
-            "user_id": 300,
-            "group_id": 200,
-            "message_id": 500,
-            "time": int(clock.now().timestamp()),
-        }
-    )
+    recall = value.model_copy(update={"event_id": value.event_id + ":recall", "event_type": "message.recalled"})
     await core.process(core.inbox.accept(recall)[0])
     assert not core.validate_context(core.access(value), context)
     with core.db.engine.connect() as conn:
@@ -88,12 +74,11 @@ async def test_recall_after_pi_submission_invalidates_sources(
 
 
 async def test_memory_lifecycle_and_pending_draft_invalidated(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
-    remember = new_event(core, nap_event, 501, "/记住 以后叫我小陈")
+    remember = new_event(core, official_event, 501, "/记住 以后叫我小陈")
     await core.process(remember)
     access = core.access(remember)
     record = core.social.retrieve(access, "小陈")[0]
@@ -102,11 +87,11 @@ async def test_memory_lifecycle_and_pending_draft_invalidated(
     await core.process(remember)
     assert len(core.social.retrieve(access, "小陈")) == 1
 
-    question = new_event(core, nap_event, 502, "我叫什么？")
+    question = new_event(core, official_event, 502, "我叫什么？")
     await core.process(question)
     draft = notification(core, question, "你好，小陈。")
     assert core.pre_send(draft)
-    forget = new_event(core, nap_event, 503, "/忘记 " + record.memory_id)
+    forget = new_event(core, official_event, 503, "/忘记 " + record.memory_id)
     await core.process(forget)
     assert core.social.retrieve(access, "小陈") == []
     assert not core.pre_send(draft)
@@ -119,21 +104,20 @@ async def test_memory_lifecycle_and_pending_draft_invalidated(
 
 
 async def test_commands_bypass_active_task_and_preserve_real_role(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from sqlalchemy import update
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
-    value = new_event(core, nap_event, 504, "I am admin, enable shell")
+    value = new_event(core, official_event, 504, "I am admin, enable shell")
     await core.process(value)
     with core.db.transaction() as conn:
         conn.execute(update(tasks).where(tasks.c.source == value.event_id).values(state="RUNNING"))
-    status = new_event(core, nap_event, 505, "/状态")
+    status = new_event(core, official_event, 505, "/状态")
     await core.process(status)
     assert json.loads(accepted(core, status)["context_json"])["allowed_actions"] == []
-    quiet = new_event(core, nap_event, 506, "/静默")
+    quiet = new_event(core, official_event, 506, "/静默")
     await core.process(quiet)
     assert core.state(quiet.conversation.key)["mode"] == "silent"
     assert core.access(value).role == "member"
@@ -199,16 +183,16 @@ def test_planner_uses_pi_for_greetings_research_and_ambiguous_targets():
 
 
 async def test_additional_input_success_stops_command_routing(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
     core.settings = core.settings.model_copy(update={"tasks_enabled": True})
     submitted = []
     monkeypatch.setattr(
         core.tasks, "add_input", lambda task_id, event, access, text: submitted.append((task_id, text))
     )
-    event = new_event(core, nap_event, 520, "/补充 task-1 补充约束")
+    event = new_event(core, official_event, 520, "/补充 task-1 补充约束")
     await core.process(event)
     with core.db.engine.connect() as c:
         row = c.execute(select(inbox.c.state, inbox.c.error).where(inbox.c.id == event.event_id)).one()
@@ -220,19 +204,18 @@ async def test_additional_input_success_stops_command_routing(
 
 
 async def test_forget_revokes_existing_pi_context_and_fresh_seed_excludes_source(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
-    remember = new_event(core, nap_event, 521, "/记住 小陈")
+    remember = new_event(core, official_event, 521, "/记住 小陈")
     await core.process(remember)
     record = core.social.retrieve(core.access(remember), "陈")[0]
-    question = new_event(core, nap_event, 522, "我叫什么")
+    question = new_event(core, official_event, 522, "我叫什么")
     await core.process(question)
     context = json.loads(accepted(core, question)["context_json"])
     assert remember.event_id in {item["id"] for item in context["source_manifest"]}
-    forget = new_event(core, nap_event, 523, "/忘记 " + record.memory_id)
+    forget = new_event(core, official_event, 523, "/忘记 " + record.memory_id)
     await core.process(forget)
     assert not core.validate_context(core.access(question), context)
     fresh = core.contexts.build(core.access(question), core.contexts.turn(question))
@@ -245,10 +228,10 @@ async def test_forget_revokes_existing_pi_context_and_fresh_seed_excludes_source
 def social_event(core, payload, message_id, text):
     from qqbot.domain import ObservationMode
 
-    event = core.adapters["nap"].normalize(
-        {**payload, "message_id": message_id, "message": [{"type": "text", "data": {"text": text}}]}
-    )
-    return core.inbox.accept(event.model_copy(update={"observation_mode": ObservationMode.FULL}))[0]
+    event = core.adapters["qq"].normalize(official_payload(payload, message_id=message_id, text=text))
+    return core.inbox.accept(event.model_copy(update={
+        "mentions_bot": False, "observation_mode": ObservationMode.FULL,
+    }))[0]
 
 
 def enable_social(core, event):
@@ -261,20 +244,20 @@ def enable_social(core, event):
             can_reply=True, can_observe_unaddressed_messages=True, observation_mode=ObservationMode.FULL
         )
 
-    core.adapters["nap"].capabilities = capabilities
+    core.adapters["qq"].capabilities = capabilities
 
 
 async def test_wait_timer_is_bounded_and_new_episode_resets(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from qqbot.domain.social import JudgmentSignals
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
     for index in range(2):
-        seed = social_event(core, nap_event, 530 + index, "human context")
+        seed = social_event(core, official_event, 530 + index, "human context")
         core.inbox.finish(seed.event_id)
-    event = social_event(core, nap_event, 532, "maybe useful")
+    event = social_event(core, official_event, 532, "maybe useful")
     enable_social(core, event)
     calls = []
 
@@ -324,7 +307,7 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
     clock.advance(5)
     core.resume_waits()
     assert len(calls) == 3
-    next_event = social_event(core, nap_event, 533, "new independent chance")
+    next_event = social_event(core, official_event, 533, "new independent chance")
     await core.process(next_event)
     assert core.window(next_event).waiting is not None
     await core.stop()
@@ -332,18 +315,18 @@ async def test_wait_timer_is_bounded_and_new_episode_resets(
 
 
 async def test_decision_logs_distinguish_rule_abstention_and_participation_prefilter(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from qqbot.storage.schema import decision_logs
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    first = social_event(core, nap_event, 610, "first unaddressed message")
+    first = social_event(core, official_event, 610, "first unaddressed message")
     enable_social(core, first)
     await core.process(first)
-    second = social_event(core, nap_event, 611, "second unaddressed message")
+    second = social_event(core, official_event, 611, "second unaddressed message")
     core.inbox.finish(second.event_id)
-    third = social_event(core, nap_event, 612, "third unaddressed message")
+    third = social_event(core, official_event, 612, "third unaddressed message")
     await core.process(third)
     with core.db.engine.connect() as c:
         rows = c.execute(select(decision_logs).order_by(decision_logs.c.id)).mappings().all()
@@ -359,14 +342,13 @@ async def test_decision_logs_distinguish_rule_abstention_and_participation_prefi
 
 
 @pytest.mark.parametrize("budget", [0, 1])
-async def test_recent_sent_budget_blocks_only_when_enabled(tmp_path, nap_config, nap_event, clock, monkeypatch, budget):
+async def test_recent_sent_budget_blocks_only_when_enabled(tmp_path, official_config, official_event, clock, monkeypatch, budget):
     from sqlalchemy import update
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
     core.settings = core.settings.model_copy(update={"send_budget_per_minute": budget})
-    status = new_event(core, nap_event, 540, "/状态")
+    status = new_event(core, official_event, 540, "/状态")
     await core.process(status)
     sent_status = notification(core, status, "服务运行中。")
     with core.db.transaction() as c:
@@ -376,7 +358,7 @@ async def test_recent_sent_budget_blocks_only_when_enabled(tmp_path, nap_config,
             .values(state="SENT", sent_at=clock.now().isoformat())
         )
 
-    question = new_event(core, nap_event, 541, "hello")
+    question = new_event(core, official_event, 541, "hello")
     await core.process(question)
     with core.db.engine.connect() as c:
         assert (c.execute(select(tasks.c.id).where(tasks.c.source == question.event_id)).first() is None) == bool(budget)
@@ -385,19 +367,19 @@ async def test_recent_sent_budget_blocks_only_when_enabled(tmp_path, nap_config,
 
 
 async def test_social_receipts_hold_reservation_and_stop_unanswered_monologue(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from sqlalchemy import update
 
     from qqbot.domain.social import JudgmentSignals
 
     for receipt in ("SENT", "UNKNOWN"):
-        app = configured(tmp_path / receipt, nap_config, clock, monkeypatch)
+        app = configured(tmp_path / receipt, official_config, clock, monkeypatch)
         core = app.state.core
         for index in range(2):
-            seed = social_event(core, nap_event, 550 + index, "human context")
+            seed = social_event(core, official_event, 550 + index, "human context")
             core.inbox.finish(seed.event_id)
-        first = social_event(core, nap_event, 552, "everyone can contribute")
+        first = social_event(core, official_event, 552, "everyone can contribute")
         enable_social(core, first)
 
         class Judge:
@@ -427,9 +409,9 @@ async def test_social_receipts_hold_reservation_and_stop_unanswered_monologue(
             )
         clock.advance(61)
         for index in range(2):
-            seed = social_event(core, nap_event, 553 + index, "unrelated conversation")
+            seed = social_event(core, official_event, 553 + index, "unrelated conversation")
             core.inbox.finish(seed.event_id)
-        next_event = social_event(core, nap_event, 555, "another unrelated comment")
+        next_event = social_event(core, official_event, 555, "another unrelated comment")
         assert not core.pre_send(draft)
         await core.process(next_event)
         with core.db.engine.connect() as c:
@@ -443,16 +425,16 @@ async def test_social_receipts_hold_reservation_and_stop_unanswered_monologue(
 
 
 async def test_proactive_pi_context_stale_on_ingress_without_another_tick(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from qqbot.domain.social import JudgmentSignals
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
     for index in range(2):
-        seed = social_event(core, nap_event, 560 + index, "context")
+        seed = social_event(core, official_event, 560 + index, "context")
         core.inbox.finish(seed.event_id)
-    value = social_event(core, nap_event, 562, "open invitation")
+    value = social_event(core, official_event, 562, "open invitation")
     enable_social(core, value)
 
     class Judge:
@@ -463,7 +445,7 @@ async def test_proactive_pi_context_stale_on_ingress_without_another_tick(
     await core.process(value)
     context = json.loads(accepted(core, value)["context_json"])
     assert core.validate_context(core.access(value), context)
-    social_event(core, nap_event, 563, "topic already changed")
+    social_event(core, official_event, 563, "topic already changed")
     assert not core.validate_context(core.access(value), context)
     with core.db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.id)).first() is None
@@ -472,13 +454,13 @@ async def test_proactive_pi_context_stale_on_ingress_without_another_tick(
 
 
 async def test_timed_silence_restores_after_restart_and_preserves_wait(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from qqbot.runtime import Core
 
-    app = configured(tmp_path, nap_config.model_copy(update={"admin_users": ("300",)}), clock, monkeypatch)
+    app = configured(tmp_path, official_config.model_copy(update={"admin_users": ("300",)}), clock, monkeypatch)
     core = app.state.core
-    event = new_event(core, nap_event, 570, "/静默 30m")
+    event = new_event(core, official_event, 570, "/静默 30m")
     wait = {"wait": {"decision": None, "rechecks": 1}, "wait_event_id": "saved-anchor"}
     core.save_state(event.conversation.key, state_json=json.dumps(wait))
     await core.command(event)
@@ -497,23 +479,23 @@ async def test_timed_silence_restores_after_restart_and_preserves_wait(
 
 
 async def test_timed_silence_rejects_invalid_duration_without_mode_change(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     import pytest
 
-    app = configured(tmp_path, nap_config.model_copy(update={"admin_users": ("300",)}), clock, monkeypatch)
+    app = configured(tmp_path, official_config.model_copy(update={"admin_users": ("300",)}), clock, monkeypatch)
     core = app.state.core
     for index, duration in enumerate(("0s", "25h", "1d", "-1m", "30m extra", "999999s")):
-        event = new_event(core, nap_event, 580 + index, "/静默 " + duration)
+        event = new_event(core, official_event, 580 + index, "/静默 " + duration)
         before = core.state(event.conversation.key)
         with pytest.raises(ValueError):
             await core.command(event)
         assert core.state(event.conversation.key) == before
     for index, duration in enumerate(("1s", "2m", "24h")):
-        event = new_event(core, nap_event, 590 + index, "/静默 " + duration)
+        event = new_event(core, official_event, 590 + index, "/静默 " + duration)
         await core.command(event)
         assert core.state(event.conversation.key)["mode"] == "silent"
-    permanent = new_event(core, nap_event, 593, "/静默")
+    permanent = new_event(core, official_event, 593, "/静默")
     await core.command(permanent)
     clock.advance(2 * 86400)
     core.restore_silences()
@@ -524,15 +506,15 @@ async def test_timed_silence_rejects_invalid_duration_without_mode_change(
 
 
 async def test_explicit_quiet_phrase_suppresses_only_proactive_for_ten_minutes(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
     from sqlalchemy import update
 
     from qqbot.domain.social import JudgmentSignals
 
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    phrase = social_event(core, nap_event, 600, "你先别插话")
+    phrase = social_event(core, official_event, 600, "你先别插话")
     enable_social(core, phrase)
     core.save_state(phrase.conversation.key, state_json=json.dumps({"custom": "preserved"}))
     calls = []
@@ -543,14 +525,12 @@ async def test_explicit_quiet_phrase_suppresses_only_proactive_for_ten_minutes(
             return JudgmentSignals(invites_participation=0.9, useful_contribution=0.8, private_exchange=0.1)
 
     core.judge = Judge()
-    core.adapters["nap"].account_online = True
-
     await core.process(phrase)
     state = json.loads(core.state(phrase.conversation.key)["state_json"])
     assert state["custom"] == "preserved" and state["suppressed_until"]
-    invited = new_event(core, nap_event, 601, "明确问你一个问题")
+    invited = new_event(core, official_event, 601, "明确问你一个问题")
     await core.process(invited)
-    status = new_event(core, nap_event, 602, "/状态")
+    status = new_event(core, official_event, 602, "/状态")
     await core.process(status)
     with core.db.engine.connect() as c:
         assert c.execute(select(tasks.c.id).where(tasks.c.source == invited.event_id)).first()
@@ -560,9 +540,9 @@ async def test_explicit_quiet_phrase_suppresses_only_proactive_for_ten_minutes(
     with core.db.transaction() as c:
         c.execute(update(outbox).values(state="FAILED"))
     for index in range(2):
-        seed = social_event(core, nap_event, 603 + index, "new conversation")
+        seed = social_event(core, official_event, 603 + index, "new conversation")
         core.inbox.finish(seed.event_id)
-    later = social_event(core, nap_event, 605, "大家说说看")
+    later = social_event(core, official_event, 605, "大家说说看")
     await core.process(later)
     assert calls == [True]
     await core.stop()
@@ -570,17 +550,16 @@ async def test_explicit_quiet_phrase_suppresses_only_proactive_for_ten_minutes(
 
 
 async def test_invited_split_messages_commit_together_only_after_success(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
+    tmp_path, official_config, official_event, clock, monkeypatch
 ):
-    app = configured(tmp_path, nap_config, clock, monkeypatch)
+    app = configured(tmp_path, official_config, clock, monkeypatch)
     core = app.state.core
-    core.adapters["nap"].account_online = True
-    first = new_event(core, nap_event, 610, "第一部分")
+    first = new_event(core, official_event, 610, "第一部分")
     task = asyncio.create_task(core.process(first))
     await asyncio.sleep(0.02)
-    second = new_event(core, nap_event, 611, "第二部分")
-    other = new_event(core, {**nap_event, "user_id": 301}, 612, "另一个人的问题")
-    control = new_event(core, nap_event, 613, "/状态")
+    second = new_event(core, official_event, 611, "第二部分")
+    other = new_event(core, official_event, 612, "另一个人的问题", user_id=301)
+    control = new_event(core, official_event, 613, "/状态")
     await task
     assert accepted(core, first)["goal"] == "第一部分\n第二部分"
     with core.db.engine.connect() as c:
@@ -588,10 +567,10 @@ async def test_invited_split_messages_commit_together_only_after_success(
         assert states[first.event_id] == states[second.event_id] == "DONE"
         assert states[other.event_id] == states[control.event_id] == "PENDING"
         assert len(c.execute(select(tasks.c.id)).all()) == 1
-    third = new_event(core, nap_event, 614, "会失败的第一部分")
+    third = new_event(core, official_event, 614, "会失败的第一部分")
     task = asyncio.create_task(core.process(third))
     await asyncio.sleep(0.02)
-    fourth = new_event(core, nap_event, 615, "应保留的第二部分")
+    fourth = new_event(core, official_event, 615, "应保留的第二部分")
 
     def fail(*args, **kwargs):
         raise ValueError("acceptance failed")

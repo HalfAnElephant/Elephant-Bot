@@ -1,203 +1,480 @@
+"""OpenViking owns facts; the host persists sources, receipts and deletion fences."""
 import json
 
 import httpx
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import select
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.memory import MemoryRecord
+from qqbot.adapters.openviking import OpenVikingMemory
+from qqbot.adapters.openviking.service import MEMORY_TYPES, digest
+from qqbot.adapters.openviking.transport import MemoryBackendError
+from qqbot.contracts.memory import (
+    MemoryBinding,
+    MemoryCorrection,
+    MemoryDeletion,
+    MemoryScope,
+    SourceBatch,
+    SourceEvent,
+)
 from qqbot.memory.openviking_config import OpenVikingConfig
+from qqbot.storage.memory_sync_schema import (
+    memory_documents,
+    memory_operations,
+)
+
+
+class Viking:
+    """Pinned HTTP schemas, including native non-idempotent append and async commit."""
+    def __init__(self):
+        self.calls, self.sessions, self.tasks, self.files, self.diffs = [], {}, {}, {}, {}
+        self.offline = False
+        self.lost_append = self.lost_commit = False
+        self.drop_append = False
+        self.role = "user"
+        self.index_failed = False
+        self.extra_hits = []
+
+    async def __call__(self, request):
+        path, method = request.url.path, request.method
+        body = json.loads(request.content) if request.content else None
+        self.calls.append((method, path, body))
+        if self.offline:
+            raise httpx.ConnectError("unavailable")
+        user = request.headers["X-OpenViking-User"]
+        account = request.headers["X-OpenViking-Account"]
+        root = f"viking://user/{user}"
+        result = {}
+        if path == "/health":
+            return httpx.Response(200, json={"status": "ok", "healthy": True, "auth_mode": "api_key",
+                "version": "v0.5.4.1", "role": self.role, "account_id": account, "user_id": user})
+        if path == "/api/v1/sessions" and method == "POST":
+            sid = body["session_id"]
+            self.sessions.setdefault(sid, {"messages": [], "config": body, "user": user})
+            result = {"session_id": sid}
+        elif path.endswith("/messages/batch"):
+            sid = path.split("/")[-3]
+            if not self.drop_append:
+                self.sessions[sid]["messages"].extend({
+                    "role": message["role"], "turn_id": message["turn_id"],
+                    "source_message_ids": message["source_message_ids"],
+                    "parts": [{"type": "text", "text": message["content"]}],
+                } for message in body["messages"])
+            if self.lost_append or self.drop_append:
+                self.lost_append = False
+                raise httpx.ReadTimeout("append receipt lost")
+            result = {"message_count": len(self.sessions[sid]["messages"]), "added": len(body["messages"])}
+        elif path.endswith("/commit"):
+            sid = path.split("/")[-2]
+            task_id = "commit-" + sid
+            archive = root + "/sessions/" + sid + "/history/archive_001"
+            self.tasks[task_id] = {"task_id": task_id, "task_type": "session_commit",
+                "resource_id": sid, "status": "running", "result": None}
+            self.sessions[sid]["archive"] = archive
+            if self.lost_commit:
+                self.lost_commit = False
+                raise httpx.ReadTimeout("commit receipt lost")
+            result = {"status": "accepted", "task_id": task_id, "archive_uri": archive, "archived": True}
+        elif path == "/api/v1/tasks":
+            result = [task for task in self.tasks.values() if all(
+                task.get(name) == request.url.params[name]
+                for name in ("resource_id", "task_type", "status") if name in request.url.params)]
+        elif path.startswith("/api/v1/tasks/"):
+            result = self.tasks[path.rsplit("/", 1)[-1]]
+        elif path == "/api/v1/content/read":
+            uri = request.url.params["uri"]
+            if uri in self.files:
+                result = self.files[uri]
+                if request.url.params.get("raw") != "true":
+                    result = result.split("\n\n<!-- MEMORY_FIELDS", 1)[0]
+            elif uri in self.diffs:
+                result = json.dumps(self.diffs[uri])
+            elif uri.endswith("/messages.jsonl"):
+                sid = uri.rsplit("/", 2)[-2]
+                if sid not in self.sessions:
+                    return httpx.Response(404, json={"status": "error"})
+                result = "\n".join(json.dumps(message) for message in self.sessions[sid]["messages"])
+            else:
+                return httpx.Response(404, json={"status": "error"})
+        elif path == "/api/v1/content/reindex":
+            completed = {"status": "completed", "failed_records": 1 if self.index_failed else 0}
+            if body["wait"]:
+                result = completed
+            else:
+                task_id = "index-" + digest(body["uri"])[:16]
+                self.tasks[task_id] = {"task_id": task_id, "task_type": "reindex",
+                    "resource_id": body["uri"], "status": "completed", "result": completed}
+                result = {"status": "accepted", "task_id": task_id}
+        elif path == "/api/v1/content/batch-write":
+            assert body["root_uri"].startswith(root + "/memories/")
+            assert body["processing_mode"] == "vectors_only"
+            for operation in body["operations"]:
+                assert operation["uri"].rsplit("/", 1)[0] == body["root_uri"]
+                if digest(self.files[operation["uri"]]) != operation["expected_sha256"]:
+                    return httpx.Response(409, json={"status": "error"})
+                self.files[operation["uri"]] = operation["content"]
+            result = {"semantic_status": "completed"}
+        elif path == "/api/v1/search/find":
+            result = {"memories": [*self.extra_hits, *({"uri": uri, "score": 0.8, "abstract": "untrusted"}
+                for uri in self.files if uri.startswith(body["target_uri"]))]}
+        elif path == "/api/v1/fs" and method == "DELETE":
+            self.files.pop(request.url.params["uri"], None)
+        elif path.startswith("/api/v1/sessions/") and method == "DELETE":
+            self.sessions.pop(path.rsplit("/", 1)[-1], None)
+        else:
+            raise AssertionError((method, path, body))
+        return httpx.Response(200, json={"status": "ok", "result": result})
+
+    def complete(self, *, sid=None, content="用户偏好用中文回复", relative="preferences/language.md", updates=False):
+        sid = sid or next(reversed(self.sessions))
+        session = self.sessions[sid]
+        uri = f"viking://user/{session['user']}/memories/{relative}"
+        self.files[uri] = content + '\n\n<!-- MEMORY_FIELDS\n{"version":1}\n-->'
+        diff_uri = session["archive"] + "/memory_diff.json"
+        self.diffs[diff_uri] = {"archive_uri": session["archive"], "operations": {
+            "updates" if updates else "adds": [{"uri": uri, "memory_type": relative.split("/")[0], "after": content}],
+            "deletes": []}, "skipped_operations": []}
+        self.tasks["commit-" + sid].update(status="completed", result={"archive_uri": session["archive"],
+            "memory_diff_uri": diff_uri, "effective_memory_types": list(MEMORY_TYPES), "session_skills_extracted": 0})
+        return uri
 
 
 @pytest.fixture
-async def ov(tmp_path, official_config, official_event, clock, monkeypatch):
-    for key in ('ALL_PROXY', 'all_proxy', 'http_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'https_proxy'):
-        monkeypatch.delenv(key, raising=False)
-    core = create_app(Settings(database=str(tmp_path / 'ov.db'), adapters=(official_config,),
-        memory={'openviking': {'endpoint': 'http://127.0.0.1:1933'}}),
-        clock=clock, run_background=False).state.core
-    event = core.adapters['qq'].normalize({**official_event, 't': 'C2C_MESSAGE_CREATE', 'd': {
-        **official_event['d'], 'author': {'user_openid': '300'}, 'content': 'hello'}})
-    event = core.inbox.accept(event)[0]
-    access = core.access(event)
-    calls = []
-    state = {'resources': [], 'fail': False}
-    async def handler(request):
-        body = json.loads(request.content) if request.content else None
-        calls.append((request.method, request.url.path, body))
-        if state['fail']:
-            raise httpx.ReadTimeout('fixture timeout')
-        result = {'resources': state['resources']} if request.url.path.endswith('/find') else {}
-        return httpx.Response(200, json={'status': 'ok', 'result': result})
-    await core.openviking.client.aclose()
-    core.openviking.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    yield core, event, access, calls, state
-    await core.stop()
-    core.db.close()
+async def memory(db, clock, monkeypatch):
+    monkeypatch.setenv("TEST_OV_USER_KEY", "fixture-user-key")
+    scope = MemoryScope(owner_id="owner")
+    binding = MemoryBinding(owner_id="owner", account_id="elephant", user_id="owner_private", api_key_env="TEST_OV_USER_KEY")
+    config = OpenVikingConfig(endpoint="http://127.0.0.1:1933", bindings=(binding,))
+    remote = Viking()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(remote))
+    accepted = {}
+
+    def loader(request_scope, session, start, end, branch, projection):
+        for batch in accepted.values():
+            if (batch.scope, batch.session_id, batch.branch, batch.projection_version) == (request_scope, session, branch, projection):
+                events = tuple(event for event in batch.events if start < event.seq <= end)
+                return batch.model_copy(update={"from_seq": start, "to_seq": end, "events": events})
+        raise LookupError("original source missing")
+
+    service = OpenVikingMemory(db, clock, config, source_loader=loader, client=client)
+    yield service, remote, scope, accepted
+    await service.close()
+    await client.aclose()
 
 
-def record(core, event, access):
-    value = core.social.candidate(access, MemoryRecord(scope_type='principal_in_conversation',
-        scope_id=access.conversation.key, subject_ref=access.principal.key, predicate='preference',
-        value_json='"山峰"', text='山峰', source_event_ids=(event.event_id,), source_kind='user_explicit',
-        confidence=1, valid_from=core.clock.now(), created_at=core.clock.now(),
-        last_verified_at=core.clock.now()), explicit=True)
-    return core.social.commit(access, value.memory_id, authorized=True)
+def batch(scope, *, session="leader-a", start=0, event_id="source-1", content="以后请用中文回复", **event_options):
+    return SourceBatch(scope=scope, session_id=session, from_seq=start, to_seq=start + 1,
+        events=(SourceEvent(id=event_id, seq=start + 1, role="user", content=content, **event_options),))
 
 
-async def prepare(core, event, access):
-    turn = core.contexts.turn(event)
-    context = core.contexts.build(access, turn)
-    await core.openviking.prepare(access, turn, context)
+async def indexed(service, receipt):
+    for _ in range(8):
+        receipt = await service.poll(receipt.operation_id)
+        if receipt.indexed:
+            return receipt
+    raise AssertionError(receipt)
 
 
-async def test_private_default_snapshots_idempotency_and_cleanup(ov):
-    core, event, access, calls, _ = ov
-    assert core.openviking.enabled(access)
-    await prepare(core, event, access)
-    assert core.openviking.status == 'ready'
-    creation = next(body for _, path, body in calls if path == '/api/v1/sessions')
-    assert creation['auto_commit_policy'] is None
-    assert all(not value['enabled'] for value in creation['memory_policy'].values())
-    await core.openviking.reconcile()  # Valid stored validation must not crash or delete.
-    assert not any(method == 'DELETE' for method, _, _ in calls)
-    await prepare(core, event, access)
-    assert sum(path.endswith('/messages/batch') for _, path, _ in calls) == 1
-    core.social.revoke_source(access, event.event_id)
-    await core.openviking.reconcile()
-    assert sum(method == 'DELETE' for method, _, _ in calls) == 2
+async def seeded(memory):
+    service, remote, scope, originals = memory
+    original = batch(scope)
+    originals[original.session_id] = original
+    receipt = await service.sync(original)
+    uri = remote.complete()
+    return original, await indexed(service, receipt), uri
 
 
-async def test_only_known_local_memories_are_returned_and_forget_cleans(ov):
-    from qqbot.memory.openviking import digest
-    core, event, access, calls, state = ov
-    value = record(core, event, access)
-    root = core.openviking.prefix(core.openviking.scope_id(access))
-    state['resources'] = [{'uri': root + '/' + digest(value.memory_id) + '.md', 'abstract': 'evil'},
-                          {'uri': root + '/foreign.md', 'abstract': 'injected'}]
-    await prepare(core, event, access)
-    assert core.social.retrieve(access, 'hello')[0].text == '山峰'
-    core.social.forget(access, value.memory_id)
-    assert core.social.retrieve(access, 'hello') == []
-    await core.openviking.reconcile()
-    assert any(method == 'DELETE' for method, _, _ in calls)
+async def test_real_contract_separates_export_accept_extract_and_index(memory):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    receipt = await service.sync(source)
+    assert receipt.accepted and not receipt.extracted and not receipt.indexed
+    assert (receipt.exported_seq, receipt.extracted_seq, receipt.indexed_seq) == (1, 0, 0)
+    config = next(iter(remote.sessions.values()))["config"]
+    assert config["auto_commit_policy"] is None
+    assert config["memory_policy"]["memory_types"] == list(MEMORY_TYPES)
+    assert config["memory_policy"]["working_memory"] == {"enabled": False}
+    uri = remote.complete()
+    extracted = await service.poll(receipt.operation_id)
+    assert extracted.extracted and not extracted.indexed and extracted.extracted_seq == 1
+    done = await indexed(service, extracted)
+    assert done.indexed_seq == 1
+    recalled = await service.search(scope, "用户的语言偏好")
+    assert [hit.uri for hit in recalled.hits] == [uri]
+    document = await service.read(scope, uri)
+    assert document.content == "用户偏好用中文回复" and document.source_event_ids == ("source-1",)
+    assert document.trust == "retrieved_data" and "MEMORY_FIELDS" not in document.content
+    # Persistence stores immutable source references/hashes, never a writable copy of fact text.
+    with service.db.engine.connect() as conn:
+        assert "以后请用中文回复" not in str(conn.execute(select(memory_operations)).all())
+        assert "用户偏好用中文回复" not in str(conn.execute(select(memory_documents)).all())
+    assert (await service.sync(source)).operation_id == receipt.operation_id
+    assert sum(path.endswith("/messages/batch") for _, path, _ in remote.calls) == 1
 
 
-async def test_timeout_leaves_cleanup_ledger_and_retry_deletes_before_rewrite(ov):
-    core, event, access, calls, state = ov
-    state['fail'] = True
-    await prepare(core, event, access)
-    assert core.openviking.status == 'unavailable_local_fallback'
-    assert core.openviking._saved(core.openviking.scope_id(access))['state'] == 'PENDING'
-    state['fail'] = False
-    calls.clear()
-    await prepare(core, event, access)
-    assert calls[0][0] == calls[1][0] == 'DELETE'
-    assert core.openviking.status == 'ready'
+async def test_three_relays_preserve_origin_and_do_not_reextract(memory):
+    service, remote, scope, originals = memory
+    await seeded(memory)
+    for number in range(3):
+        relay = batch(scope, session=f"relay-{number}", event_id=f"relay-{number}", kind="relay",
+                      source_event_ids=("source-1",), content="对同一个成果的汇总转述")
+        originals[relay.session_id] = relay
+        result = await service.sync(relay)
+        assert result.state == "SKIPPED" and result.extracted
+    assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
 
 
-async def test_unconfigured_and_group_do_not_export(ov):
-    from qqbot.domain import Surface
-    core, event, access, calls, _ = ov
-    group = access.model_copy(update={'conversation': access.conversation.model_copy(
-        update={'surface': Surface.GROUP})})
-    assert not core.openviking.enabled(group)
-    core.openviking.settings = core.settings.model_copy(update={'memory': core.settings.memory.model_copy(
-        update={'openviking': OpenVikingConfig()})})
-    await prepare(core, event, access)
-    assert calls == []
+async def test_process_restart_uses_durable_source_refs_and_does_not_repeat_worker(memory, clock):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    receipt = await service.sync(source)
+    uri = remote.complete()
+    replacement = OpenVikingMemory(service.db, clock, service.config, source_loader=service.source_loader, client=service.http.client)
+    done = await indexed(replacement, receipt)
+    assert done.extracted and (await replacement.read(scope, uri)).source_event_ids == ("source-1",)
+    assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
 
 
-@pytest.mark.parametrize('endpoint', ['http://example.com', 'https://u:p@example.com',
-    'https://example.com/path', 'https://example.com?secret=x'])
-def test_insecure_endpoints_rejected(endpoint):
+@pytest.mark.parametrize("kind", ["summary", "tool_output", "skill_review", "relay"])
+async def test_non_original_projections_are_not_long_term_facts(memory, kind):
+    service, remote, scope, _ = memory
+    receipt = await service.sync(batch(scope, kind=kind))
+    assert receipt.state == "SKIPPED" and not remote.calls
+
+
+async def test_secret_source_is_filtered_without_a_local_fact_fallback(memory):
+    service, remote, scope, _ = memory
+    receipt = await service.sync(batch(scope, content="password=never-store-this"))
+    assert receipt.state == "SKIPPED" and not remote.calls
+
+
+async def test_offline_backend_leaves_visible_pending_refs_and_recovers_from_harness(memory):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    remote.offline = True
+    receipt = await service.sync(source)
+    assert receipt.state == "QUEUED" and receipt.error_type == "ConnectError" and not receipt.extracted
+    assert (await service.search(scope, "语言偏好")).status == "degraded"
+    assert (await service.status(scope))["pending"] == 1
+    with service.db.engine.connect() as conn:
+        assert "以后请用中文回复" not in str(conn.execute(select(memory_operations)).all())
+    remote.offline = False
+    accepted = await service.poll(receipt.operation_id)
+    assert accepted.state == "ACCEPTED"
+    remote.complete()
+    assert (await indexed(service, accepted)).indexed
+
+
+@pytest.mark.parametrize("lost", ["append", "commit"])
+async def test_lost_receipt_reconciles_same_remote_operation_without_repetition(memory, lost):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    setattr(remote, "lost_" + lost, True)
+    receipt = await service.sync(source)
+    assert receipt.state == ("APPENDING" if lost == "append" else "COMMITTING")
+    receipt = await service.poll(receipt.operation_id)
+    assert receipt.state == "ACCEPTED"
+    remote.complete()
+    assert (await indexed(service, receipt)).indexed
+    assert sum(path.endswith("/messages/batch") for _, path, _ in remote.calls) == 1
+    assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
+
+
+async def test_unknown_append_is_not_repeated_or_claimed_as_saved(memory):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    remote.drop_append = True
+    receipt = await service.sync(source)
+    remote.drop_append = False
+    for _ in range(3):
+        receipt = await service.poll(receipt.operation_id)
+    assert receipt.state == "APPENDING" and not receipt.extracted and receipt.exported_seq == 0
+    assert sum(path.endswith("/messages/batch") for _, path, _ in remote.calls) == 1
+    assert not any(path.endswith("/commit") for _, path, _ in remote.calls)
+
+
+async def test_correction_revokes_old_source_and_waits_for_confirmed_remote_index(memory):
+    service, remote, scope, originals = memory
+    original, _, uri = await seeded(memory)
+    correction = batch(scope, session="correction", event_id="owner-correction", content="用户现在偏好英文回复")
+    originals[correction.session_id] = correction
+    request = MemoryCorrection(scope=scope, uri=uri, session_id=correction.session_id,
+        source=correction.events[0], idempotency_key="correct-language")
+    result = await service.correct(request)
+    assert result.completed and result.memory_epoch == 1
+    assert (await service.read(scope, uri)).content == "用户现在偏好英文回复"
+    assert (await service.read(scope, uri)).source_event_ids == ("owner-correction",)
+    replay = await service.correct(request)
+    assert replay.operation_id == result.operation_id and replay.memory_epoch == 1
+    assert (await service.sync(original)).state == "SKIPPED"
+    assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
+    events = service.changes_since(scope)
+    assert any(event["kind"] == "barrier" and event["refs"]["clean_session_required"] for event in events)
+    assert any(event["kind"] == "corrected" for event in events)
+
+
+async def test_forget_removes_derived_memory_and_input_archive_then_fences_replay(memory):
+    service, remote, scope, _ = memory
+    original, _, uri = await seeded(memory)
+    result = await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="forget-language"))
+    assert result.completed and "source-1" in result.affected_source_ids
+    assert uri not in remote.files and not remote.sessions
+    assert not (await service.search(scope, "语言偏好")).hits
+    assert (await service.sync(original)).state == "SKIPPED"
+    remote.files[uri] = "old content restored by an external index rebuild"
+    remote.extra_hits = [{"uri": uri, "score": 1.0}]
+    assert not (await service.search(scope, "语言偏好")).hits
+    with pytest.raises(PermissionError):
+        await service.read(scope, uri)
+
+
+async def test_forget_during_extraction_immediately_blocks_recall_and_discovers_late_derivations(memory):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    sync = await service.sync(source)
+    deletion = await service.revoke_source(scope, "source-1", idempotency_key="forget-inflight")
+    assert not deletion.completed and deletion.state == "WAITING_EXTRACTION"
+    assert (await service.search(scope, "语言偏好")).status == "blocked"
+    uri = remote.complete()
+    done = await service.poll(deletion.operation_id)
+    assert done.completed and uri not in remote.files
+    assert (await service.poll(sync.operation_id)).state == "SUPERSEDED"
+
+
+async def test_group_and_project_namespaces_cannot_reuse_private_user_identity(memory):
+    service, remote, scope, _ = memory
+    await seeded(memory)
+    group = scope.model_copy(update={"audience": "group"})
+    calls = len(remote.calls)
+    assert (await service.search(group, "owner secret")).status == "disabled"
+    assert len(remote.calls) == calls
+    project = scope.model_copy(update={"workspace_id": "project-a", "audience": "project"})
+    original_resolver = service.binding_resolver
+    service.binding_resolver = lambda request_scope: original_resolver(scope).model_copy(
+        update={"workspace_id": request_scope.workspace_id})
+    with pytest.raises(PermissionError, match="share"):
+        await service.search(project, "owner secret")
+    with pytest.raises(PermissionError):
+        await service.read(scope, "viking://user/other/memories/profile.md")
+
+
+@pytest.mark.parametrize("role", ["root", "admin"])
+async def test_ordinary_data_requests_reject_root_or_admin_credentials(memory, role):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    remote.role = role
+    receipt = await service.sync(source)
+    assert receipt.state == "QUEUED" and receipt.error_type == "MemoryBackendError"
+    assert all(path == "/health" for _, path, _ in remote.calls)
+
+
+async def test_unregistered_or_foreign_remote_hits_never_leak_into_recall(memory):
+    service, remote, scope, _ = memory
+    _, _, uri = await seeded(memory)
+    remote.extra_hits = [{"uri": "viking://user/other/memories/profile.md", "score": 2.0},
+                         {"uri": uri.rsplit("/", 1)[0] + "/unregistered.md", "score": 1.0},
+                         {"uri": "viking://user/owner_private/memories/skills/evil.md", "score": 3.0}]
+    assert [item.uri for item in (await service.search(scope, "语言偏好")).hits] == [uri]
+
+
+async def test_index_errors_are_not_reported_as_indexed_success(memory):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    receipt = await service.sync(source)
+    remote.complete()
+    remote.index_failed = True
+    receipt = await service.poll(receipt.operation_id)
+    receipt = await service.poll(receipt.operation_id)
+    receipt = await service.poll(receipt.operation_id)
+    assert receipt.extracted and not receipt.indexed and receipt.indexed_seq == 0
+    assert not (await service.search(scope, "语言偏好")).hits
+
+
+@pytest.mark.parametrize("endpoint", ["http://example.com", "https://u:p@example.com", "https://example.com/path", "https://example.com?secret=x"])
+def test_insecure_endpoints_are_rejected(endpoint):
     with pytest.raises(ValidationError):
         OpenVikingConfig(endpoint=endpoint)
 
 
-async def test_permission_change_removes_unselected_exported_records(ov):
-    from qqbot.permissions import PermissionPolicy, PermissionRule
-    core, event, access, calls, _ = ov
-    record(core, event, access)  # Does not lexically match hello; absent from selected memory manifest.
-    await prepare(core, event, access)
-    core.permissions.set_policy(PermissionPolicy(rules=(PermissionRule(
-        id='revoke-source', actions=('memory.source.read',), effect='deny'),)),
-        expected_version=core.permissions.policy_version, actor='test')
-    await core.openviking.reconcile()
-    assert any(method == 'DELETE' for method, _, _ in calls)
-    assert core.openviking._saved(core.openviking.scope_id(access)) is None
+async def test_same_source_revision_cannot_change_silently(memory):
+    service, _, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    await service.sync(source)
+    with pytest.raises(ValueError, match="conflicting replay"):
+        await service.sync(source.model_copy(update={"events": (source.events[0].model_copy(update={"content": "different"}),)}))
 
 
-async def test_expired_export_is_removed_without_memory_version_change(ov):
-    from datetime import timedelta
-
-    from sqlalchemy import update
-
-    from qqbot.storage.social_schema import social_records
-    core, event, access, calls, _ = ov
-    value = record(core, event, access)
-    expiring = value.model_copy(update={'valid_until': core.clock.now() + timedelta(seconds=1)})
-    with core.db.transaction() as conn:
-        conn.execute(update(social_records).where(social_records.c.id == value.memory_id).values(
-            record_json=expiring.model_dump_json()))
-    await prepare(core, event, access)
-    core.clock.advance(seconds=2)
-    await core.openviking.reconcile()
-    assert any(method == 'DELETE' for method, _, _ in calls)
-
-
-async def test_disabled_service_cleans_then_endpoint_removal_reports_pending(ov):
-    core, event, access, calls, _ = ov
-    await prepare(core, event, access)
-    settings = core.settings
-    core.openviking.settings = settings.model_copy(update={'memory': settings.memory.model_copy(
-        update={'openviking': OpenVikingConfig()})})
-    await core.openviking.reconcile()
-    assert core.openviking.status == 'endpoint_removed_cleanup_required'
-    core.openviking.settings = settings.model_copy(update={'memory': settings.memory.model_copy(
-        update={'openviking': settings.memory.openviking.model_copy(update={'private_enabled': False})})})
-    await core.openviking.reconcile()
-    assert core.openviking._saved(core.openviking.scope_id(access)) is None
-    assert any(method == 'DELETE' for method, _, _ in calls)
+async def test_restore_reconciles_read_only_and_preserves_deletion_fences(memory):
+    service, remote, scope, _ = memory
+    original, _, uri = await seeded(memory)
+    await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    manifest = service.export_barriers(scope)
+    service.restore_barriers(scope, manifest)
+    assert (await service.search(scope, "语言")).status == "blocked"
+    with pytest.raises(MemoryBackendError, match="reconciliation"):
+        await service.sync(original)
+    with pytest.raises(MemoryBackendError, match="reconciliation"):
+        await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="blocked-write"))
+    before = len(remote.calls)
+    await service.reconcile()
+    assert len(remote.calls) == before
+    assert (await service.reconcile_restore(scope))["state"] == "READY"
+    assert all(method == "GET" for method, _, _ in remote.calls[before:])
+    assert (await service.sync(original)).state == "SKIPPED"
+    remote.files[uri] = "stale backup content"
+    assert not (await service.search(scope, "语言")).hits
+    with pytest.raises(PermissionError):
+        await service.read(scope, uri)
 
 
-async def test_cleanup_rotates_past_first_page(ov):
-    from sqlalchemy import insert
-
-    from qqbot.storage.openviking_schema import openviking_scopes
-    core, event, access, _, _ = ov
-    await prepare(core, event, access)
-    saved = dict(core.openviking._saved(core.openviking.scope_id(access)))
-    with core.db.transaction() as conn:
-        for index in range(130):
-            conn.execute(insert(openviking_scopes).values({**saved, 'id': f'z{index:04d}'}))
-    await core.openviking.reconcile()
-    assert core.openviking._cleanup_cursor
-    await core.openviking.reconcile()
-    assert core.openviking._cleanup_cursor == ''
-
-
-async def test_private_principals_and_conversations_have_distinct_remote_scopes(ov):
-    core, _, access, _, _ = ov
-    other_user = access.model_copy(update={'principal': access.principal.model_copy(
-        update={'remote_user_id': 'different-user'})})
-    other_chat = access.model_copy(update={'conversation': access.conversation.model_copy(
-        update={'remote_conversation_id': 'different-chat'})})
-    prefixes = {core.openviking.prefix(core.openviking.scope_id(item))
-                for item in (access, other_user, other_chat)}
-    assert len(prefixes) == 3
+async def test_restore_stays_blocked_for_active_unknown_or_resurrected_remote_state(memory):
+    service, remote, scope, _ = memory
+    _, _, uri = await seeded(memory)
+    await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    service.restore_barriers(scope, service.export_barriers(scope))
+    task = next(iter(remote.tasks.values()))
+    task["status"] = "running"
+    with pytest.raises(MemoryBackendError, match="quiescence"):
+        await service.reconcile_restore(scope)
+    assert (await service.status(scope))["state"] == "RESTORE_REQUIRED"
+    task["status"] = "completed"
+    remote.files[uri] = "stale backup content"
+    with pytest.raises(MemoryBackendError, match="disagrees"):
+        await service.reconcile_restore(scope)
+    assert (await service.status(scope))["state"] == "RESTORE_REQUIRED"
+    remote.files.pop(uri)
+    remote.offline = True
+    with pytest.raises(httpx.ConnectError):
+        await service.reconcile_restore(scope)
+    assert (await service.status(scope))["state"] == "RESTORE_REQUIRED"
 
 
-async def test_group_export_requires_explicit_enable(ov):
-    from qqbot.domain import Surface
-
-    core, _, access, _, _ = ov
-    group = access.model_copy(update={'conversation': access.conversation.model_copy(
-        update={'surface': Surface.GROUP})})
-    assert not core.openviking.enabled(group)
-    settings = core.settings
-    core.openviking.settings = settings.model_copy(update={'memory': settings.memory.model_copy(
-        update={'openviking': settings.memory.openviking.model_copy(update={'group_enabled': True})})})
-    assert core.openviking.enabled(group)
-    assert core.openviking.scope_id(group) != core.openviking.scope_id(access)
+@pytest.mark.parametrize("has_receipt", [False, True])
+async def test_restore_observes_existing_extraction_without_replaying_it(memory, has_receipt):
+    service, remote, scope, originals = memory
+    source = batch(scope)
+    originals[source.session_id] = source
+    receipt = await service.sync(source)
+    uri = remote.complete()
+    service.restore_barriers(scope, service.export_barriers(scope))
+    if not has_receipt:
+        remote.tasks.clear()
+    before = len(remote.calls)
+    if has_receipt:
+        assert (await service.reconcile_restore(scope))["state"] == "READY"
+        assert (await service.poll(receipt.operation_id)).state == "SUPERSEDED"
+        assert (await service.read(scope, uri)).source_event_ids == ("source-1",)
+    else:
+        with pytest.raises(MemoryBackendError, match="terminal receipt"):
+            await service.reconcile_restore(scope)
+        assert (await service.status(scope))["state"] == "RESTORE_REQUIRED"
+    assert all(method == "GET" for method, _, _ in remote.calls[before:])

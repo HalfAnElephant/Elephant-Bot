@@ -234,6 +234,32 @@ async def test_budget_zero_keeps_all_messages_deliverable(db, clock, target):
     assert all(row["state"] == "SENT" and row["attempts"] == 1 for row in rows(db))
 
 
+async def test_removed_adapter_rows_are_terminal_and_do_not_starve_later_deliveries(db, clock, target):
+    service = Outbox(db, clock)
+    removed = target.model_copy(update={"adapter_instance_id": "removed"})
+    stale_ids = []
+    with db.transaction() as connection:
+        for index in range(50):
+            stale_ids.extend(service.enqueue_text(
+                connection, target=removed, text=f"old {index}", origin_kind="command", origin_id=str(index)
+            ))
+        connection.execute(update(outbox).where(outbox.c.id.in_(stale_ids)).values(
+            created_at=(clock.now() - timedelta(minutes=5)).isoformat()
+        ))
+        current = service.enqueue_text(
+            connection, target=target, text="new", origin_kind="command", origin_id="new"
+        )[0]
+
+    adapter = Adapter(clock)
+    await service.dispatch_once({"qq": adapter})
+    assert {row["state"] for row in rows(db) if row["id"] in stale_ids} == {"FAILED"}
+    assert next(row for row in rows(db) if row["id"] == current)["state"] == "PENDING"
+
+    await service.dispatch_once({"qq": adapter})
+    assert [item.text for item, _ in adapter.sent] == ["new"]
+    assert next(row for row in rows(db) if row["id"] == current)["state"] == "SENT"
+
+
 def test_persona_controls_split_without_losing_content_or_exposing_tags(db, clock, target):
     from qqbot.outbox.presentation import chat_bubbles
 

@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, insert
 
+from conftest import official_payload
 from qqbot.app import create_app
 from qqbot.config import Settings
 from qqbot.domain.social import JudgmentSignals, SpeechDecision
@@ -15,14 +16,14 @@ AUTH = {"Authorization": "Bearer decision-log-admin"}
 
 
 @pytest.fixture
-def log_console(tmp_path, nap_config, nap_event, clock, monkeypatch):
+def log_console(tmp_path, official_config, official_event, clock, monkeypatch):
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "decision-log-admin")
-    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,)),
+    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
         clock=clock, run_background=False)
     core = app.state.core
-    event = core.inbox.accept(core.adapters["nap"].normalize({
-        **nap_event, "message": [{"type": "text", "data": {"text": "private source text"}}],
-    }))[0]
+    event = core.inbox.accept(core.adapters["qq"].normalize(official_payload(
+        official_event, message_id=1, text="private source text"
+    )))[0]
     with TestClient(app) as client:
         yield client, core, event
 
@@ -39,7 +40,7 @@ def append_log(core, event, *, action="IGNORE", context=None):
     return log_id, decision
 
 
-def test_decision_logs_preserve_reevaluations_and_paginate_by_conversation(log_console, nap_event):
+def test_decision_logs_preserve_reevaluations_and_paginate_by_conversation(log_console, official_event):
     client, core, event = log_console
     cid = event.conversation.key
     url = "/api/v1/conversations/" + cid + "/decision-logs"
@@ -47,7 +48,9 @@ def test_decision_logs_preserve_reevaluations_and_paginate_by_conversation(log_c
     second_id, latest = append_log(core, event, context={
         "thresholds": {"useful_contribution": 0.75}, "judge_status": "success", "judge_duration_ms": 123,
     })
-    other = core.inbox.accept(core.adapters["nap"].normalize({**nap_event, "group_id": 201}))[0]
+    other = core.inbox.accept(core.adapters["qq"].normalize(official_payload(
+        official_event, message_id=2, group_id=201
+    )))[0]
     append_log(core, other)
     with core.db.transaction() as c:
         c.execute(insert(decisions).values(event_id=event.event_id, conversation_id=cid,

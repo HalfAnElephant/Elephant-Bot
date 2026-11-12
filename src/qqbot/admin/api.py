@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import quote
-from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -18,13 +18,10 @@ from sqlalchemy import select
 from qqbot.config import Settings
 from qqbot.configuration import changes
 from qqbot.configuration import version as config_digest
-from qqbot.dialogue import PersonaSpec
-from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, TextSegment, stable_id
+from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef
 from qqbot.domain.messages import SendReceipt
-from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.domain.tasks import TaskResult
-from qqbot.expressions import ExpressionVersionConflict
-from qqbot.memory import MemoryRecord
+from qqbot.contracts.memory import MemoryScope
 from qqbot.permissions import (
     PermissionPolicy,
     PermissionRule,
@@ -32,43 +29,19 @@ from qqbot.permissions import (
     PermissionSubject,
     PolicyVersionConflict,
 )
-from qqbot.storage.schema import conversations, decision_logs, decisions, inbox, outbox
-from qqbot.storage.social_schema import memory_source_retention, social_records, social_tombstones
+from qqbot.storage.schema import conversations, outbox
 from qqbot.storage.task_schema import events, runs, tasks
 
 
 class PolicyPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int
-    mode: str | None = None
-    persona: dict | None = None
-    speech_thresholds: SpeechThresholds | None = None
-    participation: ParticipationSettings | None = None
-
-    @model_validator(mode="after")
-    def one_change(self):
-        changed = self.model_fields_set & {"mode", "persona", "speech_thresholds", "participation"}
-        if len(changed) != 1 or ("mode" in changed and self.mode is None) or (
-            "persona" in changed and self.persona is None
-        ):
-            raise ValueError("change exactly one policy field per versioned request")
-        for field, model in (("speech_thresholds", SpeechThresholds), ("participation", ParticipationSettings)):
-            values = getattr(self, field)
-            if values is not None and values.model_fields_set != set(model.model_fields):
-                raise ValueError(field + " must include all fields; use null to inherit defaults")
-        return self
+    mode: Literal["addressed_only", "silent"]
 
 
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    conversation_id: str
     goal: str = Field(min_length=1, max_length=16000)
-
-
-class MemoryPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    source_event_id: str
-    text: str = Field(min_length=1, max_length=4000)
 
 
 class ConfigRequest(BaseModel):
@@ -79,13 +52,7 @@ class ConfigRequest(BaseModel):
     @field_validator("config", mode="before")
     @classmethod
     def parse_json_config(cls, value):
-        return value if isinstance(value, Settings) else Settings.model_validate_json(json.dumps(value))
-
-
-class ReconcileRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    run_id: str
-    result: TaskResult | None = None
+        return value if isinstance(value, Settings) else Settings.model_validate_json(json.dumps(value), strict=False)
 
 
 class DeliveryResolution(BaseModel):
@@ -93,6 +60,18 @@ class DeliveryResolution(BaseModel):
     state: Literal["SENT", "FAILED"]
     evidence: str = Field(min_length=1, max_length=1000)
     platform_message_id: str | None = Field(default=None, max_length=128)
+
+
+class TaskReconciliationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    result: TaskResult | None = None
+    resume: bool = False
+
+    @model_validator(mode="after")
+    def choose_one_recovery_action(self):
+        if self.resume == (self.result is not None):
+            raise ValueError("choose exactly one of resume or result")
+        return self
 
 
 class PermissionRuleRequest(BaseModel):
@@ -112,20 +91,6 @@ class PermissionPolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int = Field(ge=0)
     policy: PermissionPolicy
-
-
-class PersonaRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    expected_version: str
-    persona: PersonaSpec
-
-
-class ExpressionPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    expected_revision: int = Field(ge=1)
-    checked: bool
-    situation: str | None = Field(default=None, min_length=1, max_length=20)
-    style: str | None = Field(default=None, min_length=1, max_length=20)
 
 
 def router(core, authenticate):
@@ -184,26 +149,6 @@ def router(core, authenticate):
             )
         except PolicyVersionConflict as error:
             raise HTTPException(409, str(error)) from error
-
-    @router.get("/api/v1/persona")
-    def persona_view():
-        require_permission("persona.read", "persona:global")
-        persona = json.loads(core.personas.snapshot("")[0])["core"]
-        return {
-            "persona": persona,
-            "version": hashlib.sha256(PersonaSpec.model_validate(persona).model_dump_json().encode()).hexdigest(),
-            "schema": PersonaSpec.model_json_schema(),
-        }
-
-    @router.put("/api/v1/persona")
-    def save_persona(body: PersonaRequest):
-        require_permission("persona.manage", "persona:global")
-        with core.config_store.lock:
-            if body.expected_version != persona_view()["version"]:
-                raise HTTPException(409, "persona version changed")
-            core.personas.set_core(body.persona)
-            core.audit("persona.apply", body.expected_version, "admin_api:owner", "updated global persona")
-            return persona_view()
 
     @router.post("/api/v1/permissions/check")
     def check_permission(body: PermissionCheckRequest):
@@ -271,56 +216,23 @@ def router(core, authenticate):
             role="owner",
         )
 
-    def task_row(public_id):
+    def task_row(task_ref):
         with core.db.engine.connect() as c:
-            row = c.execute(select(tasks).where(tasks.c.public_id == public_id)).mappings().first()
+            row = c.execute(select(tasks).where(
+                (tasks.c.public_id == task_ref) | (tasks.c.id == task_ref)
+            )).mappings().first()
         if not row:
             raise HTTPException(404, "task unavailable")
-        conversation(row["conversation"])
-        return dict(row)
-
-    def memory_row(memory_id):
-        require_permission("memory.manage", "memory:" + memory_id)
-        with core.db.engine.connect() as c:
-            row = c.execute(select(social_records).where(social_records.c.id == memory_id)).mappings().first()
-        if not row:
-            raise HTTPException(404, "memory unavailable")
-        ref = conversation(row["conversation_id"])
-        record = MemoryRecord.model_validate_json(row["record_json"])
-        with core.db.engine.connect() as c:
-            raw = c.execute(
-                select(inbox.c.event_json).where(inbox.c.id == record.source_event_ids[0])
-            ).scalar_one_or_none()
-        if not raw:
-            raise HTTPException(409, "source no longer available")
-        event = InboundEvent.model_validate_json(raw)
-        return record, owner(ref, event.principal)
-
-    def action_event(ref, key, goal):
-        if not key or len(key) > 128:
-            raise HTTPException(400, "Idempotency-Key (1-128 characters) required")
-        event_id = stable_id("admin_action", ref.key, key)
-        with core.db.engine.connect() as c:
-            old = c.execute(select(inbox.c.event_json).where(inbox.c.id == event_id)).scalar_one_or_none()
-        if old:
-            parsed = InboundEvent.model_validate_json(old)
-            if parsed.text != goal:
-                raise HTTPException(409, "idempotency key reused for a different request")
-            return parsed
-        event = InboundEvent(
-            event_id=event_id,
-            event_type="message.created",
-            conversation=ref,
-            principal=owner(ref).principal,
-            platform_message_id="admin:" + key,
-            occurred_at=core.clock.now(),
-            received_at=core.clock.now(),
-            segments=(TextSegment(text=goal),),
-            trace_id=str(uuid4()),
-        )
-        event = core.inbox.accept(event)[0]
-        core.inbox.finish(event_id)
-        return event
+        row = dict(row)
+        if row.get("owner_id") != core.settings.owner.id:
+            raise HTTPException(404, "task unavailable")
+        try:
+            event = InboundEvent.model_validate_json(row["event_json"])
+        except ValueError as error:
+            raise HTTPException(409, "task source is unavailable") from error
+        if core.sessions.owner(event) != core.settings.owner.id:
+            raise HTTPException(404, "task unavailable")
+        return row, core.access(event)
 
     @router.get("/api/v1/adapters")
     async def adapters():
@@ -334,8 +246,6 @@ def router(core, authenticate):
                     "configured_full": cfg.full_mode_enabled,
                     "verified_full": cfg.full_mode_verified or getattr(adapter, "full_event_observed", False),
                     "proactive_verified": cfg.proactive_verified,
-                    "online": getattr(adapter, "account_online", None),
-                    "context_gap": getattr(adapter, "context_gap", False),
                     "credentials_configured": bool(os.environ.get(cfg.secret_env)),
                 }
             )
@@ -347,111 +257,42 @@ def router(core, authenticate):
         if core.state(cid)["policy_version"] != body.expected_version:
             raise HTTPException(409, "policy version changed")
         try:
-            if body.mode is not None:
-                await core.set_mode(ref, body.mode, owner(ref), expected_version=body.expected_version)
-            for field in ("speech_thresholds", "participation"):
-                if field in body.model_fields_set:
-                    require_permission("conversation.policy.set", "conversation:" + cid)
-                    core.set_policy_override(ref, field, getattr(body, field), owner(ref),
-                                             expected_version=body.expected_version)
-            if body.persona is not None:
-                core.personas.set_override(cid, body.persona, authorized=True)
-                core.save_state(cid, mode=core.state(cid)["mode"], expected_version=body.expected_version)
+            await core.set_mode(ref, body.mode, owner(ref), expected_version=body.expected_version)
         except (ValueError, PermissionError) as exc:
             raise HTTPException(422, str(exc)) from exc
         return core.policy_view(cid)
-
-    @router.get("/api/v1/conversations/{cid}/decisions")
-    def recent_decisions(cid: str):
-        require_permission("history.read", "conversation:" + cid)
-        conversation(cid)
-        with core.db.engine.connect() as c:
-            return [
-                json.loads(raw)
-                for raw in c.execute(
-                    select(decisions.c.decision_json)
-                    .where(decisions.c.conversation_id == cid)
-                    .order_by(decisions.c.created_at.desc())
-                    .limit(100)
-                ).scalars()
-            ]
-
-    @router.get("/api/v1/conversations/{cid}/decision-logs")
-    def conversation_decision_logs(
-        cid: str,
-        before: int | None = Query(default=None, ge=1),
-        limit: int = Query(default=50, ge=1, le=100),
-    ):
-        require_permission("history.read", "conversation:" + cid)
-        conversation(cid)
-        with core.db.engine.connect() as c:
-            query = (
-                select(decision_logs, inbox.c.event_json, inbox.c.state.label("inbox_state"), inbox.c.message_id)
-                .select_from(decision_logs.outerjoin(inbox, decision_logs.c.event_id == inbox.c.id))
-                .where(decision_logs.c.conversation_id == cid)
-                .order_by(decision_logs.c.id.desc())
-                .limit(limit + 1)
-            )
-            if before is not None:
-                query = query.where(decision_logs.c.id < before)
-            rows = c.execute(query).mappings().all()
-            page = rows[:limit]
-            source_ids = [row["event_id"] for row in page]
-            hidden_sources = set(c.execute(select(social_tombstones.c.source_id).where(
-                social_tombstones.c.conversation_id == cid,
-                social_tombstones.c.source_id.in_(source_ids),
-            )).scalars())
-            hidden_sources.update(c.execute(select(memory_source_retention.c.source_id).where(
-                memory_source_retention.c.conversation_id == cid,
-                memory_source_retention.c.source_id.in_(source_ids),
-            )).scalars())
-            recalled_messages = set(c.execute(select(inbox.c.message_id).where(
-                inbox.c.conversation_id == cid,
-                inbox.c.event_type == "message.recalled",
-                inbox.c.message_id.in_([row["message_id"] for row in page]),
-            )).scalars())
-            items = []
-            for row in page:
-                preview = ""
-                if row["event_json"] and row["event_id"] not in hidden_sources and row["message_id"] not in recalled_messages:
-                    event = json.loads(row["event_json"])
-                    preview = "".join(segment.get("text", "") for segment in event.get("segments", [])
-                        if segment.get("type") == "text")[:300]
-                items.append({
-                    "id": row["id"], "event_id": row["event_id"], "created_at": row["created_at"],
-                    "decision": json.loads(row["decision_json"]), "context": json.loads(row["context_json"]),
-                    "message_preview": preview, "inbox_state": row["inbox_state"],
-                })
-        return {"items": items, "next_before": items[-1]["id"] if len(rows) > limit else None}
 
     @router.post("/api/v1/tasks")
     def create_task(body: TaskRequest, idempotency_key: str = Header(default="")):
         if not core.settings.tasks_enabled:
             raise HTTPException(409, "tasks disabled")
-        ref = conversation(body.conversation_id)
-        event = action_event(ref, idempotency_key, body.goal)
-        result = core.submit_turn(event, background=True, text=body.goal, invited=True, access=owner(ref))
-        return {"public_id": result["public_id"], "state": result["state"]}
+        try:
+            return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
+                                           success_checks=(), requested_outputs=())
+        except (ValueError, PermissionError) as error:
+            raise HTTPException(422, str(error)) from error
 
     @router.get("/api/v1/tasks")
-    def list_tasks(conversation_id: str):
-        require_permission("task.read", "conversation:" + conversation_id)
-        conversation(conversation_id)
+    def list_tasks():
+        require_permission("task.read", "task:*")
         with core.db.engine.connect() as c:
-            return [
-                dict(r._mapping)
-                for r in c.execute(
-                    select(tasks.c.public_id, tasks.c.state, tasks.c.created_at)
-                    .where(tasks.c.conversation == conversation_id)
-                    .order_by(tasks.c.created_at.desc())
-                    .limit(100)
-                )
-            ]
+            rows = c.execute(select(tasks).where(
+                tasks.c.owner_id == core.settings.owner.id,
+                tasks.c.kind == "goal",
+                tasks.c.parent_task_id.is_(None),
+            ).order_by(tasks.c.created_at.desc()).limit(100)).mappings().all()
+            return [{**core.tasks.graph.status(c, row), "created_at": row["created_at"]} for row in rows]
 
     @router.get("/api/v1/tasks/{public_id}")
     def get_task(public_id: str):
-        row = task_row(public_id)
-        result = core.tasks.get(public_id, owner(conversation(row["conversation"])))
+        row, access = task_row(public_id)
+        require_permission("task.read", "task:" + row["id"])
+        try:
+            core.tasks.get(row["public_id"], access)
+            with core.db.engine.connect() as c:
+                result = core.tasks.graph.status(c, row)
+        except (KeyError, PermissionError) as error:
+            raise HTTPException(404, "task unavailable") from error
         with core.db.engine.connect() as c:
             result["deliveries"] = [
                 dict(r._mapping)
@@ -484,34 +325,17 @@ def router(core, authenticate):
 
     @router.post("/api/v1/tasks/{public_id}/cancel")
     def cancel_task(public_id: str):
-        row = task_row(public_id)
-        return core.tasks.cancel(public_id, owner(conversation(row["conversation"])))
-
-    @router.post("/api/v1/tasks/{public_id}/reconcile")
-    def reconcile_task(public_id: str, body: ReconcileRequest):
-        row = task_row(public_id)
-        return core.tasks.reconcile(
-            public_id, owner(conversation(row["conversation"])), body.run_id,
-            body.result.model_dump() if body.result else None,
-        )
-
-    @router.post("/api/v1/tasks/{public_id}/inputs")
-    def task_input(public_id: str):
-        task_row(public_id)
-        raise HTTPException(409, "configured harness does not support additional input")
-
-    @router.post("/api/v1/tasks/{public_id}/retry")
-    def retry_task(public_id: str, idempotency_key: str = Header(default="")):
-        row = task_row(public_id)
-        ref = conversation(row["conversation"])
-        event = action_event(ref, idempotency_key, row["goal"])
-        context = core.context_for(event, owner(ref), invited=True)
-        result = core.tasks.retry(public_id, event, owner(ref), context=context)
-        return {"public_id": result["public_id"], "state": result["state"]}
+        row, access = task_row(public_id)
+        require_permission("task.cancel", "task:" + row["id"])
+        try:
+            return core.tasks.cancel(row["public_id"], access)
+        except (KeyError, PermissionError) as error:
+            raise HTTPException(404, "task unavailable") from error
 
     @router.get("/api/v1/tasks/{public_id}/events")
     async def task_events(public_id: str, request: Request, last_event_id: str = Header(default="0")):
-        row = task_row(public_id)
+        row, _ = task_row(public_id)
+        require_permission("task.read", "task:" + row["id"])
         try:
             after = int(last_event_id)
         except ValueError:
@@ -540,89 +364,84 @@ def router(core, authenticate):
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
-    @router.get("/api/v1/memories")
-    def memories(conversation_id: str, status: str | None = None):
-        require_permission("memory.read", "conversation:" + conversation_id)
-        conversation(conversation_id)
-        with core.db.engine.connect() as c:
-            query = select(social_records.c.record_json).where(
-                social_records.c.conversation_id == conversation_id
+    @router.get("/api/v1/tasks/{public_id}/operations")
+    def task_operations(public_id: str):
+        row, access = task_row(public_id)
+        require_permission("task.operations.read", "task:" + row["id"])
+        try:
+            return core.recovery.list_operations(row["public_id"], access)
+        except KeyError as error:
+            raise HTTPException(404, "task operation unavailable") from error
+        except PermissionError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @router.get("/api/v1/tasks/{public_id}/operations/{operation_id}/readback")
+    async def readback_operation(public_id: str, operation_id: str):
+        row, access = task_row(public_id)
+        require_permission("task.operations.read", "task:" + row["id"])
+        try:
+            return await core.recovery.readback_operation(row["public_id"], access, operation_id)
+        except KeyError as error:
+            raise HTTPException(404, "task operation unavailable") from error
+        except PermissionError as error:
+            raise HTTPException(409, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
+    @router.post("/api/v1/tasks/{public_id}/runs/{run_id}/reconcile")
+    def reconcile_task(public_id: str, run_id: str, body: TaskReconciliationRequest):
+        row, access = task_row(public_id)
+        require_permission("task.reconcile", "task:" + row["id"])
+        try:
+            return core.recovery.reconcile_task(
+                row["public_id"], access, run_id,
+                result=body.result.model_dump(mode="json") if body.result else None,
+                resume=body.resume,
             )
-            if status:
-                query = query.where(social_records.c.status == status)
-            return [json.loads(raw) for raw in c.execute(query.limit(100)).scalars()]
+        except KeyError as error:
+            raise HTTPException(404, "recovery source unavailable") from error
+        except PermissionError as error:
+            raise HTTPException(409, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
 
-    @router.patch("/api/v1/memories/{memory_id}")
-    def correct_memory(memory_id: str, body: MemoryPatch):
-        record, access = memory_row(memory_id)
-        with core.db.engine.connect() as c:
-            raw = c.execute(
-                select(inbox.c.event_json).where(
-                    inbox.c.id == body.source_event_id, inbox.c.conversation_id == access.conversation.key
-                )
-            ).scalar_one_or_none()
-        if not raw:
-            raise HTTPException(422, "correction needs a new visible source event")
-        source = InboundEvent.model_validate_json(raw)
-        replacement = core.record(source, body.text, record.predicate)
-        return core.social.correct(access, memory_id, replacement).model_dump(mode="json")
+    def memory_scope():
+        return MemoryScope(owner_id=core.settings.owner.id)
 
-    @router.delete("/api/v1/memories/{memory_id}")
-    def delete_memory(memory_id: str):
-        _, access = memory_row(memory_id)
-        core.social.forget(access, memory_id)
-        return {"deleted": True}
-
-    @router.get("/api/v1/jargon")
-    def jargon(conversation_id: str):
-        return [r for r in memories(conversation_id) if r["predicate"].startswith("jargon:")]
-
-    @router.patch("/api/v1/jargon/{memory_id}")
-    def review_jargon(memory_id: str, publish: bool = False):
-        record, access = memory_row(memory_id)
-        if not record.predicate.startswith("jargon:"):
-            raise HTTPException(422, "not a jargon record")
-        if not publish:
-            core.social.forget(access, memory_id)
-            return {"disabled": True}
-        entry = json.loads(record.value_json)
-        verified = core.social.jargon(
-            access, entry["term"], entry["sense_id"], entry["definition"], record.source_event_ids
-        )
-        if verified.status != "active":
-            raise HTTPException(409, "insufficient independent evidence")
-        return core.social.commit(access, memory_id, authorized=True).model_dump(mode="json")
-
-    @router.get("/api/v1/expressions")
-    def expressions(conversation_id: str):
-        require_permission("expression.read", "conversation:" + conversation_id)
-        access = owner(conversation(conversation_id))
-        return {
-            "records": core.expressions.list(access),
-            "learning": core.expressions.status(access),
-            "learner_configured": core.expression_learner.configured,
-        }
-
-    @router.patch("/api/v1/expressions/{expression_id}")
-    def review_expression(expression_id: str, conversation_id: str, body: ExpressionPatch):
-        require_permission("expression.manage", "conversation:" + conversation_id)
-        require_permission("expression.manage", "expression:" + expression_id)
-        access = owner(conversation(conversation_id))
+    @router.get("/api/v1/memory/status")
+    async def memory_status():
+        scope = memory_scope()
+        require_permission("memory.read", "memory:" + scope.key)
         try:
-            return core.expressions.review(access, expression_id, **body.model_dump())
-        except ExpressionVersionConflict as error:
+            return await core.openviking.status(scope)
+        except PermissionError as error:
             raise HTTPException(409, str(error)) from error
 
-    @router.delete("/api/v1/expressions/{expression_id}")
-    def delete_expression(expression_id: str, conversation_id: str, expected_revision: int):
-        require_permission("expression.manage", "conversation:" + conversation_id)
-        require_permission("expression.manage", "expression:" + expression_id)
-        access = owner(conversation(conversation_id))
+    @router.get("/api/v1/memory/changes")
+    def memory_changes(after: int = Query(default=0, ge=0)):
+        scope = memory_scope()
+        require_permission("memory.read", "memory:" + scope.key)
+        if not core.openviking.enabled(scope):
+            return []
         try:
-            core.expressions.delete(access, expression_id, expected_revision=expected_revision)
-        except ExpressionVersionConflict as error:
+            changes = core.openviking.changes_since(scope, after=after)
+        except PermissionError as error:
             raise HTTPException(409, str(error)) from error
-        return {"deleted": True}
+        fields = ("seq", "id", "operation_id", "epoch", "kind", "refs", "created_at")
+        return [{key: item[key] for key in fields} for item in changes]
+
+    @router.post("/api/v1/memory/reconcile")
+    async def reconcile_memory_restore():
+        scope = memory_scope()
+        require_permission("memory.write", "memory:" + scope.key)
+        try:
+            return await core.openviking.reconcile_restore(scope)
+        except PermissionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(409, str(error)) from error
+        except httpx.HTTPError as error:
+            raise HTTPException(503, "OpenViking restore verification is unavailable") from error
 
     @router.get("/api/v1/config")
     def config_view():
@@ -630,8 +449,7 @@ def router(core, authenticate):
             saved = core.config_store.read()
             names = {
                 saved.admin_token_env, saved.internal_token_env, saved.model.api_key_env,
-                saved.judge.api_key_env, saved.memory.extractor_key_env, saved.memory.embedding_key_env,
-                saved.expression.learner_key_env,
+                saved.memory.openviking.api_key_env,
                 *(adapter.secret_env for adapter in saved.adapters),
             }
             return {
@@ -671,7 +489,7 @@ def router(core, authenticate):
         path = core.config_store.directory / (version + ".json")
         if not path.is_file():
             raise HTTPException(404, "config version unavailable")
-        return Settings.model_validate_json(path.read_text()).model_dump(mode="json")
+        return Settings.model_validate_json(path.read_text(), strict=False).model_dump(mode="json")
 
     @router.post("/api/v1/config/save")
     def save_config(body: ConfigRequest):
@@ -704,7 +522,7 @@ def router(core, authenticate):
                     409, "model changes require restarting Core and Worker with matching startup configuration"
                 )
             if changes(core.settings, body.config)["restart_required"]:
-                raise HTTPException(409, "connection, identity, judge or isolation changes require restart")
+                raise HTTPException(409, "connection, identity or isolation changes require restart")
             core.config_store.save(core.settings, body.config, hot=True)
             core.settings = body.config
             version = config_digest(body.config)
@@ -713,7 +531,9 @@ def router(core, authenticate):
 
     @router.get("/api/v1/artifacts/{task_id}/{digest}/download")
     def artifact(task_id: str, digest: str):
-        row = task_row(task_id)
+        row, access = task_row(task_id)
+        require_permission("task.read", "task:" + row["id"])
+        core.tasks.get(row["public_id"], access)
         if core.clock.now() > datetime.fromisoformat(row["created_at"]) + timedelta(days=30):
             raise HTTPException(410, "artifact download expired")
         result = json.loads(row["result_json"] or "{}")

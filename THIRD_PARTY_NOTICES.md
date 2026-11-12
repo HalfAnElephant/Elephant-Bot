@@ -15,7 +15,7 @@
 | OneBot v11 | 独立实现协议 | 固定快照未发现根 LICENSE，不复制其文档或夹具 |
 | QQ OpenAPI | 协议调用 | 应用权限与平台条款另行适用；不代表已获全量/主动权限 |
 
-许可证原文存于 `docs/upstream-evidence/`。锁定依赖的逐包许可清单随安装后生成；运行时分发须保留各自版权。网络服务发布时必须提供对应版本源码入口；部署配置要求明确源码地址，不能把本项目标为纯 MIT。未引入 Koishi、Hermes 或 DSH 运行时，故不虚填采用版本。
+许可证原文存于 `docs/upstream-evidence/`。锁定依赖的逐包许可清单随安装后生成；运行时分发须保留各自版权。网络服务发布时必须提供对应版本源码入口；部署配置要求明确源码地址，不能把本项目标为纯 MIT。未引入 Koishi、Hermes 的完整 Agent Loop 或 DSH 运行时；Hermes 技能子系统的移植版本见下文。
 
 ## MaiBot 表达与人格移植
 
@@ -61,3 +61,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+
+## Hermes Skills 移植
+
+来源：[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent/tree/67664e236ddcc45824b871d575677287599af152)，固定提交 `67664e236ddcc45824b871d575677287599af152`。
+Copyright (c) 2025 Nous Research，MIT License。完整许可随适配器保留于 `src/qqbot/adapters/hermes_skills/LICENSE.hermes`，原始文件 SHA256 和修改边界登记于 `_vendor/SOURCES.json`。
+
+移植原生 skills_list、skill_view、skill_manage（operations 数组），技能路径校验、描述预算、patch 匹配、跨进程重入锁、批量快照及失败回退、变更 ledger 和 blob 回退、后台复盘来源与先读后改保护，以及官方学习/复盘提示词。导入改为包内导入；profile/home、目录、配置通过宿主 ContextVar 绑定。技能正文只存标准 SKILL.md，旧 learned_skills 数据库停止写入并提供一次性核对导出。
+
+Elephant 负责当前身份授权、owner 目录、模型运行与统一调度；不移植 Hermes 的 Agent Loop、插件加载、项目自动发现、自动安装依赖、inline shell、Curator 定时调度或逐次审批。后台复盘保留实际 Agent 的计数与官方条件，由宿主排队，不回写原对话；技能仍是参考资料，不增加工具权限。第三方技能及其附件须单独核对许可。

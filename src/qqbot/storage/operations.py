@@ -5,6 +5,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from .memory_restore import apply_memory_ledger, export_memory_ledger
+
 
 def backup(source, destination):
     target = Path(destination)
@@ -34,6 +36,9 @@ def export_deletions(source, destination):
         }
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='expression_tombstones'").fetchone():
             result["expression_tombstones"] = [dict(row) for row in db.execute("SELECT * FROM expression_tombstones")]
+        memory = export_memory_ledger(db)
+        if memory is not None:
+            result["openviking"] = memory
     path = Path(destination)
     with path.open("x") as file:
         os.chmod(path, 0o600)
@@ -44,10 +49,13 @@ def restore(snapshot, destination, deletion_ledger):
     # Restore only to a new file, never replace a live WAL database.
     ledger = json.loads(Path(deletion_ledger).read_text())
     required = {"social_tombstones", "memory_deletions"}
-    if not required.issubset(ledger) or set(ledger) - required - {"expression_tombstones"}:
+    if not required.issubset(ledger) or set(ledger) - required - {"expression_tombstones", "openviking"}:
         raise ValueError("invalid deletion ledger")
     backup(snapshot, destination)
     try:
+        if "openviking" in ledger:
+            from qqbot.cli import migrate
+            migrate(str(destination), backup=False)
         with sqlite3.connect(destination) as db:
             if "expression_tombstones" in ledger:
                 db.execute("CREATE TABLE IF NOT EXISTS expression_tombstones ("
@@ -96,6 +104,8 @@ def restore(snapshot, destination, deletion_ledger):
             db.execute(
                 "UPDATE tasks SET state='NEEDS_RECONCILIATION' WHERE state IN ('RUNNING','RECOVERING','CANCEL_REQUESTED')"
             )
+            if "openviking" in ledger:
+                apply_memory_ledger(db, ledger["openviking"])
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     except BaseException:
         Path(destination).unlink(missing_ok=True)

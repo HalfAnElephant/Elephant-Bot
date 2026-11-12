@@ -21,6 +21,7 @@ class WorkerRequest(BaseModel):
     event_id: str | None = Field(default=None, max_length=128)
     seq: int | None = Field(default=None, ge=1)
     payload: dict | None = None
+    receipt: dict | None = None
 
 
 def internal_router(service, token):
@@ -134,7 +135,7 @@ def internal_router(service, token):
             if operation == "stopped":
                 return service.stopped(*args)
             if operation == "result" and body.result:
-                return service.submit(*args, body.result.model_dump(), stopped=body.stopped, quiescent=body.quiescent, process=body.process)
+                return service.submit(*args, body.result.model_dump(), stopped=body.stopped, quiescent=body.quiescent, process=body.process, receipt=body.receipt)
             raise ValueError("unsupported operation")
         except PermissionError as error:
             raise HTTPException(409, str(error)) from error

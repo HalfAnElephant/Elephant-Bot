@@ -23,15 +23,15 @@ def test_online_backup_restore_ledger(db, tmp_path):
         restore(snapshot, destination, ledger)
 
 
-def test_restore_old_snapshot_cannot_resurrect_deleted_memory(db, tmp_path, nap_config, nap_event, clock, incoming):
+def test_restore_old_snapshot_cannot_resurrect_deleted_memory(db, tmp_path, official_config, official_event, clock, incoming):
     import json
 
-    from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
+    from qqbot.adapters.qq_official.adapter import OfficialAdapter
     from qqbot.domain import AccessContext
     from qqbot.memory import MemoryRecord, SocialService
     from qqbot.storage.social_schema import social_records
 
-    event = incoming.accept(OneBotAdapter(nap_config, 'restore-test', incoming, clock).normalize(nap_event))[0]
+    event = incoming.accept(OfficialAdapter(official_config, 'restore-test', incoming, clock).normalize(official_event))[0]
     access = AccessContext(principal=event.principal, conversation=event.conversation, role='admin')
     service = SocialService(db, clock)
     record = MemoryRecord(scope_type='principal_in_conversation', scope_id=event.conversation.key,

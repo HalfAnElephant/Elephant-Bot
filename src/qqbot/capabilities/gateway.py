@@ -180,7 +180,7 @@ def standard_registry(*, github=None):
     from .verification import GitHubVerifier
     registry.verify = GitHubVerifier(cli)
     async def web(arguments, context):
-        from qqbot.harness.research import fetch_public
+        from qqbot.harness.public_web import fetch_public
         if "url" in arguments:
             url = arguments["url"]
             if not isinstance(url, str) or len(url) > 4096:

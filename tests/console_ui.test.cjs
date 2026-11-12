@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const {equal, changes, resolve, defaultValue, errorPath} = require('../src/qqbot/admin/console.js');
 
 test('draft equality ignores object key order but preserves null, empty and list order', () => {
@@ -50,9 +51,8 @@ test('new rule and free-form object defaults are representable without a depende
   assert.deepEqual(defaultValue({type: 'array', items: {type: 'string'}}, {}), []);
 });
 
-test('backend errors resolve to form fields across config, persona and policy payloads', () => {
+test('backend errors resolve to form fields across config and policy payloads', () => {
   assert.equal(errorPath(['body', 'config', 'adapters', 0, 'app_id']), 'adapters.0.app_id');
-  assert.equal(errorPath(['body', 'persona', 'traits', 1]), 'traits.1');
   assert.equal(errorPath(['body', 'policy', 'rules', 0, 'subject']), 'rules.0.subject');
   assert.equal(errorPath(['body', 'config']), '');
   assert.equal(errorPath(['expected_version']), 'expected_version');
@@ -61,14 +61,14 @@ test('backend errors resolve to form fields across config, persona and policy pa
 test('invalid JSON structure is rejected before replacing any editor draft', () => {
   const {assertShape} = require('../src/qqbot/admin/console.js');
   const schema = {type: 'object', properties: {
-    adapters: {type: 'array', items: {type: 'object', properties: {id: {type: 'string'}, kind: {type: 'string', enum: ['onebot', 'official']}}}},
+    adapters: {type: 'array', items: {type: 'object', properties: {id: {type: 'string'}, kind: {type: 'string', enum: ['official']}}}},
     endpoint: {anyOf: [{type: 'string'}, {type: 'null'}]}, style: {type: 'object', additionalProperties: true}
   }};
   assert.throws(() => assertShape({adapters: 'oops'}, schema), error => error.path === 'adapters');
   assert.throws(() => assertShape({adapters: [{id: 3}]}, schema), error => error.path === 'adapters.0.id');
   assert.throws(() => assertShape({adapters: [{kind: 'unknown'}]}, schema), error => error.path === 'adapters.0.kind');
   assert.throws(() => assertShape({style: []}, schema), error => error.path === 'style');
-  const draft = {adapters: [{id: 'first', kind: 'onebot'}], endpoint: null, style: {custom: ['a']}};
+  const draft = {adapters: [{id: 'first', kind: 'official'}], endpoint: null, style: {custom: ['a']}};
   const before = structuredClone(draft);
   assert.doesNotThrow(() => assertShape(draft, schema));
   assert.deepEqual(draft, before);
@@ -95,12 +95,11 @@ test('new permission rules target a named user and do not deny every operation g
 
 test('namespace inference uses known adapter identities and preserves explicit custom namespaces', () => {
   const {subjectNamespace} = require('../src/qqbot/admin/console.js');
-  const adapters = [{instance_id: 'nap', kind: 'onebot'}, {instance_id: 'official', kind: 'official', app_id: '123'}, {instance_id: 'unknown', kind: 'official'}];
-  assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'nap', identity_namespace: null}, adapters), 'qq');
+  const adapters = [{instance_id: 'official', kind: 'official', app_id: '123'}, {instance_id: 'unknown', kind: 'official'}];
   assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'qq'}, adapters, 'qq'), 'qq_app:123');
   assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'custom'}, adapters, 'qq'), 'custom');
   assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'unknown', identity_namespace: 'qq'}, adapters, 'qq'), null);
-  assert.equal(subjectNamespace({kind: 'group', adapter_instance_id: 'nap', identity_namespace: null}, adapters), null);
+  assert.equal(subjectNamespace({kind: 'group', adapter_instance_id: 'official', identity_namespace: null}, adapters), null);
 });
 
 test('policy validation preserves preset, unknown actions and additional selector constraints', () => {
@@ -114,7 +113,7 @@ test('policy validation preserves preset, unknown actions and additional selecto
 
 test('permission validation locates missing member identities, empty action lists and duplicate rule IDs', () => {
   const {validatePolicy} = require('../src/qqbot/admin/console.js');
-  const rule = {id: 'a', subject: {kind: 'group_member', adapter_instance_id: 'nap', identity_namespace: 'qq', group_id: '456', user_id: null}, actions: ['*'], resources: ['*']};
+  const rule = {id: 'a', subject: {kind: 'group_member', adapter_instance_id: 'official', identity_namespace: 'qq', group_id: '456', user_id: null}, actions: ['*'], resources: ['*']};
   assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.subject.user_id');
   rule.subject.user_id = '123'; rule.actions = [];
   assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.actions');
@@ -148,36 +147,13 @@ test('permission explanation identifies matching rule or fallback without requir
   assert.match(text, /策略版本 4/);
 });
 
-test('decision logs distinguish skipped model calls from model abstention', () => {
-  const {decisionJudgeStatus} = require('../src/qqbot/admin/console.js');
-  assert.equal(decisionJudgeStatus({decision: {signals: null}}), '未调用模型');
-  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: true}}}), '模型弃权');
-  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: false}}}), '模型正常返回');
-  assert.equal(decisionJudgeStatus({decision: {signals: null}, context: {judge_status: 'abstained'}}), '模型弃权');
-  assert.equal(decisionJudgeStatus({decision: {signals: {abstain: true}}, context: {judge_status: 'rule_only'}}), '规则判别器弃权（未调用模型）');
-});
-
-test('decision score display preserves zero, precise scores and historical threshold gaps', () => {
-  const {decisionScoreRows} = require('../src/qqbot/admin/console.js');
-  const rows = decisionScoreRows({signals: {directed_to_bot: 0, useful_contribution: 0.74999, private_exchange: 0.1}}, {useful_contribution: 0.75, private_exchange: 0});
-  assert.deepEqual(rows[0], {label: '面向机器人', score: 0, threshold: '仅记录'});
-  assert.deepEqual(rows[3], {label: '有用贡献', score: 0.74999, threshold: '≥ 0.75'});
-  assert.deepEqual(rows[4], {label: '他人私人交流', score: 0.1, threshold: '≤ 0'});
-  assert.deepEqual(decisionScoreRows({signals: {proactive_allowed: 0.1}})[5], {label: '主动参与偏好允许', score: 0.1, threshold: '≥ 0.5'});
-  assert.equal(rows[1].threshold, '历史未记录');
-  assert.equal(decisionScoreRows({signals: null})[0].score, '—');
-  assert.equal(decisionScoreRows({signals: {abstain: true, useful_contribution: 0}})[3].score, '—');
-});
-
-test('conversation search handles names, remote IDs, case, whitespace and empty lists', () => {
-  const {filterConversations, conversationModes} = require('../src/qqbot/admin/console.js');
-  const items = [{id: 'one:123', display_label: '学习群（123）', remote_id: '123'}, {id: 'two:456', display_label: 'Alice（456）', remote_id: '456'}];
-  assert.deepEqual(filterConversations(items, ' 学习 '), [items[0]]);
-  assert.deepEqual(filterConversations(items, 'ALICE'), [items[1]]);
-  assert.deepEqual(filterConversations(items, '456'), [items[1]]);
-  assert.deepEqual(filterConversations(items, 'one:'), [items[0]]);
-  assert.deepEqual(filterConversations(items, 'missing'), []);
-  assert.deepEqual(filterConversations(items, ''), items);
-  assert.deepEqual(filterConversations([], ''), []);
-  for (const mode of ['addressed_only', 'silent', 'shadow', 'social']) assert.equal(conversationModes[mode].length, 2);
+test('console contains only current host-task and configuration workflows', () => {
+  const source = fs.readFileSync('src/qqbot/admin/console.js', 'utf8');
+  for (const retired of ['/api/v1/persona', '/api/v1/memories', '/api/v1/jargon', '/api/v1/expressions',
+    '/decision-logs', '/api/v1/conversations', 'speak_up', 'social_evaluated_conversations', 'judge.', 'expression.']) {
+    assert.equal(source.includes(retired), false, retired);
+  }
+  assert.match(source, /request\('\/api\/v1\/tasks'\)/);
+  assert.match(source, /body: \{goal: required\('task-goal'/);
+  assert.doesNotMatch(source, /conversation_id:\s*cid\(\)/);
 });

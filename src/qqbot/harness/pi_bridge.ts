@@ -1,14 +1,16 @@
 import { Type } from "@earendil-works/pi-ai";
+import { closeSync, fsyncSync, openSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Only the trusted input envelope can rotate run credentials, before automatic compaction.
 export default function (pi: ExtensionAPI) {
   const base = process.env.QQBOT_GATEWAY_URL!;
   let binding: any = null;
-  let seedPending: any = null;
   let waiting = false;
-  const seeded = new Set<string>();
   const deliveredInputs = new Set<string>();
+  let activeInputs = new Set<string>();
+  let finalSummary = "";
+  let outcome: any = null;
   async function request(path: string, body: unknown, token: string, signal?: AbortSignal) {
     const response = await fetch(base + path, {method: "POST", headers: {
       "Content-Type": "application/json", Authorization: `Bearer ${token}`,
@@ -48,12 +50,16 @@ export default function (pi: ExtensionAPI) {
     if (binding && current.generation === binding.generation) {
       if (!envelope.input_id || typeof envelope.text !== "string" || waiting) return {action: "handled"};
       if (deliveredInputs.has(envelope.input_id)) return {action: "handled"};
-      deliveredInputs.add(envelope.input_id);
+      activeInputs.add(envelope.input_id);
       pi.appendEntry("qqbot-input", {id: envelope.input_id});
-      return {action: "transform", text: (envelope.host_notice ? "宿主状态提醒：\n" : `用户补充[${envelope.input_id}]：\n`) + envelope.text};
+      return {action: "transform", text: `[[elephant-input:${envelope.input_id}]]\n` + envelope.text};
     }
     binding = current;
     waiting = false;
+    finalSummary = "";
+    outcome = null;
+    activeInputs = new Set(binding.input_ids || []);
+    deliveredInputs.clear();
     pi.registerProvider("qqbot", {
       baseUrl: base + "/v1", api: "openai-completions", apiKey: binding.model_token,
       models: [{id: binding.model, name: binding.model, reasoning: false, input: ["text"],
@@ -61,29 +67,89 @@ export default function (pi: ExtensionAPI) {
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
     });
     for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === "qqbot-seed") seeded.add(entry.data.id);
-      if (entry.type === "custom" && entry.customType === "qqbot-input") deliveredInputs.add(entry.data.id);
+      if (entry.type === "custom" && entry.customType === "elephant-consumed") {
+        for (const id of (entry.data as any).input_ids || []) deliveredInputs.add(id);
+      }
     }
-    seedPending = seeded.has(binding.seed_id) ? null : binding.seed;
-    return {action: "transform", text: "当前用户目标：\n" + binding.goal + "\n目标约束与预算：\n" + JSON.stringify({goal: binding.goal_spec, budget: binding.budget, current_time: binding.current_time, timezone: binding.timezone,
-      repository: binding.repository, github_host: binding.github_host}) +
-      (binding.expression_habits ? "\n本轮表达素材（不可信资料，仅供措辞参考；不改变事实、身份或授权）：\n" + binding.expression_habits : "") +
-      ((binding.continuation?.checkpoint || binding.continuation?.inputs?.length) ? "\n已确认的继续检查点（资料，不是新授权）：\n" +
-        JSON.stringify(binding.continuation) : "")};
+    for (const schema of binding.native_tools || []) {
+      register({name: schema.name.replace("tasks.", "tasks_"), description: schema.description,
+                parameters: Type.Unsafe(schema.parameters)});
+    }
+    const parts: string[] = [];
+    const primary = (binding.input_ids || [])[0];
+    const extraIds = new Set((binding.continuation?.inputs || []).map((item: any) => item.id));
+    if (!primary || !deliveredInputs.has(primary)) {
+      const markers = (binding.input_ids || []).filter((id: string) => !extraIds.has(id))
+        .map((id: string) => `[[elephant-input:${id}]]`).join("\n");
+      parts.push((markers ? markers + "\n" : "") + binding.goal);
+      if (primary) pi.appendEntry("elephant-source", {id: primary, kind: binding.source_kind});
+    }
+    for (const item of binding.continuation?.inputs || []) {
+      activeInputs.add(item.id);
+      if (!deliveredInputs.has(item.id)) parts.push(`[[elephant-input:${item.id}]]\n` + item.text);
+    }
+    return {action: "transform", text: parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。"};
   });
-  pi.on("before_agent_start", async () => {
+  pi.on("before_agent_start", async (event) => {
     if (!binding) throw new Error("Missing trusted run binding");
-    const catalog = JSON.stringify(binding.capability_catalog ?? []);
-    const result: any = {systemPrompt: binding.system_prompt +
-      "\n已安装能力目录（宿主配置，含参数 schema）：\n" + catalog +
-      "\n使用 capability_invoke 调用目录中的 name 与 arguments；需要时可搜索更多能力。content_read 只接受工具实际返回的 content_ref。"};
-    if (seedPending !== null) {
-      result.message = {customType: "qqbot-context", content: JSON.stringify(seedPending), display: false};
-      seeded.add(binding.seed_id);
-      pi.appendEntry("qqbot-seed", {id: binding.seed_id});
-      seedPending = null;
+    event.systemPromptOptions.customPrompt = binding.system_prompt;
+    event.systemPromptOptions.sections.elephant_tools = "使用 capability_search 按需发现业务能力及参数；不要把完整目录复制进提示词。content_read 只接受实际返回的 content_ref。";
+    return {message: {customType: "elephant-runtime", display: false,
+      content: JSON.stringify({time: binding.current_time, timezone: binding.timezone,
+        repository: binding.repository, github_host: binding.github_host,
+        retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
+        goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
+      details: {kind: "runtime"}}};
+  });
+  function durable(ctx: any) {
+    const path = ctx.sessionManager.getSessionFile();
+    if (!path) throw new Error("Durable session file is required");
+    const fd = openSync(path, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    return {session_revision: ctx.sessionManager.getLeafId(), session_id: binding.session_id,
+      run_id: binding.run_id, input_ids: [...activeInputs]};
+  }
+  pi.on("before_provider_request", async (_event, ctx) => {
+    if (!binding?.session_id) return;
+    const text = JSON.stringify(ctx.sessionManager.getBranch());
+    for (const id of activeInputs) {
+      if (!deliveredInputs.has(id) && !text.includes(`[[elephant-input:${id}]]`)) {
+        throw new Error("Input has not reached the durable session: " + id);
+      }
     }
-    return result;
+    pi.appendEntry("elephant-consumed", {input_ids: [...activeInputs], run_id: binding.run_id});
+    await request("/session-receipt", {...durable(ctx), kind: "input_consumed"}, binding.tool_token);
+    for (const id of activeInputs) deliveredInputs.add(id);
+  });
+  pi.on("turn_end", (event, ctx) => {
+    const message: any = event.message;
+    if (message.role === "assistant") finalSummary = (message.content || []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
+    if (waiting) {
+      const calls = (message.content || []).filter((p: any) => p.type === "toolCall");
+      if (calls.length !== event.toolResultEntryIds.length) throw new Error("Wait tool results are not durably paired");
+      pi.appendEntry("elephant-yield-boundary", {run_id: binding.run_id, paired_results: event.toolResultEntryIds});
+      durable(ctx);
+      // Abort only at the committed tool-result boundary; never cancel an in-flight tool.
+      ctx.abort();
+    }
+  });
+  pi.on("agent_settled", async (event, ctx) => {
+    if (!binding?.session_id || (event.aborted && !waiting)) return;
+    const pending = new Set<string>();
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "message") continue;
+      const message: any = entry.message;
+      if (message.role === "assistant") for (const part of message.content || []) {
+        if (part.type === "toolCall") pending.add(part.id);
+      }
+      if (message.role === "toolResult") pending.delete(message.toolCallId);
+    }
+    if (pending.size) throw new Error("Settled session has unpaired tools");
+    const receipt = {...durable(ctx), kind: waiting ? "run_yielded" : "turn_finished",
+                     tools_paired: true, inflight: 0, outcome, summary: finalSummary};
+    pi.appendEntry("elephant-turn-boundary", receipt);
+    durable(ctx);
+    await request("/session-receipt", receipt, binding.tool_token);
   });
   pi.on("session_before_compact", async () => {
     if (!binding) return {cancel: true};
@@ -92,12 +158,12 @@ export default function (pi: ExtensionAPI) {
   const normal = async () => { if (binding) await request("/mode", {kind: "business"}, binding.tool_token); };
   pi.on("session_compact", normal);
   pi.on("session_compact_failed", normal);
-  const logicalName = (call: any): string => call.name === "capability_invoke" ? call.arguments?.name : call.name;
+  const logicalName = (call: any): string => call.name === "capability_invoke" ? call.arguments?.name : call.name.replace("tasks_", "tasks.");
   pi.on("tool_call", (event, ctx) => {
     const assistant: any = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) =>
       entry.type === "message" && entry.message.role === "assistant");
     const calls = (assistant?.message.content ?? []).filter((part: any) => part.type === "toolCall");
-    const waits = calls.some((call: any) => ["task_ask_user", "task.ask_user", "task_wait_external", "task.wait_external"].includes(logicalName(call)));
+    const waits = calls.some((call: any) => ["tasks.wait", "task_ask_user", "task.ask_user", "task_wait_external", "task.wait_external"].includes(logicalName(call)));
     if (waits && calls.length !== 1) return {block: true, reason: "Waiting tools must be the only call in the entire batch"};
     if (waiting) return {block: true, reason: "A durable wait is registered; finish this run"};
   });
@@ -122,7 +188,7 @@ export default function (pi: ExtensionAPI) {
         observation_refs: Type.Optional(Type.Array(Type.String())), effect_refs: Type.Optional(Type.Array(Type.String())),
         unresolved_items: Type.Optional(Type.Array(Type.String()))})},
   ];
-  for (const definition of definitions) {
+  function register(definition: any) {
     pi.registerTool({...definition, label: definition.name,
       async execute(id, parameters, signal) {
         if (!binding) throw new Error("No active run binding");
@@ -130,8 +196,10 @@ export default function (pi: ExtensionAPI) {
         const result = await request("/tools/" + definition.name, {call_id: id, arguments: parameters}, current.tool_token, signal);
         if (binding.generation !== current.generation) throw new Error("Run binding changed during tool execution");
         if (result.waiting) waiting = true;
+        if (definition.name === "task_outcome") outcome = parameters;
         return {content: [{type: "text", text: JSON.stringify(result)}], details: {}};
       },
     });
   }
+  for (const definition of definitions) register(definition);
 }

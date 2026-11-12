@@ -1,5 +1,5 @@
 [Unit]
-Description=Elephant QQ Core
+Description=Elephant Leader and Workers
 After=network-online.target
 Wants=network-online.target
 
@@ -7,10 +7,14 @@ Wants=network-online.target
 Type=simple
 User=qqbot
 Group=qqbot-worker
-SupplementaryGroups=qqbot
+SupplementaryGroups=qqbot systemd-journal
 WorkingDirectory=/opt/qqbot
 EnvironmentFile=/etc/qqbot/core.env
+EnvironmentFile=/etc/qqbot/jobs.env
 ExecStart=/opt/qqbot/.venv/bin/qqbot serve --config /etc/qqbot/core.yaml
+ExecStopPost=+/usr/local/libexec/elephant-daemon-stopped
+KillMode=control-group
+TimeoutStopSec=30
 Restart=on-failure
 RestartSec=3
 RuntimeDirectory=qqbot
@@ -21,7 +25,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/qqbot /run/qqbot
+ReadWritePaths=/var/lib/qqbot /run/qqbot /var/lib/qqbot-daemon-stops
 
 [Install]
 WantedBy=multi-user.target

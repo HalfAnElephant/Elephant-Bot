@@ -1,0 +1,78 @@
+#!/usr/bin/python3 -I
+"""ExecStopPost attests that the old daemon and every host-tool cgroup stopped."""
+import json
+import os
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+
+def service_cgroup(path):
+    parts = Path(path).parts
+    service = next((index for index in range(len(parts) - 1, -1, -1) if parts[index].endswith(".service")), None)
+    if service is None:
+        raise ValueError("a systemd service cgroup is required")
+    return str(Path(*parts[:service + 1]))
+
+
+def cgroup_is_drained(root, own_pid):
+    found_self = False
+    for path in (root / "cgroup.procs", *root.rglob("*/cgroup.procs")):
+        members = {int(pid) for pid in path.read_text().split()}
+        found_self |= own_pid in members
+        if members - {own_pid}:
+            return False
+    return found_self
+
+
+def write_receipt(directory, epoch, receipt):
+    directory.mkdir(mode=0o755, exist_ok=True)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = "." + epoch + "." + str(os.getpid()) + ".tmp"
+    try:
+        info = os.fstat(directory_fd)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("untrusted stop receipt directory")
+        # The service's UMask=0077 must not make root's evidence unreadable to the daemon.
+        os.fchmod(directory_fd, 0o755)
+        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o644, dir_fd=directory_fd)
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            json.dump(receipt, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, epoch + ".json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def main():
+    if os.geteuid() != 0:
+        raise SystemExit("root is required")
+    epoch = os.environ.get("INVOCATION_ID", "")
+    if not re.fullmatch(r"[a-f0-9]{32}", epoch):
+        raise SystemExit("systemd invocation is required")
+    entries = Path("/proc/self/cgroup").read_text().splitlines()
+    cgroup = next((line.split(":", 2)[2] for line in entries if line.startswith("0::")), None)
+    if not cgroup or not cgroup.startswith("/") or ".." in Path(cgroup).parts:
+        raise SystemExit("unified service cgroup is required")
+    cgroup = service_cgroup(cgroup)
+    root = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
+    if not cgroup_is_drained(root, os.getpid()):
+        raise SystemExit("old daemon cgroup is not empty")
+    receipt = {"host_epoch": epoch, "stopped": True, "cgroup_empty": True, "cgroup": cgroup,
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "stopped_at": datetime.now(UTC).isoformat()}
+    if not cgroup_is_drained(root, os.getpid()):
+        raise SystemExit("old daemon cgroup changed before attestation")
+    write_receipt(Path("/var/lib/qqbot-daemon-stops"), epoch, receipt)
+
+
+if __name__ == "__main__":
+    main()

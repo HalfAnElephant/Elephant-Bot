@@ -154,6 +154,6 @@ def test_button_admin_endpoint_requires_auth_and_identity(db, clock):
     response = client.post("/api/v1/qq/qq/buttons", json=body, headers={"authorization": "Bearer test"})
     assert response.status_code == 200, response.text
     assert len(response.json()["keyboard"]["content"]["rows"][0]["buttons"]) == 2
-    body["principal"]["identity_namespace"] = "onebot:qq"
+    body["principal"]["identity_namespace"] = "qq"
     assert client.post("/api/v1/qq/qq/buttons", json=body,
                        headers={"authorization": "Bearer test"}).status_code == 422

@@ -1,0 +1,60 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent",
+  "commit": "67664e236ddcc45824b871d575677287599af152",
+  "files": {
+    "tools/skill_manager_batch.py": {
+      "sha256": "a5fd36ae5790216f47832f21b48e61dc3dd6785d6eef9965de0bff90e5259870"
+    },
+    "tools/skill_manager_guards.py": {
+      "sha256": "3ca2e672a39061f3e2d9f58e402d5fb582a77d002d2d743d476e21a5a335e866"
+    },
+    "tools/skill_ledger.py": {
+      "sha256": "56121bfa4e5daa57ca7f9eb1767817e06e0ad00fae2e4c7f72bcaaf299e43c27"
+    },
+    "tools/skill_usage.py": {
+      "sha256": "30898ee7980911656ee7cc3c82b3104057d6de17b1bfce1ce18185944b166260"
+    },
+    "tools/skill_provenance.py": {
+      "sha256": "5c492a925cdde61c3257eb5db76568822d26be3d9a2c40d364a9997a3a7cb576"
+    },
+    "tools/path_security.py": {
+      "sha256": "13439f63f555e7f441e1d8b7e1091906ac67f125fd97cdd227c5ff0c5e4a7de1"
+    },
+    "tools/fuzzy_match.py": {
+      "sha256": "24a8febadad95cfe7a96f979cac92a5eed002dcc7d78c59229c664a79ac464aa"
+    },
+    "tools/escape_drift_autocorrect.py": {
+      "sha256": "d0860600cb93d0fa52f81379e99ffc3a0d47cf0dff7b73cbcd907db3f1ac2d6f"
+    },
+    "tools/skill_manager_tool.py": {
+      "sha256": "bd605f3ab98bf02d71a8746929cb87202017aaa3617b6aaf9800c15180730dbd"
+    },
+    "agent/skill_utils.py": {
+      "sha256": "9b643866caf9b0db3b568045e2b49bf2903f89197497c815a492afec89b33722"
+    },
+    "tools/skills_tool_plugin.py": {
+      "sha256": "b536d0798530f27997b7a33879f9d907993c3f15048781155037b8d6d49f6196"
+    },
+    "tools/skills_tool.py": {
+      "sha256": "bc82971986d99a568401cccba87db5bf7fba65d02492fc90afa365ed4c4ce495"
+    },
+    "agent/prompt_builder.py": {
+      "sha256": "964cdc507f35850651da978251d6145b6c6daf65a8fa81b982962906dd35802f"
+    },
+    "agent/background_review.py": {
+      "sha256": "76a3c5e4a30c5c5e069f57085b20953dff3f2c1ee8b826fe29c4e2dd1e39919b"
+    },
+    "tools/skill_lock.py": {
+      "sha256": "748b3a2a1c3664c7eabdef5b949aba2165b6505b3f64dddee9b502a445ed5aad",
+      "selected_symbols": [
+        "skill_refusal"
+      ]
+    }
+  },
+  "adaptations": [
+    "Package-local imports and host ContextVar owner/profile/config binding.",
+    "Owner-only discovery; no plugins, project auto-discovery, automatic dependency installation, inline shell, or approval staging.",
+    "Pi adapter owns model execution; upstream review prompt/conditions/provenance/guards retained, host schedules the review.",
+    "Discovery cache is owner-keyed; symlinked skill trees fail closed."
+  ]
+}
