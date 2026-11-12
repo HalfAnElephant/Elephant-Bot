@@ -108,16 +108,13 @@ async def test_empty_search_returns_complete_schemas_in_one_response(discovery):
     assert not calls and not any(operation == "ledger" for operation, _ in core.calls)
 
 
-async def test_binding_exposes_callable_catalog_and_host_repository(discovery):
+async def test_binding_exposes_host_repository_and_keeps_catalog_on_demand(discovery):
     gateway, _core, _calls = discovery
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
         response = await client.post("/binding", json={"binding_id": gateway.binding},
                                      headers={"Authorization": "Bearer " + gateway.process_token})
     result = response.json()
-    catalog = {entry["name"]: entry for entry in result["capability_catalog"]}
-    assert set(catalog) == set(gateway.registry.entries)
-    assert catalog["gh.exec"]["parameters"]["required"] == ["argv"]
-    assert set(catalog["gh.exec"]) == {"name", "description", "parameters"}
+    assert "capability_catalog" not in result
     assert result["repository"] == "owner/repo" and result["github_host"] == "github.com"
 
 
@@ -230,7 +227,7 @@ def sse(message):
     return "data: " + json.dumps(event) + "\n\ndata: " + json.dumps(finish) + "\n\ndata: [DONE]\n\n"
 
 
-async def test_real_pi_invokes_github_from_initial_catalog_without_search(discovery, tmp_path):
+async def test_real_pi_discovers_github_then_invokes_it(discovery, tmp_path):
     gateway, _core, calls = discovery
     requests = []
     def upstream(request):
@@ -238,8 +235,12 @@ async def test_real_pi_invokes_github_from_initial_catalog_without_search(discov
         requests.append(payload)
         if len(requests) == 1:
             system = payload["messages"][0]["content"]
-            assert '"name":"gh.exec"' in system and '"argv"' in system
+            assert "capability_search" in system
             assert "owner/repo" in str(payload["messages"])
+            message = {"role": "assistant", "tool_calls": [{"id": "fixture_search", "type": "function", "function": {
+                "name": "capability_search", "arguments": json.dumps({"query": "github PR"})}}]}
+        elif len(requests) == 2:
+            assert "gh.exec" in str(payload["messages"])
             message = {"role": "assistant", "tool_calls": [{"id": "fixture_gh", "type": "function", "function": {
                 "name": "capability_invoke", "arguments": json.dumps({"name": "gh.exec", "arguments": {
                     "argv": ["pr", "list", "--json", "number,title,url"]}})}}]}
@@ -252,7 +253,7 @@ async def test_real_pi_invokes_github_from_initial_catalog_without_search(discov
     async with real_pi(gateway, tmp_path) as runner:
         result = await runner.run("trusted goal")
     assert result.summary == "There is one fixture PR, #7."
-    assert len(calls) == 1 and len(requests) == 2
+    assert len(calls) == 1 and len(requests) == 3
     assert calls[0][1].repository == "owner/repo" and calls[0][1].principal == {"user_id": "real-user"}
 
 

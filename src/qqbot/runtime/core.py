@@ -255,11 +255,20 @@ class Core:
             previous = conn.execute(select(dialogue_inputs.c.event_json).where(
                 dialogue_inputs.c.dialogue_id == dialogue_id, dialogue_inputs.c.id != event.event_id)
                 .order_by(dialogue_inputs.c.created_at.desc()).limit(8)).scalars().all() if dialogue_id else []
+            if dialogue_id and event.reply_to:
+                replied = conn.execute(select(dialogue_inputs.c.event_json).join(inbox,
+                    inbox.c.id == dialogue_inputs.c.id).where(
+                    dialogue_inputs.c.dialogue_id == dialogue_id,
+                    inbox.c.message_id == event.reply_to, inbox.c.conversation_id == event.conversation.key,
+                ).limit(1)).scalar_one_or_none()
+                if replied and replied not in previous:
+                    previous.insert(0, replied)
         for candidate in previous:
             prior = InboundEvent.model_validate_json(candidate)
             age = (event.received_at - prior.received_at).total_seconds()
             if (prior.conversation != event.conversation or prior.principal != event.principal
-                    or not 0 <= age <= 600 or not any(s.type == "image" for s in prior.segments)):
+                    or age < 0 or (age > 600 and prior.platform_message_id != event.reply_to)
+                    or not any(s.type == "image" for s in prior.segments)):
                 continue
             manifest = {"kind": "inbox", "id": prior.event_id, "digest": hashlib.sha256(candidate.encode()).hexdigest()}
             if self.validate_context(access, {"source_manifest": [manifest]}):
@@ -393,21 +402,41 @@ class Core:
             self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
 
     def pre_send(self, envelope, *, stream_cleanup=False):
+        if stream_cleanup:
+            from qqbot.storage.stream_schema import stream_messages
+            with self.db.engine.connect() as conn:
+                persisted = conn.execute(select(stream_messages.c.envelope_json).where(
+                    stream_messages.c.id == envelope.origin_id, stream_messages.c.kind == "answer",
+                    stream_messages.c.stream_id.is_not(None), stream_messages.c.state == "SENDING",
+                )).scalar_one_or_none()
+            if persisted != envelope.model_dump_json():
+                return False
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
         if envelope.origin_kind == "task":
             with self.db.engine.connect() as conn:
+                from qqbot.storage.task_schema import runs
                 task = conn.execute(select(tasks, notifications.c.run_id.label("notification_run_id"),
-                    notifications.c.state.label("notification_state")).join(notifications, notifications.c.task_id == tasks.c.id)
+                    notifications.c.state.label("notification_state"), notifications.c.purpose.label("notice_purpose"),
+                    runs.c.run_reason.label("notice_run_reason")).join(notifications, notifications.c.task_id == tasks.c.id)
+                    .outerjoin(runs, runs.c.id == notifications.c.run_id)
                     .where(notifications.c.id == envelope.origin_id)).mappings().first()
-            if not task or task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
+            if not task:
+                return False
+            if not stream_cleanup and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
+                return False
+            if not stream_cleanup and task["state"] == "EXPIRED" and not (
+                task["notice_run_reason"] == "notification" and task["notice_purpose"] == "result"
+            ):
                 return False
             with self.db.engine.connect() as conn:
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
             event = InboundEvent.model_validate_json(task["event_json"])
-            return self.validate_context(self.access(event), json.loads(task["context_json"]))
+            access = self.access(event)
+            return (self.permissions.check(access, "notification.send", "conversation:" + envelope.target.key).allowed
+                    and self.validate_context(access, json.loads(task["context_json"])))
         return True
 
     async def tick(self, *, dispatch=True):

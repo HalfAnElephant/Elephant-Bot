@@ -8,12 +8,11 @@ from sqlalchemy import insert, select, update
 from qqbot.adapters.openviking.service import BACKEND_ERRORS
 from qqbot.adapters.pi.sessions import export_session
 from qqbot.contracts.memory import MemoryCorrection, MemoryDeletion, MemoryScope, SourceBatch
-from qqbot.domain import InboundEvent, Surface
+from qqbot.domain import InboundEvent, Surface, stable_id
 from qqbot.domain.execution import TaskGoal
-from qqbot.domain import stable_id
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import dialogues, leader_inbox
-from qqbot.storage.memory_sync_schema import memory_owners, memory_streams
+from qqbot.storage.memory_sync_schema import memory_barriers, memory_owners, memory_sources, memory_streams
 from qqbot.storage.schema import outbox
 from qqbot.storage.stream_schema import stream_messages, stream_runs
 from qqbot.storage.task_schema import inputs, notifications, processes, runs, sessions, tasks
@@ -133,7 +132,7 @@ class KnowledgeRuntime:
             self.core.tasks.graph.cancel_tree(conn, child, reason="revoked")
         notice_ids = list(conn.execute(select(notifications.c.id).where(notifications.c.task_id.in_(tree_ids))).scalars())
         for row in conn.execute(select(outbox).where(outbox.c.state.in_(
-                ["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER", "SENDING"]))).mappings():
+                ["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER", "STREAM_PENDING", "SENDING"]))).mappings():
             envelope = json.loads(row["envelope_json"])
             if envelope.get("origin_kind") == "task" and envelope.get("origin_id") in notice_ids:
                 state = "UNKNOWN" if row["state"] == "SENDING" else "FAILED"
@@ -178,10 +177,23 @@ class KnowledgeRuntime:
         for root in roots:
             context = json.loads(root["context_json"])
             marker = context.get("memory_replan_pending")
+            if not marker and context.get("memory_scope"):
+                scope = MemoryScope.model_validate(context["memory_scope"])
+                with self.core.db.engine.connect() as conn:
+                    epoch = conn.execute(select(memory_owners.c.epoch).where(memory_owners.c.id == scope.key)).scalar_one_or_none()
+                    fences = [dict(row) for row in conn.execute(select(memory_barriers).where(
+                        memory_barriers.c.scope_id == scope.key, memory_barriers.c.epoch > context.get("memory_epoch", -1))
+                        .order_by(memory_barriers.c.epoch)).mappings()]
+                if epoch is not None and epoch != context.get("memory_epoch") and fences:
+                    with self.core.db.transaction() as conn:
+                        self.invalidate_root(conn, root, scope, fences[-1]["operation_id"],
+                            [item["source_id"] for item in fences if item["source_id"]])
+                    continue
             if not marker:
                 continue
             scope = MemoryScope.model_validate(context["memory_scope"])
-            if (await self.memory.status(scope))["state"] != "READY":
+            memory_status = await self.memory.status(scope)
+            if memory_status["state"] != "READY":
                 continue
             with self.core.db.engine.connect() as conn:
                 worker_runs = [dict(row) for row in conn.execute(select(runs).where(runs.c.task_id.in_(
@@ -212,11 +224,25 @@ class KnowledgeRuntime:
             event = InboundEvent.model_validate_json(root["event_json"])
             source_ids = {event.event_id, *(item["id"] for item in context.get("source_manifest", []))}
             blocked = bool(source_ids.intersection(marker["source_ids"]))
+            with self.core.db.engine.connect() as conn:
+                business_inputs = [dict(row) for row in conn.execute(select(inputs).where(
+                    inputs.c.task_id == root["id"], inputs.c.kind.in_(["followup", "answer"]),
+                    inputs.c.actor == root["requester"]).order_by(inputs.c.created_at, inputs.c.id)).mappings()]
+                revoked_hashes = set(conn.execute(select(memory_sources.c.content_hash).where(
+                    memory_sources.c.scope_id == scope.key, memory_sources.c.source_id.in_(marker["source_ids"]))).scalars())
+            blocked = blocked or any(item["source_id"] in marker["source_ids"] or
+                hashlib.sha256(item["text"].encode()).hexdigest() in revoked_hashes for item in business_inputs)
+            goal = "\n".join([event.text, *(item["text"] for item in business_inputs)])
             fresh = {key: value for key, value in context.items() if key in {
                 "limits", "timezone", "model_context_window", "scope", "principal", "preferences", "owner_id"}}
             fresh["source_manifest"] = [item for item in context.get("source_manifest", []) if item["id"] == event.event_id]
             fresh["images"] = [item for item in context.get("images", []) if item.get("source") == event.event_id]
-            fresh = await self.prepare(event, fresh)
+            if blocked:
+                goal = "原始任务输入已被撤销，无法自动重规划。"
+                fresh.update(source_manifest=[], images=[], memory_scope=scope.model_dump(),
+                    memory_epoch=memory_status["memory_epoch"], memory_status="blocked", retrieved_data=[])
+            else:
+                fresh = await self.prepare(event, fresh)
             if not blocked and (fresh.get("memory_status") != "ready" or not self.valid(fresh)):
                 continue
             fresh["memory_replan"] = {"operation_ids": marker["operation_ids"],
@@ -229,7 +255,7 @@ class KnowledgeRuntime:
                     continue
                 revision = current["goal_revision"] + 1
                 conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
-                    context_json=json.dumps(fresh), goal=event.text, goal_json=TaskGoal(text=event.text).model_dump_json(),
+                    context_json=json.dumps(fresh), goal=goal, goal_json=TaskGoal(text=goal).model_dump_json(),
                     state="BLOCKED" if blocked else "WAITING_CHILDREN", stop_reason="business_source_revoked" if blocked else None,
                     result_json=None, goal_revision=revision, wait_json=None))
                 conn.execute(update(inputs).where(inputs.c.task_id.in_(select(tasks.c.id).where(

@@ -439,6 +439,7 @@ async def test_core_cleanup_gate_requires_persisted_stream_and_current_permissio
     s.core.permissions = SimpleNamespace(check=lambda *args: SimpleNamespace(allowed=s.core.allowed))
     s.core.access = lambda event: AccessContext(principal=event.principal, conversation=event.conversation)
     s.core.validate_context = lambda *args: True
+    s.core.knowledge = SimpleNamespace(delivery_valid=lambda *args: True)
     assert not Core.pre_send(s.core, envelope)
     assert not Core.pre_send(s.core, envelope, stream_cleanup=True)  # No cleanup intent yet.
     with s.core.db.transaction() as c:

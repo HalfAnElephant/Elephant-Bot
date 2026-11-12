@@ -18,10 +18,10 @@ from sqlalchemy import select
 from qqbot.config import Settings
 from qqbot.configuration import changes
 from qqbot.configuration import version as config_digest
+from qqbot.contracts.memory import MemoryScope
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef
 from qqbot.domain.messages import SendReceipt
 from qqbot.domain.tasks import TaskResult
-from qqbot.contracts.memory import MemoryScope
 from qqbot.permissions import (
     PermissionPolicy,
     PermissionRule,
@@ -42,6 +42,8 @@ class PolicyPatch(BaseModel):
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     goal: str = Field(min_length=1, max_length=16000)
+    success_checks: tuple[str, ...] = Field(default=(), max_length=20)
+    requested_outputs: tuple[str, ...] = Field(default=(), max_length=20)
 
 
 class ConfigRequest(BaseModel):
@@ -268,7 +270,7 @@ def router(core, authenticate):
             raise HTTPException(409, "tasks disabled")
         try:
             return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
-                                           success_checks=(), requested_outputs=())
+                                           success_checks=body.success_checks, requested_outputs=body.requested_outputs)
         except (ValueError, PermissionError) as error:
             raise HTTPException(422, str(error)) from error
 

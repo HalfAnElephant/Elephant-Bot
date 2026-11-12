@@ -115,6 +115,8 @@ class RunGateway:
         self.system_prompt = assemble_prompt(claim.get("role", "worker"),
             purpose=claim.get("purpose", "work"), preferences=claim.get("context", {}).get("preferences", ""),
             skills_guidance=SKILLS_GUIDANCE)
+        if self.notify_before_tools:
+            self.system_prompt += "\n开始业务工具前必须先单独调用 task_notify，确认宿主接受进度通知后再继续。"
         self.native_tools = native_tools(claim.get("role", "worker"), claim.get("purpose", "work"))
         self.wait_kind = None
         self.session_receipt = None
@@ -371,7 +373,7 @@ class RunGateway:
                 context = self.claim.get("context", {})
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
-                    "native_tools": list(self.native_tools.values()),
+                    "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
                     "repository": self.context.repository, "github_host": self.context.host,
                     "model_window": self.model_window, "output_tokens": max(self.provider.output_tokens, self.provider.compaction_output),
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],

@@ -75,6 +75,8 @@ export default function (pi: ExtensionAPI) {
       register({name: schema.name.replace("tasks.", "tasks_"), description: schema.description,
                 parameters: Type.Unsafe(schema.parameters)});
     }
+    const nativeNames = (binding.native_tools || []).map((schema: any) => schema.name.replace("tasks.", "tasks_"));
+    pi.setActiveTools(binding.role === "skill_review" ? nativeNames : [...definitions.map(d => d.name), ...nativeNames]);
     const parts: string[] = [];
     const primary = (binding.input_ids || [])[0];
     const extraIds = new Set((binding.continuation?.inputs || []).map((item: any) => item.id));

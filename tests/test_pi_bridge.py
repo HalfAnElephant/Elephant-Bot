@@ -265,8 +265,7 @@ async def test_locked_pi_recovers_once_from_real_upstream_overflow(compaction_se
 async def test_locked_pi_uses_one_million_window_for_large_normal_context(compaction_session):
     state = compaction_session
     state.gateway.revoke()
-    state.gateway.bind({**state.claim, "run_id": "large-context", "goal": "Read the relevant context and respond.",
-        "context": {**state.claim["context"], "seed": "相关上下文。" * 10000}})
+    state.gateway.bind({**state.claim, "run_id": "large-context", "goal": "Read the relevant context and respond.\n" + "相关上下文。" * 10000})
     result = await state.runner.run("Read the relevant context", keep_alive=True)
     assert result.status == "completed"
     assert len(state.requests) == 1 and state.requests[0]["kind"] == "business"
@@ -288,40 +287,41 @@ async def test_locked_pi_rejects_raw_tool_protocol_before_result(compaction_sess
 
 
 @pytest.mark.parametrize("notification", [False, True])
-async def test_locked_pi_receives_trusted_elephant_persona_for_every_speech_path(compaction_session, notification):
+async def test_locked_pi_receives_preferences_without_legacy_history_seed(compaction_session, notification):
     state = compaction_session
     state.gateway.revoke()
-    state.gateway.bind({**state.claim, "run_id": "persona-run",
+    state.gateway.bind({**state.claim, "run_id": "preference-run",
         "notification_status": "failed" if notification else None,
-        "context": {**state.claim["context"], "seed": {
-            "persona": {"core": {"name": "大象", "style": {"tone": "TRUSTED_PERSONA_SENTINEL"}}, "group": {}},
-            "history": [{"role": "user", "text": "UNTRUSTED_HISTORY_SENTINEL"}]}}})
+        "context": {**state.claim["context"], "preferences": "TRUSTED_PREFERENCE_SENTINEL",
+            "seed": {"history": [{"role": "user", "text": "RETIRED_HISTORY_SEED"}]}}})
     await state.runner.run("Say hello" if not notification else "Explain the verified failure", keep_alive=True)
     system = "\n".join(message["content"] for message in state.requests[0]["payload"]["messages"] if message["role"] == "system")
-    assert "你是大象" in system and "QQ 文字只用纯文本" in system
-    assert "TRUSTED_PERSONA_SENTINEL" in system
-    assert "UNTRUSTED_HISTORY_SENTINEL" not in system
-    users = [str(message["content"]) for message in state.requests[0]["payload"]["messages"]
-             if message["role"] == "user"]
-    assert all("TRUSTED_PERSONA_SENTINEL" not in message for message in users)
-    assert any("UNTRUSTED_HISTORY_SENTINEL" in message for message in users)
+    assert "个人助手大象" in system and "TRUSTED_PREFERENCE_SENTINEL" in system
+    assert "RETIRED_HISTORY_SEED" not in json.dumps(state.requests[0]["payload"])
     assert state.requests[0]["kind"] == ("completion" if notification else "business")
 
 
-async def test_locked_pi_refreshes_expression_material_without_reseeding_topic(compaction_session):
+async def test_locked_pi_refreshes_preferences_without_reseeding_history(compaction_session):
     state = compaction_session
     await state.runner.rpc("set_auto_compaction", enabled=False)
     state.gateway.revoke()
-    for index, material in enumerate(("EXPRESSION_FIRST_SENTINEL", "EXPRESSION_SECOND_SENTINEL")):
-        state.gateway.bind({**state.claim, "run_id": "expression-run-" + str(index),
-            "context": {**state.claim["context"], "expression_habits": material}})
+    for index, preference in enumerate(("PREFERENCE_FIRST_SENTINEL", "PREFERENCE_SECOND_SENTINEL")):
+        state.gateway.bind({**state.claim, "run_id": "preference-run-" + str(index),
+            "context": {**state.claim["context"], "preferences": preference}})
         await state.runner.run("Respond naturally", keep_alive=True)
         messages = state.requests[-1]["payload"]["messages"]
         system = "\n".join(str(message["content"]) for message in messages if message["role"] == "system")
-        users = [str(message["content"]) for message in messages if message["role"] == "user"]
-        assert material not in system
-        assert any(material in message for message in users)
+        assert preference in system
+        assert all(preference not in str(message["content"]) for message in messages if message["role"] == "user")
     assert state.runner.quiescent_verified
+
+
+async def test_locked_pi_review_exposes_only_native_hermes_tools(compaction_session):
+    state = compaction_session
+    state.gateway.revoke()
+    state.gateway.bind({**state.claim, "run_id": "review-run", "role": "skill_review", "purpose": "skill_review"})
+    await state.runner.run("Review the completed reference work", keep_alive=True)
+    assert {tool["function"]["name"] for tool in state.requests[0]["payload"]["tools"]} == {"skills_list", "skill_view", "skill_manage"}
 
 
 @pytest.mark.parametrize("use_tools", [True, False])

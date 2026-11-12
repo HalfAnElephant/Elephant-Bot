@@ -84,6 +84,11 @@ def test_question_fast_reply_is_consumed_after_quiescence_once(execution):
     assert service.claim("w") is None
     with service.db.engine.connect() as c:
         assert c.execute(select(waits.c.state)).scalar_one() == "CONSUMED"
+        assert c.execute(select(inputs.c.state)).scalar_one() == "READY"
+    service.session_receipt(continuation["run_id"], continuation["fencing_token"], "w", {
+        "session_id": continuation["session_id"], "run_id": continuation["run_id"],
+        "session_revision": "native-revision", "kind": "input_consumed", "input_ids": [first["input_id"]]})
+    with service.db.engine.connect() as c:
         assert c.execute(select(inputs.c.state)).scalar_one() == "CONSUMED"
         assert c.execute(select(notifications.c.purpose)).scalars().all() == ["question"]
 
@@ -151,7 +156,7 @@ def sse(message, usage=None):
 
 
 @pytest.mark.asyncio
-async def test_locked_pi_warm_rebind_no_extra_model_call(execution, tmp_path):
+async def test_locked_pi_separate_tasks_keep_isolated_sessions(execution, tmp_path):
     service, event, access = execution
     pi = Path("node_modules/.bin/pi").resolve()
     if not pi.exists():
@@ -186,14 +191,17 @@ async def test_locked_pi_warm_rebind_no_extra_model_call(execution, tmp_path):
             assert await worker.once()
             assert service.get(second["public_id"], access)["state"] == "SUCCEEDED"
             assert entry["runner"].process.pid == pid
-            assert entry["runner"].gateway.model_token != old_token
+            second_entry = next(item for item in pool.entries.values() if item is not entry)
+            assert second_entry["runner"].gateway.model_token != old_token
+            assert second_entry["runner"].process.pid != pid
             assert len(requests) == 2
-            assert requests[0]["messages"][0] == requests[1]["messages"][0]
-            assert sum("bounded background" in str(message) for message in requests[1]["messages"]) == 1
+            assert "个人助手大象" in requests[0]["messages"][0]["content"]
+            assert "个人助手大象" in requests[1]["messages"][0]["content"]
+            assert all("bounded background" not in str(message) for message in requests[1]["messages"])
             with service.db.engine.connect() as c:
                 rows = c.execute(select(runs)).mappings().all()
                 assert len(rows) == 2 and all(r["quiescent_at"] and r["runner_stopped_at"] is None for r in rows)
-                assert c.execute(select(processes.c.state)).scalar_one() == "IDLE"
+                assert c.execute(select(processes.c.state)).scalars().all() == ["IDLE", "IDLE"]
         finally:
             await pool.close()
 
@@ -429,7 +437,7 @@ async def test_locked_pi_late_input_survives_settled_boundary(execution, tmp_pat
             assert len(requests) == 2
             assert "and check the second item" in json.dumps(requests[1], ensure_ascii=False)
             with service.db.engine.connect() as c:
-                assert c.execute(select(inputs.c.state)).scalar_one() == ("CONSUMED" if injection == "settled" else "STEERED")
+                assert c.execute(select(inputs.c.state)).scalar_one() == "CONSUMED"
                 identity = json.loads(c.execute(select(processes.c.identity_json)).scalar_one())
                 assert identity["actual_session_id"] and identity["actual_session_file"]
         finally:

@@ -1,6 +1,6 @@
 """Persistent input routing and one writer per logical Leader session."""
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import func, insert, select, update
@@ -87,11 +87,34 @@ class SessionService:
                 dialogue_inputs.c.owner_id == dialogue["owner_id"], dialogue_inputs.c.handled_at.is_(None))).scalar_one()
             if pending >= self.settings.orchestration.pending_inputs_per_owner:
                 raise ValueError("capacity_full: pending input limit")
+            context = dict(context or {})
+            plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
+            context["leader_turn"] = {"plan": plan.model_dump(mode="json"), "used": {},
+                "deadline": (self.clock.now() + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat()}
             conn.execute(insert(dialogue_inputs).values(id=event.event_id, dialogue_id=dialogue["id"],
                 owner_id=dialogue["owner_id"], event_json=event.model_dump_json(),
-                context_json=json.dumps(context or {}, ensure_ascii=False), state="PENDING", created_at=now))
+                context_json=json.dumps(context, ensure_ascii=False), state="PENDING", created_at=now))
         self.service.wakeup.set()
         return {"input_id": event.event_id, "dialogue_id": dialogue["id"], "session_id": dialogue["session_id"], "state": "QUEUED"}
+
+    @staticmethod
+    def turn_exhausted(turn, now):
+        budget, used = turn["plan"]["budget"], turn.get("used", {})
+        return (turn["deadline"] <= now.isoformat() or used.get("model_calls", 0) >= budget["model_calls"]
+                or used.get("active_seconds", 0) >= budget["active_seconds"])
+
+    def close_input(self, conn, dialogue, user, event, context, now):
+        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"]).values(
+            state="HANDLED", handled_at=now.isoformat(), claimed_attempt_id=None))
+        access = self.service._access_for({"event_json": user["event_json"], "permission_json": "{}"})
+        valid = not self.service.context_validator or self.service.context_validator(access, context)
+        if (self.allowed(event) and valid and self.service.permissions.check(access, "notification.send",
+                "conversation:" + event.conversation.key).allowed):
+            self.service.outbox.enqueue_text(conn, target=event.conversation,
+                text="本轮处理已到执行边界，已结束本次尝试并保留处理记录。", origin_kind="chat",
+                origin_id="turn:" + dialogue["session_id"] + ":" + user["id"],
+                reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
+                anchor_message_id=event.platform_message_id, purpose="result")
 
     def claim(self, worker_id):
         now = self.clock.now()
@@ -110,10 +133,21 @@ class SessionService:
                     leader_inbox.c.target_session_id == dialogue["session_id"], leader_inbox.c.handled_at.is_(None),
                     leader_inbox.c.claimed_attempt_id.is_(None)).order_by(leader_inbox.c.created_at, leader_inbox.c.id)
                     .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
-                selected, root, purpose, task_inputs = [], None, "user", []
+                selected, root, purpose, task_inputs, turn = [], None, "user", [], None
                 if user:
                     event = InboundEvent.model_validate_json(user["event_json"])
                     context = json.loads(user["context_json"])
+                    turn = context.get("leader_turn")
+                    if turn is None:
+                        legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
+                        turn = {"plan": legacy_plan.model_dump(mode="json"), "used": {}, "deadline": (
+                            datetime.fromisoformat(user["created_at"]) + timedelta(seconds=legacy_plan.budget.total_wall_seconds)).isoformat()}
+                        context["leader_turn"] = turn
+                        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"])
+                            .values(context_json=json.dumps(context, ensure_ascii=False)))
+                    if self.turn_exhausted(turn, now):
+                        self.close_input(conn, dialogue, user, event, context, now)
+                        continue
                     source_ids = [user["id"]]
                     goal = event.text
                 else:
@@ -155,7 +189,7 @@ class SessionService:
                             "处理下列任务事实，仅汇报重要进展或必要问题。") + "\n" + json.dumps(snapshot, ensure_ascii=False)
                     if context.get("memory_replan"):
                         goal = ("依据真实用户目标和当前记忆重新规划，新增工作须关联已停止子任务。\n"
-                            + event.text + "\n" + json.dumps(snapshot, ensure_ascii=False))
+                            + root["goal"] + "\n" + json.dumps(snapshot, ensure_ascii=False))
                 access = self.service._access_for({"event_json": event.model_dump_json(), "permission_json": "{}"})
                 self.service.permissions.require(access, "model.request", "conversation:" + event.conversation.key)
                 if not self.allowed(event):
@@ -168,16 +202,17 @@ class SessionService:
                     fencing = root["fencing"] + 1
                     conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(fencing=fencing))
                 binding = json.loads(dialogue["binding_json"])
+                plan = ExecutionPlan.model_validate_json(json.dumps(turn["plan"])) if turn else ExecutionPlan(
+                    budget=self.settings.execution.interactive_budget)
                 context.update(key=dialogue["session_id"], session_id=dialogue["session_id"],
                     dialogue_id=dialogue["id"], owner_id=dialogue["owner_id"], source_input_ids=source_ids + [item["id"] for item in task_inputs],
                     role="leader", purpose=purpose, now=now.isoformat(), timezone=self.settings.timezone,
                     model_context_window=binding["context_window"],
-                    limits=self.settings.context.limits(binding["context_window"], self.settings.execution.interactive_budget.output_tokens_per_call),
+                    limits=self.settings.context.limits(binding["context_window"], plan.budget.output_tokens_per_call),
                     pool={"max_resident": self.service.max_resident, "max_idle": self.settings.execution.warm_idle_max,
                           "ttl": self.settings.execution.warm_ttl_seconds})
                 context["preferences"] = self.settings.owner.preferences
                 context.pop("seed", None)
-                plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
                 claim = {"task_id": root["id"] if root else run_id, "run_id": run_id, "fencing_token": fencing,
                     "goal": goal, "goal_spec": {"text": goal}, "plan": plan.model_dump(mode="json"),
                     "context": context, "binding": binding, "delivery": "ATTACHED", "protocol_version": 2,
@@ -188,14 +223,15 @@ class SessionService:
                     "event_json": event.model_dump_json(), "source_ids": source_ids,
                     "task_input_ids": [item["id"] for item in task_inputs],
                     "continuation": {"inputs": [dict(item) for item in task_inputs]},
-                    "deadline": (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),
-                    "active_seconds_remaining": plan.budget.active_seconds}
+                    "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),
+                    "active_seconds_remaining": max(0, plan.budget.active_seconds - (turn.get("used", {}).get("active_seconds", 0) if turn else 0))}
                 conn.execute(insert(runs).values(id=run_id, task_id=root["id"] if purpose == "finalize" else None,
                     worker=worker_id, fencing=fencing, lease=(now + timedelta(seconds=30)).isoformat(), slot_reserved=1,
                     session=dialogue["session_id"] + ".jsonl", session_id=dialogue["session_id"], last_seq=0,
                     role="leader", purpose=purpose, session_generation=generation,
                     basis_goal_revision=claim["basis_goal_revision"], request_json=json.dumps(claim, ensure_ascii=False),
-                    budget_json="{}", state="RUNNING", started_at=now.isoformat(), accounted_at=now.isoformat()))
+                    budget_json=json.dumps(turn.get("used", {})) if turn else "{}", state="RUNNING",
+                    started_at=now.isoformat(), accounted_at=now.isoformat()))
                 table = dialogue_inputs if user else leader_inbox
                 conn.execute(update(table).where(table.c.id.in_(source_ids)).values(claimed_attempt_id=run_id))
                 conn.execute(update(dialogues).where(dialogues.c.id == dialogue["id"]).values(last_admitted_at=now.isoformat()))
@@ -300,8 +336,11 @@ class SessionLearning:
                         InboundEvent.model_validate_json(claim["event_json"]).conversation.surface == Surface.PRIVATE
                         or self.settings.skills.group_enabled))
                 if pending:
+                    review_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget.model_copy(
+                        update={"model_calls": pending["max_iterations"]}))
                     pending.update(id=str(uuid4()), source_run_id=run_id, review_session_id=str(uuid4()),
-                        claim=claim)
+                        claim=claim, plan=review_plan.model_dump(mode="json"), used={},
+                        deadline=(self.clock.now() + timedelta(seconds=review_plan.budget.total_wall_seconds)).isoformat())
                     self.save(conn, claim["session_id"], state, pending_json=json.dumps(pending, ensure_ascii=False))
                     self.service.wakeup.set()
                     return
@@ -332,6 +371,24 @@ class SessionLearning:
                 learning_sessions.c.claimed_attempt_id.is_(None)).order_by(learning_sessions.c.updated_at)).mappings().all()
         for candidate in candidates:
             pending = json.loads(candidate["pending_json"])
+            if "plan" not in pending:
+                legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget.model_copy(update={"model_calls": 16}))
+                pending.update(plan=legacy_plan.model_dump(mode="json"), used={}, deadline=(
+                    datetime.fromisoformat(candidate["updated_at"]) + timedelta(seconds=legacy_plan.budget.total_wall_seconds)).isoformat())
+                with self.db.transaction() as conn:
+                    conn.execute(update(learning_sessions).where(learning_sessions.c.session_id == candidate["session_id"],
+                        learning_sessions.c.pending_json == candidate["pending_json"]).values(pending_json=json.dumps(pending, ensure_ascii=False)))
+                candidate = {**dict(candidate), "pending_json": json.dumps(pending, ensure_ascii=False)}
+            if self.sessions.turn_exhausted(pending, self.clock.now()):
+                from qqbot.adapters.hermes_skills import AgentLearningState
+                with self.db.transaction() as conn:
+                    current = conn.execute(select(learning_sessions).where(
+                        learning_sessions.c.session_id == candidate["session_id"])).mappings().one()
+                    if current["pending_json"] == candidate["pending_json"] and not current["claimed_attempt_id"]:
+                        state = AgentLearningState(**json.loads(current["state_json"]))
+                        state.finish_review()
+                        self.save(conn, candidate["session_id"], state, pending_json=None)
+                continue
             claim = pending["claim"]
             with self.db.engine.connect() as conn:
                 source = conn.execute(select(runs).where(runs.c.id == pending["source_run_id"])).mappings().one()
@@ -371,8 +428,8 @@ class SessionLearning:
                 session_id, run_id = pending["review_session_id"], str(uuid4())
                 if conn.execute(select(runs.c.id).where(runs.c.session_id == session_id, runs.c.slot_reserved == 1)).first():
                     continue
-                budget = self.settings.execution.interactive_budget.model_copy(update={"model_calls": 16})
-                plan = ExecutionPlan(budget=budget)
+                plan = ExecutionPlan.model_validate_json(json.dumps(pending["plan"]))
+                budget = plan.budget
                 context = {**claim["context"], "key": session_id, "session_id": session_id,
                     "role": "skill_review", "purpose": "skill_review", "source_input_ids": [pending["id"]],
                     "now": now.isoformat(), "timezone": self.settings.timezone,
@@ -390,13 +447,13 @@ class SessionLearning:
                     "basis_goal_revision": 0, "target_root_task_id": None, "event_json": claim["event_json"],
                     "permission_snapshot": claim["permission_snapshot"], "source_ids": [pending["id"]],
                     "source_session_id": candidate["session_id"],
-                    "deadline": (now + timedelta(seconds=budget.total_wall_seconds)).isoformat(),
-                    "active_seconds_remaining": budget.active_seconds}
+                    "deadline": pending["deadline"],
+                    "active_seconds_remaining": max(0, budget.active_seconds - pending.get("used", {}).get("active_seconds", 0))}
                 conn.execute(insert(runs).values(id=run_id, task_id=None, worker=worker_id, fencing=1,
                     lease=(now + timedelta(seconds=30)).isoformat(), slot_reserved=1,
                     session=session_id + ".jsonl", session_id=session_id, last_seq=0, role="skill_review",
                     purpose="skill_review", session_generation=1, basis_goal_revision=0,
-                    request_json=json.dumps(review, ensure_ascii=False), budget_json="{}", state="RUNNING",
+                    request_json=json.dumps(review, ensure_ascii=False), budget_json=json.dumps(pending.get("used", {})), state="RUNNING",
                     started_at=now.isoformat(), accounted_at=now.isoformat()))
                 conn.execute(update(learning_sessions).where(learning_sessions.c.session_id == candidate["session_id"])
                     .values(claimed_attempt_id=run_id))

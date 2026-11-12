@@ -156,7 +156,7 @@ def install_qq_onboarding(app, core, authenticate, *, client=None):
                             if a["instance_id"] == session.instance_id else a for a in values["adapters"]]
                     else:
                         values["adapters"].append(cfg.model_dump(mode="json"))
-                    candidate = Settings.model_validate_json(json.dumps(values))
+                    candidate = Settings.model_validate_json(json.dumps(values), strict=False)
                     core.config_store.save(previous, candidate)
                 except (OSError, ValueError, TypeError):
                     if reference:

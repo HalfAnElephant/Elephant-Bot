@@ -193,6 +193,49 @@ class TaskService:
             if process["state"] != "STOPPED" or process["epoch"] != run["process_epoch"] or process["generation"] != run["binding_generation"]:
                 raise PermissionError("active process stop has not been verified")
 
+    def _settle_exhausted_roots(self, conn):
+        if not hasattr(self, "graph"):
+            return
+        from qqbot.storage.agent_schema import leader_inbox
+
+        now = self.clock.now().isoformat()
+        roots = conn.execute(select(tasks).where(tasks.c.kind == "goal", tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
+        for root in roots:
+            used, plan = json.loads(root["budget_json"]), json.loads(root["plan_json"])
+            model_limit = plan["budget"]["model_calls"]
+            execution_limit = model_limit - plan["budget"].get("completion_reserve", 1)
+            if used.get("model_calls", 0) < execution_limit:
+                continue
+            if json.loads(root["context_json"]).get("memory_replan_pending"):
+                continue
+            tree = select(tasks.c.id).where(tasks.c.root_task_id == root["id"])
+            children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
+                tasks.c.id != root["id"], tasks.c.state.not_in(TERMINAL))).mappings().all()
+            if used.get("model_calls", 0) < model_limit and not children:
+                continue
+            active = conn.execute(select(runs.c.id).where(runs.c.slot_reserved == 1,
+                (runs.c.task_id.in_(tree)) | (runs.c.session_id == root["coordinator_session_id"]))).first()
+            if active or not getattr(self, "job_tree_quiescent", lambda _: True)(root):
+                continue
+            result = TaskResult(status="blocked", agent_authored=False,
+                summary="任务的执行预算已到收尾边界，已停止继续执行，并保留现有结果供查询。")
+            for child in children:
+                conn.execute(update(tasks).where(tasks.c.id == child["id"]).values(state="BLOCKED",
+                    stop_reason="root_budget", result_json=result.model_dump_json()))
+                self.graph.event(conn, child, "budget_exhausted", {"state": "BLOCKED"},
+                    event_id="root-budget:" + root["id"] + ":" + child["id"])
+            conn.execute(update(waits).where(waits.c.task_id.in_(tree), waits.c.state.in_(["INTENT", "WAITING"]))
+                .values(state="CANCELLED"))
+            conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(state="BLOCKED",
+                stop_reason="root_budget", result_json=result.model_dump_json()))
+            final_id = "final:" + root["id"] + ":" + str(root["goal_revision"])
+            self.graph.event(conn, root, "finished", {"state": "BLOCKED"}, event_id=final_id)
+            conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id == root["id"],
+                leader_inbox.c.handled_at.is_(None)).values(handled_at=now, output_ref="ROOT_BUDGET_EXHAUSTED"))
+            access = self._access_for(root)
+            if self.permissions.check(access, "notification.send", "conversation:" + root["conversation"]).allowed:
+                self._notification(conn, root, None, result.summary, "result", "important", final_id)
+
     def recover(self):
         now = self.clock.now().isoformat()
         with self.db.transaction() as c:
@@ -222,6 +265,7 @@ class TaskService:
                 c.execute(update(tasks).where(tasks.c.id == task["id"]).values(
                     state="EXPIRED", stop_reason="deadline", result_json=result.model_dump_json()))
                 self._queue_failure_notice(c, task, result, "EXPIRED")
+            self._settle_exhausted_roots(c)
 
     def claim(self, worker_id, protocol_version=2):
         self.recover()
@@ -969,7 +1013,8 @@ class TaskService:
             if task["root_task_id"] and task["root_task_id"] != task["id"]:
                 root = self.graph.root(c, task)
                 root_used = json.loads(root["budget_json"])
-                root_limit = json.loads(root["plan_json"])["budget"][key]
+                root_budget = json.loads(root["plan_json"])["budget"]
+                root_limit = root_budget[key] - (root_budget.get("completion_reserve", 1) if key == "model_calls" else 0)
                 if root_used.get(key, 0) >= root_limit:
                     raise ValueError("root " + key + " budget exhausted")
                 root_used[key] = root_used.get(key, 0) + 1
@@ -977,7 +1022,10 @@ class TaskService:
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(budget_json=json.dumps(used)))
             c.execute(insert(model_requests).values(id=request_id, task_id=task["id"], run_id=run_id,
                 kind=kind, state="RESERVED", created_at=self.clock.now().isoformat()))
-            return {"accepted": True, "remaining": limit - used[key]}
+            remaining = limit - used[key]
+            if task["root_task_id"] and task["root_task_id"] != task["id"]:
+                remaining = min(remaining, root_limit - root_used[key])
+            return {"accepted": True, "remaining": remaining}
 
     def record_usage(self, run_id, fencing_token, worker_id, payload):
         with self.db.transaction() as c:

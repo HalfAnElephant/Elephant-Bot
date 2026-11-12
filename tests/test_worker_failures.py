@@ -51,10 +51,14 @@ class SlowStopRunner(PiRunnerAdapter):
         self.gateway = SimpleNamespace(binding="binding", waiting=False, claim=claim, outcome=None,
             provider=SimpleNamespace(background=False), tools=SimpleNamespace(max_calls=8), key="",
             model_token="", tool_token="", process_token="", evidence=[], artifacts=[], effects={},
-            observations={}, workspace=directory, drain=self.drain)
+            observations={}, workspace=directory, drain=self.drain, session_receipt=None)
         if claim.get("notification_status"):
             self.queue.put_nowait({"type": "message_end", "message": {"role": "assistant",
                 "content": [{"type": "text", "text": "任务未完成，执行时遇到了错误。"}]}})
+            self.gateway.session_receipt = {"session_id": claim["session_id"], "run_id": claim["run_id"],
+                "session_revision": "fixture-final", "kind": "turn_finished", "input_ids": ["task:" + claim["task_id"]],
+                "tools_paired": True, "inflight": 0}
+            self.service.session_receipt(claim["run_id"], claim["fencing_token"], "worker", self.gateway.session_receipt)
             self.queue.put_nowait({"type": "agent_settled"})
         elif error == "413 context exceeds application budget":
             self.queue.put_nowait({"type": "message_end", "message": {"role": "assistant",

@@ -1,25 +1,21 @@
 # Elephant Bot
 
-独立的 QQ AI 机器人，支持 OneBot v11 / NapCat 与 QQ 官方 Webhook，提供 pi 对话执行、会话记忆、持久化通用任务和 Web 管理页。
+QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 对话、根目标和按需 Worker；Pi 管理各 Agent 的原生历史与压缩，OpenViking 管理长期记忆，Hermes 原生工具管理标准 `SKILL.md`。
 
-## 功能与运行环境
+- 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。
+- 任务、输入、操作回执和投递状态保存在 SQLite。等待会让出执行资格，取消与恢复需要真实停止证明。
+- 所有 Agent 共用执行和模型请求额度。Linux 上的持久 Job 由 systemd user manager 监督，可跨 daemon 重启继续运行。
+- QQ 保留四种官方 surface、媒体、按钮、Markdown、私聊流式及权限检查。实际能力取决于应用权限与平台验收。
+- 长期记忆按验证过的 owner、工作区和可见范围绑定。更正与忘记使用 epoch 和删除屏障；后端故障时聊天继续，不建立备用事实库。
+- Skills 使用锁定版本的 Hermes 工具、标准文件和条件复盘，Leader 与 Worker 共用各自 owner 的目录。
 
-- 双接入共用 Inbox / Outbox，消息、任务与投递状态持久化到 SQLite。
-- 普通对话与后台任务共用 pi Agent Loop，通过能力发现调用网页、GitHub、工作区和受控命令。
-- 支持会话内记忆的保存、纠正与遗忘，可选接入候选提取和 embedding 服务。
-- 独立 Worker 提供前后台交付、warm session、进度通知、等待续接、取消与恢复核对，文件按用户目标生成。
-- 统一 PermissionService 默认 allow_all，可按主体、操作和资源配置规则。
-- 管理页提供会话、发言策略、任务、记忆和配置管理。
+需要 Python 3.13、uv、Node.js >= 22.19.0 和 npm。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、persona 注入、research 专用执行器与独立 Worker API 已退役。
 
-需要 Python 3.13、uv、Node.js >= 22.19.0 和 npm。本地开发支持 macOS / Linux，生产隔离 runner 需要支持 systemd、网络命名空间与 cgroup 的 Linux 主机。凭据隔离的 GitHub CLI 和工作区命令还需要 bubblewrap。所有命令在仓库根目录执行。
+## 本地启动
 
-## 快速开始
-
-### 1. 安装依赖
+在仓库根目录运行：
 
 ```sh
-git clone https://github.com/HalfAnElephant/Elephant-Bot.git
-cd Elephant-Bot
 uv sync --locked
 npm ci --ignore-scripts
 cp configs/example.yaml configs/local.yaml
@@ -27,254 +23,57 @@ cp .env.example .env
 chmod 600 .env configs/local.yaml
 ```
 
-### 2. 设置凭据
-
-编辑 `.env`，在需要的变量后填写实际值。管理令牌和内部令牌分别用下面的命令生成，填入 `QQBOT_ADMIN_TOKEN` 与 `QQBOT_INTERNAL_TOKEN`。
-
-```sh
-uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
-
-| 环境变量 | 用途 | 使用条件 |
-| --- | --- | --- |
-| `QQBOT_ADMIN_TOKEN` | 管理页与管理 API 认证 | 使用管理功能 |
-| `QQBOT_MODEL_KEY` | 兼容配置字段；实际执行使用 Worker 专用密钥 | 按部署配置选择 |
-| `QQBOT_ONEBOT_TOKEN` | NapCat / OneBot Access Token | 启用 OneBot 接入 |
-| `QQBOT_OFFICIAL_SECRET` | QQ 官方机器人 AppSecret | 启用官方接入 |
-| `QQBOT_INTERNAL_TOKEN` | Core 与 Worker 的内部令牌，至少 32 字符 | 启用普通对话或后台执行 |
-| `QQBOT_RUNNER_OPENAI_KEY` | Worker 模型代理的独立供应商密钥 | 普通对话与后台任务的实际模型请求 |
-| `QQBOT_GITHUB_TOKEN` | 可选 Worker 专用 GitHub 令牌 | 启用凭据隔离的 GitHub/Git 能力 |
-| `QQBOT_JUDGE_KEY` | 可选发言判断服务密钥 | 配置 `jev` / `structured` judge |
-| `QQBOT_MEMORY_KEY` | 可选记忆候选提取服务密钥 | 启用自动提取 |
-| `QQBOT_EMBEDDING_KEY` | 可选 embedding 服务密钥 | 启用向量索引 |
-
-程序从进程环境读取密钥。每次启动前，在同一个终端显式加载自己填写的 `.env`。
+配置模型的完整 Chat Completions 地址、模型名及 `api_key_env`。通过进程环境提供实际密钥；管理页只保存环境变量名。至少配置 `QQBOT_ADMIN_TOKEN` 和模型使用的密钥变量。官方 QQ 另需实际 AppID/AppSecret；长期记忆使用 OpenViking 对应普通用户的凭据。
 
 ```sh
 set -a
 . ./.env
 set +a
-```
-
-`.env` 使用 shell 赋值语法，包含特殊字符的值应使用单引号包裹。systemd 部署通过 `EnvironmentFile` 注入对应进程所需的变量。
-
-### 3. 检查并启动
-
-```sh
 uv run qqbot validate --config configs/local.yaml
 uv run qqbot doctor --config configs/local.yaml
 uv run qqbot serve --config configs/local.yaml
 ```
 
-默认配置启动一个适配器列表为空、交互执行开启的 Core，需要先设置内部令牌。`serve` 自动迁移数据库并监听 `127.0.0.1:8080`。`doctor` 检查临时数据库、迁移和 FTS5，QQ 连接与模型调用需要继续按下面的步骤验收。
+`serve` 迁移数据库并监听 `127.0.0.1:8080`。默认适配器列表为空，可先使用受保护的管理任务入口；它创建真实 host 任务，不伪造 QQ 消息。`doctor` 检查临时数据库、迁移与 FTS5，不代表模型、QQ 或生产环境已经验收。
 
-打开管理页，输入 `QQBOT_ADMIN_TOKEN` 的值后读取状态。
-
-- [本地管理页](http://127.0.0.1:8080/admin)
+- [管理页](http://127.0.0.1:8080/admin)
 - [存活检查](http://127.0.0.1:8080/health/live)
 - [就绪检查](http://127.0.0.1:8080/health/ready)
 
-### 网页控制台
+## 身份、配置和任务
 
-`/admin` 提供全部 Core 配置的分类表单（含 QQ 接入、模型、执行预算、上下文、
-发言判断、记忆、路径与环境变量名），也可切换到高级 JSON 编辑。支持校验、
-历史版本载入、保存下次启动配置，以及允许字段的即时应用。全局人格和实时权限策略
-有独立编辑入口，保存后立即生效；原有会话、任务、记忆管理继续可用。
+官方 QQ owner 绑定使用 AppID 与验证过的 OpenID。旧数字 QQ 号不能直接作为官方身份。`owner.preferences` 保存明确设置的称呼、语言和沟通偏好。
 
-连接后进入配置中心，可按分类浏览或搜索中文名称、字段路径。修改会显示实际变更
-数量，改回原值自动清除草稿状态；保存前展示原值与新值，依据配置选择即时应用或等待
-重启。字段校验错误会定位到对应输入项，版本冲突、网络失败与令牌失效保留当前草稿。
-“撤销修改”恢复上次读取的内容，退出或重新读取前会提示处理未保存修改。
+完整配置见 [示例](configs/example.yaml) 与 [Schema](configs/schema.json)。管理页支持校验、版本、保存和有限热应用；连接、身份、模型及运行边界的修改需要重启 daemon。网页配置写入启动数据库旁的 `runtime-config.json`，历史版本在 `config-versions/`。保存配置不会自动搬迁数据库或部署服务。
 
-- **即时应用**：发送预算；关闭交互和后台执行时也可应用模型元信息。
-- **保存并等待重启**：其他 Core 设置。页面分别显示运行配置与已保存配置，保存不会
-  重启服务或中断任务。模型变更还需同步 Worker 的 `--model`、`--model-endpoint`
-  及部署许可名单，再重启 Core / Worker。
-- **并发与恢复**：保存使用版本校验，冲突时需重新读取；历史版本先载入候选，再校验、
-  保存或应用。磁盘写入失败不会修改运行配置。
-- **凭据与主机设置**：控制台只编辑环境变量名、显示 Core 进程内是否已配置，不读取或
-  保存密钥值。密钥仍通过 `.env` / systemd `EnvironmentFile` 注入；Worker 启动参数、
-  root runner policy、网络和系统服务配置仍由部署端管理。
+管理 API 使用管理员令牌，实时权限策略使用既有 PermissionService。任务详情和附件受真实持久身份、owner 和当前权限约束；管理任务可使用 `POST /api/v1/tasks`，必须提供稳定的 `Idempotency-Key`，同键不同目标会被拒绝。
 
-主动搭话在“设置 → 主动搭话”中配置（`speak_up`），保存后重启 Core 生效。沿用 Aurabot 默认值：空闲 40 分钟、随机间隔 60～180 分钟、每人每天 20 次、清醒时段 08:00～23:00；问句无人回应 15～40 分钟后有一次 50% 概率的轻追问。时间使用 `timezone`。默认对象为接入的 `admin_users` 中已有私聊的人，额外对象填完整私聊会话 ID；仍检查接收、模型、发送权限与主动发送能力。忙碌、静默和观察模式不搭话，状态保存在现有数据库中。此功能调用 Core 的 `model.endpoint` / `model.model` / `model.api_key_env`，缺少地址、模型或凭据时不运行；每分钟全局最多发起一次生成，不授予工具权限。
-
-默认人格采用 Aurabot 大肥鱼正文，仅改名“大象”。已在面板保存的全局人格继续优先于默认文件；已有安装可在“全局人格”中载入 `personas/elephant_default.yaml` 对应内容后保存。QQ 文本支持 `|||` 和短回复换行拆条、`[沉默]` 不发送；当前未接语音和表情包发送器，`<voice>` 内容退为文字，`<sticker:…>` 被省略。心情值模块尚未移植。
-
-网页保存文件为启动 YAML 中 `database` 所在目录的 `runtime-config.json`，历史记录在
-同目录 `config-versions/`；保存后该文件覆盖启动 YAML，CLI 的验证、备份和启动等命令
-均读取有效配置。即使在网页修改数据库路径，配置文件仍留在原目录；这不会搬迁旧数据库，
-迁移数据应使用备份/恢复流程。要恢复直接使用 YAML，可在停机备份后移走该覆盖文件。
-
-全局人格保存在当前数据库目录的 `persona-global.json`，不改写随代码提供的人格文件；
-更换 `persona_path` 后不再使用旧路径的人格覆盖。会话人格覆盖仍单独保存。
-权限页编辑数据库中的实时策略；Core 配置中的 `permissions` 仅作为尚未建立数据库策略时
-的初始值。控制台拒绝会令管理员失去权限管理入口的整份策略。
-
-权限规则按“对象、允许或禁止、操作”填写。例如阻止某个 QQ 用户触发机器人，选择
-“指定用户”、对应 OneBot 接入，填写 QQ 号并禁止“接收消息”。未命中规则时使用
-默认处理方式；多个规则命中时先比较优先级，再比较匹配范围。保存前可预览变更，
-保存后用策略检查器确认匹配结果。全局人格中的语言、语气和措辞可直接编辑，JSON 保留在高级入口。
-
-令牌仅保存在当前页面内存，断开或刷新后需重新输入。远程访问可使用 SSH 端口转发，或通过 HTTPS Tunnel 单独发布管理入口；
-所有管理 API 均需要管理员令牌。Tunnel 只匹配 `/admin`、静态资源和 `/api/v1/`，
-不要把 QQ Webhook、OneBot WebSocket 或内部服务一起公开。
-
-## 配置模型与 QQ 接入
-
-配置文件为 `configs/local.yaml`。下面各段合并到该文件，接入标识、账号、群号与模型名称按实际环境替换。完整字段和默认值见配置 schema。
-
-### 模型与执行 Worker
-
-Core 配置记录模型、窗口和配置版本。Worker 的 `--model`、`--model-endpoint` 与 `QQBOT_RUNNER_OPENAI_KEY` 控制实际 pi 模型请求，两端按部署模型对齐。`endpoint` 使用完整的 Chat Completions 地址。
-
-```yaml
-model:
-  endpoint: https://api.example.com/v1/chat/completions
-  model: your-model-id
-  api_key_env: QQBOT_MODEL_KEY
-  timeout_seconds: 30
-```
-
-普通问题和自然语言状态说明需要可用 Worker。签名校验、Inbox 与管理接口独立运行。默认人格位于 `personas/elephant_default.yaml`，可通过 `persona_path` 指向自己的文件。
-
-默认名称为“大象”，角色设定改编自 Aurabot，借鉴 MaiBot 的口语表达与群私聊差异，分别配置身份、性格、说话习惯和场景提示。普通回复、任务说明和主动搭话共用宿主表达规则。表达素材沿用 MaiBot 快速机制，从群聊学习、写入前审核、去重计数、加权抽样，再作为每轮措辞参考。表达学习独立于事实记忆，默认仅用于群聊。配置、冷启动门槛、审核删除及实现范围见 [人格与表达机制](docs/maibot-expression.md)。
-
-先在另一个终端启动本地协议开发 Worker，并加载同一份环境变量。创建受限内部令牌文件后，指定实际模型与地址。
-
-```sh
-mkdir -p var
-printf '%s' "$QQBOT_INTERNAL_TOKEN" > var/worker.token
-chmod 600 var/worker.token
-uv run python -m qqbot.jobs.worker \
-  --socket var/internal.sock --token-file var/worker.token \
-  --pi "$(pwd)/node_modules/.bin/pi" --workspace var/runners \
-  --spool var/worker-spool --archive var/artifacts --runner-mode local \
-  --model your-model-id --model-endpoint https://api.example.com/v1/chat/completions
-```
-
-macOS 本地模式用于 pi 协议开发。凭据隔离的 GitHub 操作与工作区子进程在目标 Linux 上验收。生产安装步骤见后文。
-
-### OneBot v11 / NapCat
-
-先独立安装并登录 NapCat，启用其 OneBot WebSocket 服务，并设置 Access Token。以下配置让 Core 连接 NapCat 的正向 WebSocket。
-
-```yaml
-adapters:
-  - instance_id: napcat
-    kind: onebot
-    bot_id: 'YOUR_BOT_QQ'
-    secret_env: QQBOT_ONEBOT_TOKEN
-    websocket_url: ws://127.0.0.1:3001
-```
-
-`QQBOT_ONEBOT_TOKEN` 与 NapCat 配置的 Access Token 保持一致。账号和群号使用字符串。应用权限默认全部放行，可通过统一权限规则限制群、个人或群内成员。旧 `allowed_users`、`allowed_groups`、`admin_users` 字段保留兼容数据和角色元信息，实际操作由当前 PermissionService 决定。
-
-如使用反向 WebSocket，省略 `websocket_url`，将 NapCat 连接地址设为 `ws://127.0.0.1:8080/onebot/napcat`，并发送相同的 Bearer Access Token。URL 最后一段必须与 `instance_id` 一致。
-
-保存配置并重启 Core，在已接入私聊发送 `/状态`，再发送一句普通问题检查模型回复。管理页可查看适配器连接状态。
-
-OneBot 图片会随当前请求、相关历史和已收录的引用消息送入当前模型，不需要另配识图模型；上游须支持 OpenAI 兼容的 `image_url` 输入。支持单独发图、图文合并及用图片回答任务追问。Worker 校验公开 HTTPS 地址后下载 JPEG、PNG、GIF 或 WebP，再以内联图片提交；每轮最多最近 4 张、合计 8 MiB，并受请求大小预算限制。链接失效、下载或格式检查失败时，会提示模型说明图片不可读并请用户重发。图片链接随 Inbox 持久化，图片字节仅在当前 Worker 绑定中缓存，重启后需要重新下载；升级前收到的图片没有保存链接，需要重发。
-
-### QQ 官方 Webhook
-
-创建并配置官方机器人应用，将配置加入同一个 `adapters` 列表。
-
-```yaml
-  - instance_id: official
-    kind: official
-    bot_id: YOUR_BOT_ID
-    app_id: YOUR_APP_ID
-    secret_env: QQBOT_OFFICIAL_SECRET
-    full_mode_enabled: false
-    full_mode_verified: false
-    proactive_verified: false
-```
-
-在平台配置公开 HTTPS 回调地址 `https://YOUR_DOMAIN/webhooks/qq/official`，通过反向代理转发到 Core。仅公开所需回调路径，管理访问使用本机或 SSH 转发。权限规则中的主体 ID 使用事件里的平台 OpenID。
-
-全量群消息与主动投递需要实际应用权限及目标环境验收。任务结果受平台回复窗口约束，必要时等待同会话的新触发后投递。
-
-### 其他常用字段
-
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `deployment_id` | `elephant-local` | 部署身份，参与持久化身份计算，已有数据的部署应保持稳定 |
-| `database` | `var/core.db` | SQLite 路径，运行账号需要写权限 |
-| `source_url` | 空字符串 | 对应部署版本的源码地址，发布网络服务时填写 |
-| `send_budget_per_minute` | `0` | 每分钟发送上限；`0` 不限，兼容 1–60 的显式限额 |
-| `timezone` | `Asia/Shanghai` | 时区 |
-| `interactive_execution_enabled` | `true` | 普通对话提交至 pi Worker |
-| `tasks_enabled` | `false` | 启用显式 `/研究` 后台提交 |
-| `permissions.preset` | `allow_all` | 默认无额外操作限制 |
-| `execution.foreground_wait_ms` | `5000` | 等待预算到期只改变交付方式 |
-| `execution.max_active` / `execution.sustained_limit` | `4` / `2` | Core 总执行与持续任务容量 |
-| `internal_socket` | `var/internal.sock` | Core 内部 Unix socket |
-| `judge.kind` | `rule` | 可选规则判断 `rule`、Jev `jev`、通用大模型（OpenAI 兼容）`structured` |
-| `memory.maintenance_enabled` | `false` | 增量摘要、保留期清理与索引维护 |
-| `memory.auto_extract` | `false` | 模型提取记忆候选，需配置提取 endpoint、model 与密钥 |
-| `expression.enabled` | `true` | 群聊表达学习与使用；实际学习需可用模型凭据，私聊需显式规则 |
-
-完整配置与限制见 [示例配置](configs/example.yaml)、[JSON Schema](configs/schema.json) 和 [发言与记忆说明](docs/social-implementation.md)。默认保持 `addressed_only`；管理员可为具备全量消息能力的会话启用 `social`，无需登记回放评估。主动接话还需配置 `jev` 或 `structured` 发言判别器；默认 `rule` 判别器不主动接话。旧字段 `social_evaluated_conversations` 保留兼容，不再控制准入。
-
-Jev 支持原有 `jev-1.14.0` 协议及 `jev1` 决策接口。使用 `jev1` 时，设置 `judge.kind: jev`、`judge.model: jev1`，并填写完整的 `/v1/chat/completions` 请求地址和独立密钥环境变量。每次判断并发请求六个是／否问题，取各自的 `distribution.yes` 作为分数；总超时 30 秒，任一失败或弃权则放弃本次主动接话。
-
-`jev1` 从人格的群聊提示词 `group_chat_prompt` 及群级 `participation` 偏好读取主动参与规则。除五项分数外，`proactive_allowed` 低于 0.5 时直接放弃主动发言和等待。闲聊、接梗是否算合适贡献由偏好决定。WAIT 同样遵守私人交流上限。上下文标明目标消息，提供此前最多 12 条消息的匿名说话人、时间、提及、回复关系与非文本类型，以及目标消息前 15 分钟内最多 4 条本机器人已发送回复；撤回、清理、无权限和跨会话内容不进入判断。显式 @、有效引用和私聊沿用受邀回复路径。
-
-后台“全部配置 → 发言 → 发言判断”可选择“通用大模型（OpenAI 兼容）”。与聊天模型共用时，将 `model` 配置中的完整请求地址、模型名称和密钥环境变量填入 `judge` 对应字段。通用大模型请求超时为 30 秒，失败或返回无效 JSON 时放弃本次主动接话。
-
-```yaml
-judge:
-  kind: structured
-  endpoint: https://YOUR_PROVIDER/v1/chat/completions
-  model: your-chat-model
-  api_key_env: QQBOT_MODEL_KEY
-  thresholds:
-    invites_participation: 0.8
-    continues_bot_topic: 0.85
-    useful_contribution: 0.75
-    private_exchange: 0.2
-    wait_useful_contribution: 0.5
-```
-
-五项评分阈值在“会话管理”修改，范围为 0–1。每个群可分别为评分阈值、主动参与条件选择默认设置或独立覆盖；群级设置保存后立即用于后续判断，恢复默认后随全局配置生效值变化。页面底部的默认设置复用配置版本与保存流程，保存后重启生效。冷却时间、人类消息最低数、等待成员回应、机器人占比、统计窗口、活动条数、参与预算比例和重评估次数均可配置；完整观察群消息、权限与禁言仍是硬前提。主动接话要求邀请参与或延续机器人话题达到各自下限，同时有用贡献达到下限、他人私聊程度不高于上限。有用贡献达到等待下限时可以先等待重评估。
-
-侧边栏“发言判别日志”逐次记录结果、五项分数、当时阈值、具体参与限制、判别耗时和重评估次数。新记录同步写入服务日志的 `speech.decision` 事件。历史记录升级时保留已有结果和分数，无法还原的旧阈值与输入会标为缺失。消息摘要按当前消息的撤回、清理状态读取。
-
-## 常用 QQ 命令
-
-| 命令 | 作用 |
+| QQ 命令 | 用途 |
 | --- | --- |
-| `/帮助`、`/状态` | 查看命令与运行状态 |
-| `/记住 <内容>`、`/我的记忆` | 保存和查询本会话个人记忆 |
-| `/纠正 <记忆ID> <内容>`、`/忘记 <记忆ID>` | 纠正或撤销记忆 |
-| `/静默 30m`、`/恢复` | 通过当前权限策略设置临时静默或恢复发言 |
-| `/研究 <目标>` | 提交通用后台目标，需开启 tasks_enabled 并运行 Worker |
-| `/任务 [编号]`、`/取消 <编号>` | 查询任务或请求取消 |
-| `/补充 <编号> <内容>` | 补充活跃目标或回答持久化问题 |
+| `/帮助`、`/状态` | 命令与确定性服务状态 |
+| `/任务 [编号]`、`/取消 <编号>` | 查询或取消任务树 |
+| `/补充 <编号> <内容>` | 追加输入或回答持久化问题 |
+| `/新对话 <名称>`、`/切换对话 <名称或编号>`、`/对话` | 管理持久 Dialogue |
+| `/静默 [30m]`、`/恢复` | 当前会话静默与恢复 |
 
-## 通用执行与 Linux 部署
+自然语言交给 Leader 判断直接答复或委派。任务完成、成果验证和 QQ 送达是独立状态；排队不表示已经启动，UNKNOWN 外部操作必须先核对。
 
-普通对话和后台任务都需要 Core 与可信 Worker。生产使用隔离 runner。启用实际执行前完成以下配套配置。
+## 部署和恢复
 
-1. 按部署说明安装 `/opt/qqbot` 运行环境、独立服务账号、固定 root launcher 与网络命名空间。
-2. 在 Core 配置 `tasks_enabled: true`、`internal_socket: /run/qqbot/internal.sock`，设置独立内部令牌。
-3. 将相同内部令牌写入受限的 `/etc/qqbot/worker.token`，为 Worker 配置独立的 `QQBOT_RUNNER_OPENAI_KEY`。
-4. 对齐 Worker 的 `--model`、完整 `--model-endpoint` 与 root policy 中的模型许可名单。仓库服务模板中的供应商与模型值需要按部署环境调整。
-5. 完成目标主机的 `pi-isolation-check --enable-policy` 检查，配置产物目录权限，再启动 Core / Worker / 网络服务。
+按 [Ubuntu 部署说明](deploy/README.md) 安装单 daemon、root 停止证明 helper、Job user manager 和 OpenViking。现有部署升级需先停止旧服务，保留数据库中的输入、操作回执、未知投递和删除屏障。普通启动默认保留迁移前备份；明确要求不备份的部署可调用 `migrate(path, backup=False)`。
 
-Core 模型元信息与 Worker 实际模型配置保持一致。生产 runner 使用 `--runner-mode systemd`，本地协议开发可使用 `local` 模式。
+- [实现与完整验收矩阵](docs/elephant-agent-implementation-plan.md)
+- [持久 Job](docs/operations/persistent-jobs.md)
+- [QQ 官方接入](docs/operations/qq_official.md)
+- [技能文件与原生工具](docs/learned-skills.md)
+- [运维入口](docs/runbooks/operations.md)
+- [CI 和发布](docs/runbooks/releases.md)
 
-- [Ubuntu 安装与隔离检查](deploy/README.md)
-- [任务控制与恢复契约](docs/task-implementation.md)
-- [Harness 工具与产物边界](docs/harness-contract.md)
-- [A01–A62 验收证据与限制](docs/agent-execution-acceptance.md)
-- [运维、备份与投递核对](docs/runbooks/operations.md)
+备份恢复必须应用最新删除记录，再核对远端记忆状态。旧 Pi 历史不能在遗忘后重新作为当前上下文打开；未知副作用不能因重启或通知失败被重新执行。恢复工具和真实主机验收的边界见部署文档。
 
-## 开发与验证
+## 验证与隐私
 
-GitHub Actions 自动执行回归、lint、schema 校验、构建和安装冒烟检查。
-推送匹配项目版本的 `v*` 标签后，检查通过会发布包含完整源码包和校验和的 GitHub Release。
-版本发布与手动部署步骤见 [CI 与发布流程](docs/runbooks/releases.md)。
+GitHub Actions 执行回归、控制台检查、lint、schema 校验、构建和安装冒烟。仓库测试含真实锁定 Pi 配合确定性模型夹具；真实供应商调用、QQ 客户端和 Linux 隔离分别验收。
 
 ```sh
 uv run pytest -q
@@ -282,25 +81,6 @@ node --test tests/console_ui.test.cjs
 uv run ruff check src tests evals scripts
 ```
 
-测试使用合成消息和本地模型夹具。部分测试会运行 `node_modules/.bin/pi`，请先安装 npm 锁定依赖。真实 QQ 收发、供应商调用和目标 Linux 主机隔离分别验收。
+凭据、有效配置、数据库、原生 Session 和产物应放在仓库外并限制权限；提交前检查实际文件。管理员令牌仅保存在页面内存。远程管理使用 SSH 转发或受保护的 HTTPS 入口，勿公开内部能力网关。
 
-## 文件与隐私
-
-凭据通过环境变量注入，本地配置放在 `configs/local.yaml`，数据库、会话记忆、人格覆盖和任务产物放在 `var/`。这些位置及常见密钥、备份、日志文件已加入 `.gitignore`。现场验收记录和截图保留在本地。
-
-自定义目录或导入用户档案时，将实际配置、档案清单和运行数据放到仓库外，并检查 `git status --short` 后再提交。备份含用户数据，应限制权限并设定保留期。
-
-## 许可证
-
-原创代码采用 AGPL-3.0-only。提供网络服务时，应向使用者提供对应版本源码入口，可通过 `source_url` 配置。第三方依赖、参考项目与许可证据见 [第三方说明](THIRD_PARTY_NOTICES.md) 和 [版本锁定清单](upstreams.lock.yaml)。
-
-### QQ 官方富消息与扫码配置
-
-官方适配器支持私聊/群聊 Markdown、媒体、按钮及卡片；私聊可选择启用输入状态和原生流式。
-管理后台的“QQ 官方扫码配置”入口可创建禁用状态的新应用配置，配置统一权限后再启用。
-完整能力边界、管理 API、迁移和验收步骤见 [QQ 官方接入说明](docs/operations/qq_official.md)。
-代码和模拟测试不代表应用权限或真实客户端验收。未支持的频道富消息会明确拒绝，不静默丢弃。
-
-## OpenViking
-
-可选外部记忆索引与私聊会话支持，配置与数据边界见 [OpenViking](docs/openviking.md)。
+原创代码采用 AGPL-3.0-only。网络部署应提供对应源码入口（`source_url`）。第三方代码与锁定版本见 [第三方说明](THIRD_PARTY_NOTICES.md) 和 [版本锁定](upstreams.lock.yaml)。

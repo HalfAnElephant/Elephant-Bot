@@ -1,7 +1,7 @@
 """Short Leader attempts over the same Harness; the host owns goals and delivery."""
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import insert, select, update
 
@@ -74,6 +74,36 @@ class LeaderRuntime:
             self.service.permissions.require(access, action, resource)
         return {"allowed": True, "policy_version": self.service.permissions.policy_version}
 
+    def _persist_turn_budget(self, conn, run, claim, used):
+        if claim["purpose"] == "user":
+            source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == claim["source_ids"][0],
+                dialogue_inputs.c.claimed_attempt_id == run["id"])).mappings().first()
+            if source:
+                context = json.loads(source["context_json"])
+                turn = context.setdefault("leader_turn", {"plan": claim["plan"], "deadline": claim["deadline"]})
+                turn["used"] = used
+                conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == source["id"])
+                    .values(context_json=json.dumps(context, ensure_ascii=False)))
+        elif run["role"] == "skill_review":
+            from qqbot.storage.learning_schema import learning_sessions
+            source = conn.execute(select(learning_sessions).where(
+                learning_sessions.c.claimed_attempt_id == run["id"])).mappings().first()
+            if source and source["pending_json"]:
+                pending = json.loads(source["pending_json"])
+                pending["used"] = used
+                conn.execute(update(learning_sessions).where(learning_sessions.c.session_id == source["session_id"])
+                    .values(pending_json=json.dumps(pending, ensure_ascii=False)))
+
+    def _account_turn(self, conn, run, claim):
+        if claim["purpose"] != "user" and run["role"] != "skill_review":
+            return
+        used = json.loads(run["budget_json"])
+        now = self.clock.now()
+        elapsed = max(0, (now - datetime.fromisoformat(run["accounted_at"])).total_seconds()) if run["accounted_at"] else 0
+        used["active_seconds"] = min(claim["plan"]["budget"]["active_seconds"], used.get("active_seconds", 0) + elapsed)
+        conn.execute(update(runs).where(runs.c.id == run["id"]).values(budget_json=json.dumps(used), accounted_at=now.isoformat()))
+        self._persist_turn_budget(conn, run, claim, used)
+
     def receipt(self, conn, run, claim, payload):
         expected = set(claim["source_ids"]) | set(claim.get("task_input_ids", []))
         confirmed = payload.get("input_ids")
@@ -122,16 +152,22 @@ class LeaderRuntime:
         if claim.get("target_root_task_id"):
             root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
             root_used = json.loads(root["budget_json"])
-            root_limit = json.loads(root["plan_json"])["budget"][key]
+            root_budget = json.loads(root["plan_json"])["budget"]
+            root_limit = root_budget[key] - (root_budget.get("completion_reserve", 1)
+                if key == "model_calls" and claim["purpose"] != "finalize" else 0)
             if root_used.get(key, 0) >= root_limit:
                 raise ValueError("root budget exhausted")
             root_used[key] = root_used.get(key, 0) + 1
             conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(budget_json=json.dumps(root_used)))
         used[key] = used.get(key, 0) + 1
         conn.execute(update(runs).where(runs.c.id == run["id"]).values(budget_json=json.dumps(used)))
+        self._persist_turn_budget(conn, run, claim, used)
         conn.execute(insert(model_requests).values(id=request_id, run_id=run["id"], task_id=claim["task_id"],
             kind=kind, state="RESERVED", created_at=self.clock.now().isoformat()))
-        return {"accepted": True, "remaining": limit - used[key]}
+        remaining = limit - used[key]
+        if claim.get("target_root_task_id"):
+            remaining = min(remaining, root_limit - root_used[key])
+        return {"accepted": True, "remaining": remaining}
 
     def task_tool(self, conn, run, claim, payload):
         if claim.get("memory_mutation"):
@@ -226,10 +262,18 @@ class LeaderRuntime:
                         or process.get("generation") != run["binding_generation"]
                         or process.get("epoch") != run["process_epoch"]):
                     raise PermissionError("quiescence proof does not match process")
+            self._account_turn(conn, run, claim)
             if not result.agent_authored and not mutation:
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
+                source_values = {"claimed_attempt_id": None}
+                if claim.get("target_root_task_id") and claim["purpose"] != "finalize":
+                    root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                    root_budget = json.loads(root["plan_json"])["budget"]
+                    if json.loads(root["budget_json"]).get("model_calls", 0) >= (
+                            root_budget["model_calls"] - root_budget.get("completion_reserve", 1)):
+                        source_values.update(handled_at=now, output_ref="ROOT_EXECUTION_BUDGET_EXHAUSTED")
                 conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
-                    table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(claimed_attempt_id=None))
+                    table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(**source_values))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="FINISHED", slot_reserved=0,
                     quiescent_at=now, runner_stopped_at=now if stopped else None, result_json=submitted_result))
                 if run["process_id"]:
@@ -240,6 +284,8 @@ class LeaderRuntime:
                 if run["role"] == "skill_review":
                     self.sessions.learning.finish_review(conn, run_id, retry=True)
                     self._review_marks.pop(run_id, None)
+                if claim.get("target_root_task_id"):
+                    self.service._settle_exhausted_roots(conn)
                 self.service.wakeup.set()
                 return {"state": "FINISHED"}
             self.authorize(conn, run, claim, {"action": "task.execute"})
@@ -383,6 +429,7 @@ class LeaderRuntime:
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
                 table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(claimed_attempt_id=None))
+            self._account_turn(conn, current, claim)
             if run["role"] == "skill_review":
                 self.sessions.learning.finish_review(conn, run_id, retry=True)
                 self._review_marks.pop(run_id, None)

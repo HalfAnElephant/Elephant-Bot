@@ -318,6 +318,8 @@
         },
         "sustained_limit": {
           "default": 2,
+          "deprecated": true,
+          "description": "Legacy compatibility field; all Agent roles share max_active without reserved slots",
           "maximum": 31,
           "minimum": 1,
           "title": "Sustained Limit",
@@ -700,7 +702,6 @@
           "additionalProperties": {
             "type": "string"
           },
-          "default": {},
           "title": "Workspace Bindings",
           "type": "object"
         }

@@ -189,8 +189,9 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             "inbox_pending": pending,
             "background": background_health(),
             "deliveries": dict(delivery_states),
-            "model_configured": None,
-            "model_execution": "worker_pi"
+            "model_configured": bool(core.settings.model.endpoint and core.settings.model.model
+                                     and os.environ.get(core.settings.model.api_key_env)),
+            "model_execution": "pi"
             if core.settings.interactive_execution_enabled or core.settings.tasks_enabled
             else "disabled",
             "tasks_enabled": core.settings.tasks_enabled,

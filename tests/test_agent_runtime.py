@@ -460,6 +460,9 @@ def memory_runtime(runtime):
     class Memory:
         config = SimpleNamespace(bindings=(binding,), max_query_chars=1000)
 
+        def __init__(self):
+            self.search_calls = []
+
         def enabled(self, _scope):
             return True
 
@@ -467,6 +470,7 @@ def memory_runtime(runtime):
             return {"state": "READY", "memory_epoch": 1}
 
         async def search(self, _scope, _query):
+            self.search_calls.append(_query)
             return MemorySearchResult(status="ready", memory_epoch=1)
 
     core = runtime.leader.core
@@ -496,6 +500,8 @@ async def test_memory_change_cleanly_replans_linked_work_and_fences_queued_deliv
         conn.execute(update(tasks).where(tasks.c.root_task_id == root_id).values(
             context_json=json.dumps(old_context), goal="FORGOTTEN_SECRET"))
         root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+        followup = runtime.event.model_copy(update={"event_id": "followup", "segments": (TextSegment(text="仅做只读检查"),)})
+        runtime.service.add_graph_input(conn, root, followup, runtime.access, followup.text)
         runtime.service._notification(conn, root, user_claim["run_id"], "FORGOTTEN_SECRET", "result", "important", "old-result")
     receipt = MutationReceipt(operation_id="forget-1", state="APPLIED", completed=True,
         memory_epoch=1, affected_source_ids=("memory-source",))
@@ -517,6 +523,7 @@ async def test_memory_change_cleanly_replans_linked_work_and_fences_queued_deliv
     assert claim["purpose"] == "finalize" and claim["target_root_task_id"] == root_id
     assert claim["session_id"] != user_claim["session_id"]
     assert "FORGOTTEN_SECRET" not in json.dumps(claim)
+    assert "仅做只读检查" in claim["goal"]
     assert claim["context"]["memory_epoch"] == 1
     with runtime.db.transaction() as conn:
         root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
@@ -529,6 +536,13 @@ async def test_memory_change_cleanly_replans_linked_work_and_fences_queued_deliv
         assert child["rework_of_task_id"] == child_id
         assert json.loads(child["context_json"])["memory_epoch"] == 1
         assert "FORGOTTEN_SECRET" not in json.dumps(runtime.service.graph.status(conn, root))
+        conn.execute(update(tasks).where(tasks.c.id == child_id).values(result_json=json.dumps({
+            "status": "completed", "summary": "FORGOTTEN_SECRET", "artifacts": [{"id": "invalid-old-artifact"}]})))
+    worker_complete(runtime)
+    leader_complete(runtime, claim)
+    with runtime.db.engine.connect() as conn:
+        result = conn.execute(select(tasks.c.result_json).where(tasks.c.id == root_id)).scalar_one()
+        assert "FORGOTTEN_SECRET" not in result and "invalid-old-artifact" not in result
 
 
 async def test_memory_change_blocks_replanning_when_original_business_source_is_forgotten(runtime):
@@ -548,4 +562,64 @@ async def test_memory_change_blocks_replanning_when_original_business_source_is_
     with runtime.db.engine.connect() as conn:
         root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
         assert root["state"] == "BLOCKED" and root["stop_reason"] == "business_source_revoked"
+        assert not knowledge.memory.search_calls and root["goal"] != runtime.event.text
         assert not conn.execute(select(leader_inbox).where(leader_inbox.c.handled_at.is_(None))).first()
+
+
+async def test_memory_replan_waits_for_worker_stop_and_preserves_uncertain_delivery(runtime):
+    from qqbot.contracts.memory import MutationReceipt
+    from qqbot.storage.task_schema import notifications
+
+    knowledge, scope = memory_runtime(runtime)
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    user_claim = runtime.sessions.claim("leader")
+    root_id = root_goal(runtime)["task_id"]
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.root_task_id == root_id).values(
+            context_json=json.dumps({"memory_scope": scope.model_dump(), "memory_epoch": 0})))
+    worker_claim = runtime.service.claim("worker")
+    with runtime.db.transaction() as conn:
+        root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+        runtime.service._notification(conn, root, user_claim["run_id"], "旧结果", "result", "important", "sending-result")
+        conn.execute(update(outbox).values(state="SENDING"))
+    knowledge.rotate(scope, (user_claim["run_id"], 1, "leader"), MutationReceipt(operation_id="forget-active",
+        state="APPLIED", completed=True, memory_epoch=1, affected_source_ids=("memory-source",)))
+    leader_complete(runtime, user_claim)
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state).where(outbox.c.origin_id == "sending-result")).scalar_one() == "UNKNOWN"
+        assert conn.execute(select(notifications.c.state)).scalar_one() == "UNKNOWN"
+        assert "memory_replan_pending" in json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
+    with runtime.db.transaction() as conn:
+        conn.execute(update(runs).where(runs.c.id == worker_claim["run_id"]).values(slot_reserved=0))
+        conn.execute(update(tasks).where(tasks.c.id == worker_claim["task_id"]).values(state="CANCELLED"))
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        assert "memory_replan_pending" in json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
+    with runtime.db.transaction() as conn:
+        conn.execute(update(runs).where(runs.c.id == worker_claim["run_id"]).values(runner_stopped_at=runtime.clock.now().isoformat()))
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        assert "memory_replan_pending" not in json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
+
+
+async def test_restored_epoch_barrier_automatically_schedules_clean_replanning(runtime):
+    from sqlalchemy import insert
+
+    from qqbot.storage.memory_sync_schema import memory_barriers
+
+    knowledge, scope = memory_runtime(runtime)
+    root_id = root_goal(runtime)["task_id"]
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.root_task_id == root_id).values(
+            context_json=json.dumps({"memory_scope": scope.model_dump(), "memory_epoch": 0})))
+        conn.execute(insert(memory_barriers).values(id="restored-fence", scope_id=scope.key, epoch=1,
+            operation_id="restored-forget", source_id="memory-source", created_at=runtime.clock.now().isoformat()))
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        context = json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
+        assert context["memory_replan_pending"]["operation_ids"] == ["restored-forget"]
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        context = json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
+        assert context["memory_epoch"] == 1 and "memory_replan_pending" not in context

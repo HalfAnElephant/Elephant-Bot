@@ -89,7 +89,8 @@ class MemoryConfig(DTO):
 class ExecutionConfig(DTO):
     notify_before_tools: bool = True
     max_active: int = Field(default=8, ge=1, le=32)
-    sustained_limit: int = Field(default=2, ge=1, le=31)
+    sustained_limit: int = Field(default=2, ge=1, le=31, deprecated=True,
+        description="Legacy compatibility field; all Agent roles share max_active without reserved slots")
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
     interactive_budget: RunBudget = RunBudget(
         model_calls=30, tool_calls=80, active_seconds=600, total_wall_seconds=3600,
@@ -102,8 +103,6 @@ class ExecutionConfig(DTO):
 
     @model_validator(mode="after")
     def bounded_capacity(self):
-        if self.sustained_limit > self.max_active:
-            raise ValueError("sustained execution limit exceeds total active capacity")
         if self.warm_max and self.warm_idle_max > self.warm_max:
             raise ValueError("idle process limit exceeds resident limit")
         return self
@@ -137,7 +136,7 @@ class OrchestrationConfig(DTO):
     model_request_limit: int = Field(default=8, ge=1, le=32)
     pi_executable: str = "node_modules/.bin/pi"
     github_host: str = "github.com"
-    workspace_bindings: dict[str, str] = {}
+    workspace_bindings: dict[str, str] = Field(default_factory=dict)
 
 
 class ContextConfig(DTO):

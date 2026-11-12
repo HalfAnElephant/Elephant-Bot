@@ -166,3 +166,53 @@ async def test_retired_transport_inputs_and_tasks_cannot_execute(tmp_path, offic
     finally:
         await core.stop()
         core.db.close()
+
+
+async def test_reply_image_and_source_permission_preserve_dialogue_boundary(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
+
+    from qqbot.domain import MediaSegment
+    from qqbot.permissions import PermissionRule
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        image = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="", message_id="old-pic"))
+        image = image.model_copy(update={"segments": (MediaSegment(type="image", attachment_ref="image", image_url="https://example.com/old.png"),)})
+        image, _ = core.inbox.accept(image)
+        await core.process(image)
+        clock.advance(601)
+        follow = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="解释回复图片", message_id="new"))
+        follow, _ = core.inbox.accept(follow)
+        assert core.context_for(follow)["images"] == []
+        follow = follow.model_copy(update={"reply_to": image.platform_message_id})
+        context = core.context_for(follow)
+        assert context["images"][0]["source"] == image.event_id
+        assert "seed" not in context
+        core.permissions.upsert(PermissionRule(id="deny-image", effect="deny", actions=("history.source.read",),
+            resources=("event:" + image.event_id,)), expected_version=0, actor="test")
+        assert not core.validate_context(core.access(follow), context)
+        assert core.context_for(follow)["images"] == []
+    finally:
+        await core.stop()
+        core.db.close()
+
+
+def test_admin_task_has_host_identity_explicit_contract_and_idempotency(tmp_path, official_config, clock, monkeypatch):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-fixture")
+    app = create_app(Settings(database=str(tmp_path / "admin.db"), adapters=(official_config,), tasks_enabled=True),
+        clock=clock, run_background=False)
+    auth = {"Authorization": "Bearer admin-fixture", "Idempotency-Key": "host-contract"}
+    body = {"goal": "生成报告", "requested_outputs": ["reports/result.txt"], "success_checks": ["artifact"]}
+    with TestClient(app) as client:
+        assert client.post("/api/v1/tasks", json=body).status_code == 401
+        response = client.post("/api/v1/tasks", headers=auth, json=body)
+        assert response.status_code == 200, response.text
+        assert client.post("/api/v1/tasks", headers=auth, json=body).json() == response.json()
+        with app.state.db.engine.connect() as conn:
+            saved = conn.execute(select(tasks).where(tasks.c.kind == "work")).mappings().one()
+        goal = json.loads(saved["goal_json"])
+        assert goal["requested_outputs"] == ["reports/result.txt"]
+        assert goal["success_checks"] == ["artifact"]
+        identity = json.loads(saved["event_json"])
+        assert identity["principal"]["identity_namespace"] == "admin_api"
+        assert identity["conversation"]["adapter_instance_id"] == "admin_api"

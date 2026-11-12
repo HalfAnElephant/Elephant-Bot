@@ -108,6 +108,8 @@ def internal_router(service, token):
                 return rich_status(service, args, body.payload)
             if operation == "ledger" and body.payload:
                 return await service.ledger(*args, body.payload)
+            if operation == "session-receipt" and body.payload:
+                return service.session_receipt(*args, body.payload)
             if operation == "input-ack" and body.payload:
                 return service.acknowledge_input(*args, body.payload)
             if operation == "extend-budget" and body.payload:

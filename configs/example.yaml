@@ -10,7 +10,6 @@ permissions:
   rules: []
 execution:
   max_active: 8
-  sustained_limit: 2
   foreground_wait_ms: 5000
   warm_max: 4
   warm_idle_max: 2

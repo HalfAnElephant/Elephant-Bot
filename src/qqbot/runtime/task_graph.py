@@ -145,6 +145,8 @@ class TaskGraph:
         root = self.root(conn, task)
         context = json.loads(root["context_json"])
         replanning = bool(context.get("memory_replan_pending") or context.get("memory_replan"))
+        stale_task = bool(context.get("memory_replan_pending") or replanning and
+            json.loads(task["context_json"]).get("memory_epoch") != context.get("memory_epoch"))
         children = conn.execute(select(tasks.c.id, tasks.c.public_id, tasks.c.kind, tasks.c.state,
             tasks.c.goal, tasks.c.result_json, tasks.c.context_json).where(tasks.c.parent_task_id == task["id"])
             .order_by(tasks.c.created_at, tasks.c.id)).mappings().all()
@@ -159,15 +161,16 @@ class TaskGraph:
                     "rework_required": True, "operation_ids": operation_ids})
             else:
                 child_status.append({key: row[key] for key in ("id", "public_id", "kind", "state", "goal")} | {
+                    "result_json": row["result_json"],
                     "result": json.loads(row["result_json"]) if row["result_json"] else None})
         last = conn.execute(select(agent_events.c.kind, agent_events.c.payload_json, agent_events.c.created_at)
             .where(agent_events.c.task_id == task["id"]).order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
         delivery = conn.execute(select(notifications.c.state).where(notifications.c.task_id == task["id"],
             notifications.c.purpose == "result")).scalars().all()
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
-            "state": task["state"], "goal": InboundEvent.model_validate_json(root["event_json"]).text if replanning else task["goal"],
+            "state": task["state"], "goal": None if stale_task else task["goal"],
             "goal_revision": task["goal_revision"], "children": child_status,
-            "result": json.loads(task["result_json"]) if task["result_json"] and not replanning else None,
+            "result": json.loads(task["result_json"]) if task["result_json"] and not stale_task else None,
             "last_progress": dict(last) if last and not replanning else None, "delivery_states": delivery}
 
     def check_authority(self, conn, task, payload):
