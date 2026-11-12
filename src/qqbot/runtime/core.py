@@ -487,6 +487,7 @@ class Core:
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
         self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
+        self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
         self.supervisor.start("memory", self.maintenance, interval=10)
         while not self.stopping:
             await asyncio.sleep(0.1)

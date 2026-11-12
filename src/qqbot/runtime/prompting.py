@@ -24,6 +24,10 @@ def assemble_prompt(role, *, purpose="work", preferences="", skills_guidance="")
     if role not in ROLES:
         raise ValueError("unsupported agent role")
     parts = [COMMON, ROLES[role], "本轮用途：" + purpose]
+    if role == "leader" and purpose == "finalize":
+        parts.append("最终答复在本轮结束并通过宿主验收后才原子结算根目标；答复前看到 WAITING_CHILDREN 不是结算失败。"
+                     "宿主会汇总已验证的子任务制品，不在 Leader 工作区重新导出子文件，也不重复原业务写入。"
+                     "条件满足时直接汇报成果、证据和限制并结束本轮；未满足时明确部分完成或安排关联返工。")
     if preferences:
         parts.append("用户明确设置的沟通偏好：\n" + preferences)
     if skills_guidance:

@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import httpx
 from sqlalchemy import select, update
 
+from qqbot.capabilities.gateway import standard_registry
 from qqbot.harness.pool import SessionPool
 from qqbot.jobs.api import WorkerRequest
-from qqbot.jobs.worker import GeneralRun, Spool, Worker
+from qqbot.jobs.waiters import ExternalWaiters
+from qqbot.jobs.worker import GeneralRun, Spool, Worker, configured_github
 from qqbot.providers import ModelCapacity
 from qqbot.storage.task_schema import runs
 
@@ -144,6 +146,9 @@ class Scheduler:
             max_idle=min(self.settings.execution.warm_idle_max, core.tasks.max_resident),
             ttl=self.settings.execution.warm_ttl_seconds)
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)
+        async def waiter_call(operation, payload):
+            return await self.worker.call(operation, payload=payload)
+        self.waiters = ExternalWaiters(waiter_call, standard_registry(github=configured_github(self.args)))
         self.active = set()
 
     async def step(self):

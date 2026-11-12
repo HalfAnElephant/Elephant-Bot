@@ -1,5 +1,5 @@
 """Bounded HTTP for the pinned OpenViking v0.5.4.1 session/content API."""
-import hashlib
+import hmac
 import json
 import os
 import time
@@ -21,6 +21,7 @@ class OpenVikingHTTP:
         self.client = client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
         self.owns_client = client is None
         self.identities = {}
+        self.identity_key = os.urandom(32)
 
     def headers(self, binding):
         key = os.environ.get(binding.api_key_env, "")
@@ -50,7 +51,7 @@ class OpenVikingHTTP:
         return data
 
     async def verify(self, binding):
-        credential_hash = hashlib.sha256(self.headers(binding)["X-API-Key"].encode()).hexdigest()
+        credential_hash = hmac.digest(self.identity_key, self.headers(binding)["X-API-Key"].encode(), "sha256")
         key = (binding.account_id, binding.user_id, credential_hash)
         if self.identities.get(key, 0) > time.monotonic():
             return
