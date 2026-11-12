@@ -244,10 +244,11 @@ class TaskGraph:
             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))).first()
         return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain and (allow_pending_inputs or not pending))
 
-    def verify_final_result(self, conn, root, result):
-        goal = json.loads(root["goal_json"])
+    def verify_final_result(self, conn, root, result, checks=None):
+        if checks is None:
+            checks = json.loads(root["goal_json"]).get("success_checks", [])
         tree = select(tasks.c.id).where(tasks.c.root_task_id == root["id"])
-        for check in goal.get("success_checks", []):
+        for check in checks:
             if check == "artifact" and result.artifacts:
                 continue
             if check == "observation" and result.observation_refs:

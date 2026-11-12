@@ -1,6 +1,8 @@
 # Leader / Workers 验收记录
 
-本稿对应[实施计划第 11 章](elephant-agent-implementation-plan.md#11-验收矩阵)，记录截至 2026-11-13 的实现、已执行定点验证和剩余验收。统一 CI 与最终 daemon 验收由主线程补齐后再形成完成结论。
+本文对应[实施计划第 11 章](elephant-agent-implementation-plan.md#11-验收矩阵)。Leader/Workers 已切换并部署到 home；宿主回归、真实模型任务、组件和指定恢复场景已验证。完整 QQ 平台验收尚未完成，不能把本记录理解为全部 T/L 场景均已通过。
+
+下方 T/L 表保留各场景的原始覆盖边界；部署与 CI 的最终证据优先见本节。
 
 ## 证据边界
 
@@ -11,7 +13,7 @@
 | home 真实组件 | 在 home 调用实际 systemd user-manager、bubblewrap 或 OpenViking 服务，记录组件行为。单独列出与最终 daemon 的集成范围。 |
 | 待统一 CI | 测试存在或有分批定点结果，当前提交的完整 CI 结论仍待补。失败、跳过及未执行的场景均保留待验收状态。 |
 
-本稿形成时，新的 home daemon 与真实业务模型端到端流程尚未启动验收。home 已检查的配置缺少 QQ 官方 AppID、secret 与已验证 OpenID 绑定，真实 QQ 收发及平台能力仍待验收。
+home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务。官方 adapter 与已验证 QQ owner 绑定均为 0；缺少 AppID、secret 与 OpenID，当前服务没有 QQ 接入。未向旧 NapCat 恢复兼容链路，也未伪造官方身份。
 
 ## 已有验证记录
 
@@ -119,14 +121,33 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 
 摘要文件为 `/tmp/elephant-memory-benchmark.json`。home volume 对应容器目录 `/app/.openviking/acceptance-package/benchmark/`，保留 `fixture.json`、`state.json`、`queries.jsonl`、`http-observations.jsonl`、`initial-scoring-v1.json` 和 `scored-results-v2.json`。此前 16 项验收状态保留在 `/app/.openviking/acceptance-package/state/run.json`。
 
-## 主线程待补记录
+## home 最终部署与恢复证据
 
-| 项目 | 最终记录 |
-| --- | --- |
-| 统一 CI | 待补 commit、PR/CI URL、各 job 结果、测试计数、失败/跳过项及 artifact 路径。 |
-| 最终部署 | 待补发布 revision、单 daemon unit、实际库迁移结果、旧执行器/监听退出与配置校验。 |
-| 真实 daemon 与业务模型 | 待补接受→委派→Worker→Leader→交付、并发/预算/压缩、skills 自动学习与重启恢复。 |
-| 真实停止及操作恢复 | 待补旧 daemon epoch、root-owned cgroup 停止证明、持久 Job 续存、UNKNOWN 只读核对及幂等。 |
-| 延迟指标 | 待补宿主状态读取与控制持久接受的 P95，分别对照小于 1 秒目标。真实模型及 QQ 延迟单独记录。 |
-| 官方 QQ | 待补授权测试应用、已验证主体与四 surface 能力记录。当前凭据/绑定缺口仍存在。 |
-| 最终判定 | 待上述证据核对后填写通过范围、剩余限制与未完成项。 |
+- 单 `elephant-bot.service` 已启用，旧 core/worker acceptance units 均 disabled/inactive。后台监督包含 ingress、delivery、scheduler、external_waiters 和 memory；ready 为 true。发布 revision 记录在 `/opt/qqbot/REVISION`。
+- 实际库从历史实验 0010 升级至 0020，`PRAGMA integrity_check=ok`。按用户要求使用 `backup=False`，本次没有备份原 bot。
+- 最终代码回归以 [PR #6 的检查](https://github.com/HalfAnElephant/Elephant-Bot/pull/6/checks)为准，包括 Python、console、Ruff、配置 schema、构建/发布冒烟，以及 Python/TypeScript CodeQL。对应原始 JUnit 和日志保留在每次 CI 的 correctness-results artifact。统一渠道使用 CI，不另跑同范围的本地全量测试。
+- 真实文件目标 `T-87ade253-056` 达到 SUCCEEDED。根目标聚合子 artifact，通过受保护下载 API 取得 17 字节 `ELEPHANT_FINAL_OK`，hash 与登记值一致。
+- 真实 150 秒持久 Job 目标 `T-fd407f5d-145` 达到 SUCCEEDED。Job `fb89e1624083470ca401d2ddb79d9992` 只派发一次；daemon 正常重启前后 InvocationID `222eed5e321d4eb09798aa888e60b96b` 与 PID 保持一致，就绪恢复 1.77 秒。原 Task/Session 续接，新 attempt 不重启业务 Job；最终 EXITED/0，下载的 8 字节 `SURVIVED` 与 artifact hash 一致。
+- 在上述目标 Worker 结果持久化后，对 Leader 所在 daemon 主进程注入 SIGKILL。就绪恢复 4.24 秒，已有 Worker attempts 不增加，最终仍由原根目标汇总同一 artifact。原生回执与 root-owned cgroup 空证明是恢复依据。
+- 真实取消目标 `T-95bf4657-dcd` 的 root、child、Job 均为 CANCELLED，运行槽释放。控制持久接受耗时 25.62 ms。并发任务期间每批 30 次宿主状态读取的 P95 为 5.9–14.3 ms；这是 HTTP 宿主控制测量，不含模型/QQ 延迟，也不是全角色峰值压力测试。
+- 真实模型通过原生 Hermes 工具创建、读取和更新标准 SKILL.md。主机也通过同一工具修正过验收期间形成的错误结算经验，ledger 保留回退记录。真实条件复盘尚无触发成功记录；其计数、调度、只读工具范围及不可递归由契约测试验证。
+
+该批实测发现并修复了：idle JSON null、Scheduler 失败批次监督、外部等待 observer 遗漏、技能回执字段、子 artifact 聚合、关闭 stdin 的 uvloop 竞态、沙箱内用户 D-Bus 不可见、正常 daemon 停机误记任务失败、宿主终态未唤醒父任务，以及 finalizer 显式引用合法 child 证据被拒。早期失败任务与原回执保留，不将这些失败计作成功。
+
+root 的 `task_outcome` 接单与 turn_finished 后原子结算分开。旧故障期间生成的部分模型正文仍描述当时的待核对状态；恢复保留原始正文，不能仅凭模型叙述判断当前状态。应读取根目标 state、原操作回执和 artifact。新回执明确要求完成最终答复并结束轮次，禁止用本轮结算前的 status 判断结算卡死。
+
+home 持久证据：
+
+- `/var/lib/qqbot/leader-live-acceptance.json`：task/run/Job、延迟、正常重启、Leader SIGKILL、artifact 下载校验。
+- `/var/lib/qqbot/leader-deployment-facts.json`：revision、迁移、units、监督、学习会话及监听快照。
+- `/var/lib/qqbot-daemon-stops/`：root-owned、daemon 只读的旧 epoch 停止证明。
+- OpenViking 基准与删除/恢复证据仍位于前述独立 acceptance-package，包含原始评分记录。
+
+## 尚未验收的边界
+
+1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。
+2. 所有 L01–L14 故障切点的真实平台组合、全角色满额压力、真实供应商切换/429/断流与所有控制语义的质量基准。本轮 CI 覆盖对应宿主边界，并补充上述指定真实恢复场景，未执行的组合仍保持未验收。
+3. 最终 daemon 经真实 QQ 用户输入自动记忆并跨新 Dialogue 召回，以及活动 QQ Worker 更正/遗忘后的完整交付。OpenViking 真实组件的提炼、更正、遗忘、隔离、重启和基准已执行；活动任务 epoch 屏障与重规划有契约测试。
+4. 模型自动技能学习已实际发生；自然触发的独立条件复盘、无可存内容及其真实并发效果仍需独立实测。学习成功不等同于业务执行或 QQ 送达成功。
+
+部署成功与完整验收分别记录。当前能证明单 daemon、任务树、真实业务模型/Job、受保护制品交付及列明恢复路径工作；尚不能宣布实施计划第 12.1 节全部通过。

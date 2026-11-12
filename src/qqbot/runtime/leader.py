@@ -306,9 +306,9 @@ class LeaderRuntime:
                     descendants = conn.execute(select(tasks).where(tasks.c.root_task_id == target["id"],
                         tasks.c.id != target["id"])).mappings().all()
                     if result.observation_refs:
-                        self.service._verify_checks(conn, ("observation",), result, target["id"])
+                        self.service.graph.verify_final_result(conn, target, result, checks=("observation",))
                     if result.effect_refs:
-                        self.service._verify_checks(conn, ("effect",), result, target["id"])
+                        self.service.graph.verify_final_result(conn, target, result, checks=("effect",))
                     artifacts = {item.id: item.model_dump(mode="json") for item in result.artifacts}
                     evidence = {item.url: item.model_dump(mode="json") for item in result.evidence}
                     effects, observed = set(result.effect_refs), set(result.observation_refs)
