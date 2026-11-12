@@ -252,7 +252,9 @@ class PiRunnerAdapter:
             for pending in self.responses.values():
                 if not pending.done():
                     pending.set_exception(RuntimeError("RPC closed before command acknowledgement"))
-            await self.queue.put({"type": "host_eof"})
+            # Shutdown cancels the reader after its queue consumer has already stopped.
+            if not asyncio.current_task().cancelling():
+                await self.queue.put({"type": "host_eof"})
 
     async def _stderr(self):
         while chunk := await self.process.stderr.read(65536):

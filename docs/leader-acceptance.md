@@ -164,6 +164,16 @@ home 持久证据：
 
 等待 Job 时收到真实任务修订会持久登记受影响 Job 的停止意图，旧等待被替代，同 Task/Session 可读取新输入。旧 Job 尚未证停时，新业务写入和根目标验收继续阻断。问题答复只影响对应 Task，兄弟 Job 可继续运行，停止意图不会因输入已消费而丢失。dispatch 期间权限变化后仍保留真实调用回执并登记停止，避免把已经发生的派发当作未执行。
 
+## 最新运行复验
+
+`db1b4eb` 的统一 CI 为 1070 项 Python、17 项 JavaScript 全部通过且无跳过，Ruff、配置 schema、构建/发布冒烟与 CodeQL 均通过，已部署到 home。旧 IDLE 驻留记录 `889f6490-4375-4209-aaf7-7f6012ea4368` 已凭可信旧 epoch 停止证明成为 STOPPED。
+
+原失败分支 `T-4e232c35-b0b` 的 Job 等待在部署后唤醒原 Task 与同一 Worker Session，最终 BLOCKED，原 Job 仍只有一个且 exit 7。另一根目标保持 SUCCEEDED，已核对的产物保持原 hash。恢复事实写入 `/var/lib/qqbot/leader-isolation-fixed-acceptance.json` 的 post_fix_checks。
+
+真实 HOST 普通文件重试已完成 Leader → Worker → 文件读回 → Leader 核验闭环。根目标 `T-19dd86df-b83` 达到 SUCCEEDED，只有一个 Worker attempt 和一个 finalizer，均 FINISHED、槽位为 0，没有 Job。`outputs/host-final.txt` 为精确 13 字节 `HOST_FINAL_OK`，受保护下载的原始字节及 SHA-256 与登记值相符。该重试保留了先前绑定前失败的目标，记录在 `/var/lib/qqbot/acceptance-host-final/3828bb49-8ecc-4c48-b004-79eedf310331/summary.json`。
+
+真实 Pi 已启动后的取消接受耗时 24.83 ms，但首次探针发现进程退出后任务槽未释放，原失败结果保留在 `/var/lib/qqbot/leader-cancel-process-fixed-acceptance.json`。原因是取消 stdout reader 时，满队列的 EOF 入队等待没有消费者，阻塞停止回执。该场景须经修复、统一 CI 和真实复验后才能计为通过。
+
 ## 尚未验收的边界
 
 1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。
