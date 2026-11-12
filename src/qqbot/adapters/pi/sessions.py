@@ -124,6 +124,22 @@ def unfinished_tools(path):
     return tuple(pending.values())
 
 
+def mutation_calls(path, *, run_id, input_ids):
+    calls, active = [], False
+    for entry in branch_entries(load_entries(path)):
+        if entry.get("type") == "custom" and entry.get("customType") == "elephant-consumed":
+            data = entry.get("data", {})
+            active = data.get("run_id") == run_id and set(data.get("input_ids", ())) == set(input_ids)
+        elif entry.get("type") == "custom" and entry.get("customType") == "elephant-turn-boundary":
+            active = False
+        elif active and entry.get("type") == "message":
+            message = entry.get("message", {})
+            if message.get("role") == "assistant":
+                calls.extend(part for part in message.get("content", []) if part.get("type") == "toolCall"
+                    and part.get("name") in {"memory_correct", "memory_forget"})
+    return calls
+
+
 def restore_tool_results(path, receipts, *, pi_executable):
     """Append genuine host receipts through Pi's native writer after verified stop."""
     native = load_entries(path)

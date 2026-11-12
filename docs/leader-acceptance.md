@@ -172,7 +172,13 @@ home 持久证据：
 
 真实 HOST 普通文件重试已完成 Leader → Worker → 文件读回 → Leader 核验闭环。根目标 `T-19dd86df-b83` 达到 SUCCEEDED，只有一个 Worker attempt 和一个 finalizer，均 FINISHED、槽位为 0，没有 Job。`outputs/host-final.txt` 为精确 13 字节 `HOST_FINAL_OK`，受保护下载的原始字节及 SHA-256 与登记值相符。该重试保留了先前绑定前失败的目标，记录在 `/var/lib/qqbot/acceptance-host-final/3828bb49-8ecc-4c48-b004-79eedf310331/summary.json`。
 
-真实 Pi 已启动后的取消接受耗时 24.83 ms，但首次探针发现进程退出后任务槽未释放，原失败结果保留在 `/var/lib/qqbot/leader-cancel-process-fixed-acceptance.json`。原因是取消 stdout reader 时，满队列的 EOF 入队等待没有消费者，阻塞停止回执。该场景须经修复、统一 CI 和真实复验后才能计为通过。
+真实 Pi 已启动后的取消接受耗时 24.83 ms，但首次探针发现进程退出后任务槽未释放，原失败结果保留在 `/var/lib/qqbot/leader-cancel-process-fixed-acceptance.json`。原因是取消 stdout reader 时，满队列的 EOF 入队等待没有消费者，阻塞停止回执。后续 `47d397e` 的统一 CI 为 1073 项 Python、17 项 JavaScript 全部通过且无跳过，构建/发布冒烟和 CodeQL 通过。部署后，原取消任务凭可信停止证明自然恢复为 CANCELLED。新探针 `T-346170d1-060` 先观察实际 Pi PID 与启动时间，再发取消；接受耗时 33.58 ms，随后根目标 CANCELLED、run FINISHED 且 slot_reserved=0、process STOPPED，原 PID 已停止。新成功证据独立保存在 `/var/lib/qqbot/leader-cancel-process-final-acceptance.json`，首次失败记录保留。
+
+真实 HOST 活动任务更正已完成同根返工。根目标 `T-52013406-6de` 原 Job `897934bd5b0943c2be1a23b7a07e22c5` 处于 RUNNING 时，通过真实 `memory_correct` 更正唯一测试项目，操作达到 APPLIED，owner epoch 从 0 升至 1。旧 child 与 Job 均 CANCELLED，确认原 PID 消失且 cgroup 消失或为空后，系统才建立关联旧任务的 rework。新 Worker 使用新 Session、epoch 1，替代 Job EXITED/0，原根最终 SUCCEEDED。受保护制品下载的 71 字节为更正后的 archive-b 值，hash 与登记一致。中间 Leader 轮次 `cbc941bc-527d-4a71-9280-da548ab24a26` 的 aborted 结果保留；该轮已持久派出关联子任务，后续正常汇总，无额外业务 Job 或最终阻塞。证据仍在上述 HOST summary 和原生日志中。
+
+三文档遗忘已在真实后端达到 APPLIED，epoch 为 2，三份 synthetic 文档均 DELETED 且直接 GET 返回 404。首次宿主确认暴露新的竞态：适配器登记 epoch 屏障后等待远端操作，期间旧轮次被控制检查撤销，尚未写入 mutation marker；旧输入随后因过期上下文被反复领取，共产生 393 个 attempt。后续 392 次均在绑定前失败，未启动 Pi 或模型。daemon 已停止以终止循环，原生调用、失败和删除回执保留。
+
+修复使 correct/forget 仅同步登记并立即返回持久 receipt，由原后台队列执行远端操作。崩溃窗口通过原生 run/输入/工具 ID 与完整参数 hash 精确匹配已提交操作，等待所有相关 attempt 与旧会话写者停止后，复用宿主确认并轮换会话。已释放槽位的原失败结果保存在原 receipt 的 recovered_result 中，后续失败 attempt 保持原样。缺少停止证明的已匹配输入继续待核验；无匹配回执的永久失效上下文在分配 run 前终止并记录 CONTEXT_REVOKED。畸形原生日志隔离在该输入的匹配范围，原操作不重放。此补丁的生产确认恢复和活跃同步循环无复活复验仍待下一次部署记录。
 
 ## 尚未验收的边界
 

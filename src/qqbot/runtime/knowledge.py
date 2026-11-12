@@ -1,19 +1,26 @@
 """Bind memory operations to verified owners and export only native Pi sources."""
 import hashlib
 import json
+from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 
-from qqbot.adapters.openviking.service import BACKEND_ERRORS
-from qqbot.adapters.pi.sessions import export_session
-from qqbot.contracts.memory import MemoryCorrection, MemoryDeletion, MemoryScope, SourceBatch
+from qqbot.adapters.openviking.service import BACKEND_ERRORS, digest
+from qqbot.adapters.pi.sessions import export_session, mutation_calls
+from qqbot.contracts.memory import MemoryCorrection, MemoryDeletion, MemoryScope, MutationReceipt, SourceBatch
 from qqbot.dialogue.planner import plan_turn
 from qqbot.domain import InboundEvent, Surface, stable_id
 from qqbot.domain.execution import TaskGoal, TurnInput
 from qqbot.storage.action_schema import operations
-from qqbot.storage.agent_schema import dialogues, leader_inbox
-from qqbot.storage.memory_sync_schema import memory_barriers, memory_owners, memory_sources, memory_streams
+from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
+from qqbot.storage.memory_sync_schema import (
+    memory_barriers,
+    memory_operations,
+    memory_owners,
+    memory_sources,
+    memory_streams,
+)
 from qqbot.storage.schema import outbox
 from qqbot.storage.stream_schema import stream_messages, stream_runs
 from qqbot.storage.task_schema import inputs, notifications, processes, runs, sessions, tasks
@@ -277,6 +284,10 @@ class KnowledgeRuntime:
         with self.core.db.transaction() as conn:
             request_json = conn.execute(select(runs.c.request_json).where(runs.c.id == identity[0])).scalar_one()
             claim = json.loads(request_json)
+            if claim.get("memory_mutation"):
+                if claim["memory_mutation"]["operation_id"] != receipt.operation_id:
+                    raise PermissionError("memory mutation receipt conflicts with its original turn")
+                return
             claim["memory_mutation"] = {"summary": "记忆更改已完成。" if receipt.completed else "记忆更改已登记，旧内容已停止召回，后端清理仍在处理。",
                                         **receipt.model_dump(mode="json")}
             conn.execute(update(runs).where(runs.c.id == identity[0]).values(request_json=json.dumps(claim)))
@@ -294,6 +305,111 @@ class KnowledgeRuntime:
                 if json.loads(root["context_json"]).get("memory_scope") == scope.model_dump():
                     self.invalidate_root(conn, root, scope, receipt.operation_id, receipt.affected_source_ids, old_session_ids)
 
+    def mutation_request(self, scope, claim, call_id, operation, args, session_file):
+        event = InboundEvent.model_validate_json(claim["event_json"])
+        key = hashlib.sha256((event.event_id + ":" + call_id).encode()).hexdigest()
+        if operation == "memory_forget":
+            return MemoryDeletion(scope=scope, idempotency_key=key,
+                uris=tuple(args.get("uris", ())), source_event_ids=tuple(args.get("source_event_ids", ())))
+        after, source = 0, None
+        while True:
+            exported = export_session(session_file, session_id=claim["session_id"], after=after)
+            source = next((item for item in exported["events"] if event.event_id in item.origins and item.role == "user"), None)
+            if source or not exported["has_more"]:
+                break
+            after = exported["next_cursor"]
+        if source is None:
+            raise PermissionError("the original correction statement is not durably exported")
+        return MemoryCorrection(scope=scope, uri=args["uri"], session_id=claim["session_id"],
+            source=source, idempotency_key=key)
+
+    def recover_mutations(self):
+        """Read committed receipts for stopped native calls without repeating the mutation."""
+        recovered = []
+        self.core.sessions.reconciling_inputs.clear()
+        with self.core.db.engine.connect() as conn:
+            pending = [dict(row) for row in conn.execute(select(dialogue_inputs).where(
+                dialogue_inputs.c.handled_at.is_(None))).mappings()]
+        for source in pending:
+            event = InboundEvent.model_validate_json(source["event_json"])
+            scope = self.scope(event)
+            if scope is None or source["owner_id"] != scope.owner_id or not self.core.allowed(event):
+                continue
+            context = json.loads(source["context_json"])
+            if context.get("memory_scope") and self.valid(context):
+                continue
+            with self.core.db.engine.connect() as conn:
+                attempts = [dict(row) for row in conn.execute(select(runs).where(runs.c.role == "leader",
+                    runs.c.purpose == "user", func.json_extract(runs.c.request_json, "$.source_ids[0]") == source["id"])
+                    .order_by(runs.c.started_at)).mappings()]
+                active_sessions = set(conn.execute(select(runs.c.session_id).where(runs.c.slot_reserved == 1)).scalars())
+                process_rows = {row["id"]: dict(row) for row in conn.execute(select(processes).where(
+                    processes.c.id.in_([item["process_id"] for item in attempts if item["process_id"]]))).mappings()}
+            if not attempts:
+                continue
+            stopped = True
+            for attempt in attempts:
+                process = process_rows.get(attempt["process_id"])
+                if process:
+                    identity = json.loads(process["identity_json"])
+                    matching = process["epoch"] == attempt["process_epoch"] and process["generation"] == attempt["binding_generation"]
+                    stopped = stopped and matching and (process["state"] == "STOPPED" or self.core.tasks.stop_verifier(
+                        identity.get("launch_task_id", json.loads(attempt["request_json"])["task_id"]), process["id"]))
+                else:
+                    stopped = stopped and not attempt["process_id"] and not attempt["slot_reserved"] and bool(attempt["runner_stopped_at"])
+            matches = []
+            for attempt in attempts:
+                if not attempt["process_id"]:
+                    continue
+                claim = json.loads(attempt["request_json"])
+                if claim["event_json"] != source["event_json"] or claim["context"]["dialogue_id"] != source["dialogue_id"]:
+                    continue
+                process = process_rows[attempt["process_id"]]
+                path = Path(json.loads(process["identity_json"]).get("actual_session_file") or attempt["session"])
+                try:
+                    for call in mutation_calls(path, run_id=attempt["id"], input_ids=claim["source_ids"]):
+                        request = self.mutation_request(scope, claim, call["id"], call["name"], call["arguments"], path)
+                        operation_id = stable_id("memory-mutation", scope.key, request.idempotency_key)
+                        with self.core.db.engine.connect() as conn:
+                            row = conn.execute(select(memory_operations).join(memory_owners,
+                                memory_owners.c.id == memory_operations.c.scope_id).where(memory_operations.c.id == operation_id,
+                                memory_operations.c.scope_id == scope.key, memory_operations.c.kind == (
+                                    "FORGET" if call["name"] == "memory_forget" else "CORRECT"),
+                                memory_operations.c.payload_hash == digest(request.model_dump(mode="json")),
+                                memory_owners.c.epoch >= memory_operations.c.epoch,
+                                memory_owners.c.state != "RESTORE_REQUIRED", memory_operations.c.id.in_(
+                                    select(memory_barriers.c.operation_id).where(memory_barriers.c.scope_id == scope.key)))) .mappings().first()
+                        if row:
+                            refs = json.loads(row["refs_json"])
+                            receipt = MutationReceipt(operation_id=row["id"], state=row["state"], completed=row["state"] == "APPLIED",
+                                memory_epoch=row["epoch"], changed_uris=tuple(refs.get("uris", ())),
+                                affected_source_ids=tuple(refs.get("source_ids", ())), error_type=row["error_type"])
+                            matches.append((attempt, claim, receipt))
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, PermissionError):
+                    continue
+            if len(matches) != 1:
+                continue
+            attempt, claim, receipt = matches[0]
+            self.core.sessions.reconciling_inputs.add(source["id"])
+            if not stopped:
+                continue
+            reserved = any(item["slot_reserved"] for item in attempts)
+            if attempt["session_id"] in active_sessions and not reserved:
+                continue
+            self.rotate(scope, (attempt["id"], attempt["fencing"], attempt["worker"]), receipt)
+            if reserved:
+                continue
+            try:
+                with self.core.db.transaction() as conn:
+                    current = conn.execute(select(runs).where(runs.c.id == attempt["id"])).mappings().one()
+                    claim = json.loads(current["request_json"])
+                    outcome = self.core.leader.finalize_committed_mutation(conn, current, claim, stopped=True, recovered=True)
+            except (PermissionError, ValueError):
+                continue
+            recovered.append({"run_id": attempt["id"], "operation_id": receipt.operation_id, **outcome})
+            self.core.sessions.reconciling_inputs.discard(source["id"])
+        return recovered
+
     async def invoke(self, identity, payload):
         with self.core.db.transaction() as conn:
             run, claim = self.core.leader.lease(conn, *identity)
@@ -310,25 +426,11 @@ class KnowledgeRuntime:
             return (await self.memory.search(scope, args["query"])).model_dump(mode="json")
         if operation == "memory_read":
             return (await self.memory.read(scope, args["uri"])).model_dump(mode="json")
-        key = hashlib.sha256((event.event_id + ":" + payload["call_id"]).encode()).hexdigest()
-        if operation == "memory_forget":
-            result = await self.memory.forget(MemoryDeletion(scope=scope, idempotency_key=key,
-                uris=tuple(args.get("uris", ())), source_event_ids=tuple(args.get("source_event_ids", ()))))
-        elif operation == "memory_correct":
-            with self.core.db.engine.connect() as conn:
-                record = conn.execute(select(sessions).where(sessions.c.id == claim["session_id"])).mappings().one()
-            after, source = 0, None
-            while True:
-                exported = export_session(record["session_file"], session_id=claim["session_id"], after=after)
-                source = next((item for item in exported["events"] if event.event_id in item.origins and item.role == "user"), None)
-                if source or not exported["has_more"]:
-                    break
-                after = exported["next_cursor"]
-            if source is None:
-                raise PermissionError("the original correction statement is not durably exported")
-            result = await self.memory.correct(MemoryCorrection(scope=scope, uri=args["uri"],
-                session_id=claim["session_id"], source=source, idempotency_key=key))
-        else:
+        if operation not in {"memory_correct", "memory_forget"}:
             raise ValueError("unknown memory tool")
+        with self.core.db.engine.connect() as conn:
+            record = conn.execute(select(sessions).where(sessions.c.id == claim["session_id"])).mappings().one()
+        request = self.mutation_request(scope, claim, payload["call_id"], operation, args, record["session_file"])
+        result = await (self.memory.forget(request) if operation == "memory_forget" else self.memory.correct(request))
         self.rotate(scope, identity, result)
         return {**result.model_dump(mode="json"), "waiting": True, "end_turn": True}

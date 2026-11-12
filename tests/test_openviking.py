@@ -1,4 +1,5 @@
 """OpenViking owns facts; the host persists sources, receipts and deletion fences."""
+import asyncio
 import json
 
 import httpx
@@ -305,7 +306,13 @@ async def test_correction_revokes_old_source_and_waits_for_confirmed_remote_inde
     originals[correction.session_id] = correction
     request = MemoryCorrection(scope=scope, uri=uri, session_id=correction.session_id,
         source=correction.events[0], idempotency_key="correct-language")
+    calls_before = len(remote.calls)
     result = await service.correct(request)
+    assert not result.completed and result.state == "QUEUED" and result.memory_epoch == 1
+    assert len(remote.calls) == calls_before
+    with pytest.raises(MemoryBackendError, match="blocked"):
+        await service.read(scope, uri)
+    result = await service.poll(result.operation_id)
     assert result.completed and result.memory_epoch == 1
     assert (await service.read(scope, uri)).content == "用户现在偏好英文回复"
     assert (await service.read(scope, uri)).source_event_ids == ("owner-correction",)
@@ -321,7 +328,11 @@ async def test_correction_revokes_old_source_and_waits_for_confirmed_remote_inde
 async def test_forget_removes_derived_memory_and_input_archive_then_fences_replay(memory):
     service, remote, scope, _ = memory
     original, _, uri = await seeded(memory)
+    calls_before = len(remote.calls)
     result = await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="forget-language"))
+    assert not result.completed and result.state == "QUEUED"
+    assert len(remote.calls) == calls_before
+    result = await service.poll(result.operation_id)
     assert result.completed and "source-1" in result.affected_source_ids
     assert uri not in remote.files and not remote.sessions
     assert not (await service.search(scope, "语言偏好")).hits
@@ -339,12 +350,79 @@ async def test_forget_during_extraction_immediately_blocks_recall_and_discovers_
     originals[source.session_id] = source
     sync = await service.sync(source)
     deletion = await service.revoke_source(scope, "source-1", idempotency_key="forget-inflight")
+    assert not deletion.completed and deletion.state == "QUEUED"
+    deletion = await service.poll(deletion.operation_id)
     assert not deletion.completed and deletion.state == "WAITING_EXTRACTION"
     assert (await service.search(scope, "语言偏好")).status == "blocked"
     uri = remote.complete()
     done = await service.poll(deletion.operation_id)
     assert done.completed and uri not in remote.files
     assert (await service.poll(sync.operation_id)).state == "SUPERSEDED"
+
+
+@pytest.mark.parametrize("operation", ["correct", "forget"])
+async def test_mutation_registration_returns_durable_receipt_while_owner_driver_is_locked(memory, operation):
+    service, remote, scope, originals = memory
+    _, _, uri = await seeded(memory)
+    if operation == "correct":
+        correction = batch(scope, session="locked-correction", event_id="locked-owner-correction",
+            content="用户现在偏好英文回复")
+        originals[correction.session_id] = correction
+        request = MemoryCorrection(scope=scope, uri=uri, session_id=correction.session_id,
+            source=correction.events[0], idempotency_key="locked-correction")
+    else:
+        request = MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="locked-forget")
+    calls_before = len(remote.calls)
+    async with service.locks[scope.owner_id]:
+        pending = asyncio.create_task(getattr(service, operation)(request))
+        await asyncio.sleep(0)
+        try:
+            assert pending.done(), "mutation registration must finish before the next owner-driver await"
+            receipt = pending.result()
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+    row = service._row(receipt.operation_id)
+    assert receipt.state == row["state"] == "QUEUED" and not receipt.completed
+    assert row["payload_hash"] == digest(request.model_dump(mode="json"))
+    assert receipt.memory_epoch == 1 and uri in receipt.changed_uris
+    assert len(remote.calls) == calls_before and uri in remote.files
+    assert (await service.status(scope))["state"] == "MUTATING"
+
+
+@pytest.mark.parametrize("driver", ["poll", "reconcile"])
+async def test_registered_correction_recovers_original_source_after_restart_and_driver_retry(memory, driver):
+    service, remote, scope, originals = memory
+    _, _, uri = await seeded(memory)
+    correction = batch(scope, session="restart-correction", event_id="restart-owner-correction",
+        content="用户现在偏好英文回复")
+    originals[correction.session_id] = correction
+    receipt = await service.correct(MemoryCorrection(scope=scope, uri=uri, session_id=correction.session_id,
+        source=correction.events[0], idempotency_key="restart-correction"))
+    loader = service.source_loader
+    service.source_loader = None
+    pending = await service.poll(receipt.operation_id)
+    assert not pending.completed and pending.error_type == "MemoryBackendError"
+    loaded = []
+    def restored_loader(*arguments):
+        loaded.append(arguments)
+        return loader(*arguments)
+    replacement = OpenVikingMemory(service.db, service.clock, service.config,
+        source_loader=restored_loader, client=service.http.client)
+    try:
+        if driver == "poll":
+            assert (await replacement.poll(receipt.operation_id)).completed
+        else:
+            await replacement.reconcile()
+        assert replacement._row(receipt.operation_id)["state"] == "APPLIED"
+        assert loaded == [(scope, correction.session_id, 0, 1, correction.branch, correction.projection_version)]
+        document = await replacement.read(scope, uri)
+        assert document.content == "用户现在偏好英文回复"
+        assert document.source_event_ids == ("restart-owner-correction",)
+        assert (await replacement.status(scope))["state"] == "READY"
+        assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
+    finally:
+        await replacement.close()
 
 
 async def test_group_and_project_namespaces_cannot_reuse_private_user_identity(memory):
@@ -416,7 +494,8 @@ async def test_same_source_revision_cannot_change_silently(memory):
 async def test_restore_reconciles_read_only_and_preserves_deletion_fences(memory):
     service, remote, scope, _ = memory
     original, _, uri = await seeded(memory)
-    await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    deletion = await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    assert (await service.poll(deletion.operation_id)).completed
     manifest = service.export_barriers(scope)
     service.restore_barriers(scope, manifest)
     assert (await service.search(scope, "语言")).status == "blocked"
@@ -439,7 +518,8 @@ async def test_restore_reconciles_read_only_and_preserves_deletion_fences(memory
 async def test_restore_stays_blocked_for_active_unknown_or_resurrected_remote_state(memory):
     service, remote, scope, _ = memory
     _, _, uri = await seeded(memory)
-    await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    deletion = await service.forget(MemoryDeletion(scope=scope, uris=(uri,), idempotency_key="restore-forget"))
+    assert (await service.poll(deletion.operation_id)).completed
     service.restore_barriers(scope, service.export_barriers(scope))
     task = next(iter(remote.tasks.values()))
     task["status"] = "running"

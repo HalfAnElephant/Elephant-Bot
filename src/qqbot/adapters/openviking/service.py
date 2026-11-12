@@ -550,8 +550,6 @@ class OpenVikingMemory:
                 "correction": self._source_ref(request.source)}
         operation_id = self._register_mutation(request.scope, "CORRECT", request.idempotency_key,
                                                 refs, digest(request.model_dump(mode="json")))
-        async with self.locks[request.scope.owner_id]:
-            await self._drive(request.scope, correction=request)
         return self._mutation_receipt(self._row(operation_id))
 
     async def forget(self, request: MemoryDeletion):
@@ -561,8 +559,6 @@ class OpenVikingMemory:
                 "delete_archives": request.delete_archives}
         operation_id = self._register_mutation(request.scope, "FORGET", request.idempotency_key,
                                                 refs, digest(request.model_dump(mode="json")))
-        async with self.locks[request.scope.owner_id]:
-            await self._drive(request.scope)
         return self._mutation_receipt(self._row(operation_id))
 
     async def revoke_source(self, scope, source_id, *, idempotency_key):

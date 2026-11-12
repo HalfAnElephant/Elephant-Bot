@@ -471,7 +471,9 @@ class Core:
 
     async def maintenance(self):
         self.recovery.recover_workers()
+        self.knowledge.recover_mutations()
         self.leader.recover()
+        self.knowledge.recover_mutations()
         await self.knowledge.sync()
 
     def retire_adapters(self):
@@ -503,7 +505,9 @@ class Core:
         self.recovery.recover_processes()
         self.tasks.recover()
         self.recovery.recover_workers()
+        self.knowledge.recover_mutations()
         self.leader.recover()
+        self.knowledge.recover_mutations()
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
         self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)

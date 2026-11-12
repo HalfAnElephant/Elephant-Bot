@@ -18,6 +18,7 @@ class SessionService:
     def __init__(self, service, settings, *, allowed=None):
         self.service, self.db, self.clock, self.settings = service, service.db, service.clock, settings
         self.allowed = allowed or (lambda event: True)
+        self.reconciling_inputs = set()
         self.learning = SessionLearning(self)
 
     def owner(self, event):
@@ -103,9 +104,13 @@ class SessionService:
         return (turn["deadline"] <= now.isoformat() or used.get("model_calls", 0) >= budget["model_calls"]
                 or used.get("active_seconds", 0) >= budget["active_seconds"])
 
-    def close_input(self, conn, dialogue, user, event, context, now):
-        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"]).values(
-            state="HANDLED", handled_at=now.isoformat(), claimed_attempt_id=None))
+    def close_input(self, conn, dialogue, user, event, context, now, *, output_ref=None):
+        values = {"state": "HANDLED", "handled_at": now.isoformat(), "claimed_attempt_id": None}
+        if output_ref:
+            values["context_json"] = json.dumps({**context, "output_ref": output_ref}, ensure_ascii=False)
+        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"]).values(**values))
+        if output_ref:
+            return
         access = self.service._access_for({"event_json": user["event_json"], "permission_json": "{}"})
         valid = not self.service.context_validator or self.service.context_validator(access, context)
         if (self.allowed(event) and valid and self.service.permissions.check(access, "notification.send",
@@ -135,8 +140,14 @@ class SessionService:
                     .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
                 selected, root, purpose, task_inputs, turn = [], None, "user", [], None
                 if user:
+                    if user["id"] in self.reconciling_inputs:
+                        continue
                     event = InboundEvent.model_validate_json(user["event_json"])
                     context = json.loads(user["context_json"])
+                    access = self.service._access_for({"event_json": user["event_json"], "permission_json": "{}"})
+                    if self.service.context_validator and not self.service.context_validator(access, context):
+                        self.close_input(conn, dialogue, user, event, context, now, output_ref="CONTEXT_REVOKED")
+                        continue
                     turn = context.get("leader_turn")
                     if turn is None:
                         legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)

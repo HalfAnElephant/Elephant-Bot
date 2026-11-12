@@ -207,6 +207,10 @@ class RunGateway:
             return result["allowed"]
         except (PermissionError, RuntimeError):
             return False
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403, 409}:
+                return False
+            raise
 
     async def authorize_action(self, action):
         if self.revoked:

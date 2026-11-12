@@ -9,6 +9,7 @@ from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import TaskInputSpec
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
+from qqbot.storage.schema import outbox
 from qqbot.storage.task_schema import (
     events,
     inputs,
@@ -228,6 +229,47 @@ class LeaderRuntime:
                 kind=spec.kind, question_id=spec.question_id, source_id=stable_id(event.event_id, payload["call_id"]))
         raise ValueError("unsupported task tool for Leader")
 
+    def finalize_committed_mutation(self, conn, run, claim, *, stopped, recovered=False):
+        event = InboundEvent.model_validate_json(claim["event_json"])
+        if claim["purpose"] != "user" or not self.core.allowed(event) or self.sessions.owner(event) is None:
+            raise PermissionError("memory confirmation requires its currently authorized owner")
+        self.service.permissions.require(self.sessions.access_for_claim(claim), "task.execute",
+            "conversation:" + event.conversation.key)
+        mutation = claim["memory_mutation"]
+        source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == claim["source_ids"][0],
+            dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"],
+            dialogue_inputs.c.event_json == claim["event_json"])).mappings().one()
+        if source["handled_at"]:
+            return {"state": run["state"]}
+        result = TaskResult(status="completed", summary=mutation["summary"], agent_authored=False)
+        origin_id = "turn:" + claim["session_id"] + ":" + source["id"]
+        for previous in conn.execute(select(outbox.c.envelope_json).where(outbox.c.origin_kind == "chat",
+                outbox.c.origin_id == origin_id, outbox.c.conversation_id == event.conversation.key)).scalars():
+            if json.loads(previous)["text"] != result.summary:
+                raise ValueError("memory confirmation conflicts with an existing delivery")
+        now = self.clock.now().isoformat()
+        values = {"state": "FINISHED", "slot_reserved": 0, "result_json": result.model_dump_json()}
+        if recovered:
+            proof = json.loads(run["receipt_json"] or "{}")
+            proof.setdefault("recovered_result", run["result_json"])
+            values["receipt_json"] = json.dumps(proof)
+        else:
+            values.update(quiescent_at=now, runner_stopped_at=now if stopped else None)
+            if run["process_id"]:
+                conn.execute(update(processes).where(processes.c.id == run["process_id"],
+                    processes.c.generation == run["binding_generation"]).values(
+                        state="STOPPED" if stopped else "IDLE", last_used=now))
+        self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
+            origin_kind="chat", origin_id=origin_id,
+            reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
+            anchor_message_id=event.platform_message_id, purpose="result")
+        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == source["id"]).values(
+            state="HANDLED", handled_at=now, claimed_attempt_id=run["id"]))
+        conn.execute(update(runs).where(runs.c.id == run["id"]).values(**values))
+        conn.execute(update(sessions).where(sessions.c.active_run_id == run["id"]).values(active_run_id=None))
+        self.service.wakeup.set()
+        return {"state": "FINISHED"}
+
     def complete(self, run_id, fencing, worker_id, result, *, stopped, quiescent, process=None, receipt=None):
         result = TaskResult.model_validate_json(json.dumps(result))
         validate_user_facing_text(result.summary)
@@ -263,6 +305,9 @@ class LeaderRuntime:
                         or process.get("epoch") != run["process_epoch"]):
                     raise PermissionError("quiescence proof does not match process")
             self._account_turn(conn, run, claim)
+            if mutation:
+                self.authorize(conn, run, claim, {"action": "task.execute"})
+                return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
             if not result.agent_authored and not mutation:
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
                 source_values = {"claimed_attempt_id": None}
