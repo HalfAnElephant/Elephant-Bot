@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -11,6 +12,12 @@ export default function (pi: ExtensionAPI) {
   let activeInputs = new Set<string>();
   let finalSummary = "";
   let outcome: any = null;
+  const inputHash = (text: string) => createHash("sha256").update(text).digest("hex");
+  function persistInput(text: string, ids: string[]) {
+    pi.appendEntry("elephant-input-persisting", {session_id: binding.session_id,
+      input_ids: ids, sha256: inputHash(text)});
+    return {action: "transform" as const, text};
+  }
   async function request(path: string, body: unknown, token: string, signal?: AbortSignal) {
     const response = await fetch(base + path, {method: "POST", headers: {
       "Content-Type": "application/json", Authorization: `Bearer ${token}`,
@@ -52,7 +59,7 @@ export default function (pi: ExtensionAPI) {
       if (deliveredInputs.has(envelope.input_id)) return {action: "handled"};
       activeInputs.add(envelope.input_id);
       pi.appendEntry("qqbot-input", {id: envelope.input_id});
-      return {action: "transform", text: `[[elephant-input:${envelope.input_id}]]\n` + envelope.text};
+      return persistInput(`[[elephant-input:${envelope.input_id}]]\n` + envelope.text, [envelope.input_id]);
     }
     binding = current;
     waiting = false;
@@ -66,9 +73,27 @@ export default function (pi: ExtensionAPI) {
         contextWindow: binding.model_window, maxTokens: binding.output_tokens,
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
     });
+    let persisted: any = null;
+    let legacySource: string | null = null;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === "elephant-consumed") {
         for (const id of (entry.data as any).input_ids || []) deliveredInputs.add(id);
+      }
+      if (entry.type === "custom" && entry.customType === "elephant-input-persisting") persisted = entry.data;
+      if (entry.type === "custom" && entry.customType === "elephant-source") legacySource = (entry.data as any).id;
+      if (entry.type === "message" && entry.message.role === "user") {
+        const content = entry.message.content;
+        const text = typeof content === "string" ? content : content.filter((part: any) => part.type === "text")
+          .map((part: any) => part.text).join("\n");
+        if (persisted?.session_id === binding.session_id && persisted.sha256 === inputHash(text)) {
+          for (const id of persisted.input_ids || []) if (activeInputs.has(id)) deliveredInputs.add(id);
+        } else if (!persisted && legacySource && activeInputs.has(legacySource)
+                   && text.startsWith(`[[elephant-input:${legacySource}]]\n`)) {
+          // Older logs recorded the trusted primary source before writing its body.
+          deliveredInputs.add(legacySource);
+        }
+        persisted = null;
+        legacySource = null;
       }
     }
     for (const schema of binding.native_tools || []) {
@@ -90,7 +115,8 @@ export default function (pi: ExtensionAPI) {
       activeInputs.add(item.id);
       if (!deliveredInputs.has(item.id)) parts.push(`[[elephant-input:${item.id}]]\n` + item.text);
     }
-    return {action: "transform", text: parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。"};
+    const text = parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。";
+    return persistInput(text, [...activeInputs].filter(id => !deliveredInputs.has(id)));
   });
   pi.on("before_agent_start", async (event) => {
     if (!binding) throw new Error("Missing trusted run binding");

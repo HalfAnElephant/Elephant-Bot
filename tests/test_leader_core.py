@@ -1,6 +1,7 @@
 """Real ingress routes into persistent turns; controls never consume model slots."""
 import json
 
+import pytest
 from sqlalchemy import select
 
 from qqbot.app import create_app
@@ -246,6 +247,120 @@ async def test_idle_direct_transport_serializes_no_claim_as_json_null(tmp_path, 
     try:
         assert await core.scheduler.worker.once() is False
         assert not core.scheduler.pool.entries
+    finally:
+        await core.stop()
+        core.db.close()
+
+
+def finish_leader(core, claim, summary):
+    return core.leader.complete(claim["run_id"], claim["fencing_token"], "fixture",
+        {"status": "completed", "summary": summary}, stopped=True, quiescent=False,
+        receipt={"kind": "turn_finished", "session_id": claim["session_id"], "run_id": claim["run_id"],
+                 "session_revision": "leaf", "input_ids": claim["source_ids"], "inflight": 0, "tools_paired": True})
+
+
+async def test_fast_final_prevents_delayed_dispatch_ack_and_unknown_result_resend(tmp_path, official_config, official_event, clock):
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from conftest import official_payload
+    from sqlalchemy import update
+
+    from qqbot.domain import DeliveryCheck, OutboundEnvelope, SendReceipt
+    from qqbot.storage.schema import outbox
+    core = make_core(tmp_path, official_config, clock)
+    sent = []
+    class Adapter:
+        config = SimpleNamespace(kind="fixture")
+        async def validate_delivery(self, envelope):
+            return DeliveryCheck(allowed=True, reason="fixture")
+        async def send(self, envelope):
+            sent.append(envelope)
+            return SendReceipt(state="UNKNOWN")
+    try:
+        event = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="检查项目", message_id="fast"))
+        event, _ = core.inbox.accept(event)
+        await core.process(event)
+        user = core.sessions.claim("fixture")
+        with core.db.transaction() as conn:
+            run, claim = core.leader.lease(conn, user["run_id"], user["fencing_token"], "fixture")
+            root = core.leader.task_tool(conn, run, claim, {"operation": "tasks.submit", "call_id": "dispatch",
+                "arguments": {"goal": "检查项目", "children": [{"goal": "检查", "delegation_key": "only"}]}})
+        worker = core.tasks.claim("worker")
+        core.tasks.submit(worker["run_id"], worker["fencing_token"], "worker",
+            {"status": "completed", "summary": "检查完成"}, receipt={"kind": "turn_finished",
+             "session_id": worker["context"]["session_id"], "run_id": worker["run_id"], "session_revision": "leaf",
+             "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True})
+        finish_leader(core, user, "已接受，等待执行。")
+        with core.db.transaction() as conn:
+            ack = conn.execute(select(outbox).where(outbox.c.origin_kind == "chat")).mappings().one()
+            conn.execute(update(outbox).where(outbox.c.id == ack["id"]).values(
+                state="RETRYABLE", next_attempt_at=(clock.now() + timedelta(seconds=60)).isoformat()))
+        finalizer = core.sessions.claim("fixture")
+        assert finalizer["purpose"] == "finalize"
+        finish_leader(core, finalizer, "项目检查完成。")
+        assert not core.pre_send(OutboundEnvelope.model_validate_json(ack["envelope_json"]))
+        await core.outbox.dispatch_once({"qq": Adapter()}, pre_send=core.pre_send)
+        assert [envelope.text for envelope in sent] == ["项目检查完成。"]
+        clock.advance(61)
+        with core.db.transaction() as conn:
+            core.outbox.retrigger(conn, event.model_copy(update={"event_id": "new-trigger", "platform_message_id": "new"}))
+        await core.outbox.dispatch_once({"qq": Adapter()}, pre_send=core.pre_send)
+        assert len(sent) == 1
+        with core.db.engine.connect() as conn:
+            assert conn.execute(select(tasks.c.state).where(tasks.c.id == root["task_id"])).scalar_one() == "SUCCEEDED"
+            states = dict(conn.execute(select(outbox.c.origin_kind, outbox.c.state)).all())
+            assert states == {"chat": "FAILED", "task": "UNKNOWN"}
+            assert conn.execute(select(outbox.c.id).where(outbox.c.origin_kind == "task")).all() == [(sent[0].delivery_id,)]
+        assert finish_leader(core, finalizer, "项目检查完成。") == {"state": "FINISHED"}
+        with pytest.raises(PermissionError, match="conflicts"):
+            finish_leader(core, finalizer, "换个说法，项目检查已办完。")
+        await core.outbox.dispatch_once({"qq": Adapter()}, pre_send=core.pre_send)
+        assert len(sent) == 1
+    finally:
+        await core.stop()
+        core.db.close()
+
+
+@pytest.mark.parametrize("mutation", [False, True])
+async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official_config, official_event, clock, mutation):
+    from conftest import official_payload
+    from sqlalchemy import insert, update
+
+    from qqbot.contracts.memory import MemoryScope
+    from qqbot.domain import OutboundEnvelope
+    from qqbot.storage.memory_sync_schema import memory_owners
+    from qqbot.storage.schema import outbox
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        event = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="解释项目偏好", message_id="memory-chat"))
+        event, _ = core.inbox.accept(event)
+        await core.process(event)
+        scope = MemoryScope(owner_id=core.settings.owner.id)
+        with core.db.transaction() as conn:
+            row = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == event.event_id)).mappings().one()
+            context = json.loads(row["context_json"])
+            context.update(memory_scope=scope.model_dump(), memory_epoch=1, retrieved_data=[{"content": "旧偏好"}])
+            conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == row["id"]).values(context_json=json.dumps(context)))
+            conn.execute(insert(memory_owners).values(id=scope.key, scope_json=scope.model_dump_json(), binding_json="{}",
+                binding_hash="fixture", remote_identity="fixture", epoch=1, state="READY", updated_at=clock.now().isoformat()))
+        claim = core.sessions.claim("fixture")
+        if mutation:
+            from qqbot.contracts.memory import MutationReceipt
+            core.knowledge.rotate(scope, (claim["run_id"], claim["fencing_token"], "fixture"),
+                MutationReceipt(operation_id="verified-forget", state="COMPLETED", completed=True, memory_epoch=2))
+        finish_leader(core, claim, "目前偏好为旧值。")
+        with core.db.engine.connect() as conn:
+            envelope = OutboundEnvelope.model_validate_json(conn.execute(select(outbox.c.envelope_json)).scalar_one())
+        assert core.pre_send(envelope)
+        with core.db.transaction() as conn:
+            conn.execute(update(memory_owners).where(memory_owners.c.id == scope.key).values(epoch=2))
+        if mutation:
+            assert envelope.text == "记忆更改已完成。"
+            assert core.pre_send(envelope)
+            assert not core.pre_send(envelope.model_copy(update={"text": "目前偏好为旧值。"}))
+        else:
+            assert not core.pre_send(envelope)
     finally:
         await core.stop()
         core.db.close()

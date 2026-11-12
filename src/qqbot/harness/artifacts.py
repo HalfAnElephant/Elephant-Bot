@@ -17,6 +17,16 @@ DEFAULT_ARTIFACT_MIME_TYPES = {
 }
 
 
+def artifact_path(relative, *, mime_types=None):
+    path = PurePosixPath(relative)
+    if len(str(path)) > 512 or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError("artifact path must be a relative workspace file of at most 512 characters")
+    mime_type = (DEFAULT_ARTIFACT_MIME_TYPES if mime_types is None else mime_types).get(path.suffix.lower())
+    if not isinstance(mime_type, str) or not mime_type:
+        raise ValueError("unsupported artifact type: " + str(path))
+    return path, mime_type
+
+
 def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, mime_types=None):
     if len(paths) > 20:
         raise ValueError("too many artifacts")
@@ -33,12 +43,7 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
     total = 0
     try:
         for relative in paths:
-            path = PurePosixPath(relative)
-            if path.is_absolute() or ".." in path.parts or not path.parts:
-                raise ValueError("artifact path must stay in workspace")
-            mime_type = mime_types.get(path.suffix.lower())
-            if not isinstance(mime_type, str) or not mime_type:
-                raise ValueError("unsupported artifact type")
+            path, mime_type = artifact_path(relative, mime_types=mime_types)
             directory = os.dup(root)
             try:
                 for component in path.parts[:-1]:

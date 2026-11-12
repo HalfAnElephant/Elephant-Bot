@@ -11,15 +11,19 @@ class ChildSpec(DTO):
     goal: str = Field(min_length=1, max_length=16000)
     delegation_key: str = Field(min_length=1, max_length=128)
     input_refs: tuple[str, ...] = Field(default=(), strict=False)
-    success_checks: tuple[str, ...] = Field(default=(), strict=False)
-    requested_outputs: tuple[str, ...] = Field(default=(), strict=False)
+    success_checks: tuple[Literal["artifact", "observation", "effect"], ...] = Field(default=(), strict=False,
+        description="Host evidence checks. Put business acceptance criteria in goal.")
+    requested_outputs: tuple[str, ...] = Field(default=(), strict=False,
+        description="Exact relative workspace artifact file paths, such as outputs/report.txt. Put narrative requirements in goal.")
     rework_of_task_id: str | None = None
 
 
 class GoalSpec(DTO):
     goal: str = Field(min_length=1, max_length=16000)
-    success_checks: tuple[str, ...] = Field(default=(), strict=False)
-    requested_outputs: tuple[str, ...] = Field(default=(), strict=False)
+    success_checks: tuple[Literal["artifact", "observation", "effect"], ...] = Field(default=(), strict=False,
+        description="Host evidence checks. Put business acceptance criteria in goal.")
+    requested_outputs: tuple[str, ...] = Field(default=(), strict=False,
+        description="Exact relative workspace artifact file paths, such as outputs/report.txt. Put narrative requirements in goal.")
     children: tuple[ChildSpec, ...] = Field(min_length=1, max_length=6, strict=False)
 
 

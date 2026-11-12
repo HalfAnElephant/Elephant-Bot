@@ -18,7 +18,7 @@ from qqbot.adapters.pi.sessions import recovery_snapshot
 from qqbot.capabilities.types import Action, ToolContext
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.tasks import TaskResult
-from qqbot.harness.artifacts import export_artifacts
+from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, export_artifacts
 from qqbot.harness.launcher import trusted_json
 from qqbot.storage.action_schema import operations
 from qqbot.storage.schema import outbox
@@ -245,7 +245,8 @@ class RuntimeRecovery:
         for operation in generated:
             data = json.loads(operation["result_json"])
             path = data.get("path") if isinstance(data, dict) else None
-            if isinstance(path, str) and (path.startswith("outputs/") or path in requested):
+            if isinstance(path, str) and (path.startswith("outputs/") and Path(path).suffix.lower() in DEFAULT_ARTIFACT_MIME_TYPES
+                                          or path in requested):
                 paths.append(path)
         if result["status"] == "completed":
             paths.extend(requested)

@@ -42,7 +42,7 @@ class RuntimeClient:
             return httpx.Response(200, json=result, request=request)
         except PermissionError as error:
             return httpx.Response(409, json={"detail": str(error)}, request=request)
-        except (ValueError, KeyError, TypeError) as error:
+        except (ValueError, LookupError, TypeError) as error:
             return httpx.Response(422, json={"detail": str(error)}, request=request)
 
     async def invoke(self, operation, body):

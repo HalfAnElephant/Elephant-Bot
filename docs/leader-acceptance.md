@@ -17,7 +17,7 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 
 ## 已有验证记录
 
-以下分批记录保留为历史覆盖说明。最终运行代码为 `31c23902877bb54851572f82e0dfe3893ef52809`；[CI](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670267) 的 959 项 Python、17 项 JavaScript 测试均通过且无跳过，构建与发布冒烟通过；[CodeQL](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670357) 通过。表中“当前完整 CI”等早期待补项已由该结果覆盖；真实场景范围以末尾最终证据和未验收边界为准。
+以下分批记录保留为历史覆盖说明。首轮通过全量验证并部署的运行代码为 `31c23902877bb54851572f82e0dfe3893ef52809`；[CI](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670267) 的 959 项 Python、17 项 JavaScript 测试均通过且无跳过，构建与发布冒烟通过；[CodeQL](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670357) 通过。表中“当前完整 CI”等早期待补项已由该结果覆盖；补充批次与真实场景范围见末尾记录，当前发布 revision 以主机部署事实文件为准。
 
 | 记录 | 已执行范围 | 证据入口与限制 |
 | --- | --- | --- |
@@ -45,21 +45,21 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 | T06 | 事件绑定 principal、conversation、owner、Dialogue。离线定点拒绝异主体重放和 question/progress 伪造用户修订，按钮契约包含范围、期限与单次使用。 | QQ 官方不同 AppID、群成员和过期按钮的真实平台验收，相关完整 CI。 |
 | T07 | 取消撤销权限并等待 Pi 停止与 Job quiescence，迟到事实按原操作核对。离线恢复/Job 用例和 home Job 进程树取消有成功记录。 | 最终 daemon 宽限停止、真实 root cgroup 证明、旧 generation 与迟到外部回执的组合实测。 |
 | T08 | 持久 wait、原生回执、目标修订与终态 CAS 已接线。定点覆盖输入消费、旧 finalizer 拒绝、原等待恢复，真实 Pi＋模型桩覆盖等待与写入同批时阻止写入。 | 满额父子任务、wait(any) 全部收尾及多个早到结果竞态的完整组合验收。 |
-| T09 | 源游标、accepted/extracted/indexed 分离与转述去重有 HTTP 契约成功记录。home 真实提炼、索引召回、来源与服务重启召回已验证。 | 最终 daemon 从 Pi 原始导出到跨新 Dialogue 召回的全链路，真实 Worker→Leader→QQ 转述链。 |
+| T09 | 源游标、accepted/extracted/indexed 分离、转述去重有契约覆盖。home 实际 HOST Leader 原生源自动提炼/索引，新 Dialogue/Pi Session 召回精确项目值和唯一原始 source ID。 | 真实 Worker→Leader→QQ 三次转述链尚无平台验收。 |
 | T10 | home 真实更正、遗忘、旧源重放与重启不复活通过。活动根目标登记屏障，等待旧 Worker 停止、Job 清空及操作确定后，以新 Session、新 epoch 和真实用户输入同树重规划。8 项定点覆盖旧结果/goal/制品过滤、linked rework、投递失效及原业务源撤销后 BLOCKED。复用 plan_turn 从保留的真实用户源重建明确产物与检查，缺失要求的空成果 finalize 被拒绝。 | 最终 daemon 在真实 Worker、真实模型运行中更正/遗忘，并验证流式缓存与 queued delivery 的边界。 |
-| T11 | Core 在记忆后端异常时保留输入并降级，宿主只保存同步引用、回执与屏障。离线断网、同步恢复及无本地事实体的检查已有成功记录。 | 最终 daemon 中实际停止 OpenViking 时聊天、工具、同步待办与恢复的端到端验收。 |
+| T11 | home 实际停止 OpenViking，daemon 输入保持 HANDLED/FINISHED 且 skills_list 成功；同一 QUEUED/ConnectError 同步操作在后端恢复后 INDEXED，新 Dialogue 正确回答。无本地备用事实库的宿主检查有定点证据。 | QQ 入口离线组合未验收。 |
 | T12 | USER、私有/项目 scope、群禁用个人记忆与旧备份屏障有契约覆盖。home 跨 USER、伪造身份 header、只读恢复核对均通过。恢复先导入最新 epoch/屏障及来源回执，保持 RESTORE_REQUIRED 直至核对完成。 | 真实部署库的旧备份恢复演练、项目/群入口及 root 活动任务的整体恢复。 |
 | T13 | 锁定 Hermes 原生 schema、SKILL.md、共享 owner 根目录与即时写入。原生文件定点验证创建、发现、读取与跨调用复用，Pi review 只暴露 3 个 Hermes 工具有成功记录。 | 真实模型在最终 daemon 中创建技能，再由新会话与 Worker 发现、复用。 |
-| T14 | Hermes patch、支持文件、目录约束、批量失败回退和失败回执有原生工具定点成功记录。 | 最终部署目录权限及真实模型更新既有技能的链路。 |
-| T15 | 计数归执行 Session，学习事件去重，复盘有独立 Session 与共享预算，后台 review 来源、read-before-write、禁止递归及不改任务结果有定点成功记录。 | 最终 daemon 中条件自然触发、无可存内容、真实模型复盘和不占 Leader 写者的实测。 |
+| T14 | Hermes 原生 patch、支持文件、目录/owner 限制及批量失败回退有定点。生产模型与宿主实际通过原生工具更新标准 SKILL.md，目录写入和 ledger 已核对。 | 未扩展额外真实批量故障组合。 |
+| T15 | 实际 Agent 计数、事件去重、独立复盘 Session、共享预算、read-before-write、禁止递归和无可存内容均有定点。home 默认阈值 10 自然触发两次真实复盘并 FINISHED，来源结果与原生摘要一致，复盘无业务操作和递归记录。 | 全角色真实峰值混合负载未执行。 |
 | T16 | provider/gateway 契约覆盖请求边界、usage、流式中断、代际授权与配额。真实 Pi＋模型桩覆盖工具、压缩与能力发现。OpenViking 提炼另有受限队列。 | 当前完整 CI，真实供应商 429/断流/取消/usage，与冻结旧 Task 运行组合的替换验证。 |
 | T17 | Pi 独占原生压缩，已删除旧 history seed。真实 Pi＋模型桩覆盖 1M window、rebind 前压缩、上下文溢出恢复及偏好刷新。恢复读取原生日志与边界回执。 | 完整工具配对、更正、待办与内容引用在最终 daemon 压缩/重启后的组合验收。 |
-| T18 | GeneralRun 与 Job 共用执行工作区解析，缺少持久 Job 能力时失败关闭。离线契约及 home systemd/bwrap 的 cwd、文件、退出和取消行为已有证据。 | Pi 与持久 Job 在最终 daemon 的同环境联动，以及控制进程真实重启后续存。 |
+| T18 | GeneralRun 与 Job 共用执行工作区解析；实际 daemon 中 Pi 创建目录/文件、systemd/bwrap Job 写入、退出/取消与同 Job 跨重启续存已有证据。无持久 Job 能力时失败关闭有契约覆盖。 | 额外执行环境实现仅保留契约替换边界。 |
 | T19 | GitHub 真实目标解析与授权覆盖 flags/URL 顺序、repo、编号、host 和未知形式。恢复复用已有 GET verifier，定点覆盖只读核对与 PARTIAL。 | [GitHub 目标回归](../tests/test_github_verification.py)及[能力回归](../tests/test_capabilities.py)的当前完整 CI，授权测试仓库的真实读写核对。 |
 | T20 | 官方四种 surface、媒体、按钮、菜单、关系、流式与 Outbox 路径保留。Pi＋模型桩与 QQ HTTP mock 覆盖部分流式、额度、UNKNOWN 和不重复交付。 | 四种 surface 的真实收发、上传、按钮、菜单、C2C 流式、回复过期和主动拒收。缺少官方凭据与身份绑定，保持待验收。 |
 | T21 | LoopSupervisor 提供有界重启与 readiness 故障状态，[监督测试](../tests/test_m0_supervision.py)覆盖异常、停滞及数据库故障。 | 当前完整 CI，最终 daemon 注入 scheduler/delivery 异常后的恢复与健康端点实测。 |
-| T22 | OneBot adapter、启动、WebSocket 路由和旧 Worker 监听已退出新路径，旧输入/任务拒绝执行，缺失 adapter 的待发消息转终态。相关离线回归已有成功记录。 | 最终部署后的进程、监听端口与超过 50 条旧待发记录不会阻塞官方队列的统一回归。 |
-| T23 | 旧 main/实验 0010 形状有升级定点，保留已发布 revision。迁移可显式关闭备份，恢复保留最新屏障并旋转 Session。 | 实际 home 库迁移、冻结/排空、输入水位和 UNKNOWN 发送保留，需与最终部署日志核对。 |
+| T22 | OneBot adapter、启动和 WebSocket 路由、旧 Worker 监听已退出运行；旧输入/任务拒绝执行，缺失 adapter 待发消息终态化。超过 50 条旧队列回归通过，home 旧 units disabled/inactive，进程/监听快照已存。 | QQ 官方队列的真实平台流量未验收。 |
+| T23 | main/实验 0010 升级定点与实际 home 库迁移均通过，发布 revision 未改写。实际库达到 0020/integrity ok，按要求 backup=False。旧 backup 恢复时屏障导入、来源回执、Session 旋转与 UNKNOWN 保留有定点。 | 生产旧备份完整灾难恢复演练未执行。 |
 | T24 | dispatch-intent、immutable key、UNKNOWN/迟到回读和幂等均有离线契约与恢复定点。home Job 对象重建按原 unit 回读，没有二次启动。 | 实际外部请求丢回执、daemon 崩溃和恢复只读核对的组合实测。 |
 | T25 | Leader 短轮次与 Goal 独立，原用户输入才能 submit/revise，分派幂等。双 Worker finalize 与非用户 question 伪造修订有定点成功记录。 | 同 Dialogue 多根 Goal、Worker/progress/question/finalize 禁止 submit 的完整 CI，以及真实模型委派后 Leader 继续对话。 |
 | T26 | 结果和 Inbox 同事务，persisted/handled 分离，恢复原生边界后结算原 run，稳定通知 ID 避免重复。离线 Leader/Worker 恢复与 UNKNOWN 流式用例已有证据。 | 最终 daemon 在正文持久化前后、Inbox handled 前后崩溃的整组故障注入，以及真实 QQ 最终逻辑通知核对。 |
@@ -70,20 +70,20 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 
 | ID | 已有实现与验证范围 | 剩余场景 |
 | --- | --- | --- |
-| L01 | 离线根目标分派后 Leader 轮次可以完成，Workers 独立。执行测试存在真实 Pi＋模型桩的 12 秒慢工具同 run detach 场景。 | 计划中的持续两分钟场景及真实 daemon 交付全链路。 |
-| L02 | 双 Worker、独立根/Session 的领域实现及分派定点已落地。 | 同 Dialogue 两根未完成目标同时运行，一根失败不连带另一根的专项组合。 |
-| L03 | `test_input_binding_and_session_writer_survive_dialogue_switch` 验证 Dialogue/Session 与事件重投绑定，结果按 root coordinator 投 Inbox。 | 切换焦点时旧结果投递到原 Dialogue 的完整组合，以及真实 QQ 呈现。 |
-| L04 | 分派 key 相同返回原 Task，不同意图拒绝。恢复保留原 run/Session/操作账本，定点结算不会重跑 Worker。 | 精确“提交后、工具回执前”切断进程的真实 daemon 演练。 |
-| L05 | 结果/Inbox 稳定 ID、原生 persisted/consumed/finished 回执、停后恢复均有离线定点。 | 注入前、正文落盘后、游标提交前三个切点的逐一组合记录。 |
-| L06 | 阶段节流、旧进度 supersede 与过期/UNKNOWN 投递路径已实现，部分流式清理定点通过。 | 大量同阶段事件、终态、回复窗口过期和新触发混合的专项记录。 |
-| L07 | 已接受修订形成写屏障，旧版本 finalizer 拒绝，新输入在收尾前消费的定点通过。 | 最后一次真实模型请求在途时注入“只检查，不修改”的完整时序。 |
-| L08 | 取消与迟到结果/事实分别结算，Job quiescence 进入取消条件。定点覆盖取消后旧 finalizer 和迟到 operation 不复活任务。 | 真实网络外部写入回执与取消同时发生的演练。 |
-| L09 | Leader 停止证明、原生终态恢复和 host failure 保留原输入有定点，恢复不创建替代 Worker。 | 最终 daemon 杀死 Leader，Worker 随后完成，核对恢复只执行必要汇报。 |
-| L10 | 统一 max_active、逐模型请求预约、确定状态控制与独立 OpenViking 队列已接线，部分容量与 provider 定点通过。 | 满额 Leader/Worker/review/压缩混合负载，真实请求统计及状态/控制 P95。 |
-| L11 | durable wait、让出回执与新旧写资格检查有实现，等待恢复定点和 Pi 混合 wait/write 阻断通过。 | 所有槽位被父任务占用时孩子准入、早到重复结果、wait(any) 的整组验证。 |
-| L12 | 工具和修订依赖宿主身份，Worker 结果按资料处理。异主体重放与后台 question 伪造 owner 答复定点通过。 | Worker 结果内嵌伪指令、跨根取消与不同 QQ 主体的完整组合及平台实测。 |
-| L13 | 工作区互斥、活跃/UNKNOWN Job 保留目录资格，取消后等待真正停止。Job 契约与 home 进程树取消有证据。 | 两个真实 Worker 竞争同一路径，一方崩溃/取消后的所有权转移。 |
-| L14 | 最终通知稳定 ID，过时进度终态化。流式 mock 定点覆盖快完成、UNKNOWN 不 fallback/重发、重启保持 next index。 | 真实 QQ 快完成竞态与最终请求回执丢失。 |
+| L01 | `test_two_minute_worker_survives_leader_turn_and_allows_same_dialogue_reply` 用受控时钟验证两分钟独立 Worker、Leader 结束释放槽及原 Dialogue 继续回答；真实 Pi 的慢工具同 run detach 与 home 150 秒 Job 另有证据。 | QQ 呈现未验收。 |
+| L02 | 独立根/Session、单写者与双 Worker 分派有领域回归。home 同 Dialogue 两个 Job 曾同时 RUNNING、工作区独立；一次失败隔离试运行暴露下述占位文件导出问题，保留失败结果并复验修复。 | 修复后真实双目标结局记录见最新宿主验收文件。 |
+| L03 | `test_old_worker_result_keeps_its_dialogue_after_focus_switch` 验证切换焦点后旧结果仍投原 Session、另一 Dialogue 写者不受影响、旧输入重投保持绑定且 Dialogue 数不增加。 | QQ 呈现未验收。 |
+| L04 | `test_leader_dispatch_recovery.py` 在宿主提交后丢回执，停止证明前保留写者，证明后通过锁定 Pi 的 SessionManager 补入真实回执。同一原生日志被真实 Pi 续接，模型收到原 Task ID，仅一个根/Worker。同键异意图或缺少已提交意图拒绝恢复。 | 未支持的未配对工具保持显式核对状态。 |
+| L05 | `test_pi_input_recovery.py` 覆盖正文落盘前、落盘后/消费标记前及宿主游标前重启。当前记录用宿主 Session、输入清单和正文 hash 识别已写输入；伪造正文 marker 不构成回执。结果/Inbox 去重、原生边界与 handled 分离由任务和恢复回归验证。 | 历史无清单日志只去重可信主输入，附加输入保守重送；原操作幂等键继续生效。 |
+| L06 | `test_progress_flood_final_and_new_trigger_keep_one_current_notification` 连发 50 个同阶段事件只形成一个里程碑，progress 不结算根目标，final 使等待触发的旧进度失效，新触发不复活旧消息。 | 真实 QQ 窗口未验收。 |
+| L07 | 新定点验证“只检查，不修改”在途修订后旧 Worker 写授权被拒、旧结果仅排队续接、旧 finalizer 不能结算。已消费自己修订的 Worker 可推进，排队兄弟的待消费输入不会耗尽全局执行能力。 | 真实供应商请求在途的组合未执行。 |
+| L08 | 取消先于结果及可信迟到事实的恢复定点保留 CANCELLED、允许只读核对原操作且不再 claim。取消树现在等待活跃子进程停止，父任务持续 CANCEL_REQUESTED。 | 真实外部网络写入与取消同时到达未演练。 |
+| L09 | 原生 completed boundary 恢复原 run/result/artifact/单 Inbox，宿主失败保留原输入。home 注入 Leader SIGKILL 后既有 Worker attempts 不增加，原目标最终结算。 | QQ 最终送达未验收。 |
+| L10 | `test_host_controls.py` 验证满槽状态/取消快路径、歧义列选项、主体/Dialogue/通知绑定及重投不换目标。请求、重试、压缩和 review 预算由现有定点验证；30 次真实队列取消 P95 为 19.08 ms，状态读取 P95 为 8.32 ms，采样结束活跃槽位为 4。 | 该测量为宿主控制，不含模型及 QQ 延迟；全角色持续峰值压力未执行。 |
+| L11 | `test_agent_wait_capacity.py` 验证父任务占满全部槽位、未配对/未停不释放、持久让出后孩子准入、早到/重复结果单次唤醒及同 Task/Session 续接。wait(any) 撤销剩余孩子写资格，根目标等剩余进程证停后才可汇总。 | 真实 QQ 展示未验收。 |
+| L12 | 定点将恶意 owner 指令放入 Worker 结果后，finalize 仍不能 submit 或取消别的根；Worker 跨根取消被拒。其他成员/另一 AppID 无法答复真实开放问题，宿主通知回复按实际 wait 绑定且 answer 不广播给兄弟。 | QQ 不同账号/应用的真实平台演练未执行。 |
+| L13 | 共享工作区 claim 互斥、Job 存活/UNKNOWN 时继续持有目录资格、未证明旧进程停止不能转移写者均有定点。home 并发两个 Job 使用独立工作区写同名路径。 | 真实共享绑定的崩溃/取消组合未执行。 |
+| L14 | 新定点使快完成后的 RETRYABLE 派发确认被投递门禁拒绝，最终通知只保留一个；最终 UNKNOWN 经新触发、同结果重投或换措辞不能再发。旧检索正文跨记忆 epoch 被拒，真实宿主记忆更改确认可按精确持久回执投递。 | 真实 QQ 回执丢失未演练。 |
 
 ## OpenViking 真实组件验收
 
@@ -144,11 +144,23 @@ home 持久证据：
 - `/var/lib/qqbot/acceptance-natural-review/production-review-facts-c6055f8e.json`：默认阈值自然复盘、原生日志 hash、来源结果及工具范围的只读核对。
 - OpenViking 基准与删除/恢复证据仍位于前述独立 acceptance-package，包含原始评分记录。
 
+## 补充批次的宿主证据与修复
+
+原始计划 11.3 节允许 fake/replay Harness、工具和受控时钟验证 L01–L14。上表采用这一范围，真实 Pi、模型、Job 和平台结果分别保留，未把所有竞态改成必须在 QQ 平台逐一注入。
+
+实际 daemon 的可信 HOST 入站钩子复用了已认证 admin_api owner 事件，输入经 Core.inbox.accept 后由运行中的 Core.process、Scheduler 和 Pi 处理。原生源自动达到 OpenViking INDEXED，全新 Dialogue/Pi Session 召回精确项目值和唯一原始 source ID。实际停止 OpenViking 后，Leader 仍完成输入及 skills_list，同步留下 QUEUED/ConnectError；后端恢复后同一操作 ID 达到 INDEXED，新 Dialogue 正确回答。8 项断言全部通过，记录在 `/var/lib/qqbot/acceptance-memory-daemon/46f5d4cc-4212-482e-b704-817351ee9f7b/summary.json`。这是 HOST 链路，QQ 平台范围仍按下节记录。
+
+该实测也暴露了“记住偏好”被模型误作写本地文件的行为。单一提示词现已说明自动原生同步和实际记忆回执，不为记忆另建文件/Worker 保存链。错误根目标已取消，原文件和失败回执保留，后续新提示词验证写入最新 HOST 验收事实。
+
+同 Dialogue 的双目标试运行中，失败 Job 按设计退出 7，另一 Job 实际退出 0 并写出文件，但 `outputs/.keep` 被自动当作可交付制品，导致成功分支在导出时失败。正常结算与停止后恢复现均仅自动收集支持的输出文件，显式附件在工具边界校验；TaskSpec 的机器验收检查只接受 artifact、observation、effect，产物必须是可导出的相对文件路径，业务完成标准写在 goal。无效要求在接单事务中拒绝，不再执行到最后才发现不可验收。原失败结果保留在 `/var/lib/qqbot/leader-isolation-acceptance.json`，未计作双目标通过。 Leader 对子任务 Job 的只读 inspect 现由宿主按实际 Job/Task 冻结绑定授权，绑定根、当前租约、主体/会话及读取权限在异步读取后再次核对，Worker 的精确作用域保持原契约。
+
+30 个不同根目标经真实 HTTP 管理入口接单后立即取消，全部 CANCELLED，未派发 Job；唯一抢先启动的 run 已确认停止并释放槽。取消持久接受 P95 19.08 ms，30 次状态读取 P95 8.32 ms，记录在 `/var/lib/qqbot/leader-control-benchmark.json`。本批生产复验的输入、模型结果、任务树和制品校验另存最新 HOST 验收事实文件，发布版本以 `/var/lib/qqbot/leader-deployment-facts.json` 为准。
+
 ## 尚未验收的边界
 
 1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。
 2. 所有 L01–L14 故障切点的真实平台组合、全角色满额压力、真实供应商切换/429/断流与所有控制语义的质量基准。本轮 CI 覆盖对应宿主边界，并补充上述指定真实恢复场景，未执行的组合仍保持未验收。
 3. 最终 daemon 经真实 QQ 用户输入自动记忆并跨新 Dialogue 召回，以及活动 QQ Worker 更正/遗忘后的完整交付。OpenViking 真实组件的提炼、更正、遗忘、隔离、重启和基准已执行；活动任务 epoch 屏障与重规划有契约测试。
-4. 模型自动技能学习与自然触发的独立条件复盘已实际发生；“无可存内容”分支及全角色并发效果仍需独立实测。学习成功不等同于业务执行或 QQ 送达成功。
+4. 模型自动技能学习与自然触发的独立条件复盘已实际发生，“无可存内容”分支已有宿主定点验证。全角色真实并发效果仍未执行。
 
 部署成功与完整验收分别记录。当前能证明单 daemon、任务树、真实业务模型/Job、受保护制品交付及列明恢复路径工作；尚不能宣布实施计划第 12.1 节全部通过。

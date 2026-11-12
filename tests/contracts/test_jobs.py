@@ -354,7 +354,8 @@ def job_runtime(db, clock, tmp_path, monkeypatch):
             'dispatch-build', sessions.binding(), {})
     claim = service.claim('daemon')
     workspace = execution_workspace(tmp_path, claim['task_id'], None, {}, create=True)
-    client = RuntimeClient(core, LeaderRuntime(core, sessions))
+    core.leader = LeaderRuntime(core, sessions)
+    client = RuntimeClient(core, core.leader)
     async def call(operation, payload):
         response = await client.post('/internal/tasks/' + operation, json={
             'worker_id': 'daemon', 'run_id': claim['run_id'], 'fencing_token': claim['fencing_token'], 'payload': payload})
@@ -592,3 +593,165 @@ async def test_scheduler_recovers_jobs_before_claiming_and_shutdown_leaves_units
     assert claims == ['claim']
     await scheduler.close()
     assert fixture.provider.cancels == []
+
+
+def _finish_job_worker(fixture, claim=None):
+    claim = claim or fixture.claim
+    fixture.service.submit(claim['run_id'], claim['fencing_token'], 'daemon',
+        {'status': 'completed', 'summary': '后台 Job 已交回句柄。'}, stopped=True,
+        receipt={'kind': 'turn_finished', 'session_id': claim['context']['session_id'], 'run_id': claim['run_id'],
+                 'session_revision': 'job-worker-finished', 'input_ids': claim['context']['source_input_ids'],
+                 'inflight': 0, 'tools_paired': True})
+
+
+def _job_leader(fixture, *, user=False):
+    _finish_job_worker(fixture)
+    if user:
+        from qqbot.domain import TextSegment
+        event = fixture.event.model_copy(update={'event_id': 'explicit-job-read', 'segments': (TextSegment(text='查看指定 Job'),)})
+        fixture.core.sessions.enqueue(event, fixture.access)
+    claim = fixture.core.sessions.claim('leader-reader')
+    assert claim['purpose'] == ('user' if user else 'finalize')
+    return claim, (claim['run_id'], claim['fencing_token'], 'leader-reader')
+
+
+async def test_leader_finalizer_inspects_actual_child_job_and_logs_without_worker_scope(job_runtime):
+    from qqbot.jobs.api import WorkerRequest
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'leader-read', 'argv': ['true']}})
+    claim, identity = _job_leader(fixture)
+    result = await fixture.client.invoke('jobs', WorkerRequest(
+        run_id=identity[0], fencing_token=identity[1], worker_id=identity[2],
+        payload={'operation': 'inspect', 'arguments': {'job_id': started['job_id'], 'include_logs': True}}))
+    assert claim['target_root_task_id'] == result['root_task_id'] == fixture.root['task_id']
+    assert result['task_id'] == fixture.claim['task_id'] and result['state'] == 'RUNNING'
+    assert result['logs'] == 'Observed test output.' and len(fixture.provider.launches) == 1
+    assert not fixture.provider.cancels
+
+
+async def test_unbound_user_leader_can_read_explicit_job_only_in_own_conversation(job_runtime):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'user-read', 'argv': ['true']}})
+    claim, identity = _job_leader(fixture, user=True)
+    assert claim['target_root_task_id'] is None
+    result = await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
+    assert result['task_id'] == fixture.claim['task_id']
+    foreign = json.loads(claim['event_json'])
+    foreign['conversation']['remote_conversation_id'] = 'another-conversation'
+    claim['event_json'] = json.dumps(foreign)
+    with fixture.service.db.transaction() as conn:
+        conn.execute(runs.update().where(runs.c.id == identity[0]).values(request_json=json.dumps(claim)))
+    with pytest.raises(PermissionError, match='conversation'):
+        await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
+
+
+@pytest.mark.parametrize('operation', ['start', 'prepare', 'lookup', 'cancel'])
+async def test_leader_job_inspection_does_not_enable_other_job_operations(job_runtime, operation):
+    fixture = job_runtime
+    _, identity = _job_leader(fixture)
+    with pytest.raises(PermissionError):
+        await fixture.runtime.invoke(identity, {'operation': operation, 'arguments': {}})
+    assert not fixture.provider.launches and not fixture.provider.cancels
+
+
+@pytest.mark.parametrize('mutation', ['job_owner', 'task_owner', 'task_conversation', 'task_requester', 'root_owner'])
+async def test_leader_job_read_rejects_foreign_scope_before_returning_logs(job_runtime, mutation):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'scope-read', 'argv': ['true']}})
+    _, identity = _job_leader(fixture)
+    with fixture.service.db.transaction() as conn:
+        if mutation == 'job_owner':
+            conn.execute(jobs.update().where(jobs.c.id == started['job_id']).values(owner_id='foreign-owner'))
+        else:
+            column = {'task_owner': 'owner_id', 'task_conversation': 'conversation',
+                      'task_requester': 'requester', 'root_owner': 'owner_id'}[mutation]
+            task_id = fixture.root['task_id'] if mutation == 'root_owner' else fixture.claim['task_id']
+            conn.execute(tasks.update().where(tasks.c.id == task_id).values(**{column: 'foreign-scope'}))
+    with pytest.raises(PermissionError, match='same owner'):
+        await fixture.runtime.invoke(identity, {'operation': 'inspect',
+            'arguments': {'job_id': started['job_id'], 'include_logs': True}})
+    assert not fixture.provider.cancels
+
+
+async def test_bound_leader_cannot_inspect_another_actual_root(job_runtime):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'first-root', 'argv': ['true']}})
+    _finish_job_worker(fixture)
+    first_leader = fixture.core.sessions.claim('first-leader')
+    assert first_leader['target_root_task_id'] == fixture.root['task_id']
+    source = fixture.event.model_copy(update={'event_id': 'second-root-source'})
+    with fixture.service.db.transaction() as conn:
+        dialogue = fixture.core.sessions.dialogue(conn, source, new_title='另一个根目标')
+        other = fixture.service.graph.submit(conn, dialogue, source, fixture.access,
+            {'goal': 'Second independent goal', 'children': [{'goal': 'Second work', 'delegation_key': 'second'}]},
+            'second-root', fixture.core.sessions.binding(), {})
+    second_worker = fixture.service.claim('daemon')
+    _finish_job_worker(fixture, second_worker)
+    second_leader = fixture.core.sessions.claim('second-leader')
+    assert second_leader['target_root_task_id'] == other['task_id']
+    with pytest.raises(PermissionError, match='another root'):
+        await fixture.runtime.invoke((second_leader['run_id'], second_leader['fencing_token'], 'second-leader'),
+            {'operation': 'inspect', 'arguments': {'job_id': started['job_id'], 'include_logs': True}})
+
+
+@pytest.mark.parametrize('action', ['task.read', 'workspace.job.inspect'])
+async def test_leader_job_read_requires_current_actual_child_permissions(job_runtime, action):
+    from qqbot.permissions import PermissionRule
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'permission-read', 'argv': ['true']}})
+    _, identity = _job_leader(fixture)
+    fixture.service.permissions.upsert(PermissionRule(id='deny-job-read', effect='deny', actions=(action,),
+        resources=('task:' + fixture.claim['task_id'],)), expected_version=0, actor='test')
+    with pytest.raises(PermissionError):
+        await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
+
+
+async def test_leader_job_read_rechecks_authority_after_asynchronous_provider_read(job_runtime):
+    from qqbot.permissions import PermissionRule
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'late-read-revoke', 'argv': ['true']}})
+    _, identity = _job_leader(fixture)
+    inspect = fixture.provider.inspect
+    async def revoke(unit):
+        fixture.service.permissions.upsert(PermissionRule(id='revoke-job-read', effect='deny',
+            actions=('workspace.job.inspect',), resources=('workspace:' + str(fixture.workspace),)),
+            expected_version=0, actor='test')
+        return await inspect(unit)
+    fixture.provider.inspect = revoke
+    with pytest.raises(PermissionError):
+        await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
+
+
+@pytest.mark.parametrize('revocation', ['expired_lease', 'wrong_fence', 'skill_review'])
+async def test_job_inspection_requires_live_leader_and_excludes_review(job_runtime, revocation):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'leader-lease', 'argv': ['true']}})
+    _, identity = _job_leader(fixture)
+    with fixture.service.db.transaction() as conn:
+        if revocation == 'expired_lease':
+            conn.execute(runs.update().where(runs.c.id == identity[0]).values(lease=fixture.core.clock.now().isoformat()))
+        elif revocation == 'skill_review':
+            conn.execute(runs.update().where(runs.c.id == identity[0]).values(role='skill_review'))
+        else:
+            identity = (identity[0], identity[1] + 1, identity[2])
+    with pytest.raises(PermissionError):
+        await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
+
+
+async def test_leader_missing_job_is_bounded_runtime_error_without_mutation(job_runtime):
+    fixture = job_runtime
+    _, identity = _job_leader(fixture)
+    response = await fixture.client.post('/internal/tasks/jobs', json={
+        'worker_id': identity[2], 'run_id': identity[0], 'fencing_token': identity[1],
+        'payload': {'operation': 'inspect', 'arguments': {'job_id': '0' * 32}}})
+    assert response.status_code == 422 and 'unavailable' in response.json()['detail'].lower()
+    assert not fixture.provider.launches and not fixture.provider.cancels
+    with fixture.service.db.engine.connect() as conn:
+        assert not conn.execute(select(jobs)).first()

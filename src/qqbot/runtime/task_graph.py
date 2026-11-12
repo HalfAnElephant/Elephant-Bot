@@ -8,6 +8,7 @@ from sqlalchemy import func, insert, or_, select, update
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import ChildSpec, GoalSpec, ProgressSpec, WaitSpec
 from qqbot.domain.execution import ExecutionPlan, TaskGoal
+from qqbot.harness.artifacts import artifact_path
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import agent_events, leader_inbox
 from qqbot.storage.task_schema import inputs, notifications, observations, runs, tasks
@@ -46,6 +47,8 @@ class TaskGraph:
 
     def submit(self, conn, dialogue, event, access, spec, dispatch_key, binding, context):
         spec = GoalSpec.model_validate_json(json.dumps(spec))
+        for path in spec.requested_outputs:
+            artifact_path(path)
         self.service.permissions.require(access, "task.create", "conversation:" + access.conversation.key)
         old = conn.execute(select(tasks).where(tasks.c.owner_id == dialogue["owner_id"],
             tasks.c.dispatch_key == dispatch_key)).mappings().first()
@@ -84,6 +87,8 @@ class TaskGraph:
 
     def spawn(self, conn, parent, spec, access):
         spec = spec if isinstance(spec, ChildSpec) else ChildSpec.model_validate_json(json.dumps(spec))
+        for path in spec.requested_outputs:
+            artifact_path(path)
         root = self.root(conn, parent)
         root_context = json.loads(root["context_json"])
         if root_context.get("memory_replan_pending"):
@@ -184,8 +189,7 @@ class TaskGraph:
         if task["kind"] == "consult" and write and not personal:
             raise PermissionError("consult is business read-only")
         if write and not personal:
-            pending = conn.execute(select(inputs.c.id).where(inputs.c.task_id.in_(
-                select(tasks.c.id).where(tasks.c.root_task_id == root["id"])),
+            pending = conn.execute(select(inputs.c.id).where(inputs.c.task_id == task["id"],
                 inputs.c.kind.in_(["followup", "answer"]), inputs.c.consumed_at.is_(None))).first()
             if pending or task["goal_revision"] != root["goal_revision"]:
                 raise PermissionError("unconsumed revision blocks new writes")
@@ -268,11 +272,19 @@ class TaskGraph:
         while frontier:
             frontier = set(conn.execute(select(tasks.c.id).where(tasks.c.parent_task_id.in_(frontier))).scalars()) - ids
             ids |= frontier
-        for row in conn.execute(select(tasks).where(tasks.c.id.in_(ids), tasks.c.state.not_in(TERMINAL))).mappings():
-            active = conn.execute(select(runs.c.id).where(runs.c.task_id == row["id"], runs.c.slot_reserved == 1)).first()
+        rows = {row["id"]: row for row in conn.execute(select(tasks).where(tasks.c.id.in_(ids))).mappings()}
+        active = set(conn.execute(select(runs.c.task_id).where(runs.c.task_id.in_(ids), runs.c.slot_reserved == 1)).scalars())
+        for task_id in tuple(active):
+            parent_id = rows[task_id]["parent_task_id"]
+            while parent_id in rows and parent_id not in active:
+                active.add(parent_id)
+                parent_id = rows[parent_id]["parent_task_id"]
+        for row in rows.values():
+            if row["state"] in TERMINAL:
+                continue
             jobs_quiescent = getattr(self.service, "job_tree_quiescent", lambda _task: True)(row)
             conn.execute(update(tasks).where(tasks.c.id == row["id"]).values(
-                state="CANCEL_REQUESTED" if active or not jobs_quiescent else "CANCELLED", stop_reason=reason))
+                state="CANCEL_REQUESTED" if row["id"] in active or not jobs_quiescent else "CANCELLED", stop_reason=reason))
         conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id.in_(ids),
             leader_inbox.c.handled_at.is_(None)).values(handled_at=self.clock.now().isoformat(), output_ref="SUPERSEDED"))
         self.service.wakeup.set()

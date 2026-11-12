@@ -29,8 +29,9 @@ from qqbot.observability.supervision import LoopSupervisor
 from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.storage.schema import audit_events, inbox, outbox, runtime_state
-from qqbot.storage.task_schema import notifications, tasks
+from qqbot.storage.task_schema import notifications, runs, tasks
 
+from .control import HostTaskControls
 from .leader import LeaderRuntime
 from .sessions import SessionService
 from .task_graph import TaskGraph
@@ -60,6 +61,7 @@ class Core:
         self.tasks.graph = TaskGraph(self.tasks, settings)
         self.sessions = SessionService(self.tasks, settings, allowed=self.allowed)
         self.leader = LeaderRuntime(self, self.sessions)
+        self.controls = HostTaskControls(self)
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
         self.openviking = OpenVikingMemory(db, clock, settings.memory.openviking)
         from .knowledge import KnowledgeRuntime
@@ -343,20 +345,8 @@ class Core:
                 duration = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
             await self.set_mode(event.conversation, mode, access, duration_seconds=duration)
             return "已静默；发送 /恢复 可恢复。" if mode == "silent" else "已恢复。"
-        if command == "/任务":
-            if argument.strip():
-                return json.dumps(self.tasks.get(argument.strip(), access), ensure_ascii=False, default=str)
-            self.permissions.require(access, "task.read", "conversation:" + event.conversation.key)
-            with self.db.engine.connect() as conn:
-                rows = conn.execute(select(tasks.c.public_id, tasks.c.state, tasks.c.goal).where(
-                    tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
-                    tasks.c.kind == "goal").order_by(tasks.c.created_at.desc()).limit(8)).mappings().all()
-            return "\n".join(f"{r['public_id']} · {r['state']} · {r['goal']}" for r in rows) or "暂无任务。"
-        if command == "/取消":
-            return json.dumps(self.tasks.cancel(argument.strip(), access), ensure_ascii=False)
-        if command == "/补充":
-            reference, _, text = argument.partition(" ")
-            return json.dumps(self.tasks.add_input(reference, event, access, text), ensure_ascii=False)
+        if command in {"/任务", "/取消", "/补充"}:
+            return self.controls.command(event, command, argument)
         from qqbot.storage.agent_schema import dialogues
         with self.db.transaction() as conn:
             if command == "/新对话":
@@ -387,6 +377,10 @@ class Core:
             if event.conversation.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE} and not (
                     event.mentions_bot or self.valid_bot_reply(event)):
                 return
+            controlled = self.controls.route(event)
+            if controlled is not None:
+                self.reply(event, controlled)
+                return
             if not self.settings.interactive_execution_enabled:
                 return
             context = await self.knowledge.prepare(event, self.context_for(event))
@@ -414,9 +408,34 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
+        if envelope.origin_kind == "chat" and envelope.origin_id.startswith("turn:"):
+            from qqbot.storage.agent_schema import dialogue_inputs
+
+            from .task_graph import TERMINAL
+
+            session_id, _, source_id = envelope.origin_id.removeprefix("turn:").partition(":")
+            with self.db.engine.connect() as conn:
+                source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == source_id)).mappings().first()
+                if not source:
+                    return False
+                completed = conn.execute(select(runs.c.request_json, runs.c.result_json).where(
+                    runs.c.id == source["claimed_attempt_id"], runs.c.session_id == session_id,
+                    runs.c.role == "leader", runs.c.state == "FINISHED")).mappings().first()
+                settled = conn.execute(select(tasks.c.id).where(tasks.c.kind == "goal",
+                    tasks.c.origin_dialogue_id == source["dialogue_id"], tasks.c.event_json == source["event_json"],
+                    tasks.c.state.in_(TERMINAL))).first()
+            event = InboundEvent.model_validate_json(source["event_json"])
+            if event.conversation != envelope.target or event.principal != envelope.requester:
+                return False
+            mutation = json.loads(completed["request_json"]).get("memory_mutation", {}) if completed else {}
+            result = json.loads(completed["result_json"] or "{}") if completed else {}
+            if (mutation.get("summary") == envelope.text and result.get("summary") == envelope.text
+                    and result.get("agent_authored") is False):
+                return self.sessions.owner(event) is not None and self.allowed(event)
+            if settled or not self.validate_context(self.access(event), json.loads(source["context_json"])):
+                return False
         if envelope.origin_kind == "task":
             with self.db.engine.connect() as conn:
-                from qqbot.storage.task_schema import runs
                 task = conn.execute(select(tasks, notifications.c.run_id.label("notification_run_id"),
                     notifications.c.state.label("notification_state"), notifications.c.purpose.label("notice_purpose"),
                     runs.c.run_reason.label("notice_run_reason")).join(notifications, notifications.c.task_id == tasks.c.id)

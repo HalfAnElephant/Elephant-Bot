@@ -76,10 +76,53 @@ class JobRuntime:
         if identity is None or self._authorized(identity, 'start') != scope:
             raise PermissionError('Job dispatch authority changed')
 
+    def _leader_inspection_scope(self, identity, job_id):
+        with self.db.engine.connect() as conn:
+            run, claim = self.core.leader.lease(conn, *identity)
+            if run['role'] != 'leader':
+                raise PermissionError('Job inspection requires the current Leader')
+            event = InboundEvent.model_validate_json(claim['event_json'])
+            owner = self.core.sessions.owner(event)
+            job = self.jobs._row(job_id)
+            task = conn.execute(select(tasks).where(tasks.c.id == job['task_id'])).mappings().first()
+            root = conn.execute(select(tasks).where(tasks.c.id == job['root_task_id'])).mappings().first()
+            if (not owner or not task or not root or job['owner_id'] != owner
+                    or task['owner_id'] != owner or root['owner_id'] != owner
+                    or (task['root_task_id'] or task['id']) != root['id']
+                    or any(row['conversation'] != event.conversation.key or row['requester'] != event.principal.key
+                           for row in (task, root))):
+                raise PermissionError('Job inspection requires the same owner, requester and conversation')
+            source = InboundEvent.model_validate_json(task['event_json'])
+            if (self.core.sessions.owner(source) != owner or source.principal != event.principal
+                    or source.conversation != event.conversation):
+                raise PermissionError('Job source identity does not match the current Leader')
+            bound_root = claim.get('target_root_task_id')
+            if ((bound_root and bound_root != root['id']) or
+                    (not bound_root and claim['purpose'] != 'user')):
+                raise PermissionError('Leader Job inspection is bound to another root')
+            workspace = self.workspace(task, strict=False)
+            access = self.core.sessions.access_for_claim(claim)
+            self.task_service.permissions.require(access, 'task.read', 'task:' + task['id'])
+            self.core.leader.authorize(conn, run, claim, {'action': 'workspace.job.inspect',
+                'resources': ['workspace:' + str(workspace), 'task:' + task['id']], 'effect': 'read'})
+        return JobScope(owner_id=owner, task_id=task['id'], root_task_id=root['id'], workspace=str(workspace),
+                        expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline'])))
+
     async def invoke(self, identity, payload):
         if not isinstance(payload, dict) or set(payload) != {'operation', 'arguments'}:
             raise ValueError('Job operation and arguments are required')
         operation, arguments = payload['operation'], payload['arguments']
+        if operation == 'inspect':
+            with self.db.engine.connect() as conn:
+                role = conn.execute(select(runs.c.role).where(runs.c.id == identity[0])).scalar_one_or_none()
+            if role == 'leader':
+                if not isinstance(arguments, dict):
+                    raise ValueError('Invalid Job inspection arguments')
+                scope = self._leader_inspection_scope(identity, arguments.get('job_id'))
+                result = await self.jobs.inspect(arguments, scope)
+                if self._leader_inspection_scope(identity, arguments.get('job_id')) != scope:
+                    raise PermissionError('Leader Job inspection authority changed')
+                return result
         scope = self._authorized(identity, operation)
         if operation == 'lookup':
             if (not isinstance(arguments, dict) or set(arguments) != {'job_key'}

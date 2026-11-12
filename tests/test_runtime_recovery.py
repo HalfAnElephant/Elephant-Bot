@@ -500,3 +500,21 @@ def test_reconciling_an_already_restored_result_is_idempotent(recovery):
     task = task_row(runtime, claim["task_id"])
     assert recovery.service.reconcile_task(task["public_id"], runtime.access, claim["run_id"], resume=True)["state"] == "SUCCEEDED"
     assert task_row(runtime, claim["task_id"])["result_json"] == original
+
+
+async def test_completed_native_result_ignores_unsupported_implicit_sidecar(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim, outcome={"status": "completed", "attachments": ["outputs/report.txt"]})
+    (claim["workspace"] / "outputs/report.txt").write_text("ISOLATED_OK")
+    (claim["workspace"] / "outputs/.keep").write_text("")
+    await operation(recovery, claim, state="VERIFIED", arguments={"path": "outputs/.keep", "text": ""},
+                    data={"path": "outputs/.keep"})
+    prove_stop(recovery)
+    expire(recovery)
+    assert recovery.service.recover_workers()[0]["state"] == "SUCCEEDED"
+    result = json.loads(task_row(runtime, claim["task_id"])["result_json"])
+    assert len(result["artifacts"]) == 1
+    artifact = result["artifacts"][0]
+    assert artifact["relative_path"] == "outputs/report.txt"
+    assert (runtime.service.archive_root / artifact["id"]).read_bytes() == b"ISOLATED_OK"

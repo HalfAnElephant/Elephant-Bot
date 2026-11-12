@@ -1321,6 +1321,7 @@ class TaskService:
             kind=kind, actor=event.principal.key, goal_revision=revision))
         if kind != "notify":
             conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(goal_revision=revision))
+        if kind == "followup":
             children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
                 tasks.c.kind != "goal", tasks.c.id != task["id"], tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
             for child in children:

@@ -317,3 +317,26 @@ async def test_finalizer_cannot_export_a_child_path_as_its_own_file(discovery):
         response = await invoke(client, gateway, "task_outcome", {"status": "completed"})
     assert response.json()["accepted"] and response.json()["committed"] is False
     assert "end this turn" in response.json()["next_action"]
+
+
+async def test_output_sidecar_stays_workspace_file_without_breaking_artifact_export(discovery):
+    from qqbot.harness.artifacts import export_artifacts
+    gateway, _core, _calls = discovery
+    gateway.notify_before_tools = False
+    (gateway.workspace / "outputs").mkdir()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        for path, text in [("outputs/.keep", ""), ("outputs/result.txt", "ISOLATED_OK")]:
+            response = await invoke(client, gateway, "capability_invoke",
+                {"name": "workspace.write", "arguments": {"path": path, "text": text}}, identity=path)
+            assert response.status_code == 200, response.text
+        assert gateway.artifacts == ["outputs/result.txt"]
+        rejected = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/.keep"]}, identity="bad-artifact")
+        assert rejected.status_code == 422 and "unsupported artifact type" in rejected.text
+        assert gateway.outcome is None
+        accepted = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/result.txt"]}, identity="good-artifact")
+        assert accepted.status_code == 200
+    assert (gateway.workspace / "outputs/.keep").is_file()
+    archive = gateway.workspace / "archive"
+    artifacts = export_artifacts(gateway.workspace, archive, gateway.artifacts)
+    assert len(artifacts) == 1 and artifacts[0]["relative_path"] == "outputs/result.txt"
+    assert (archive / artifacts[0]["id"]).read_bytes() == b"ISOLATED_OK"

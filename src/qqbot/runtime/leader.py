@@ -374,7 +374,8 @@ class LeaderRuntime:
         return [self.recover_attempt(run_id) for run_id in expired]
 
     def recover_attempt(self, run_id):
-        from qqbot.adapters.pi.sessions import boundary_receipts
+        from qqbot.adapters.pi.sessions import boundary_receipts, restore_tool_results, unfinished_tools
+        from qqbot.domain.agents import GoalSpec
 
         with self.db.engine.connect() as conn:
             run = conn.execute(select(runs).where(runs.c.id == run_id,
@@ -394,6 +395,36 @@ class LeaderRuntime:
             return {"run_id": run_id, "state": "NEEDS_RECONCILIATION"}
         proof = json.loads(run["receipt_json"]) if run["receipt_json"] else None
         path = identity.get("actual_session_file") or run["session"]
+        mutation = claim.get("memory_mutation")
+        try:
+            pending = () if mutation else unfinished_tools(path)
+            submitted = [call for call in pending if call.get("name") == "tasks_submit"]
+            if pending:
+                if len(submitted) != len(pending) or run["role"] != "leader" or claim["purpose"] != "user":
+                    raise ValueError("native dispatch recovery requires an isolated owner submission")
+                receipts = []
+                with self.db.engine.connect() as conn:
+                    source = conn.execute(select(dialogue_inputs).where(
+                        dialogue_inputs.c.id == claim["source_ids"][0],
+                        dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"])).mappings().first()
+                    if not source:
+                        raise ValueError("native dispatch source no longer matches its original Dialogue")
+                    owner = claim["context"]["owner_id"]
+                    for call in submitted:
+                        task = conn.execute(select(tasks).where(tasks.c.owner_id == owner,
+                            tasks.c.dispatch_key == stable_id(owner, source["id"], call["id"]),
+                            tasks.c.origin_dialogue_id == source["dialogue_id"],
+                            tasks.c.coordinator_session_id == claim["session_id"])).mappings().first()
+                        intent = GoalSpec.model_validate_json(json.dumps(call["arguments"])).model_dump(mode="json")
+                        if not task or json.loads(task["context_json"]).get("dispatch_spec") != intent:
+                            raise ValueError("native dispatch has no matching committed host intent")
+                        receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
+                restore_tool_results(path, receipts, pi_executable=self.sessions.settings.orchestration.pi_executable)
+        except (OSError, ValueError, KeyError):
+            with self.db.transaction() as conn:
+                conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
+                    .values(state="NEEDS_RECONCILIATION"))
+            return {"run_id": run_id, "state": "NEEDS_RECONCILIATION"}
         try:
             native = [item for item in boundary_receipts(path) if item.get("run_id") == run_id]
             if native:
@@ -413,6 +444,11 @@ class LeaderRuntime:
                     processes.c.generation == run["binding_generation"]).values(state="STOPPED", stopped_at=now))
             conn.execute(update(runs).where(runs.c.id == run_id).values(state="RUNNING",
                 lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
+        if mutation:
+            outcome = self.complete(run_id, run["fencing"], run["worker"],
+                {"status": "completed", "summary": mutation["summary"], "agent_authored": False},
+                stopped=True, quiescent=False)
+            return {"run_id": run_id, **outcome}
         if proof and proof.get("summary"):
             try:
                 outcome = self.complete(run_id, run["fencing"], run["worker"],

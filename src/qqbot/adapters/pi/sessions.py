@@ -1,6 +1,8 @@
 """Native Pi log export. Only this adapter parses the Harness's file format."""
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from qqbot.contracts.memory import SourceEvent
@@ -120,6 +122,62 @@ def unfinished_tools(path):
         elif message.get("role") == "toolResult":
             pending.pop(message.get("toolCallId"), None)
     return tuple(pending.values())
+
+
+def restore_tool_results(path, receipts, *, pi_executable):
+    """Append genuine host receipts through Pi's native writer after verified stop."""
+    native = load_entries(path)
+    if not native or native[0].get("type") != "session" or native[0].get("version") != 3:
+        raise ValueError("native recovery requires a current Pi session header")
+    entries = branch_entries(native)
+    if not entries or not receipts:
+        raise ValueError("native recovery requires an existing session and receipts")
+    executable = Path(shutil.which(pi_executable) or pi_executable).resolve(strict=True)
+    module = None
+    for parent in executable.parents:
+        manifest = parent / "package.json"
+        if manifest.is_file():
+            package = json.loads(manifest.read_text())
+            if package.get("name") == "@earendil-works/pi-coding-agent" and package.get("version") == "1.5.0":
+                module = parent / "dist" / "index.js"
+                break
+    if module is None or not module.is_file():
+        raise ValueError("locked Pi public SessionManager API is unavailable")
+    payload = json.dumps({"module": module.as_uri(), "path": str(Path(path).resolve()),
+        "revision": entries[-1]["id"], "receipts": receipts}, ensure_ascii=False)
+    if len(payload.encode()) > 1024 * 1024:
+        raise ValueError("native recovery receipts exceed the bounded transport")
+    script = """
+import {readFileSync, openSync, fsyncSync, closeSync} from 'node:fs';
+import {isDeepStrictEqual} from 'node:util';
+const body = JSON.parse(readFileSync(0, 'utf8'));
+const {SessionManager} = await import(body.module);
+const session = SessionManager.open(body.path);
+if (session.getLeafId() !== body.revision) throw new Error('Native session revision changed');
+const pending = new Map();
+for (const entry of session.getBranch()) {
+  if (entry.type !== 'message') continue;
+  const message = entry.message;
+  if (message.role === 'assistant') for (const part of message.content) {
+    if (part.type === 'toolCall') pending.set(part.id, part);
+  }
+  if (message.role === 'toolResult') pending.delete(message.toolCallId);
+}
+for (const receipt of body.receipts) {
+  if (!isDeepStrictEqual(pending.get(receipt.call.id), receipt.call)) throw new Error('Native call changed');
+}
+for (const receipt of body.receipts) {
+  session.appendMessage({role: 'toolResult', toolCallId: receipt.call.id, toolName: receipt.call.name,
+    content: [{type: 'text', text: JSON.stringify(receipt.result)}], details: {}, isError: false, timestamp: Date.now()});
+}
+const fd = openSync(body.path, 'r');
+try { fsyncSync(fd); } finally { closeSync(fd); }
+"""
+    try:
+        subprocess.run([shutil.which("node") or "node", "--input-type=module", "-e", script],
+            input=payload, text=True, capture_output=True, timeout=15, check=True)
+    except (subprocess.SubprocessError, OSError) as error:
+        raise ValueError("native tool-result recovery failed") from error
 
 
 def review_snapshot(path, *, run_id, max_chars=64000):

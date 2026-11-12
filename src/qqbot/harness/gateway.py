@@ -22,6 +22,7 @@ from qqbot.capabilities.gateway import ToolGateway, standard_registry
 from qqbot.capabilities.git import GitService
 from qqbot.capabilities.process import ProcessService
 from qqbot.capabilities.types import Action, Capability, ToolContext
+from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, artifact_path
 from qqbot.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, fetch_image
 from qqbot.harness.public_web import bounded_json
 from qqbot.providers import ProviderAdapter, validate_transactions
@@ -260,7 +261,8 @@ class RunGateway:
         if action.name.startswith("workspace.") and isinstance(data, dict) and data.get("path"):
             path = self.workspace / data["path"]
             if path.is_file() and not path.is_symlink():
-                if data["path"].startswith("outputs/") or data["path"] in self.claim.get("goal_spec", {}).get("requested_outputs", []):
+                if (data["path"].startswith("outputs/") and path.suffix.lower() in DEFAULT_ARTIFACT_MIME_TYPES
+                        or data["path"] in self.claim.get("goal_spec", {}).get("requested_outputs", [])):
                     self.artifacts.append(data["path"])
                 return "VERIFIED", data
         verifier = getattr(self.registry, "verify", None)
@@ -494,6 +496,8 @@ class RunGateway:
                         if not isinstance(attachments, list) or len(attachments) > 20 or any(
                                 not isinstance(path, str) or not 1 <= len(path) <= 1024 for path in attachments):
                             raise ValueError("invalid artifact paths")
+                        for path in attachments:
+                            artifact_path(path)
                         if attachments and self.claim.get("role") == "leader" and self.claim.get("purpose") == "finalize":
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         self.outcome = args
