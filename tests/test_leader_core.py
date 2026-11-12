@@ -237,3 +237,15 @@ async def test_recovery_has_job_quiescence_guard_before_any_admission(tmp_path, 
     finally:
         await core.stop()
         core.db.close()
+
+
+async def test_idle_direct_transport_serializes_no_claim_as_json_null(tmp_path, official_config, clock):
+    from qqbot.runtime.scheduler import Scheduler
+    core = make_core(tmp_path, official_config, clock)
+    core.scheduler = Scheduler(core, core.leader)
+    try:
+        assert await core.scheduler.worker.once() is False
+        assert not core.scheduler.pool.entries
+    finally:
+        await core.stop()
+        core.db.close()

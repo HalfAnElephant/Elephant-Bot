@@ -354,7 +354,7 @@ class Worker:
             if gateway:
                 result["evidence"] = gateway.evidence
                 paths = list(gateway.artifacts)
-                if result["status"] == "completed":
+                if result["status"] == "completed" and claim.get("role", "worker") == "worker":
                     paths.extend(claim.get("goal_spec", {}).get("requested_outputs", []))
                 result["artifacts"] = export_artifacts(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
             if not harness.stopped_verified and not getattr(harness, "quiescent_verified", False):

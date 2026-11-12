@@ -279,3 +279,36 @@ async def test_real_pi_receives_bounded_actionable_gateway_error(discovery, tmp_
         result = await runner.run("trusted goal")
     assert result.summary == "The reference was invalid and can be corrected."
     assert len(requests) == 2 and not calls
+
+
+@pytest.mark.parametrize("kind", ["host", "missing_file"])
+async def test_native_host_and_workspace_errors_are_bounded_actionable_results(discovery, kind):
+    gateway, _core, _calls = discovery
+    if kind == "host":
+        async def reject(operation, payload):
+            if operation == "skills":
+                response = httpx.Response(422, json={"detail": "Invalid skill call identity. " + gateway.key},
+                    request=httpx.Request("POST", "http://runtime.local/skills"))
+                response.raise_for_status()
+            return {"accepted": True, "allowed": True}
+        gateway.call = reject
+        name, arguments = "skills_list", {}
+    else:
+        gateway.notify_before_tools = False
+        name, arguments = "capability_invoke", {"name": "workspace.read", "arguments": {"path": "missing.txt"}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, name, arguments)
+    assert response.status_code == 422
+    assert gateway.key not in response.text
+    assert ("Invalid skill call identity" if kind == "host" else "missing.txt") in response.json()["detail"]
+
+
+async def test_finalizer_cannot_export_a_child_path_as_its_own_file(discovery):
+    gateway, _core, _calls = discovery
+    claim = gateway.claim
+    gateway.revoke()
+    gateway.bind({**claim, "role": "leader", "purpose": "finalize"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/child.txt"]})
+    assert response.status_code == 422 and "verified child artifacts" in response.json()["detail"]
+    assert not gateway.artifacts

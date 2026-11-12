@@ -43,7 +43,7 @@ class LoopSupervisor:
                     next_retry_at=None, state="RUNNING", heartbeat=datetime.now(UTC).isoformat(), started=time.monotonic()
                 )
                 try:
-                    await step()
+                    outcome = await step()
                 except Exception as exc:  # Isolate periodic subsystems and retry safely.
                     state.update(
                         state="RETRYING",
@@ -67,7 +67,10 @@ class LoopSupervisor:
                     delay = min(30, self.retry_base * 2 ** min(state["failures"] - 1, 5))
                     state["next_retry_at"] = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
                 else:
-                    state.update(state="IDLE", failures=0, last_success=datetime.now(UTC).isoformat())
+                    state["state"] = "IDLE"
+                    # False means no confirmed success yet; None preserves existing step contracts.
+                    if outcome is not False:
+                        state.update(failures=0, last_success=datetime.now(UTC).isoformat())
                     delay = interval
                 await asyncio.sleep(delay)
         finally:

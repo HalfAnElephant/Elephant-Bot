@@ -48,13 +48,14 @@ def test_legacy_candidate_api_is_explicitly_retired(setup):
         skill_operation(service, args, {"operation": "save", "skill": DOC})
 
 
-def test_native_route_authenticates_and_binds_owner(setup, tmp_path):
+@pytest.mark.parametrize("receipt", [{}, {"call_id": "native-call"}])
+def test_native_route_authenticates_and_binds_owner(setup, tmp_path, receipt):
     from qqbot.adapters.hermes_skills import HermesSkills
     service, event = setup
     _, args = start(service, event, "native")
     adapter = HermesSkills(tmp_path)
     service.skills_provider = lambda access: adapter if access.principal == event.principal else None
-    assert skill_operation(service, args, {"operation": "skills_list", "arguments": {}})["success"]
+    assert skill_operation(service, args, {"operation": "skills_list", "arguments": {}, **receipt})["success"]
     service.skills_provider = lambda access: None
     with pytest.raises(PermissionError, match="scope"):
         skill_operation(service, args, {"operation": "skills_list", "arguments": {}})

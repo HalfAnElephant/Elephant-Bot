@@ -6,8 +6,11 @@ __all__ = ["GUIDANCE", "skill_operation"]
 
 
 def skill_operation(service, args, payload):
-    if not isinstance(payload, dict) or set(payload) != {'operation', 'arguments'}:
+    if (not isinstance(payload, dict) or not {'operation', 'arguments'} <= set(payload)
+            or set(payload) - {'operation', 'arguments', 'call_id'}):
         raise ValueError('Legacy candidate skills API retired; use skills_list, skill_view or skill_manage.')
+    if 'call_id' in payload and (not isinstance(payload['call_id'], str) or not 1 <= len(payload['call_id']) <= 200):
+        raise ValueError('Invalid skill call identity.')
     name, arguments = payload['operation'], payload['arguments']
     if name not in {'skills_list', 'skill_view', 'skill_manage'}:
         raise ValueError('Legacy candidate skills API retired; use native Hermes skill tools.')

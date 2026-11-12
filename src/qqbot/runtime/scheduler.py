@@ -35,6 +35,8 @@ class RuntimeClient:
             else:
                 body = WorkerRequest.model_validate(json)
                 result = await self.invoke(path.rsplit("/", 1)[-1], body)
+            if result is None:
+                return httpx.Response(200, content=b"null", headers={"content-type": "application/json"}, request=request)
             return httpx.Response(200, json=result, request=request)
         except PermissionError as error:
             return httpx.Response(409, json={"detail": str(error)}, request=request)
@@ -154,15 +156,28 @@ class Scheduler:
         if self.job_maintenance is None and loop.time() >= self.next_job_maintenance:
             self.job_maintenance = asyncio.create_task(self.core.job_runtime.maintain())
         if not self.jobs_recovered:
-            return
+            return False
+        completed = False
+        failure = None
         for task in list(self.active):
             if task.done():
                 self.active.remove(task)
                 # A failed runner leaves its persisted spool for the next bounded replay.
-                task.result()
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    failure = failure or RuntimeError("Worker cycle was cancelled unexpectedly")
+                except Exception as error:  # noqa: BLE001 — drain the completed batch, then re-raise its failure.
+                    failure = failure or error
+                else:
+                    completed = True
+        if failure is not None:
+            raise failure
         if len(self.active) < self.core.tasks.max_active:
             self.active.add(asyncio.create_task(self.worker.once()))
         await self.pool.sweep()
+        # Admission and in-flight work do not confirm that a Worker cycle succeeded.
+        return completed
 
     async def close(self):
         if self.job_maintenance is not None:

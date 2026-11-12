@@ -388,3 +388,28 @@ async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path
     with service.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == claim["task_id"])).scalar_one() == "NEEDS_RECONCILIATION"
         assert conn.execute(select(tasks.c.failure_notice_json).where(tasks.c.id == new_task["id"])).scalar_one()
+
+
+async def test_finalizer_does_not_reexport_child_paths_from_its_workspace(environment, tmp_path):
+    from qqbot.domain.tasks import TaskResult
+    service, task, app = environment
+    class FinalizerRunner(SlowStopRunner):
+        async def run(self, goal, **kwargs):
+            self.quiescent_verified = True
+            return TaskResult(status="completed", summary="Verified child artifact is ready.")
+    pool = SessionPool(lambda claim, pid, sid: FinalizerRunner(tmp_path / pid, claim, service, pid, error="wait"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
+                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
+        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+        original = worker.call
+        async def finalizer(operation, **payload):
+            value = await original(operation, **payload)
+            if operation == "claim" and value:
+                value.update(role="leader", purpose="finalize", goal_spec={"requested_outputs": ["outputs/child.txt"]})
+            return value
+        worker.call = finalizer
+        try:
+            assert await worker.once()
+            assert service.get(task["public_id"], service._access_for(task))["state"] == "SUCCEEDED"
+        finally:
+            await pool.close()

@@ -13,6 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -493,6 +494,8 @@ class RunGateway:
                         if not isinstance(attachments, list) or len(attachments) > 20 or any(
                                 not isinstance(path, str) or not 1 <= len(path) <= 1024 for path in attachments):
                             raise ValueError("invalid artifact paths")
+                        if attachments and self.claim.get("role") == "leader" and self.claim.get("purpose") == "finalize":
+                            raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)
                         return {"accepted": True}
@@ -530,5 +533,11 @@ class RunGateway:
                         encoded["content_ref"] = reference
                         encoded["truncated"] = True
                     return encoded
-                except (KeyError, ValueError, PermissionError) as error:
+                except httpx.HTTPStatusError as error:
+                    try:
+                        detail = error.response.json().get("detail", str(error))
+                    except (ValueError, AttributeError):
+                        detail = str(error)
+                    raise HTTPException(422, self.safe_error(ValueError(str(detail)))) from error
+                except (KeyError, ValueError, PermissionError, OSError) as error:
                     raise HTTPException(422, self.safe_error(error)) from error
