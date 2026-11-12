@@ -156,6 +156,14 @@ home 持久证据：
 
 30 个不同根目标经真实 HTTP 管理入口接单后立即取消，全部 CANCELLED，未派发 Job；唯一抢先启动的 run 已确认停止并释放槽。取消持久接受 P95 19.08 ms，30 次状态读取 P95 8.32 ms，记录在 `/var/lib/qqbot/leader-control-benchmark.json`。本批生产复验的输入、模型结果、任务树和制品校验另存最新 HOST 验收事实文件，发布版本以 `/var/lib/qqbot/leader-deployment-facts.json` 为准。
 
+## 后续真实入口发现的问题
+
+`12b5580` 的统一 CI 为 1039 项 Python、17 项 JavaScript 全部通过且无跳过，构建、发布冒烟和 CodeQL 通过。该版真实双目标中的成功根 `T-b90afba2-654` 已 SUCCEEDED，空的 `outputs/.keep` 留在工作区，唯一导出产物为 11 字节 `ISOLATED_OK`，受保护下载 hash 一致。失败分支的 Job 已退出 7，但 Worker 使用 `job.inspect/data.state` 等待，暴露外部等待器只处理 GitHub/web 的遗漏。当前补丁由同一等待器调用宿主按原 wait、Worker、Job 作用域读取，支持已有 data.state 条件，续接原 Task/Session，不再派发 Job。
+
+新版本的普通 HOST 记忆输入已确认收到并自动 INDEXED，新 Dialogue 回答精确值和原始来源，没有 Worker 或文件替代链。真实模型还修正了一条先前错误学到的本地文件记忆技能。普通文件任务随后在绑定 Pi 进程前失败，原因是旧 daemon 的 IDLE 驻留记录仍占容量。启动回收现在仅按可信旧 epoch 停止证明标记物理进程 STOPPED，活动 run 的槽位与 Session 写者仍由原生恢复处理。无证明和当前 epoch 的记录保留，空 PID 不构成停止证明。
+
+等待 Job 时收到真实任务修订会持久登记受影响 Job 的停止意图，旧等待被替代，同 Task/Session 可读取新输入。旧 Job 尚未证停时，新业务写入和根目标验收继续阻断。问题答复只影响对应 Task，兄弟 Job 可继续运行，停止意图不会因输入已消费而丢失。dispatch 期间权限变化后仍保留真实调用回执并登记停止，避免把已经发生的派发当作未执行。
+
 ## 尚未验收的边界
 
 1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。

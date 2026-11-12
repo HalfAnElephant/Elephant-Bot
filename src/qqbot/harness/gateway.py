@@ -22,6 +22,7 @@ from qqbot.capabilities.gateway import ToolGateway, standard_registry
 from qqbot.capabilities.git import GitService
 from qqbot.capabilities.process import ProcessService
 from qqbot.capabilities.types import Action, Capability, ToolContext
+from qqbot.domain.execution import WaitCondition
 from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, artifact_path
 from qqbot.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, fetch_image
 from qqbot.harness.public_web import bounded_json
@@ -481,6 +482,17 @@ class RunGateway:
                             self.progress_announced = True
                         return result
                     if name in {"task_ask_user", "task_wait_external"}:
+                        if name == "task_wait_external":
+                            condition = WaitCondition.model_validate_json(json.dumps(args.get("condition", {})))
+                            entry = self.registry.entries.get(condition.capability)
+                            if not entry:
+                                raise ValueError("External waits require an installed read capability")
+                            action = entry[2](condition.arguments, self.context)
+                            if action.effect != "read" or not (action.name == "workspace.job.inspect"
+                                    or action.name.startswith(("github.", "web."))):
+                                raise PermissionError("External waits require a supported read observation")
+                            if condition.capability == "job.inspect":
+                                await self.call("jobs", {"operation": "inspect", "arguments": condition.arguments})
                         result = await self.call("ask", {**args, "question_id": operation_id,
                             "kind": "input" if name == "task_ask_user" else "external"})
                         self.waiting = True

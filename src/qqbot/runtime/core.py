@@ -500,6 +500,7 @@ class Core:
         self.retire_adapters()
         self.outbox.recover()
         self.stream_delivery.recover()
+        self.recovery.recover_processes()
         self.tasks.recover()
         self.recovery.recover_workers()
         self.leader.recover()

@@ -340,3 +340,28 @@ async def test_output_sidecar_stays_workspace_file_without_breaking_artifact_exp
     artifacts = export_artifacts(gateway.workspace, archive, gateway.artifacts)
     assert len(artifacts) == 1 and artifacts[0]["relative_path"] == "outputs/result.txt"
     assert (archive / artifacts[0]["id"]).read_bytes() == b"ISOLATED_OK"
+
+
+@pytest.mark.parametrize('condition', [
+    {'capability': 'missing.capability', 'arguments': {}, 'path': 'state', 'equals': 'EXITED'},
+    {'capability': 'workspace.write', 'arguments': {'path': 'forbidden.txt', 'text': 'no'}, 'path': 'state', 'equals': 'EXITED'},
+    {'capability': 'job.inspect', 'arguments': {'job_id': 'f' * 32}, 'path': 'data.state', 'equals': 'EXITED'},
+    [],
+])
+async def test_unobservable_or_unauthorized_condition_is_rejected_before_wait_intent(discovery, condition):
+    gateway, _core, _calls = discovery
+    original_call, called = gateway.call, []
+    async def call(operation, payload):
+        called.append(operation)
+        if operation == 'jobs':
+            raise PermissionError('Job belongs to another task')
+        if operation == 'ask':
+            raise AssertionError('Unobservable condition must not become a durable wait')
+        return await original_call(operation, payload)
+    gateway.call = call
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://gateway') as client:
+        response = await invoke(client, gateway, 'task_wait_external',
+            {'text': '等待结果', 'checkpoint': '原业务不重复执行', 'condition': condition})
+    assert response.status_code == 422, response.text
+    assert 'ask' not in called and not gateway.waiting
+    assert not (gateway.workspace / 'forbidden.txt').exists()

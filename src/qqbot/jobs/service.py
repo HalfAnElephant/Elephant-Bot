@@ -552,8 +552,10 @@ class TaskService:
                 c.execute(update(tasks).where(tasks.c.id == task["id"]).values(wait_json=json.dumps(condition)))
                 self.graph.wake_parent(c, {**dict(task), "state": "WAITING_CHILDREN", "wait_json": json.dumps(condition)})
             elif wait:
-                c.execute(update(waits).where(waits.c.id == wait["id"]).values(state="WAITING"))
-                self._wake(c, task["id"], wait["id"])
+                c.execute(update(waits).where(waits.c.id == wait["id"]).values(
+                    state="SUPERSEDED" if state == "QUEUED" else "WAITING"))
+                if state != "QUEUED":
+                    self._wake(c, task["id"], wait["id"])
                 state = c.execute(select(tasks.c.state).where(tasks.c.id == task["id"])).scalar_one()
             elif task["root_task_id"] and state != "QUEUED":
                 settled_task = {**dict(task), "state": state}
@@ -1218,11 +1220,16 @@ class TaskService:
             task = c.execute(select(tasks).where(tasks.c.id == wait["task_id"])).mappings().one()
             if task["state"] != "WAITING_EXTERNAL" or task["deadline"] <= self.clock.now().isoformat():
                 raise PermissionError("waiting task is no longer active")
+            if task["root_task_id"] and hasattr(self, "graph"):
+                root = self.graph.root(c, task)
+                if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or root["deadline"] <= self.clock.now().isoformat():
+                    raise PermissionError("waiting root is no longer active")
             access, context = self._access_for(task), json.loads(task["context_json"])
             if self.context_validator and context and not self.context_validator(access, context):
                 raise PermissionError("waiting context was revoked")
             action = payload["action"]
-            if not action.startswith(("github.", "web.")) or not action.endswith((".read", ".fetch", ".search")):
+            job_read = action == "workspace.job.inspect" and json.loads(wait["condition_json"]).get("capability") == "job.inspect"
+            if not job_read and (not action.startswith(("github.", "web.")) or not action.endswith((".read", ".fetch", ".search"))):
                 raise PermissionError("waiter action is not a remote observation")
             if action == "github.graphql.read" and self.permissions.has_restrictions(access):
                 raise PermissionError("GraphQL observation cannot prove restricted resource scope")
@@ -1319,12 +1326,14 @@ class TaskService:
         conn.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=question_id,
             source_id=source_id, text=text, state="READY" if task["state"] == "QUEUED" else "PENDING", created_at=now,
             kind=kind, actor=event.principal.key, goal_revision=revision))
+        affected = {task["id"]}
         if kind != "notify":
             conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(goal_revision=revision))
         if kind == "followup":
             children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
                 tasks.c.kind != "goal", tasks.c.id != task["id"], tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
             for child in children:
+                affected.add(child["id"])
                 conn.execute(insert(inputs).values(id=str(uuid4()), task_id=child["id"], question_id=None,
                     source_id=source_id + ":" + child["id"], text=text, state="READY" if child["state"] == "QUEUED" else "PENDING",
                     created_at=now, kind=kind, actor=event.principal.key, goal_revision=revision))
@@ -1332,6 +1341,23 @@ class TaskService:
                 event_id = self.graph.event(conn, root, "followup", {"input_id": input_id, "text": text})
                 conn.execute(insert(leader_inbox).values(id=str(uuid4()), target_session_id=root["coordinator_session_id"],
                     root_task_id=root["id"], event_id=event_id, resume_reason="followup", source_revision=revision, created_at=now))
+        if kind != "notify":
+            from qqbot.storage.job_schema import jobs
+            conn.execute(update(jobs).where(jobs.c.task_id.in_(affected),
+                jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"})).values(
+                    state="CANCEL_REQUESTED", cancel_requested_at=func.coalesce(jobs.c.cancel_requested_at, now)))
+            suspended = conn.execute(select(waits).join(tasks, tasks.c.id == waits.c.task_id).where(
+                waits.c.task_id.in_(affected), waits.c.kind == "external", waits.c.state == "WAITING",
+                tasks.c.state == "WAITING_EXTERNAL")).mappings().all()
+            for waiting in suspended:
+                if json.loads(waiting["condition_json"]).get("capability") != "job.inspect":
+                    continue
+                if conn.execute(select(runs.c.id).where(runs.c.task_id == waiting["task_id"], runs.c.slot_reserved == 1)).first():
+                    continue
+                conn.execute(update(waits).where(waits.c.id == waiting["id"]).values(state="SUPERSEDED"))
+                conn.execute(update(tasks).where(tasks.c.id == waiting["task_id"]).values(state="QUEUED"))
+                conn.execute(update(inputs).where(inputs.c.task_id == waiting["task_id"],
+                    inputs.c.consumed_at.is_(None)).values(state="READY"))
         if wait:
             self._wake(conn, task["id"], question_id)
         self.wakeup.set()

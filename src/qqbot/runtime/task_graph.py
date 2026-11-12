@@ -11,6 +11,7 @@ from qqbot.domain.execution import ExecutionPlan, TaskGoal
 from qqbot.harness.artifacts import artifact_path
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import agent_events, leader_inbox
+from qqbot.storage.job_schema import jobs
 from qqbot.storage.task_schema import inputs, notifications, observations, runs, tasks
 
 TERMINAL = frozenset({"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"})
@@ -193,6 +194,10 @@ class TaskGraph:
                 inputs.c.kind.in_(["followup", "answer"]), inputs.c.consumed_at.is_(None))).first()
             if pending or task["goal_revision"] != root["goal_revision"]:
                 raise PermissionError("unconsumed revision blocks new writes")
+            if payload.get("action") != "workspace.job.cancel" and conn.execute(select(jobs.c.id).where(
+                    jobs.c.task_id == task["id"], jobs.c.cancel_requested_at.is_not(None),
+                    jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))).first():
+                raise PermissionError("revoked Jobs have not been proven stopped")
 
     def settled(self, conn, task, run_id, result):
         self.event(conn, task, "child_result", {"result": result}, attempt_id=run_id,
@@ -246,7 +251,10 @@ class TaskGraph:
             select(tasks.c.id).where(tasks.c.root_task_id == root["id"])), operations.c.state.in_(UNSETTLED))).first()
         pending = conn.execute(select(inputs.c.id).where(inputs.c.task_id == root["id"],
             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))).first()
-        return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain and (allow_pending_inputs or not pending))
+        stopping = conn.execute(select(jobs.c.id).where(jobs.c.root_task_id == root["id"],
+            jobs.c.cancel_requested_at.is_not(None), jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))).first()
+        return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain
+                    and not stopping and (allow_pending_inputs or not pending))
 
     def verify_final_result(self, conn, root, result, checks=None):
         if checks is None:

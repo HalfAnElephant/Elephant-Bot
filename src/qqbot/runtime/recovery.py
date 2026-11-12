@@ -81,6 +81,29 @@ class RuntimeRecovery:
             process = conn.execute(select(processes).where(processes.c.id == run["process_id"])).mappings().first()
         return run, task, process
 
+    def recover_processes(self):
+        """Retire proved old-daemon residents without settling their active runs."""
+        with self.core.db.engine.connect() as conn:
+            residents = conn.execute(select(processes).where(processes.c.state != "STOPPED")).mappings().all()
+        recovered = []
+        for process in residents:
+            identity = json.loads(process["identity_json"])
+            task_id = identity.get("launch_task_id") if isinstance(identity, dict) else None
+            if not isinstance(task_id, str) or not task_id or not self.stopped(task_id, process["id"]):
+                continue
+            with self.core.db.transaction() as conn:
+                changed = conn.execute(update(processes).where(processes.c.id == process["id"],
+                    processes.c.epoch == process["epoch"], processes.c.generation == process["generation"],
+                    processes.c.identity_json == process["identity_json"], processes.c.state != "STOPPED")
+                    .values(state="STOPPED", stopped_at=self.core.clock.now().isoformat()))
+                if not changed.rowcount:
+                    continue
+                inactive = select(runs.c.id).where(runs.c.session_id == process["session_id"], runs.c.slot_reserved == 0)
+                conn.execute(update(sessions).where(sessions.c.id == process["session_id"],
+                    sessions.c.active_run_id.in_(inactive)).values(active_run_id=None))
+                recovered.append({"process_id": process["id"], "state": "STOPPED"})
+        return recovered
+
     def _stop_proved(self, run, task, process):
         if process and (process["epoch"] != run["process_epoch"] or process["generation"] != run["binding_generation"]):
             return False

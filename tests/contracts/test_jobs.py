@@ -12,7 +12,7 @@ from sqlalchemy import select
 from qqbot.adapters.execution.jobs import JobService, SystemdJobProvider, UnitReceipt
 from qqbot.contracts.execution import ExecutionCapabilities, JobScope, JobStart
 from qqbot.storage.job_schema import jobs
-from qqbot.storage.task_schema import inputs, runs, tasks
+from qqbot.storage.task_schema import inputs, runs, tasks, waits
 
 
 class FakeSystemd:
@@ -480,7 +480,7 @@ async def test_runtime_revision_and_permission_revocation_stop_existing_job(job_
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'build', 'argv': ['true']}})
     with fixture.service.db.transaction() as conn:
-        conn.execute(insert(inputs).values(id='revision', task_id=fixture.root['task_id'], kind='followup',
+        conn.execute(insert(inputs).values(id='revision', task_id=fixture.claim['task_id'], kind='followup',
             source_id='new-user-input', text='Stop modifying files.', state='PENDING',
             created_at=fixture.core.clock.now().isoformat()))
     await fixture.runtime.maintain()
@@ -494,6 +494,97 @@ async def test_runtime_revision_and_permission_revocation_stop_existing_job(job_
         id='deny-job-write', effect='deny', actions=('workspace.job.start',)),))
     await fixture.runtime.maintain()
     assert next_job['unit'] in fixture.provider.cancels
+
+
+@pytest.fixture
+async def sibling_jobs(job_runtime):
+    from qqbot.adapters.execution.world import execution_workspace
+    fixture = job_runtime
+    with fixture.service.db.transaction() as conn:
+        root = conn.execute(select(tasks).where(tasks.c.id == fixture.root['task_id'])).mappings().one()
+        sibling = fixture.service.graph.spawn(conn, root, {'mode': 'work', 'goal': 'Independent background task.',
+            'delegation_key': 'sibling-job'}, fixture.access)
+    second = fixture.service.claim('daemon')
+    assert second['task_id'] == sibling['task_id']
+    execution_workspace(fixture.runtime.data_root, second['task_id'], None, {}, create=True)
+    claims, started = [fixture.claim, second], []
+    for index, claim in enumerate(claims):
+        identity = (claim['run_id'], claim['fencing_token'], 'daemon')
+        job = await fixture.runtime.invoke(identity, {'operation': 'start',
+            'arguments': {'job_key': 'sibling-' + str(index), 'argv': ['true']}})
+        started.append(job)
+        question = {'question_id': 'sibling-wait-' + str(index), 'kind': 'input' if index == 0 else 'external',
+            'text': '请提供新配置。' if index == 0 else '等待原有进程。', 'checkpoint': '保留原有 Job 身份。'}
+        if index == 1:
+            question['condition'] = {'capability': 'job.inspect', 'arguments': {'job_id': job['job_id']},
+                'path': 'state', 'equals': 'EXITED', 'interval_seconds': 15}
+        fixture.service.ask(*identity, question)
+        fixture.service.submit(*identity, {'status': 'waiting_input' if index == 0 else 'waiting_external',
+            'summary': '等待输入或后台进程。'}, receipt={'kind': 'run_yielded', 'session_id': claim['context']['session_id'],
+                'run_id': claim['run_id'], 'session_revision': 'sibling-yield-' + str(index),
+                'input_ids': claim['context']['source_input_ids'], 'inflight': 0, 'tools_paired': True})
+    return fixture, claims, started
+
+
+@pytest.mark.parametrize('kind', ['answer', 'followup'])
+@pytest.mark.parametrize('consume_before_maintenance', [False, True])
+async def test_job_revision_stop_intent_preserves_unaffected_sibling_and_survives_input_consumption(
+    sibling_jobs, kind, consume_before_maintenance
+):
+    from qqbot.domain import TextSegment
+    fixture, claims, started = sibling_jobs
+    with fixture.service.db.engine.connect() as conn:
+        second_wait = dict(conn.execute(select(waits).where(waits.c.run_id == claims[1]['run_id'])).mappings().one())
+        second_inputs = [dict(row) for row in conn.execute(select(inputs).where(inputs.c.task_id == claims[1]['task_id'])).mappings()]
+        target = conn.execute(select(tasks).where(tasks.c.id == (
+            claims[0]['task_id'] if kind == 'answer' else fixture.root['task_id']))).mappings().one()
+    event = fixture.event.model_copy(update={'event_id': 'sibling-revision-' + kind,
+        'segments': (TextSegment(text='使用更新后的配置完成任务。'),)})
+    fixture.service.add_input(target['public_id'], event, fixture.access, event.text,
+        question_id='sibling-wait-0' if kind == 'answer' else None)
+    assert fixture.runtime.jobs._row(started[0]['job_id'])['cancel_requested_at']
+    if consume_before_maintenance:
+        with fixture.service.db.transaction() as conn:
+            conn.execute(inputs.update().where(inputs.c.source_id.like(event.event_id + '%')).values(
+                consumed_at=fixture.core.clock.now().isoformat(), state='CONSUMED'))
+    await fixture.runtime.maintain()
+    assert fixture.runtime.jobs._row(started[0]['job_id'])['state'] == 'CANCELLED'
+    if kind == 'answer':
+        assert fixture.runtime.jobs._row(started[1]['job_id'])['state'] == 'RUNNING'
+        assert fixture.provider.cancels == [started[0]['unit']]
+        with fixture.service.db.engine.connect() as conn:
+            assert dict(conn.execute(select(waits).where(waits.c.id == second_wait['id'])).mappings().one()) == second_wait
+            assert [dict(row) for row in conn.execute(select(inputs).where(inputs.c.task_id == claims[1]['task_id'])).mappings()] == second_inputs
+            assert conn.execute(select(tasks.c.state).where(tasks.c.id == claims[1]['task_id'])).scalar_one() == 'WAITING_EXTERNAL'
+    else:
+        assert fixture.runtime.jobs._row(started[1]['job_id'])['state'] == 'CANCELLED'
+        assert set(fixture.provider.cancels) == {job['unit'] for job in started}
+    assert len(fixture.provider.launches) == 2
+
+
+async def test_job_dispatched_after_revision_transaction_is_marked_for_stop_without_replay(job_runtime):
+    from qqbot.domain import TextSegment
+    fixture = job_runtime
+    guard = fixture.runtime.jobs.dispatch_guard
+    def revise_after_authorization(scope):
+        guard(scope)
+        event = fixture.event.model_copy(update={'event_id': 'revision-before-job-intent',
+            'segments': (TextSegment(text='停止旧操作，改用更新后的配置。'),)})
+        fixture.service.add_input(fixture.root['public_id'], event, fixture.access, event.text)
+        with fixture.service.db.engine.connect() as conn:
+            assert not conn.execute(select(jobs)).first()
+    fixture.runtime.jobs.dispatch_guard = revise_after_authorization
+    result = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'inflight-revision', 'argv': ['true']}})
+    assert result['state'] == 'CANCEL_REQUESTED'
+    assert result['invocation_id'] == '1' * 32 and len(fixture.provider.launches) == 1
+    with fixture.service.db.transaction() as conn:
+        assert conn.execute(select(jobs.c.cancel_requested_at)).scalar_one()
+        conn.execute(inputs.update().where(inputs.c.kind == 'followup').values(
+            consumed_at=fixture.core.clock.now().isoformat(), state='CONSUMED'))
+    await fixture.runtime.maintain()
+    assert fixture.runtime.jobs._row(result['job_id'])['state'] == 'CANCELLED'
+    assert fixture.provider.cancels == [result['unit']] and len(fixture.provider.launches) == 1
 
 
 async def test_runtime_claim_keeps_shared_workspace_locked_by_live_job(job_runtime, tmp_path):
@@ -564,6 +655,113 @@ async def test_runtime_wrong_worker_fence_cannot_use_late_job_readback(job_runti
         with pytest.raises(PermissionError):
             await fixture.runtime.invoke(identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}})
     assert not fixture.provider.cancels
+
+
+@pytest.fixture
+async def job_waiter(job_runtime):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'waited-job', 'argv': ['true']}})
+    fixture.service.ask(*fixture.identity, {'question_id': 'wait-job', 'kind': 'external',
+        'text': '等待原有后台进程。', 'checkpoint': '保持原有 Job 身份。',
+        'condition': {'capability': 'job.inspect', 'arguments': {'job_id': started['job_id']},
+            'path': 'state', 'equals': 'EXITED', 'interval_seconds': 15}})
+    fixture.service.submit(*fixture.identity, {'status': 'waiting_external', 'summary': '等待后台进程。'},
+        receipt={'kind': 'run_yielded', 'session_id': fixture.claim['context']['session_id'],
+            'run_id': fixture.claim['run_id'], 'session_revision': 'yielded-job',
+            'input_ids': fixture.claim['context']['source_input_ids'], 'inflight': 0, 'tools_paired': True})
+    fixture.core.clock.advance(31)
+    return fixture, started, {'wait_id': 'wait-job', 'revision': 1}
+
+
+async def test_job_waiter_reads_original_job_after_paired_yield_and_expired_attempt_lease(job_waiter):
+    fixture, started, payload = job_waiter
+    calls = []
+    authorize = fixture.service.authorize_waiter
+    def observed_authorize(arguments):
+        calls.append(arguments)
+        return authorize(arguments)
+    fixture.service.authorize_waiter = observed_authorize
+    result = await fixture.runtime.inspect_waiter(payload)
+    assert result['job_id'] == started['job_id'] and result['state'] == 'RUNNING'
+    expected = {**payload, 'action': 'workspace.job.inspect',
+        'resources': ['workspace:' + str(fixture.workspace), 'task:' + fixture.claim['task_id']]}
+    assert calls == [expected, expected]
+    with fixture.service.db.engine.connect() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == fixture.claim['run_id'])).mappings().one()
+        assert run['state'] == 'YIELDED' and not run['slot_reserved']
+        assert run['lease'] < fixture.core.clock.now().isoformat()
+    assert len(fixture.provider.launches) == 1 and not fixture.provider.cancels
+
+
+@pytest.mark.parametrize('change', ['cancelled', 'cancelled_root', 'context', 'policy', 'foreign_job', 'expired_root', 'unyielded'])
+async def test_job_waiter_rejects_revoked_or_unrelated_observations_before_provider_read(job_waiter, change):
+    fixture, started, payload = job_waiter
+    with fixture.service.db.transaction() as conn:
+        if change == 'cancelled':
+            conn.execute(tasks.update().where(tasks.c.id == fixture.claim['task_id']).values(state='CANCELLED'))
+        elif change == 'cancelled_root':
+            conn.execute(tasks.update().where(tasks.c.id == fixture.root['task_id']).values(state='CANCEL_REQUESTED'))
+        elif change == 'context':
+            fixture.service.context_validator = lambda access, context: False
+        elif change == 'policy':
+            def revoked_policy(access, action, resource):
+                raise PermissionError('Job read policy revoked')
+            fixture.service.permissions.require = revoked_policy
+        elif change == 'foreign_job':
+            conn.execute(jobs.update().where(jobs.c.id == started['job_id']).values(owner_id='another-owner'))
+        elif change == 'expired_root':
+            conn.execute(tasks.update().where(tasks.c.id == fixture.root['task_id']).values(
+                deadline=(fixture.core.clock.now() - timedelta(seconds=1)).isoformat()))
+        else:
+            conn.execute(runs.update().where(runs.c.id == fixture.claim['run_id']).values(state='RUNNING'))
+    inspected = []
+    async def unexpected_inspect(unit):
+        inspected.append(unit)
+        return fixture.provider.units[unit]
+    fixture.provider.inspect = unexpected_inspect
+    with pytest.raises(PermissionError):
+        await fixture.runtime.inspect_waiter(payload)
+    assert not inspected and len(fixture.provider.launches) == 1 and not fixture.provider.cancels
+
+
+@pytest.mark.parametrize('change', ['cancelled', 'context', 'policy', 'condition'])
+async def test_job_waiter_discards_read_if_authority_changes_during_provider_await(job_waiter, change):
+    fixture, _started, payload = job_waiter
+    inspect = fixture.provider.inspect
+    async def changed_during_read(unit):
+        with fixture.service.db.transaction() as conn:
+            if change == 'cancelled':
+                conn.execute(tasks.update().where(tasks.c.id == fixture.claim['task_id']).values(state='CANCELLED'))
+            elif change == 'context':
+                fixture.service.context_validator = lambda access, context: False
+            elif change == 'policy':
+                def revoked_policy(access, action, resource):
+                    raise PermissionError('Job read policy revoked')
+                fixture.service.permissions.require = revoked_policy
+            else:
+                condition = {'capability': 'job.inspect', 'arguments': {'job_id': 'replacement'},
+                    'path': 'state', 'equals': 'EXITED'}
+                conn.execute(waits.update().where(waits.c.id == payload['wait_id']).values(condition_json=json.dumps(condition)))
+        return await inspect(unit)
+    fixture.provider.inspect = changed_during_read
+    with pytest.raises(PermissionError):
+        await fixture.runtime.inspect_waiter(payload)
+    assert len(fixture.provider.launches) == 1 and not fixture.provider.cancels
+
+
+async def test_job_waiter_only_accepts_stored_wait_identity_and_job_inspection_condition(job_waiter):
+    fixture, _started, payload = job_waiter
+    with pytest.raises(ValueError):
+        await fixture.runtime.inspect_waiter({**payload, 'arguments': {'job_id': 'foreign-job'}})
+    with pytest.raises(PermissionError):
+        await fixture.runtime.inspect_waiter({**payload, 'revision': 2})
+    with fixture.service.db.transaction() as conn:
+        conn.execute(waits.update().where(waits.c.id == payload['wait_id']).values(
+            condition_json=json.dumps({'capability': 'job.cancel', 'arguments': {'job_id': 'foreign-job'}})))
+    with pytest.raises(PermissionError):
+        await fixture.runtime.inspect_waiter(payload)
+    assert len(fixture.provider.launches) == 1 and not fixture.provider.cancels
 
 
 async def test_scheduler_recovers_jobs_before_claiming_and_shutdown_leaves_units_alone(job_runtime, monkeypatch):
@@ -755,3 +953,101 @@ async def test_leader_missing_job_is_bounded_runtime_error_without_mutation(job_
     assert not fixture.provider.launches and not fixture.provider.cancels
     with fixture.service.db.engine.connect() as conn:
         assert not conn.execute(select(jobs)).first()
+
+
+@pytest.mark.parametrize('path', ['state', 'data.state'])
+@pytest.mark.parametrize(('target', 'exit_code'), [('EXITED', 0), ('FAILED', 7)])
+async def test_host_job_condition_wakes_original_task_once_without_model_polling(job_waiter, path, target, exit_code):
+    from qqbot.capabilities.gateway import CapabilityRegistry
+    from qqbot.jobs.waiters import ExternalWaiters
+    from qqbot.storage.task_schema import model_requests
+    fixture, started, payload = job_waiter
+    with fixture.service.db.transaction() as conn:
+        condition = json.loads(conn.execute(select(waits.c.condition_json).where(waits.c.id == payload['wait_id'])).scalar_one())
+        condition.update(path=path, equals=target)
+        conn.execute(waits.update().where(waits.c.id == payload['wait_id']).values(condition_json=json.dumps(condition)))
+    called = []
+    async def call(operation, arguments):
+        called.append(operation)
+        response = await fixture.client.post('/internal/tasks/' + operation, json={'worker_id': 'daemon', 'payload': arguments})
+        response.raise_for_status()
+        return response.json()
+    observer = ExternalWaiters(call, CapabilityRegistry())
+    await observer.once()
+    with fixture.service.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.state).where(tasks.c.id == fixture.claim['task_id'])).scalar_one() == 'WAITING_EXTERNAL'
+    unit = started['unit']
+    fixture.provider.units[unit] = replace(fixture.provider.units[unit], active_state='inactive', sub_state='exited',
+        result='success' if exit_code == 0 else 'exit-code', exit_code=exit_code, cgroup_empty=True, pid=0)
+    observer.next_poll.clear()
+    await observer.once()
+    observer.next_poll.clear()
+    await observer.once()
+    with fixture.service.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.state).where(tasks.c.id == fixture.claim['task_id'])).scalar_one() == 'QUEUED'
+        assert conn.execute(select(waits.c.state).where(waits.c.id == payload['wait_id'])).scalar_one() == 'CONSUMED'
+        assert len(conn.execute(select(inputs).where(inputs.c.task_id == fixture.claim['task_id'])).all()) == 1
+        assert not conn.execute(select(model_requests)).first()
+        original = conn.execute(select(runs).where(runs.c.id == fixture.claim['run_id'])).mappings().one()
+        assert original['state'] == 'YIELDED' and original['slot_reserved'] == 0
+    assert called.count('wait-job-inspect') == 2 and called.count('wait-observed') == 1
+    resumed = fixture.service.claim('resumed')
+    assert resumed['task_id'] == fixture.claim['task_id'] and resumed['session_id'] == fixture.claim['session_id']
+    observation = json.loads(resumed['continuation']['inputs'][0]['text'])
+    assert observation['job_id'] == started['job_id'] and observation['state'] == target
+    assert len(fixture.provider.launches) == 1 and not fixture.provider.cancels
+
+
+async def test_revision_supersedes_job_wait_but_writes_and_finalization_wait_for_stop(job_waiter):
+    from qqbot.domain import TextSegment
+    fixture, started, payload = job_waiter
+    with fixture.service.db.engine.connect() as conn:
+        public_id = conn.execute(select(tasks.c.public_id).where(tasks.c.id == fixture.claim['task_id'])).scalar_one()
+    event = fixture.event.model_copy(update={'event_id': 'read-only-job-revision', 'segments': (TextSegment(text='只检查，不修改。'),)})
+    fixture.service.add_input(public_id, event, fixture.access, event.text)
+    with fixture.service.db.engine.connect() as conn:
+        assert conn.execute(select(waits.c.state).where(waits.c.id == payload['wait_id'])).scalar_one() == 'SUPERSEDED'
+        job = conn.execute(select(jobs).where(jobs.c.id == started['job_id'])).mappings().one()
+        assert job['state'] == 'CANCEL_REQUESTED' and job['cancel_requested_at']
+    resumed = fixture.service.claim('revised-worker')
+    assert resumed['task_id'] == fixture.claim['task_id'] and resumed['session_id'] == fixture.claim['session_id']
+    assert resumed['continuation']['inputs'][0]['text'] == event.text
+    identity = resumed['run_id'], resumed['fencing_token'], 'revised-worker'
+    proof = {'kind': 'input_consumed', 'session_id': resumed['session_id'], 'run_id': resumed['run_id'],
+        'session_revision': 'new-instruction', 'input_ids': resumed['context']['source_input_ids']}
+    fixture.service.session_receipt(*identity, proof)
+    write = {'action': 'workspace.file.write', 'effect': 'write', 'resources': ['workspace:' + str(fixture.workspace)]}
+    with pytest.raises(PermissionError, match='proven stopped'):
+        fixture.service.authorize(*identity, write)
+    assert fixture.service.authorize(*identity, {**write, 'action': 'workspace.file.read', 'effect': 'read'})['allowed']
+    assert fixture.service.authorize(*identity, {**write, 'action': 'workspace.job.cancel'})['allowed']
+    fixture.service.submit(*identity, {'status': 'completed', 'summary': '按新指令完成只读核验。'},
+        receipt={**proof, 'kind': 'turn_finished', 'inflight': 0, 'tools_paired': True})
+    assert fixture.core.sessions.claim('premature-finalizer') is None
+    await fixture.runtime.maintain()
+    assert (await fixture.runtime.invoke(fixture.identity, {'operation': 'inspect', 'arguments': {'job_id': started['job_id']}}))['state'] == 'CANCELLED'
+    finalizer = fixture.core.sessions.claim('finalizer')
+    assert finalizer['purpose'] == 'finalize' and finalizer['target_root_task_id'] == fixture.root['task_id']
+    assert len(fixture.provider.launches) == 1 and fixture.provider.cancels == [started['unit']]
+
+
+async def test_revision_before_job_wait_yield_does_not_leave_an_obsolete_condition(job_runtime):
+    from qqbot.domain import TextSegment
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'before-yield', 'argv': ['true']}})
+    fixture.service.ask(*fixture.identity, {'question_id': 'early-job-wait', 'kind': 'external',
+        'text': '等待原进程', 'checkpoint': '保留 Job', 'condition': {'capability': 'job.inspect',
+            'arguments': {'job_id': started['job_id']}, 'path': 'state', 'equals': 'EXITED'}})
+    event = fixture.event.model_copy(update={'event_id': 'before-yield-revision', 'segments': (TextSegment(text='只检查，不修改。'),)})
+    fixture.service.add_input(fixture.root['public_id'], event, fixture.access, event.text)
+    result = fixture.service.submit(*fixture.identity, {'status': 'waiting_external', 'summary': '旧等待已持久化'},
+        receipt={'kind': 'run_yielded', 'session_id': fixture.claim['session_id'], 'run_id': fixture.claim['run_id'],
+            'session_revision': 'old-wait', 'input_ids': fixture.claim['context']['source_input_ids'], 'inflight': 0, 'tools_paired': True})
+    assert result['state'] == 'QUEUED' and fixture.service.external_waiters() == []
+    with fixture.service.db.engine.connect() as conn:
+        assert conn.execute(select(waits.c.state).where(waits.c.id == 'early-job-wait')).scalar_one() == 'SUPERSEDED'
+        assert conn.execute(select(jobs.c.cancel_requested_at).where(jobs.c.id == started['job_id'])).scalar_one()
+    resumed = fixture.service.claim('new-worker')
+    assert resumed['task_id'] == fixture.claim['task_id'] and resumed['session_id'] == fixture.claim['session_id']
+    assert any(item['text'] == event.text for item in resumed['continuation']['inputs'])

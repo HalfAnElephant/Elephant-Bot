@@ -71,6 +71,8 @@ class RuntimeClient:
             return self.service.external_waiters()
         if operation == "wait-authorize":
             return self.service.authorize_waiter(body.payload)
+        if operation == "wait-job-inspect":
+            return await self.core.job_runtime.inspect_waiter(body.payload)
         if operation == "wait-observed":
             return self.service.observe_waiter(body.payload)
         identity = (body.run_id, body.fencing_token, body.worker_id)

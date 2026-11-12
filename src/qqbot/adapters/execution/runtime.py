@@ -5,14 +5,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from qqbot.contracts.execution import JobScope, JobStart
 from qqbot.domain import InboundEvent
 from qqbot.domain.tasks import TaskResult
 from qqbot.storage.action_schema import operations
 from qqbot.storage.job_schema import jobs
-from qqbot.storage.task_schema import inputs, runs, tasks
+from qqbot.storage.task_schema import inputs, runs, tasks, waits
 
 from .jobs import JobService, SystemdJobProvider
 from .world import execution_workspace
@@ -146,9 +146,52 @@ class JobRuntime:
                     'daemon_restart_survival': True}
         token = _call_identity.set(identity)
         try:
-            return await getattr(self.jobs, operation)(arguments, scope)
+            result = await getattr(self.jobs, operation)(arguments, scope)
+            if operation == 'start':
+                try:
+                    if self._authorized(identity, 'start') != scope:
+                        raise PermissionError('Job dispatch authority changed')
+                except PermissionError:
+                    now = self.core.clock.now().isoformat()
+                    with self.db.transaction() as conn:
+                        conn.execute(update(jobs).where(jobs.c.id == result['job_id'],
+                            jobs.c.state.not_in(_JOB_TERMINAL)).values(state='CANCEL_REQUESTED',
+                                cancel_requested_at=func.coalesce(jobs.c.cancel_requested_at, now), updated_at=now))
+                    result = self.jobs._handle(self.jobs._row(result['job_id'])).model_dump(mode='json')
+            return result
         finally:
             _call_identity.reset(token)
+
+    async def inspect_waiter(self, payload):
+        if (not isinstance(payload, dict) or set(payload) != {'wait_id', 'revision'}
+                or not isinstance(payload['wait_id'], str) or type(payload['revision']) is not int):
+            raise ValueError('Job waiter requires its stored identity and revision')
+        with self.db.engine.connect() as conn:
+            wait = conn.execute(select(waits).where(waits.c.id == payload['wait_id'],
+                waits.c.revision == payload['revision'], waits.c.kind == 'external',
+                waits.c.state == 'WAITING')).mappings().first()
+            run = conn.execute(select(runs).where(runs.c.id == wait['run_id'])).mappings().first() if wait else None
+        if (not run or run['task_id'] != wait['task_id'] or run['role'] != 'worker'
+                or run['state'] != 'YIELDED' or run['slot_reserved']):
+            raise PermissionError('Job waiter requires its original yielded Worker')
+        condition = json.loads(wait['condition_json'])
+        if condition.get('capability') != 'job.inspect':
+            raise PermissionError('Job waiter only inspects its stored Job condition')
+        identity = (run['id'], run['fencing'], run['worker'])
+        scope = self._authorized(identity, 'inspect')
+        authorization = {**payload, 'action': 'workspace.job.inspect',
+            'resources': ['workspace:' + scope.workspace, 'task:' + scope.task_id]}
+        self.task_service.authorize_waiter(authorization)
+        if scope.expires_at <= self.core.clock.now():
+            raise PermissionError('Job waiter scope expired')
+        result = await self.invoke(identity, {'operation': 'inspect', 'arguments': condition['arguments']})
+        self.task_service.authorize_waiter(authorization)
+        with self.db.engine.connect() as conn:
+            current = conn.execute(select(waits).where(waits.c.id == wait['id'])).mappings().first()
+        if (current != wait or self._authorized(identity, 'inspect') != scope
+                or scope.expires_at <= self.core.clock.now()):
+            raise PermissionError('Job waiter authority changed during observation')
+        return result
 
     def workspace_available(self, task):
         workspace = str(self.workspace(task, strict=False))
@@ -199,9 +242,9 @@ class JobRuntime:
                 jobs.c.owner_id, jobs.c.workspace, jobs.c.state).where(jobs.c.state.not_in(_JOB_TERMINAL))).mappings().all()
             task_rows = {row['id']: dict(row) for row in conn.execute(select(tasks).where(tasks.c.id.in_(
                 {item['task_id'] for item in rows} | {item['root_task_id'] for item in rows}))).mappings()}
-            revised_roots = set(conn.execute(select(tasks.c.root_task_id).join(inputs, inputs.c.task_id == tasks.c.id)
-                .where(tasks.c.root_task_id.in_({item['root_task_id'] for item in rows}),
-                       inputs.c.kind.in_({'followup', 'answer'}), inputs.c.consumed_at.is_(None))).scalars())
+            revised_tasks = set(conn.execute(select(inputs.c.task_id).where(
+                inputs.c.task_id.in_({item['task_id'] for item in rows}),
+                inputs.c.kind.in_({'followup', 'answer'}), inputs.c.consumed_at.is_(None))).scalars())
         cancelled = set()
         for row in rows:
             task, root = task_rows.get(row['task_id']), task_rows.get(row['root_task_id'])
@@ -215,7 +258,7 @@ class JobRuntime:
                     access = self.task_service._access_for(task)
                     stop = not self.task_service.permissions.check(access, 'workspace.job.start',
                                                                   'workspace:' + row['workspace']).allowed
-            stop = stop or row['root_task_id'] in revised_roots
+            stop = stop or row['task_id'] in revised_tasks
             key = (row['task_id'], row['owner_id'])
             if stop and key not in cancelled:
                 await self.jobs.cancel_task(*key)

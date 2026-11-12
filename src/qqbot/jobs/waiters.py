@@ -27,20 +27,26 @@ class ExternalWaiters:
             context = ToolContext(task_id=record["task_id"], run_id="waiter:" + record["id"], fence=record["revision"],
                 principal=record["principal"], workspace="", repository=record.get("repository"), host=record.get("host", "github.com"))
             try:
-                capability, execute, classify = self.registry.entries[condition["capability"]]
-                action = classify(condition["arguments"], context)
-                if action.effect != "read" or not action.name.startswith(("github.", "web.")):
-                    raise PermissionError("external waiter only observes registered remote read capabilities")
-                await self.call("wait-authorize", {"wait_id": record["id"], "revision": record["revision"],
-                    "action": action.name, "resources": action.resources})
-                value = execute(condition["arguments"], context)
-                value = await asyncio.wait_for(value, capability.timeout_seconds) if inspect.isawaitable(value) else value
+                if condition["capability"] == "job.inspect":
+                    value = await self.call("wait-job-inspect", {"wait_id": record["id"], "revision": record["revision"]})
+                else:
+                    capability, execute, classify = self.registry.entries[condition["capability"]]
+                    action = classify(condition["arguments"], context)
+                    if action.effect != "read" or not action.name.startswith(("github.", "web.")):
+                        raise PermissionError("external waiter only observes registered remote read capabilities")
+                    await self.call("wait-authorize", {"wait_id": record["id"], "revision": record["revision"],
+                        "action": action.name, "resources": action.resources})
+                    value = execute(condition["arguments"], context)
+                    value = await asyncio.wait_for(value, capability.timeout_seconds) if inspect.isawaitable(value) else value
                 if isinstance(value, dict) and "stdout" in value:
                     if value.get("exit_code") or value.get("truncated"):
                         continue
                     value = json.loads(value["stdout"])
                 observed = value
-                for part in condition["path"].split("."):
+                path = condition["path"]
+                if condition["capability"] == "job.inspect":
+                    path = path.removeprefix("data.")
+                for part in path.split("."):
                     if part:
                         observed = observed[int(part)] if isinstance(observed, list) else observed[part]
                 if observed != condition["equals"]:
