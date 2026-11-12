@@ -623,3 +623,41 @@ async def test_restored_epoch_barrier_automatically_schedules_clean_replanning(r
     with runtime.db.engine.connect() as conn:
         context = json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root_id)).scalar_one())
         assert context["memory_epoch"] == 1 and "memory_replan_pending" not in context
+
+
+@pytest.mark.parametrize(("original", "followup", "outputs", "checks"), [
+    ("生成 report.md", None, ["report.md"], ["artifact"]),
+    ("检查项目", "导出到 reports/result.csv 文件", ["reports/result.csv"], ["artifact"]),
+    ("帮我查今天的天气", None, [], ["observation"]),
+    ("研究两种方案，给我报告结论", None, [], []),
+])
+async def test_memory_replan_rebuilds_explicit_contract_from_retained_user_sources(runtime, original, followup, outputs, checks):
+    from qqbot.contracts.memory import MutationReceipt
+
+    runtime.event = runtime.event.model_copy(update={"segments": (TextSegment(text=original),)})
+    knowledge, scope = memory_runtime(runtime)
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    user_claim = runtime.sessions.claim("leader")
+    root_id = root_goal(runtime)["task_id"]
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.root_task_id == root_id).values(
+            context_json=json.dumps({"memory_scope": scope.model_dump(), "memory_epoch": 0}),
+            goal="FORGOTTEN_SECRET", goal_json=json.dumps({"text": "FORGOTTEN_SECRET",
+                "requested_outputs": ["forgotten-secret.txt"], "success_checks": ["effect"]})))
+        if followup:
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+            event = runtime.event.model_copy(update={"event_id": "contract-followup", "segments": (TextSegment(text=followup),)})
+            runtime.service.add_graph_input(conn, root, event, runtime.access, event.text)
+    knowledge.rotate(scope, (user_claim["run_id"], 1, "leader"), MutationReceipt(operation_id="forget-contract",
+        state="APPLIED", completed=True, memory_epoch=1, affected_source_ids=("memory-source",)))
+    leader_complete(runtime, user_claim)
+    await knowledge.replan()
+    with runtime.db.engine.connect() as conn:
+        raw = conn.execute(select(tasks.c.goal_json).where(tasks.c.id == root_id)).scalar_one()
+        goal = json.loads(raw)
+    assert goal["requested_outputs"] == outputs and goal["success_checks"] == checks
+    assert "FORGOTTEN_SECRET" not in raw and "forgotten-secret.txt" not in raw
+    if checks:
+        claim = runtime.sessions.claim("leader")
+        with pytest.raises(ValueError, match="root success check not verified"):
+            leader_complete(runtime, claim)

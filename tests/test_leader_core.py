@@ -216,3 +216,24 @@ def test_admin_task_has_host_identity_explicit_contract_and_idempotency(tmp_path
         identity = json.loads(saved["event_json"])
         assert identity["principal"]["identity_namespace"] == "admin_api"
         assert identity["conversation"]["adapter_instance_id"] == "admin_api"
+
+
+async def test_recovery_has_job_quiescence_guard_before_any_admission(tmp_path, official_config, clock, monkeypatch):
+    core = make_core(tmp_path, official_config, clock)
+    recovered = []
+    def recover():
+        assert core.scheduler is not None
+        assert core.tasks.job_tree_quiescent.__self__ is core.job_runtime
+        assert not core.scheduler.jobs_recovered
+        recovered.append(True)
+    monkeypatch.setattr(core.tasks, "recover", recover)
+    monkeypatch.setattr(core.recovery, "recover_workers", recover)
+    monkeypatch.setattr(core.leader, "recover", recover)
+    monkeypatch.setattr(core.supervisor, "start", lambda *args, **kwargs: None)
+    core.stopping = True
+    try:
+        await core.run()
+        assert len(recovered) == 3
+    finally:
+        await core.stop()
+        core.db.close()

@@ -8,8 +8,9 @@ from sqlalchemy import insert, select, update
 from qqbot.adapters.openviking.service import BACKEND_ERRORS
 from qqbot.adapters.pi.sessions import export_session
 from qqbot.contracts.memory import MemoryCorrection, MemoryDeletion, MemoryScope, SourceBatch
+from qqbot.dialogue.planner import plan_turn
 from qqbot.domain import InboundEvent, Surface, stable_id
-from qqbot.domain.execution import TaskGoal
+from qqbot.domain.execution import TaskGoal, TurnInput
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import dialogues, leader_inbox
 from qqbot.storage.memory_sync_schema import memory_barriers, memory_owners, memory_sources, memory_streams
@@ -239,9 +240,13 @@ class KnowledgeRuntime:
             fresh["images"] = [item for item in context.get("images", []) if item.get("source") == event.event_id]
             if blocked:
                 goal = "原始任务输入已被撤销，无法自动重规划。"
+                goal_spec = TaskGoal(text=goal)
                 fresh.update(source_manifest=[], images=[], memory_scope=scope.model_dump(),
                     memory_epoch=memory_status["memory_epoch"], memory_status="blocked", retrieved_data=[])
             else:
+                goal_spec, _ = plan_turn(TurnInput(conversation=event.conversation, principal=event.principal,
+                    text=goal, source_event_ids=(event.event_id, *(item["source_id"] for item in business_inputs)),
+                    anchor_event_id=event.event_id), self.core.sessions.settings, background=True)
                 fresh = await self.prepare(event, fresh)
             if not blocked and (fresh.get("memory_status") != "ready" or not self.valid(fresh)):
                 continue
@@ -255,7 +260,7 @@ class KnowledgeRuntime:
                     continue
                 revision = current["goal_revision"] + 1
                 conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
-                    context_json=json.dumps(fresh), goal=goal, goal_json=TaskGoal(text=goal).model_dump_json(),
+                    context_json=json.dumps(fresh), goal=goal, goal_json=goal_spec.model_dump_json(),
                     state="BLOCKED" if blocked else "WAITING_CHILDREN", stop_reason="business_source_revoked" if blocked else None,
                     result_json=None, goal_revision=revision, wait_json=None))
                 conn.execute(update(inputs).where(inputs.c.task_id.in_(select(tasks.c.id).where(

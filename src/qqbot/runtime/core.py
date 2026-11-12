@@ -477,13 +477,13 @@ class Core:
 
     async def run(self):
         from .scheduler import Scheduler
+        self.scheduler = Scheduler(self, self.leader)
         self.retire_adapters()
         self.outbox.recover()
         self.stream_delivery.recover()
         self.tasks.recover()
         self.recovery.recover_workers()
         self.leader.recover()
-        self.scheduler = Scheduler(self, self.leader)
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
         self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
