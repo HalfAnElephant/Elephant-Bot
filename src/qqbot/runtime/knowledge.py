@@ -391,13 +391,11 @@ class KnowledgeRuntime:
                 continue
             attempt, claim, receipt = matches[0]
             self.core.sessions.reconciling_inputs.add(source["id"])
+            self.rotate(scope, (attempt["id"], attempt["fencing"], attempt["worker"]), receipt)
             if not stopped:
                 continue
             reserved = any(item["slot_reserved"] for item in attempts)
-            if attempt["session_id"] in active_sessions and not reserved:
-                continue
-            self.rotate(scope, (attempt["id"], attempt["fencing"], attempt["worker"]), receipt)
-            if reserved:
+            if attempt["session_id"] in active_sessions or reserved:
                 continue
             try:
                 with self.core.db.transaction() as conn:

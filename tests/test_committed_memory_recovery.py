@@ -256,7 +256,7 @@ async def test_later_attempt_and_session_writer_must_stop_before_confirmation(ho
     assert host.core.knowledge.recover_mutations() == []
     with r.db.engine.connect() as conn:
         assert not conn.execute(select(outbox)).first()
-        assert conn.execute(select(dialogues.c.session_id)).scalar_one() == host.claim["session_id"]
+        assert conn.execute(select(dialogues.c.session_id)).scalar_one() != host.claim["session_id"]
     with r.db.transaction() as conn:
         conn.execute(update(runs).where(runs.c.id == later_id).values(state="FINISHED", slot_reserved=0,
             runner_stopped_at=r.clock.now().isoformat()))
@@ -299,7 +299,7 @@ async def test_unrelated_old_session_writer_keeps_original_receipt_queued_during
     assert r.sessions.claim("normal-admission") is None
     with r.db.engine.connect() as conn:
         assert conn.execute(select(dialogue_inputs.c.handled_at)).scalar_one() is None
-        assert conn.execute(select(dialogues.c.session_id)).scalar_one() == host.claim["session_id"]
+        assert conn.execute(select(dialogues.c.session_id)).scalar_one() != host.claim["session_id"]
         assert not conn.execute(select(outbox)).first()
     with r.db.transaction() as conn:
         conn.execute(update(runs).where(runs.c.id == writer_id).values(state="FINISHED", slot_reserved=0,
@@ -334,3 +334,34 @@ async def test_malformed_native_mutation_is_isolated_from_admission(host, field)
     with r.db.engine.connect() as conn:
         assert not conn.execute(select(outbox)).first()
         assert len(conn.execute(select(runs)).all()) == 1
+
+
+async def test_missing_stop_proof_rotates_other_dialogues_before_new_admission(host):
+    r = host.runtime
+    with r.db.transaction() as conn:
+        other = r.sessions.dialogue(conn, r.event, new_title="Other owner dialogue")
+        old_other_session = other["session_id"]
+    await register_gap(host)
+    with r.db.transaction() as conn:
+        conn.execute(update(runs).values(state="FINISHED", slot_reserved=0, runner_stopped_at=r.clock.now().isoformat()))
+        conn.execute(update(dialogue_inputs).values(claimed_attempt_id=None))
+    r.service.stop_verifier = lambda *_: False
+    assert host.core.knowledge.recover_mutations() == []
+    assert r.sessions.claim("before-stop-proof") is None
+    with r.db.engine.connect() as conn:
+        assert conn.execute(select(dialogue_inputs.c.handled_at)).scalar_one() is None
+        new_other_session = conn.execute(select(dialogues.c.session_id).where(dialogues.c.id == other["id"])).scalar_one()
+        assert new_other_session != old_other_session
+        assert not conn.execute(select(outbox)).first()
+    followup = r.event.model_copy(update={"event_id": "new-owner-input"})
+    r.sessions.enqueue(followup, r.access, context={"memory_scope": host.scope.model_dump(),
+        "memory_epoch": 1, "retrieved_data": []}, select_ref=other["id"])
+    claim = r.sessions.claim("new-session")
+    assert claim["source_ids"] == [followup.event_id] and claim["session_id"] == new_other_session
+    with r.db.transaction() as conn:
+        conn.execute(update(processes).values(state="STOPPED", stopped_at=r.clock.now().isoformat()))
+    assert len(host.core.knowledge.recover_mutations()) == 1
+    assert host.core.knowledge.recover_mutations() == []
+    with r.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.id)).one()
+        assert conn.execute(select(dialogues.c.session_id).where(dialogues.c.id == other["id"])).scalar_one() == new_other_session
