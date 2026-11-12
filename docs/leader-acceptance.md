@@ -37,16 +37,16 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 
 | ID | 实现与已有证据 | 待补验收 |
 | --- | --- | --- |
-| T01 | SessionService 负责 Leader 输入，TaskGraph 持久创建根 Goal 与独立 Workers。离线定点覆盖双 Worker、分派键冲突、一次 finalize，真实 Pi＋模型桩覆盖直接聊天和工具执行。 | 真实模型对“小查询／只解释／多步工作”的路由判断，以及最终 daemon 从接受到根交付的整条路径。 |
+| T01 | SessionService 负责 Leader 输入，TaskGraph 持久创建根 Goal 与独立 Workers。离线定点覆盖双 Worker、分派键冲突、一次 finalize，真实 Pi＋模型桩覆盖直接聊天和工具执行，HOST 普通文件输入已有一次 Worker 与一次 Leader 的完整交付证据。 | QQ 入口的真实模型路由质量，包括小查询、只解释和多步委派。 |
 | T02 | 分派键与原 Task/Attempt/Session 绑定。`test_dispatch_replay_conflict_and_worker_results_finalize_once`、同 Task detach 的执行用例覆盖相关契约。 | 当前完整 CI、部署数据中的 ATTACHED→DETACHED 身份与工具调用次数核对，迁移后真实 daemon 续接。 |
-| T03 | Dialogue 独立 Session、逐 Session 写者、统一槽位与 Job 工作区准入已接线。离线定点覆盖切换对话、输入身份与状态查询不占执行容量。 | 同 Dialogue 双根目标与跨 Dialogue 满载混合运行、真实请求配额及控制延迟统计。 |
+| T03 | Dialogue 独立 Session、逐 Session 写者、统一槽位与 Job 工作区准入已接线。离线定点覆盖切换对话、输入身份与状态查询不占执行容量，home 同 Dialogue 双根目标已实际并行且失败隔离，控制延迟另见生产记录。 | 跨 Dialogue 满载混合运行及供应商配额组合。 |
 | T04 | TaskGraph 记录事实进度并节流，LeaderInbox 合并后安排短 progress 轮次，进度完成与根完成分开。 | 大量同阶段事件的专项验证、中文公开摘要质量及真实 QQ 节流效果。当前不能据实现存在认定本项全部通过。 |
 | T05 | 已有任务状态与歧义选择入口，进度按阶段合并，终态使旧进度失效。执行、上下文及 QQ workflow 用例覆盖部分行为。 | 自然语言指代、多任务歧义、持续刷屏场景的组合回归及真实模型判断。 |
 | T06 | 事件绑定 principal、conversation、owner、Dialogue。离线定点拒绝异主体重放和 question/progress 伪造用户修订，按钮契约包含范围、期限与单次使用。 | QQ 官方不同 AppID、群成员和过期按钮的真实平台验收，相关完整 CI。 |
-| T07 | 取消撤销权限并等待 Pi 停止与 Job quiescence，迟到事实按原操作核对。离线恢复/Job 用例和 home Job 进程树取消有成功记录。 | 最终 daemon 宽限停止、真实 root cgroup 证明、旧 generation 与迟到外部回执的组合实测。 |
+| T07 | 取消撤销权限并等待 Pi 停止与 Job quiescence，迟到事实按原操作核对。离线恢复/Job 用例、home Job 进程树取消、最终 daemon 实际 Pi 取消及 root cgroup 停止证明均有成功记录。 | 旧 generation 与迟到外部回执的所有真实组合。 |
 | T08 | 持久 wait、原生回执、目标修订与终态 CAS 已接线。定点覆盖输入消费、旧 finalizer 拒绝、原等待恢复，真实 Pi＋模型桩覆盖等待与写入同批时阻止写入。 | 满额父子任务、wait(any) 全部收尾及多个早到结果竞态的完整组合验收。 |
 | T09 | 源游标、accepted/extracted/indexed 分离、转述去重有契约覆盖。home 实际 HOST Leader 原生源自动提炼/索引，新 Dialogue/Pi Session 召回精确项目值和唯一原始 source ID。 | 真实 Worker→Leader→QQ 三次转述链尚无平台验收。 |
-| T10 | home 真实更正、遗忘、旧源重放与重启不复活通过。活动根目标登记屏障，等待旧 Worker 停止、Job 清空及操作确定后，以新 Session、新 epoch 和真实用户输入同树重规划。8 项定点覆盖旧结果/goal/制品过滤、linked rework、投递失效及原业务源撤销后 BLOCKED。复用 plan_turn 从保留的真实用户源重建明确产物与检查，缺失要求的空成果 finalize 被拒绝。 | 最终 daemon 在真实 Worker、真实模型运行中更正/遗忘，并验证流式缓存与 queued delivery 的边界。 |
+| T10 | home 真实更正、遗忘、旧源重放与重启不复活通过。活动根目标登记屏障，等待旧 Worker 停止、Job 清空及操作确定后，以新 Session、新 epoch 和真实用户输入同树重规划。8 项定点覆盖旧结果/goal/制品过滤、linked rework、投递失效及原业务源撤销后 BLOCKED。复用 plan_turn 从保留的真实用户源重建明确产物与检查，缺失要求的空成果 finalize 被拒绝。HOST 活动 Job 更正后同根关联返工、artifactB 下载，以及真实遗忘确认恢复和活跃循环无复活均已验证。 | QQ 流式缓存与 queued delivery 的真实平台边界。 |
 | T11 | home 实际停止 OpenViking，daemon 输入保持 HANDLED/FINISHED 且 skills_list 成功；同一 QUEUED/ConnectError 同步操作在后端恢复后 INDEXED，新 Dialogue 正确回答。无本地备用事实库的宿主检查有定点证据。 | QQ 入口离线组合未验收。 |
 | T12 | USER、私有/项目 scope、群禁用个人记忆与旧备份屏障有契约覆盖。home 跨 USER、伪造身份 header、只读恢复核对均通过。恢复先导入最新 epoch/屏障及来源回执，保持 RESTORE_REQUIRED 直至核对完成。 | 真实部署库的旧备份恢复演练、项目/群入口及 root 活动任务的整体恢复。 |
 | T13 | 锁定 Hermes 原生 schema、SKILL.md、共享 owner 根目录与即时写入。原生文件定点验证创建、发现、读取与跨调用复用，Pi review 只暴露 3 个 Hermes 工具有成功记录。 | 真实模型在最终 daemon 中创建技能，再由新会话与 Worker 发现、复用。 |
@@ -178,7 +178,11 @@ home 持久证据：
 
 三文档遗忘已在真实后端达到 APPLIED，epoch 为 2，三份 synthetic 文档均 DELETED 且直接 GET 返回 404。首次宿主确认暴露新的竞态：适配器登记 epoch 屏障后等待远端操作，期间旧轮次被控制检查撤销，尚未写入 mutation marker；旧输入随后因过期上下文被反复领取，共产生 393 个 attempt。后续 392 次均在绑定前失败，未启动 Pi 或模型。daemon 已停止以终止循环，原生调用、失败和删除回执保留。
 
-修复使 correct/forget 仅同步登记并立即返回持久 receipt，由原后台队列执行远端操作。崩溃窗口通过原生 run/输入/工具 ID 与完整参数 hash 精确匹配已提交操作，立即轮换后续对话历史，并在所有相关 attempt 与旧会话写者停止后复用宿主确认。已释放槽位的原失败结果保存在原 receipt 的 recovered_result 中，后续失败 attempt 保持原样。缺少停止证明的已匹配输入继续待核验；无匹配回执的永久失效上下文在分配 run 前终止并记录 CONTEXT_REVOKED。畸形原生日志隔离在该输入的匹配范围，原操作不重放。此补丁的生产确认恢复和活跃同步循环无复活复验仍待下一次部署记录。
+修复使 correct/forget 仅同步登记并立即返回持久 receipt，由原后台队列执行远端操作。崩溃窗口通过原生 run/输入/工具 ID 与完整参数 hash 精确匹配已提交操作，立即轮换后续对话历史，并在所有相关 attempt 与旧会话写者停止后复用宿主确认。已释放槽位的原失败结果保存在原 receipt 的 recovered_result 中，后续失败 attempt 保持原样。缺少停止证明的已匹配输入继续待核验；无匹配回执的永久失效上下文在分配 run 前终止并记录 CONTEXT_REVOKED。畸形原生日志隔离在该输入的匹配范围，原操作不重放。`6502148` 已通过统一 CI 的 1102 项 Python、17 项 JavaScript 测试，均无跳过，Ruff、配置 schema、构建/发布冒烟与 CodeQL 通过，并已部署。原遗忘输入已由原 run 收口为 HANDLED，原 operation ID 与 epoch 2 保持不变。393 个 attempt ID 均保持，其他 392 条整行 hash 不变；原 `5884e9ca...` 仅 request/result/receipt 三字段变化，旧失败逐字归档，原生日志 hash 不变。CORRECT 1、FORGET 1、SYNC 30 的数量未增加，没有重新遗忘或重注入。新 Session 已隔离旧历史，槽位为 0。
+
+同一 daemon Invocation/PID 持续运行 93.99 秒，memory 循环 last_success 推进，三个 URI 在窗口前后实际 GET 均为 404。完整对照位于上述 HOST 目录的 `forget-recovery-proof.json`，部署前全量基线为 `forget-recovery-baseline.json`。确认的范围是一次宿主逻辑结果和一条 Outbox，`Core.pre_send` 实际返回 true；HOST 缺 channel adapter，因此该 Outbox 的实际状态为 FAILED/ADAPTER_REMOVED，未计作平台送达。
+
+遗忘后的新 Dialogue/Session 普通输入也已实际通过。唯一 Leader run `8daf7444...` 达到 HANDLED/FINISHED、epoch 2、slot 0，答复精确为“恢复正常”，原生工具调用为 0，没有 Root、Worker 或 Job，所有运行槽为 0。源、上下文及原生日志 hash 保存在 HOST summary 的 post_forget_normal_probe。运行代码的统一检查为 [CI 43300742366](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43300742366) 与 [CodeQL 43300742204](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43300742204)。
 
 ## 尚未验收的边界
 
