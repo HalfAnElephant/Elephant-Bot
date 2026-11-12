@@ -110,14 +110,19 @@ def child_rows(runtime, root_id):
 async def test_full_slots_ambiguous_cancel_selects_then_exact_cancel_only_targets_one(control_runtime):
     r = control_runtime
     first, second = r.root(goal="第一项"), r.root(goal="第二项")
-    assert r.core.tasks.claim("busy-worker") is not None
+    busy = r.core.tasks.claim("busy-worker")
+    assert busy is not None
+    with r.core.db.engine.connect() as conn:
+        busy_root = conn.execute(select(tasks.c.root_task_id).where(tasks.c.id == busy["task_id"])).scalar_one()
+    assert busy_root in {first["task_id"], second["task_id"]}
+    target = next(root for root in (first, second) if root["task_id"] != busy_root)
     source = await r.receive(r.event("取消刚才那个"))
     answer = r.response(source)
     assert first["public_id"] in answer and second["public_id"] in answer and "/取消" in answer
     assert task_state(r, first["task_id"]) == task_state(r, second["task_id"]) == "WAITING_CHILDREN"
-    await r.receive(r.event("取消 " + second["public_id"]))
-    assert task_state(r, second["task_id"]) == "CANCELLED"
-    assert task_state(r, first["task_id"]) == "WAITING_CHILDREN"
+    await r.receive(r.event("取消 " + target["public_id"]))
+    assert task_state(r, target["task_id"]) == "CANCELLED"
+    assert task_state(r, busy_root) == "WAITING_CHILDREN"
     r.no_model_input()
 
 
