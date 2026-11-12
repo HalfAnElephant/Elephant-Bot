@@ -17,7 +17,7 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 
 ## 已有验证记录
 
-以下结果可复用。主线程应在最终版本补入对应提交、CI URL 和持久化日志位置。
+以下分批记录保留为历史覆盖说明。最终运行代码为 `31c23902877bb54851572f82e0dfe3893ef52809`；[CI](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670267) 的 959 项 Python、17 项 JavaScript 测试均通过且无跳过，构建与发布冒烟通过；[CodeQL](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43272670357) 通过。表中“当前完整 CI”等早期待补项已由该结果覆盖；真实场景范围以末尾最终证据和未验收边界为准。
 
 | 记录 | 已执行范围 | 证据入口与限制 |
 | --- | --- | --- |
@@ -126,11 +126,11 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 - 单 `elephant-bot.service` 已启用，旧 core/worker acceptance units 均 disabled/inactive。后台监督包含 ingress、delivery、scheduler、external_waiters 和 memory；ready 为 true。发布 revision 记录在 `/opt/qqbot/REVISION`。
 - 实际库从历史实验 0010 升级至 0020，`PRAGMA integrity_check=ok`。按用户要求使用 `backup=False`，本次没有备份原 bot。
 - 最终代码回归以 [PR #6 的检查](https://github.com/HalfAnElephant/Elephant-Bot/pull/6/checks)为准，包括 Python、console、Ruff、配置 schema、构建/发布冒烟，以及 Python/TypeScript CodeQL。对应原始 JUnit 和日志保留在每次 CI 的 correctness-results artifact。统一渠道使用 CI，不另跑同范围的本地全量测试。
-- 真实文件目标 `T-87ade253-056` 达到 SUCCEEDED。根目标聚合子 artifact，通过受保护下载 API 取得 17 字节 `ELEPHANT_FINAL_OK`，hash 与登记值一致。
+- 最终干净模型目标 `T-03be12cc-338` 由一次 Worker 和一次 Leader 汇总达到 SUCCEEDED，产物 `outputs/final-summary.txt` 为 8 字节 `FINAL_OK`，最终正文准确说明路径、内容和核对结果。此前真实文件目标 `T-87ade253-056` 达到 SUCCEEDED。根目标聚合子 artifact，通过受保护下载 API 取得 17 字节 `ELEPHANT_FINAL_OK`，hash 与登记值一致。
 - 真实 150 秒持久 Job 目标 `T-fd407f5d-145` 达到 SUCCEEDED。Job `fb89e1624083470ca401d2ddb79d9992` 只派发一次；daemon 正常重启前后 InvocationID `222eed5e321d4eb09798aa888e60b96b` 与 PID 保持一致，就绪恢复 1.77 秒。原 Task/Session 续接，新 attempt 不重启业务 Job；最终 EXITED/0，下载的 8 字节 `SURVIVED` 与 artifact hash 一致。
 - 在上述目标 Worker 结果持久化后，对 Leader 所在 daemon 主进程注入 SIGKILL。就绪恢复 4.24 秒，已有 Worker attempts 不增加，最终仍由原根目标汇总同一 artifact。原生回执与 root-owned cgroup 空证明是恢复依据。
 - 真实取消目标 `T-95bf4657-dcd` 的 root、child、Job 均为 CANCELLED，运行槽释放。控制持久接受耗时 25.62 ms。并发任务期间每批 30 次宿主状态读取的 P95 为 5.9–14.3 ms；这是 HTTP 宿主控制测量，不含模型/QQ 延迟，也不是全角色峰值压力测试。
-- 真实模型通过原生 Hermes 工具创建、读取和更新标准 SKILL.md。主机也通过同一工具修正过验收期间形成的错误结算经验，ledger 保留回退记录。真实条件复盘尚无触发成功记录；其计数、调度、只读工具范围及不可递归由契约测试验证。
+- 真实模型通过原生 Hermes 工具创建、读取和更新标准 SKILL.md。主机也通过同一工具修正过验收期间形成的错误结算经验，ledger 保留回退记录。默认阈值 10 下，两次真实条件复盘均在独立 Session 达到 FINISHED：`2b0ea34b-0184-4eda-b242-fbd1848589a3` 与 `98b26cc2-e519-44a2-bc2c-d3f203ed3fe4`。原来源轮次计数均为 11；原生日志中仅有 skills_list、skill_view、skill_manage，工具均配对且无 inflight。未发现复盘归属的业务操作/事件、学习记录或递归复盘，原来源结果与其原生摘要一致。此为事后只读核对，未创建复盘前数据库快照。
 
 该批实测发现并修复了：idle JSON null、Scheduler 失败批次监督、外部等待 observer 遗漏、技能回执字段、子 artifact 聚合、关闭 stdin 的 uvloop 竞态、沙箱内用户 D-Bus 不可见、正常 daemon 停机误记任务失败、宿主终态未唤醒父任务，以及 finalizer 显式引用合法 child 证据被拒。早期失败任务与原回执保留，不将这些失败计作成功。
 
@@ -141,6 +141,7 @@ home 持久证据：
 - `/var/lib/qqbot/leader-live-acceptance.json`：task/run/Job、延迟、正常重启、Leader SIGKILL、artifact 下载校验。
 - `/var/lib/qqbot/leader-deployment-facts.json`：revision、迁移、units、监督、学习会话及监听快照。
 - `/var/lib/qqbot-daemon-stops/`：root-owned、daemon 只读的旧 epoch 停止证明。
+- `/var/lib/qqbot/acceptance-natural-review/production-review-facts-c6055f8e.json`：默认阈值自然复盘、原生日志 hash、来源结果及工具范围的只读核对。
 - OpenViking 基准与删除/恢复证据仍位于前述独立 acceptance-package，包含原始评分记录。
 
 ## 尚未验收的边界
@@ -148,6 +149,6 @@ home 持久证据：
 1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。
 2. 所有 L01–L14 故障切点的真实平台组合、全角色满额压力、真实供应商切换/429/断流与所有控制语义的质量基准。本轮 CI 覆盖对应宿主边界，并补充上述指定真实恢复场景，未执行的组合仍保持未验收。
 3. 最终 daemon 经真实 QQ 用户输入自动记忆并跨新 Dialogue 召回，以及活动 QQ Worker 更正/遗忘后的完整交付。OpenViking 真实组件的提炼、更正、遗忘、隔离、重启和基准已执行；活动任务 epoch 屏障与重规划有契约测试。
-4. 模型自动技能学习已实际发生；自然触发的独立条件复盘、无可存内容及其真实并发效果仍需独立实测。学习成功不等同于业务执行或 QQ 送达成功。
+4. 模型自动技能学习与自然触发的独立条件复盘已实际发生；“无可存内容”分支及全角色并发效果仍需独立实测。学习成功不等同于业务执行或 QQ 送达成功。
 
 部署成功与完整验收分别记录。当前能证明单 daemon、任务树、真实业务模型/Job、受保护制品交付及列明恢复路径工作；尚不能宣布实施计划第 12.1 节全部通过。
