@@ -31,4 +31,8 @@ esac
 mkdir -p /etc/qqbot
 install -m 0644 /dev/null /etc/qqbot/jobs.env
 printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$service_uid" "$bus_address" > /etc/qqbot/jobs.env
+mkdir -p /etc/systemd/system/elephant-bot.service.d
+printf '[Unit]\nRequires=user@%s.service\nAfter=user@%s.service\n[Service]\nBindReadOnlyPaths=/run/user/%s\n' \
+    "$service_uid" "$service_uid" "$service_uid" > /etc/systemd/system/elephant-bot.service.d/jobs.conf
+systemctl daemon-reload
 echo "User manager provisioned for $account. Run the documented isolated Job acceptance before enabling tools."

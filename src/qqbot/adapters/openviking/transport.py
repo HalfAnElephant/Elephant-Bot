@@ -1,8 +1,6 @@
 """Bounded HTTP for the pinned OpenViking v0.5.4.1 session/content API."""
-import hmac
 import json
 import os
-import time
 
 import httpx
 
@@ -20,8 +18,6 @@ class OpenVikingHTTP:
         self.config = config
         self.client = client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
         self.owns_client = client is None
-        self.identities = {}
-        self.identity_key = os.urandom(32)
 
     def headers(self, binding):
         key = os.environ.get(binding.api_key_env, "")
@@ -51,16 +47,11 @@ class OpenVikingHTTP:
         return data
 
     async def verify(self, binding):
-        credential_hash = hmac.digest(self.identity_key, self.headers(binding)["X-API-Key"].encode(), "sha256")
-        key = (binding.account_id, binding.user_id, credential_hash)
-        if self.identities.get(key, 0) > time.monotonic():
-            return
         health = await self._request(binding, "GET", "/health")
         if (health.get("version") != self.config.expected_version or health.get("auth_mode") != "api_key"
                 or health.get("role") != "user" or health.get("account_id") != binding.account_id
                 or health.get("user_id") != binding.user_id):
             raise MemoryBackendError("OpenViking version or USER identity contract mismatch")
-        self.identities[key] = time.monotonic() + 30
 
     async def request(self, binding, method, path, **kwargs):
         await self.verify(binding)

@@ -23,7 +23,7 @@ RuntimeDirectoryPreserve=restart
 UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=tmpfs
 PrivateTmp=true
 ReadWritePaths=/var/lib/qqbot /run/qqbot /var/lib/qqbot-daemon-stops
 

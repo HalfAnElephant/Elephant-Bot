@@ -61,10 +61,14 @@ class ProcessService:
                 await process.wait()
             async def feed():
                 try:
-                    process.stdin.write(stdin.encode())
-                    await process.stdin.drain()
+                    if stdin:
+                        process.stdin.write(stdin.encode())
+                        await process.stdin.drain()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+                except RuntimeError:
+                    if not process.stdin.is_closing():
+                        raise
                 finally:
                     process.stdin.close()
             try:
