@@ -12,10 +12,14 @@ from .presentation import chat_bubbles, plain_text, split_text
 
 
 class Outbox:
-    def __init__(self, db, clock):
+    def __init__(self, db, clock, *, markdown_adapters=()):
         self.db, self.clock = db, clock
+        self.markdown_adapters = frozenset(markdown_adapters)
 
     def enqueue(self, c, envelope: OutboundEnvelope) -> str:
+        # Rich payloads are atomic. Never duplicate a keyboard or media by text splitting.
+        if envelope.content_format == "markdown" or envelope.official_content is not None:
+            return self._enqueue_one(c, envelope)
         text = envelope.text if envelope.plain_text else plain_text(envelope.text)
         deliveries = []
         for offset, part in enumerate(split_text(text)):
@@ -89,6 +93,19 @@ class Outbox:
         purpose=None,
     ):
         ids = []
+        if (target.adapter_instance_id in self.markdown_adapters and target.surface in {"private", "group", "guild_channel", "guild_private"}
+                and text.strip() and len(text) <= 10000):
+            # Preserve the complete Markdown unit. Oversize output is explicitly rendered
+            # as text below rather than silently truncating or breaking a code fence.
+            return [self.enqueue(c, OutboundEnvelope(
+                    delivery_id=str(uuid4()), target=target, text=text, content_format="markdown",
+                    origin_kind=origin_kind, origin_id=origin_id, reply_context=reply_context,
+                    expires_at=self.clock.now() + timedelta(seconds=ttl_seconds),
+                    allow_proactive=allow_proactive, context_version=context_version,
+                    persona_version=persona_version, policy_version=policy_version,
+                    anchor_message_id=anchor_message_id, requester=requester,
+                    parent_task_id=parent_task_id, notification_sequence=notification_sequence, purpose=purpose,
+                ))]
         bubbles = [text] if origin_kind == "command" or purpose == "question" else chat_bubbles(text)
         parts = [part for bubble in bubbles for part in split_text(plain_text(bubble))]
         for part_no, part in enumerate(parts):
@@ -121,7 +138,7 @@ class Outbox:
 
     def _prepare_pending(self, c, row):
         envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
-        if envelope.plain_text:
+        if envelope.plain_text or envelope.content_format == "markdown" or envelope.official_content is not None:
             return envelope
         parts = split_text(plain_text(envelope.text))
         envelope = envelope.model_copy(update={"text": parts[0], "plain_text": True})
@@ -231,7 +248,9 @@ class Outbox:
                         envelope.delivery_id,
                         SendReceipt(state="WAITING_FOR_TRIGGER", error_code=check.reason),
                     )
-                elif check.reason in {"TARGET_DENIED", "IDENTITY_MISMATCH", "UNSUPPORTED_SURFACE"}:
+                elif check.reason in {"TARGET_DENIED", "IDENTITY_MISMATCH", "UNSUPPORTED_SURFACE",
+                                     "RICH_MESSAGES_DISABLED", "MARKDOWN_DISABLED", "INCOMPATIBLE_CONTENT",
+                                     "UNSUPPORTED_RICH_CONTENT", "RELATIONSHIP_REMOVED", "PROACTIVE_REJECTED", "LOCAL_MEDIA_LIMIT_UNVERIFIED"}:
                     self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code=check.reason))
                 continue
             with self.db.transaction() as c:
@@ -268,7 +287,26 @@ class Outbox:
                     outbox.c.notification_sequence < envelope.notification_sequence,
                     outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
                     continue
-                if budget:
+                config = getattr(adapter, "config", None)
+                effective_budget = budget
+                if getattr(config, "kind", None) == "official":
+                    effective_budget = min(budget or config.official_messages_per_minute,
+                                           config.official_messages_per_minute)
+                    # Count every attempted delivery conservatively, including UNKNOWN.
+                    # Platform rate limits still remain authoritative.
+                    daily = c.execute(select(func.count()).select_from(outbox).where(
+                        outbox.c.conversation_id == envelope.target.key,
+                        outbox.c.attempted_at >= (now - timedelta(days=1)).isoformat(),
+                    )).scalar_one()
+                    global_minute = c.execute(select(func.count()).select_from(outbox).where(
+                        func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id")
+                        == envelope.target.adapter_instance_id,
+                        outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat(),
+                    )).scalar_one()
+                    if daily >= config.official_messages_per_day or global_minute >= config.official_bot_messages_per_minute:
+                        self._defer(c, envelope.delivery_id, now + timedelta(seconds=60))
+                        continue
+                if effective_budget:
                     used = c.execute(
                         select(func.count())
                         .select_from(outbox)
@@ -285,7 +323,7 @@ class Outbox:
                             ),
                         )
                     ).scalar_one()
-                    if used >= budget:
+                    if used >= effective_budget:
                         continue
                 claimed = c.execute(
                     update(outbox)
@@ -295,7 +333,10 @@ class Outbox:
                 if claimed.rowcount != 1:
                     continue
             try:
-                receipt = await adapter.send(envelope)
+                if getattr(getattr(adapter, "config", None), "kind", None) == "official":
+                    receipt = await adapter.send(envelope, authorize=lambda envelope=envelope: not pre_send or pre_send(envelope))
+                else:
+                    receipt = await adapter.send(envelope)
             except Exception:  # noqa: BLE001 - A send exception may follow an external side effect.
                 receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
             self._receipt(envelope.delivery_id, receipt)

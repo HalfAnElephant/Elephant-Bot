@@ -24,6 +24,7 @@ from qqbot.dialogue import EXPRESSION_RULES, render_persona, select_temporary_re
 from qqbot.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, fetch_image
 from qqbot.harness.research import bounded_json
 from qqbot.providers import ProviderAdapter, validate_transactions
+from qqbot.skills import GUIDANCE as SKILLS_GUIDANCE
 
 MAX_TOOL_RESULT_BYTES = 64 * 1024
 MAX_CONTENT_BYTES = 20 * 1024 * 1024
@@ -52,7 +53,7 @@ class RemoteLedger:
 class RunGateway:
     def __init__(self, workspace, model, key, endpoint, *, call, capacity=None, transport=None,
                  github=None, processes=None, model_window=32768, content_root=None, github_host="github.com",
-                 icloud=None):
+                 icloud=None, upload=None):
         self.workspace = Path(workspace)
         self.model, self.key, self.endpoint = model, key, endpoint
         self.upstream_session = str(uuid4())
@@ -61,6 +62,10 @@ class RunGateway:
         self.github_host = github_host
         self.content_root = Path(content_root) if content_root else self.workspace.parent / ".tool-content"
         self.registry = standard_registry(github=github)
+        from qqbot.capabilities.skills import register_skills
+        register_skills(self.registry, self.call)
+        from qqbot.capabilities.qq import register_qq
+        register_qq(self.registry, self.call, workspace=lambda: self.workspace, upload=upload)
         self.icloud = icloud
         if self.icloud is None and os.environ.get("ICLOUD_CALENDAR_CONFIG"):
             from qqbot.capabilities.icloud import ICloudCalendarService
@@ -110,7 +115,7 @@ class RunGateway:
         self.business_exhausted = False
         seed = claim.get("context", {}).get("seed", {})
         persona = seed.get("persona") if isinstance(seed, dict) else None
-        self.system_prompt = GENERAL_PROMPT
+        self.system_prompt = GENERAL_PROMPT + "\n" + SKILLS_GUIDANCE
         if self.notify_before_tools:
             self.system_prompt += "\n需要调用工具、无法立即给出结果时，必须先单独调用 task_notify，用当前人格简短告诉用户准备做什么，再开始操作。首次提示用 importance=important，后续只报告重要进展。可以直接回答时直接回复。"
         if persona:
@@ -227,8 +232,24 @@ class RunGateway:
         return await prepare(context, action, arguments) if prepare else {}
 
     async def verify(self, context, action, arguments, data):
+        if action.name == "skills.write" and isinstance(data, dict):
+            status = await self.call("skills", {"operation": "status", "name": data.get("name"),
+                **({"id": data["id"]} if data.get("id") else {})})
+            if data.get("id") and status.get("stored") and all(
+                status.get(k) == data.get(k) for k in ("id", "version", "fingerprint")
+            ):
+                return "VERIFIED", {**data, "verified_effect": "durable_skill_candidate_not_activation"}
+            if "archived" in data and status.get("archived") == data["archived"]:
+                return "VERIFIED", {**data, "verified_effect": "skill_archive"}
+            return "UNKNOWN", data
         if self.icloud and action.name.startswith("icloud."):
             return await self.icloud.verify(context, action, arguments, data)
+        if action.name == "notification.send" and isinstance(data, dict) and data.get("binding_created"):
+            return "VERIFIED", data
+        if action.name == "notification.send" and isinstance(data, dict) and data.get("delivery_id"):
+            # Verification is of durable enqueue only, never a claim of remote delivery.
+            status = await self.call("qq-status", {"delivery_id": data["delivery_id"]})
+            return "VERIFIED", {**status, "verified_effect": "durable_enqueue"}
         if action.name == "task.budget.extend" and data.get("accepted"):
             return "VERIFIED", data
         if action.name.startswith("workspace.") and isinstance(data, dict) and data.get("path"):

@@ -37,3 +37,11 @@ model:
 #   secret_env: QQBOT_OFFICIAL_SECRET
 #   full_mode_enabled: false
 #   full_mode_verified: false
+
+# Optional trusted OpenViking service. No remote calls until endpoint is configured.
+memory:
+  openviking:
+    endpoint: null
+    api_key_env: QQBOT_OPENVIKING_KEY
+    private_enabled: true
+    group_enabled: false

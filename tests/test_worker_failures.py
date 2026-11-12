@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -279,20 +280,48 @@ async def test_event_persistence_error_does_not_drop_failure_result(environment,
             assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
 
 
-async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp_path, clock):
+async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp_path, clock, monkeypatch):
+    from qqbot.jobs import worker as worker_module
+
     service, _task, app = environment
+    sleeping, ticks = asyncio.Queue(), asyncio.Queue()
+    renewals = []
+    original_expiry = None
+
+    class HeartbeatClock:
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+        async def sleep(self, delay):
+            # Only the worker's heartbeat uses this clock. Do not mix accelerated
+            # Core time with real heartbeat timers: the old test advanced 30 fake
+            # seconds during one 5-second interval and raced exact lease expiry.
+            assert delay == 5
+            with service.db.engine.connect() as conn:
+                renewals.append(conn.execute(select(runs.c.lease)).scalar_one())
+            sleeping.put_nowait(None)
+            await ticks.get()
+
+    monkeypatch.setattr(worker_module, "asyncio", HeartbeatClock())
 
     class LongStop(SlowStopRunner):
         async def run(self, *args, **kwargs):
+            nonlocal original_expiry
+            with service.db.engine.connect() as conn:
+                original_expiry = conn.execute(select(runs.c.lease)).scalar_one()
             clock.advance(25)
             raise ValueError("Failure before verified stop")
 
         async def stop(self):
             if self.stopped_verified:
                 return True
-            for _ in range(7):
-                await asyncio.sleep(1)
-                clock.advance(6)
+            for _ in range(9):
+                # Reaching sleep proves the real renew request has completed.
+                await asyncio.wait_for(sleeping.get(), timeout=5)
+                clock.advance(5)
+                assert renewals[-1] > clock.now().isoformat()
+                ticks.put_nowait(None)
+            await asyncio.wait_for(sleeping.get(), timeout=5)
             return await super().stop()
 
     pool = SessionPool(lambda claim, pid, _sid: LongStop(tmp_path / pid, claim, service, pid, error="plain"))
@@ -300,6 +329,9 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
                                 headers={"Authorization": "Bearer " + "x" * 32}) as client:
         worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
         assert await worker.once()
+    assert clock.now().isoformat() > original_expiry
+    assert len(renewals) == 10
+    assert all(a < b for a, b in pairwise(renewals))
     with service.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
         assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()

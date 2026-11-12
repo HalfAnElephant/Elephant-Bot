@@ -12,8 +12,14 @@ from sqlalchemy import func, select
 
 from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
+from qqbot.adapters.qq_official.interaction_delivery import handle_callback
+from qqbot.adapters.qq_official.interactions import InteractionStore
+from qqbot.adapters.qq_official.interactions import router as interaction_router
+from qqbot.adapters.qq_official.menus import router as menu_router
 from qqbot.admin.api import ADMIN_HTML
 from qqbot.admin.api import router as admin_router
+from qqbot.admin.qq_delivery import router as qq_delivery_router
+from qqbot.admin.qq_onboarding import install_qq_onboarding
 from qqbot.cli import migrate
 from qqbot.clock import Clock
 from qqbot.configuration import ConfigurationStore
@@ -47,7 +53,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             if cfg.kind == "onebot"
             else OfficialAdapter(cfg, settings.deployment_id, incoming, clock, official_client)
         )
-        for cfg in settings.adapters
+        for cfg in settings.adapters if cfg.enabled
     }
     core = Core(settings, db, clock, adapters, model_client)
     core.config_store = config_store
@@ -88,6 +94,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             yield
         finally:
             app.state.ready = False
+            await app.state.qq_onboarding.close()
             await core.stop()
             if loop:
                 loop.cancel()
@@ -162,6 +169,12 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             raise HTTPException(401, "administrator authentication required")
 
     app.include_router(admin_router(core, admin))
+    install_qq_onboarding(app, core, admin, client=official_client)
+    interaction_store = InteractionStore(db, clock)
+    app.state.qq_interactions = interaction_store
+    app.include_router(interaction_router(adapters, interaction_store, admin, core.permissions))
+    app.include_router(menu_router(adapters, admin, core.permissions))
+    app.include_router(qq_delivery_router(core, admin))
 
     @app.get("/admin", response_class=HTMLResponse)
     def management_page():
@@ -270,7 +283,7 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             if len(body) > 2 * 1024 * 1024:
                 raise HTTPException(413)
         try:
-            return adapter.callback(bytes(body), request.headers)
+            return await handle_callback(adapter, core, interaction_store, bytes(body), request.headers)
         except (ValueError, KeyError, TypeError):
             raise HTTPException(401, "invalid callback") from None
 

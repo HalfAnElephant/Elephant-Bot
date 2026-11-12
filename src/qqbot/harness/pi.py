@@ -21,6 +21,80 @@ def compaction_settings(model_window, limits, output_tokens):
     return {"enabled": True, "reserveTokens": model_window - soft, "keepRecentTokens": recent}
 
 
+class PublicAnswerEvents:
+    """Project pi text blocks only, never thinking/tool arguments or raw RPC records.
+
+    A bounded tail is held back while generating to avoid exposing partial secret
+    tokens. The host still authorizes every delivery; these events are not grants.
+    `public_answer_final` occurs at agent_settled, not at a tool-call turn boundary.
+    """
+
+    def __init__(self, redact=lambda value: value, max_chars=10000):
+        self.redact, self.max_chars = redact, max_chars
+        self.message_id = None
+        self.text = self.emitted = ""
+        self.failed = False
+        self.last_complete = None
+
+    def accept(self, event):
+        kind = event.get("type")
+        message = event.get("message") or {}
+        if kind == "message_start" and message.get("role") == "assistant":
+            self.message_id = str(uuid4())
+            self.text = self.emitted = ""
+            self.failed = False
+            self.last_complete = None
+            return [{"type": "public_answer_start", "message_id": self.message_id}]
+        if kind == "message_update" and message.get("role") == "assistant" and self.message_id:
+            change = event.get("assistantMessageEvent") or {}
+            if change.get("type") != "text_delta" or not isinstance(change.get("delta"), str):
+                return []
+            if self.failed:
+                return []
+            self.text += change["delta"]
+            return self._emit(False)
+        if kind == "message_end" and message.get("role") == "assistant":
+            if self.message_id is None:
+                self.message_id = str(uuid4())
+            parts = message.get("content") or []
+            self.text = "".join(part.get("text", "") for part in parts
+                                if isinstance(part, dict) and part.get("type") == "text"
+                                and isinstance(part.get("text"), str))
+            self.failed = self.failed or bool(message.get("errorMessage")) or message.get("stopReason") in {
+                "error", "aborted"}
+            emitted = self._emit(True)
+            self.last_complete = None if self.failed else (self.message_id, self.redact(self.text))
+            return emitted
+        if kind == "agent_settled" and self.last_complete:
+            message_id, text = self.last_complete
+            self.last_complete = None
+            return [{"type": "public_answer_final", "message_id": message_id, "text": text}]
+        return []
+
+    def _emit(self, final):
+        try:
+            validate_user_facing_text(self.text)
+            if len(self.text) > self.max_chars:
+                raise ValueError("answer exceeds public streaming limit")
+            safe = self.redact(self.text)
+            # Retain enough of the newest text to catch split credentials; callers
+            # can additionally disable streaming for tasks with sensitive output.
+            visible = safe if final else safe[:max(0, len(safe) - 256)]
+            if not visible.startswith(self.emitted):
+                raise ValueError("public text prefix changed")
+        except ValueError:
+            self.failed = True
+            visible = self.emitted
+        if self.failed:
+            return [{"type": "public_answer_end", "message_id": self.message_id,
+                     "text": self.emitted, "error": True}] if final else []
+        if not final and len(visible) - len(self.emitted) < 128:
+            return []
+        self.emitted = visible
+        return [{"type": "public_answer_end" if final else "public_answer_delta",
+                 "message_id": self.message_id, "text": visible, "error": False}]
+
+
 class PiRunnerAdapter:
     capabilities = HarnessCapabilities(append_input=True, interactive_questions=True)
 
@@ -52,6 +126,8 @@ class PiRunnerAdapter:
         self.steered_inputs = set()
         self.actual_session_id = None
         self.event_sink = None
+        self.public_event_sink = None
+        self.public_answers = PublicAnswerEvents(self.safe_diagnostic)
         self.process = None
         self.queue = asyncio.Queue(maxsize=8)
         self.responses = {}
@@ -198,6 +274,9 @@ class PiRunnerAdapter:
                     raise TypeError("RPC event must be an object")
                 if self.event_sink:
                     self.event_sink(record)
+                if self.public_event_sink:
+                    for public_event in self.public_answers.accept(record):
+                        self.public_event_sink(public_event)
                 pending = self.responses.get(record.get("id")) if record.get("type") == "response" else None
                 if pending is not None and not pending.done():
                     pending.set_result(record)
@@ -248,6 +327,7 @@ class PiRunnerAdapter:
         self.busy, self.quiescent_verified = True, False
         self.accepting_input = True
         self.steered_inputs = set()
+        self.public_answers = PublicAnswerEvents(self.safe_diagnostic)
         text, error, settled = "", None, False
         try:
             if not self.process:
