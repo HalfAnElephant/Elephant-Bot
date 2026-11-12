@@ -138,7 +138,7 @@ async def test_redirect_from_cos_never_followed(target):
         posts.append(request.url.path)
         return httpx.Response(200, json=plan())
     def cos(request):
-        assert request.url.host.endswith("myqcloud.com")
+        assert request.url.host == "bucket-123.cos.ap-guangzhou.myqcloud.com"
         return httpx.Response(307, headers={"location": "https://evil.com/capture"})
     adapter = setup(api)
     async with httpx.AsyncClient(transport=httpx.MockTransport(cos), follow_redirects=True) as cos_client:
