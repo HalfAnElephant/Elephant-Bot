@@ -293,3 +293,14 @@ uv run ruff check src tests evals scripts
 ## 许可证
 
 原创代码采用 AGPL-3.0-only。提供网络服务时，应向使用者提供对应版本源码入口，可通过 `source_url` 配置。第三方依赖、参考项目与许可证据见 [第三方说明](THIRD_PARTY_NOTICES.md) 和 [版本锁定清单](upstreams.lock.yaml)。
+
+### QQ 官方富消息与扫码配置
+
+官方适配器支持私聊/群聊 Markdown、媒体、按钮及卡片；私聊可选择启用输入状态和原生流式。
+管理后台的“QQ 官方扫码配置”入口可创建禁用状态的新应用配置，配置统一权限后再启用。
+完整能力边界、管理 API、迁移和验收步骤见 [QQ 官方接入说明](docs/operations/qq_official.md)。
+代码和模拟测试不代表应用权限或真实客户端验收。未支持的频道富消息会明确拒绝，不静默丢弃。
+
+## OpenViking
+
+可选外部记忆索引与私聊会话支持，配置与数据边界见 [OpenViking](docs/openviking.md)。

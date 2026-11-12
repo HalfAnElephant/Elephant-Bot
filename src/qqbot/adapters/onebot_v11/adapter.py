@@ -339,6 +339,8 @@ class OneBotAdapter:
         )
 
     async def validate_delivery(self, envelope):
+        if envelope.official_content is not None or envelope.content_format != "text":
+            return DeliveryCheck(allowed=False, reason="UNSUPPORTED_RICH_CONTENT")
         if (
             envelope.target.bot_identity_id != self.config.bot_id
             or envelope.target.adapter_instance_id != self.config.instance_id

@@ -13,21 +13,24 @@ from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal, WaitCondi
 from qqbot.domain.messages import AccessContext, InboundEvent
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
 from qqbot.harness.launcher import verify_stop_marker
+from qqbot.jobs.streaming import PUBLIC_KINDS, validate_public_event
 from qqbot.permissions import PermissionService
 from qqbot.storage.schema import outbox as outbox_table
+from qqbot.storage.stream_schema import stream_runs
 from qqbot.storage.task_schema import events, inputs, model_requests, notifications, runs, tasks, waits
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
 
 
 class TaskService:
-    def __init__(self, db, clock, outbox, archive_root=None, stop_verifier=None, *, permissions=None, max_active=4, sustained_limit=2, max_resident=None, context_validator=None, budget_ceiling=None):
+    def __init__(self, db, clock, outbox, archive_root=None, stop_verifier=None, *, permissions=None, max_active=4, sustained_limit=2, max_resident=None, context_validator=None, budget_ceiling=None, stream_eligibility=None):
         self.db, self.clock, self.outbox = db, clock, outbox
         self.permissions = permissions or PermissionService(db, clock)
         self.max_active, self.sustained_limit = max_active, sustained_limit
         self.max_resident = max_resident if max_resident is not None else max_active
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
+        self.stream_eligibility = stream_eligibility
         self.wakeup = asyncio.Event()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
@@ -289,7 +292,12 @@ class TaskService:
                     if len(parts) == 3:
                         host, repository = parts[0], "/".join(parts[1:])
                         break
+            public_answer_events = bool(self.stream_eligibility and self.stream_eligibility(
+                InboundEvent.model_validate_json(row["event_json"])))
+            if public_answer_events:
+                c.execute(insert(stream_runs).values(run_id=run_id, task_id=row["id"], state="ACTIVE", cursor_seq=0))
             return {
+                "public_answer_events": public_answer_events,
                 "repository": repository,
                 "host": host,
                 "task_id": row["id"],
@@ -465,11 +473,15 @@ class TaskService:
             raise ValueError("success check not verified: " + check)
 
     def append_event(self, run_id, fencing_token, worker_id, event_id, seq, payload):
+        validate_public_event(payload)
         encoded = json.dumps(payload, ensure_ascii=False)
         if not isinstance(seq, int) or seq < 1 or len(encoded.encode()) > 2 * 1024 * 1024:
             raise ValueError("invalid event sequence or payload")
         with self.db.transaction() as c:
             run, _task = self._lease(c, run_id, fencing_token, worker_id)
+            if payload.get("kind") in PUBLIC_KINDS and not c.execute(select(stream_runs.c.run_id).where(
+                stream_runs.c.run_id == run_id)).first():
+                raise PermissionError("public answer stream was not enabled for this run")
             old = c.execute(select(events).where(events.c.event_id == event_id)).mappings().first()
             if old:
                 if old["run_id"] != run_id or old["seq"] != seq or old["payload"] != encoded:
@@ -677,6 +689,9 @@ class TaskService:
             origin_kind="task", origin_id=notification_id, reply_context=event.reply_context,
             ttl_seconds=86400, requester=event.principal, anchor_message_id=event.platform_message_id,
             parent_task_id=task["id"], notification_sequence=seq, purpose=purpose)
+        if purpose == "result" and run_id and c.execute(select(stream_runs.c.run_id).where(
+            stream_runs.c.run_id == run_id)).first():
+            c.execute(update(outbox_table).where(outbox_table.c.id.in_(deliveries)).values(state="STREAM_PENDING"))
         if purpose == "progress" and importance == "normal":
             last_sent = c.execute(select(func.max(outbox_table.c.sent_at)).where(
                 outbox_table.c.origin_id.in_(select(notifications.c.id).where(notifications.c.task_id == task["id"])))) .scalar_one()

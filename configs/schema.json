@@ -7,6 +7,11 @@
           "title": "Instance Id",
           "type": "string"
         },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
         "kind": {
           "enum": [
             "onebot",
@@ -20,8 +25,33 @@
           "type": "string"
         },
         "secret_env": {
+          "default": "",
           "title": "Secret Env",
           "type": "string"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credential Ref"
+        },
+        "credential_store_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credential Store Dir"
         },
         "app_id": {
           "anyOf": [
@@ -94,6 +124,96 @@
           "title": "Proactive Verified",
           "type": "boolean"
         },
+        "markdown_enabled": {
+          "default": true,
+          "title": "Markdown Enabled",
+          "type": "boolean"
+        },
+        "rich_messages_enabled": {
+          "default": true,
+          "title": "Rich Messages Enabled",
+          "type": "boolean"
+        },
+        "streaming_enabled": {
+          "default": false,
+          "title": "Streaming Enabled",
+          "type": "boolean"
+        },
+        "typing_enabled": {
+          "default": false,
+          "title": "Typing Enabled",
+          "type": "boolean"
+        },
+        "official_messages_per_minute": {
+          "default": 20,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Official Messages Per Minute",
+          "type": "integer"
+        },
+        "official_bot_messages_per_minute": {
+          "default": 30,
+          "maximum": 600,
+          "minimum": 1,
+          "title": "Official Bot Messages Per Minute",
+          "type": "integer"
+        },
+        "official_messages_per_day": {
+          "default": 1000,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Official Messages Per Day",
+          "type": "integer"
+        },
+        "c2c_reply_window_seconds": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "C2C Reply Window Seconds"
+        },
+        "c2c_max_replies": {
+          "default": 4,
+          "maximum": 4,
+          "minimum": 1,
+          "title": "C2C Max Replies",
+          "type": "integer"
+        },
+        "group_reply_window_seconds": {
+          "anyOf": [
+            {
+              "maximum": 300,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Reply Window Seconds"
+        },
+        "group_max_replies": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Max Replies"
+        },
         "reply_window_seconds": {
           "default": 300,
           "maximum": 86400,
@@ -129,8 +249,7 @@
       "required": [
         "instance_id",
         "kind",
-        "bot_id",
-        "secret_env"
+        "bot_id"
       ],
       "title": "AdapterConfig",
       "type": "object"
@@ -523,6 +642,20 @@
     "MemoryConfig": {
       "additionalProperties": false,
       "properties": {
+        "openviking": {
+          "$ref": "#/$defs/OpenVikingConfig",
+          "default": {
+            "endpoint": null,
+            "api_key_env": "QQBOT_OPENVIKING_KEY",
+            "namespace": "elephant",
+            "private_enabled": true,
+            "group_enabled": false,
+            "timeout_seconds": 2.0,
+            "operation_budget_seconds": 8.0,
+            "max_records": 64,
+            "max_query_chars": 4000
+          }
+        },
         "maintenance_enabled": {
           "default": false,
           "title": "Maintenance Enabled",
@@ -669,6 +802,74 @@
         }
       },
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "OpenVikingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Endpoint"
+        },
+        "api_key_env": {
+          "default": "QQBOT_OPENVIKING_KEY",
+          "title": "Api Key Env",
+          "type": "string"
+        },
+        "namespace": {
+          "default": "elephant",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,47}$",
+          "title": "Namespace",
+          "type": "string"
+        },
+        "private_enabled": {
+          "default": true,
+          "title": "Private Enabled",
+          "type": "boolean"
+        },
+        "group_enabled": {
+          "default": false,
+          "title": "Group Enabled",
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "default": 2.0,
+          "maximum": 10,
+          "minimum": 0.1,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "operation_budget_seconds": {
+          "default": 8.0,
+          "maximum": 30,
+          "minimum": 0.1,
+          "title": "Operation Budget Seconds",
+          "type": "number"
+        },
+        "max_records": {
+          "default": 64,
+          "maximum": 128,
+          "minimum": 1,
+          "title": "Max Records",
+          "type": "integer"
+        },
+        "max_query_chars": {
+          "default": 4000,
+          "maximum": 8000,
+          "minimum": 100,
+          "title": "Max Query Chars",
+          "type": "integer"
+        }
+      },
+      "title": "OpenVikingConfig",
       "type": "object"
     },
     "ParticipationSettings": {
@@ -866,6 +1067,44 @@
         }
       },
       "title": "RunBudget",
+      "type": "object"
+    },
+    "SkillsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "group_enabled": {
+          "default": true,
+          "title": "Group Enabled",
+          "type": "boolean"
+        },
+        "max_per_scope": {
+          "default": 100,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Per Scope",
+          "type": "integer"
+        },
+        "max_versions_per_skill": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Max Versions Per Skill",
+          "type": "integer"
+        },
+        "max_candidates_per_task": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Candidates Per Task",
+          "type": "integer"
+        }
+      },
+      "title": "SkillsConfig",
       "type": "object"
     },
     "SpeakUpConfig": {
@@ -1212,6 +1451,17 @@
     "memory": {
       "$ref": "#/$defs/MemoryConfig",
       "default": {
+        "openviking": {
+          "api_key_env": "QQBOT_OPENVIKING_KEY",
+          "endpoint": null,
+          "group_enabled": false,
+          "max_query_chars": 4000,
+          "max_records": 64,
+          "namespace": "elephant",
+          "operation_budget_seconds": 8.0,
+          "private_enabled": true,
+          "timeout_seconds": 2.0
+        },
         "maintenance_enabled": false,
         "auto_extract": false,
         "extractor_endpoint": null,
@@ -1223,6 +1473,16 @@
         "embedding_dimensions": null,
         "embedding_key_env": "QQBOT_EMBEDDING_KEY",
         "raw_retention_days": 30
+      }
+    },
+    "skills": {
+      "$ref": "#/$defs/SkillsConfig",
+      "default": {
+        "enabled": true,
+        "group_enabled": true,
+        "max_per_scope": 100,
+        "max_versions_per_skill": 10,
+        "max_candidates_per_task": 3
       }
     },
     "speak_up": {

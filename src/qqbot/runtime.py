@@ -21,10 +21,12 @@ from qqbot.domain.social import JudgmentSignals, ParticipationSettings, SpeechTh
 from qqbot.expressions import HTTPLearner
 from qqbot.ingress.service import Inbox
 from qqbot.jobs.service import TaskService
+from qqbot.jobs.streaming import StreamDelivery
 from qqbot.memory import MemoryRecord, SocialService
 from qqbot.memory.embedding import HTTPEmbedding
 from qqbot.memory.extraction import HTTPCandidateExtractor
 from qqbot.memory.maintenance import MemoryMaintenance
+from qqbot.memory.openviking import OpenVikingMemory
 from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.policy import ParticipationController, PolicyState, SpeechPolicy
@@ -59,7 +61,10 @@ class Core:
         self.permissions = PermissionService(db, clock, settings.permissions)
         for adapter in adapters.values():
             adapter.permissions = self.permissions
-        self.inbox, self.outbox = Inbox(db), Outbox(db, clock)
+        self.inbox, self.outbox = Inbox(db), Outbox(db, clock, markdown_adapters={
+            cfg.instance_id for cfg in settings.adapters if cfg.kind == "official" and cfg.markdown_enabled
+        })
+        self.stream_delivery = StreamDelivery(self)
         self.social, self.personas = (
             SocialService(db, clock, permissions=self.permissions),
             PersonaStore(
@@ -80,7 +85,10 @@ class Core:
             sustained_limit=settings.execution.sustained_limit,
             budget_ceiling=settings.execution.budget,
             context_validator=self.validate_context,
+            stream_eligibility=self.stream_delivery.eligible,
         )
+        self.tasks.qq_adapters = self.adapters
+        self.tasks.skills_settings = lambda: self.settings.skills
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
         self.expressions = self.contexts.expressions
         expression = settings.expression
@@ -134,6 +142,9 @@ class Core:
             embedding=self.embedding,
             enabled=memory.maintenance_enabled,
             raw_retention_days=memory.raw_retention_days,
+        )
+        self.openviking = OpenVikingMemory(
+            db, clock, settings, self.social, self.permissions, self.validate_context
         )
         self.active = {}
         self.active_ids = set()
@@ -361,6 +372,8 @@ class Core:
                     "speech_mode": self.state(event.conversation.key)["mode"],
                     "background_enabled": self.settings.tasks_enabled,
                     "interactive_execution_enabled": self.settings.interactive_execution_enabled,
+                    "openviking_status": self.openviking.status,
+                    "openviking_private_sessions_enabled": self.settings.memory.openviking.private_enabled,
                 },
             )
             return None
@@ -806,6 +819,8 @@ class Core:
             command = (event.text.strip().split(maxsplit=1) or [""])[0]
             if command in CONTROL_COMMANDS:
                 reply = await self.command(event)
+                self.openviking.settings = self.settings
+                await self.openviking.reconcile()
                 if reply:
                     with self.db.transaction() as c:
                         self.outbox.enqueue_text(
@@ -1131,6 +1146,11 @@ class Core:
             if decision.action != "SPEAK":
                 self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
                 return
+            self.openviking.settings = self.settings
+            if self.openviking.enabled(access):
+                turn = self.contexts.turn(event, coalesced)
+                context = self.context_for(event, access, turn=turn)
+                await self.openviking.prepare(access, turn, context)
             self.submit_turn(event, coalesced)
             with self.db.transaction() as c:
                 for source in (event, *coalesced):
@@ -1167,7 +1187,18 @@ class Core:
         self.contexts.settings = self.settings
         return self.contexts.validate(access, context)
 
-    def pre_send(self, envelope):
+    def pre_send(self, envelope, *, stream_cleanup=False):
+        if stream_cleanup:
+            # Cleanup is only for a persisted, acknowledged stream, never a new reply.
+            from qqbot.storage.stream_schema import stream_messages
+            with self.db.engine.connect() as c:
+                existing = c.execute(select(stream_messages.c.envelope_json).where(
+                    stream_messages.c.id == envelope.origin_id,
+                    stream_messages.c.kind == "answer", stream_messages.c.stream_id.is_not(None),
+                    stream_messages.c.state == "SENDING",
+                )).scalar_one_or_none()
+            if not existing or existing != envelope.model_dump_json():
+                return False
         if envelope.origin_id.startswith("speakup:") and not self.speak_up.valid(envelope):
             return False
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
@@ -1197,9 +1228,9 @@ class Core:
                 access, "notification.send", "conversation:" + envelope.target.key
             ).allowed:
                 return False
-            if row["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
+            if not stream_cleanup and row["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
                 return False
-            if row["state"] == "EXPIRED" and not (
+            if not stream_cleanup and row["state"] == "EXPIRED" and not (
                 row["notice_run_reason"] == "notification" and row["notice_purpose"] == "result"
             ):
                 return False
@@ -1271,6 +1302,7 @@ class Core:
                 self.windows[key].accept(event)
         self.resume_waits()
         if dispatch:
+            await self.stream_delivery.dispatch_once()
             await self.outbox.dispatch_once(
                 self.adapters, self.settings.send_budget_per_minute, self.pre_send
             )
@@ -1284,6 +1316,7 @@ class Core:
 
     async def delivery_loop(self):
         while not self.stopping:
+            await self.stream_delivery.dispatch_once()
             await self.outbox.dispatch_once(
                 self.adapters, self.settings.send_budget_per_minute, self.pre_send
             )
@@ -1291,6 +1324,8 @@ class Core:
 
     async def maintenance_loop(self):
         while not self.stopping:
+            self.openviking.settings = self.settings
+            await self.openviking.reconcile()
             if self.settings.memory.maintenance_enabled or self.settings.expression.enabled:
                 with self.db.engine.connect() as c:
                     latest = (
@@ -1333,6 +1368,7 @@ class Core:
     async def run(self):
         self.restore_waits()
         self.outbox.recover()
+        self.stream_delivery.recover()
         self.tasks.recover()
         delivery = asyncio.create_task(self.delivery_loop())
         maintenance = asyncio.create_task(self.maintenance_loop())
@@ -1352,4 +1388,5 @@ class Core:
         for task in list(self.active.values()):
             task.cancel()
         await asyncio.gather(*list(self.active.values()), return_exceptions=True)
+        await self.openviking.close()
         await self.model_client.aclose()

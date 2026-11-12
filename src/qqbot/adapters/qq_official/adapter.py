@@ -13,7 +13,6 @@ from qqbot.domain import (
     ConversationRef,
     DeliveryCheck,
     InboundEvent,
-    MediaSegment,
     ObservationMode,
     PrincipalRef,
     ReplyContext,
@@ -23,6 +22,10 @@ from qqbot.domain import (
     stable_id,
 )
 from qqbot.permissions import PermissionService, PermissionSubject
+
+from .events import extra_segments
+from .relationships import RelationshipStore
+from .rendering import message_body
 
 
 class OfficialAdapter:
@@ -34,6 +37,7 @@ class OfficialAdapter:
         self.token_expires = clock.now()
         self.token_lock = asyncio.Lock()
         self.full_event_observed = False
+        self.relationships = RelationshipStore(inbox.db, clock)
 
     def key(self):
         secret = self.config.secret().encode()
@@ -69,6 +73,8 @@ class OfficialAdapter:
             return {"plain_token": token, "signature": self.key().sign((stamp + token).encode()).hex()}
         self.verify(body, headers.get("x-signature-timestamp", ""), headers.get("x-signature-ed25519", ""))
         if payload.get("op") == 0:
+            if self.relationships.accept(payload, self):
+                return {"op": 12}
             event = self.normalize(payload)
             if event:
                 self.inbox.accept(event)
@@ -82,6 +88,7 @@ class OfficialAdapter:
             "C2C_MESSAGE_CREATE",
             "AT_MESSAGE_CREATE",
             "MESSAGE_CREATE",
+            "DIRECT_MESSAGE_CREATE",
         }:
             return None
         author = data["author"]
@@ -95,6 +102,9 @@ class OfficialAdapter:
         elif kind == "C2C_MESSAGE_CREATE":
             user = str(author.get("user_openid") or author.get("id") or "")
             surface, remote = Surface.PRIVATE, user
+        elif kind == "DIRECT_MESSAGE_CREATE":
+            user = str(author["id"])
+            surface, remote = Surface.GUILD_PRIVATE, str(data["guild_id"])
         else:
             user = str(author["id"])
             surface, remote = Surface.GUILD_CHANNEL, str(data["channel_id"])
@@ -114,15 +124,9 @@ class OfficialAdapter:
         platform_id = str(payload.get("id") or stable_id(kind, ref.key, msg_id, user, data["timestamp"]))
         full = self.config.full_mode_enabled and (self.config.full_mode_verified or self.full_event_observed)
         chain = [TextSegment(text=str(data.get("content", "")))]
-        for attachment in data.get("attachments", []):
-            chain.append(
-                MediaSegment(
-                    type="image" if str(attachment.get("content_type", "")).startswith("image/") else "file",
-                    attachment_ref="unresolved:" + stable_id(json.dumps(attachment, sort_keys=True)),
-                    mime_type=attachment.get("content_type"),
-                )
-            )
-        reference = data.get("message_reference") or {}
+        chain.extend(extra_segments(data))
+        reference = data.get("message_reference")
+        reference = reference if isinstance(reference, dict) else {}
         return InboundEvent(
             event_id=stable_id(ref.key, "message.created", msg_id),
             platform_event_id=platform_id,
@@ -139,7 +143,8 @@ class OfficialAdapter:
             segments=tuple(chain),
             reply_to=reference.get("message_id"),
             mentions_bot=kind in {"GROUP_AT_MESSAGE_CREATE", "AT_MESSAGE_CREATE"}
-            or any(str(m.get("id")) == self.config.bot_id for m in data.get("mentions", [])),
+            or any(isinstance(m, dict) and str(m.get("id")) == self.config.bot_id
+                   for m in (data.get("mentions") if isinstance(data.get("mentions"), list) else [])),
             sender_is_bot=bool(author.get("bot", False)) or user == self.config.bot_id,
             observation_mode=ObservationMode.FULL
             if full or surface == Surface.PRIVATE
@@ -147,26 +152,37 @@ class OfficialAdapter:
             reply_context=ReplyContext(
                 platform_message_id=msg_id,
                 event_id=platform_id,
-                expires_at=stamp + timedelta(seconds=self.config.reply_window_seconds),
-                max_replies=self.config.max_replies,
+                expires_at=stamp + timedelta(seconds=self.reply_policy(surface)[0]),
+                max_replies=self.reply_policy(surface)[1],
             ),
             trace_id=str(uuid4()),
         )
 
+    def reply_policy(self, surface):
+        if surface == Surface.PRIVATE:
+            return (self.config.c2c_reply_window_seconds or self.config.reply_window_seconds,
+                    self.config.c2c_max_replies)
+        if surface == Surface.GROUP:
+            return (self.config.group_reply_window_seconds or min(self.config.reply_window_seconds, 300),
+                    self.config.group_max_replies or self.config.max_replies)
+        return self.config.reply_window_seconds, self.config.max_replies
+
     async def capabilities(self, target):
         full = self.config.full_mode_enabled and (self.config.full_mode_verified or self.full_event_observed)
+        rich = self.config.rich_messages_enabled
+        qq_media = rich and target.surface in {Surface.PRIVATE, Surface.GROUP}
         return AdapterCapabilities(
-            can_reply=True,
-            can_initiate_message=self.config.proactive_verified,
-            can_observe_unaddressed_messages=full,
-            supports_reply_reference=target.surface == Surface.GUILD_CHANNEL,
-            observation_mode=ObservationMode.FULL if full else ObservationMode.MENTIONS_ONLY,
-            delivery_constraints=(
-                "text_only",
-                f"reply_window={self.config.reply_window_seconds}s",
-                f"max_replies={self.config.max_replies}",
-                "actual_permissions_require_smoke_test",
-            ),
+            can_reply=True, can_initiate_message=self.config.proactive_verified,
+            can_observe_unaddressed_messages=full or target.surface == Surface.PRIVATE,
+            supports_reply_reference=True, supports_mention=True,
+            supports_images=rich, supports_files=qq_media, supports_audio=qq_media, supports_video=qq_media,
+            supports_markdown=rich and self.config.markdown_enabled, supports_keyboard=rich,
+            supports_typing=target.surface == Surface.PRIVATE and self.config.typing_enabled,
+            supports_streaming=target.surface == Surface.PRIVATE and self.config.streaming_enabled,
+            observation_mode=ObservationMode.FULL if full or target.surface == Surface.PRIVATE
+            else ObservationMode.MENTIONS_ONLY,
+            delivery_constraints=(f"reply_window={self.reply_policy(target.surface)[0]}s",
+                f"max_replies={self.reply_policy(target.surface)[1]}", "actual_permissions_require_smoke_test"),
         )
 
     async def validate_delivery(self, envelope):
@@ -180,6 +196,14 @@ class OfficialAdapter:
             PermissionSubject.from_refs(target), "notification.send", "conversation:" + target.key
         ).allowed:
             return DeliveryCheck(allowed=False, reason="TARGET_DENIED")
+        try:
+            message_body(envelope, markdown_enabled=self.config.markdown_enabled,
+                         rich_enabled=self.config.rich_messages_enabled)
+        except ValueError as exc:
+            return DeliveryCheck(allowed=False, reason=str(exc))
+        reason = self.relationships.denied(target)
+        if reason:
+            return DeliveryCheck(allowed=False, reason=reason)
         reply = envelope.reply_context
         if (
             reply
@@ -190,6 +214,9 @@ class OfficialAdapter:
         ):
             return DeliveryCheck(allowed=True, reason="VALID_REPLY")
         if self.config.proactive_verified and envelope.allow_proactive:
+            reason = self.relationships.denied(target, proactive=True)
+            if reason:
+                return DeliveryCheck(allowed=False, reason=reason)
             return DeliveryCheck(allowed=True, reason="AUTHORIZED_PROACTIVE")
         return DeliveryCheck(allowed=False, reason="REPLY_EXPIRED_OR_EXHAUSTED", wait_for_trigger=True)
 
@@ -209,7 +236,7 @@ class OfficialAdapter:
             self.token, self.token_expires = token, self.clock.now() + timedelta(seconds=ttl)
             return token
 
-    async def send(self, envelope):
+    async def send(self, envelope, *, authorize=None):
         check = await self.validate_delivery(envelope)
         if not check.allowed:
             return SendReceipt(
@@ -219,19 +246,102 @@ class OfficialAdapter:
             token = await self.access_token()
         except (httpx.HTTPError, ValueError, KeyError):
             return SendReceipt(state="RETRYABLE", error_code="TOKEN_UNAVAILABLE")
+        def authorized():
+            if authorize is None:
+                return True
+            try:
+                return bool(authorize())
+            except Exception:  # noqa: BLE001 - Policy resolution failures must fail closed.
+                return False
+
+        if not authorized():
+            return SendReceipt(state="FAILED", error_code="AUTHORIZATION_CHANGED")
         remote = quote(envelope.target.remote_conversation_id, safe="")
         if envelope.target.surface == Surface.GROUP:
             path = f"/v2/groups/{remote}/messages"
         elif envelope.target.surface == Surface.PRIVATE:
             path = f"/v2/users/{remote}/messages"
+        elif envelope.target.surface == Surface.GUILD_PRIVATE:
+            path = f"/dms/{remote}/messages"
         else:
             path = f"/channels/{remote}/messages"
-        body = {"content": envelope.text}
-        if envelope.target.surface != Surface.GUILD_CHANNEL:
-            body["msg_type"] = 0
+        body = message_body(envelope, markdown_enabled=self.config.markdown_enabled,
+                            rich_enabled=self.config.rich_messages_enabled)
+        if (envelope.official_content and envelope.official_content.media
+                and envelope.official_content.media.local_ref):
+            from .local_media import LocalMediaStore
+            from .local_upload import LocalUploadError, upload_local
+            media = envelope.official_content.media
+            if not envelope.parent_task_id or not envelope.requester:
+                return SendReceipt(state="FAILED", error_code="LOCAL_MEDIA_SCOPE_REQUIRED")
+            content = None
+            try:
+                opening = asyncio.create_task(asyncio.to_thread(LocalMediaStore(self.inbox.db, self.clock).open,
+                    media.local_ref, task_id=envelope.parent_task_id, conversation_id=envelope.target.key,
+                    principal_key=envelope.requester.key))
+                try:
+                    metadata, content = await asyncio.shield(opening)
+                except asyncio.CancelledError:
+                    def close_late(done):
+                        if not done.cancelled() and done.exception() is None:
+                            done.result()[1].close()
+                    opening.add_done_callback(close_late)
+                    raise
+                if metadata["media_type"] != media.type or (media.filename and metadata["filename"] != media.filename):
+                    raise ValueError("media metadata mismatch")
+                info = await upload_local(self, envelope, content, metadata["filename"], media.type,
+                                          metadata["mime_type"], authorized)
+                body["media"] = {"file_info": info}
+            except LocalUploadError as exc:
+                return SendReceipt(state="RETRYABLE" if exc.retryable else "FAILED", error_code=exc.code)
+            except (ValueError, PermissionError, OSError):
+                return SendReceipt(state="FAILED", error_code="LOCAL_MEDIA_UNAVAILABLE")
+            finally:
+                if content is not None:
+                    content.close()
+        elif (envelope.official_content and envelope.official_content.media
+                and envelope.target.surface in {Surface.PRIVATE, Surface.GROUP}):
+            media = envelope.official_content.media
+            try:
+                upload = await self.client.post(
+                    self.config.api_base.rstrip("/") + path.removesuffix("messages") + "files",
+                    headers={"Authorization": "QQBot " + token, "X-Union-Appid": str(self.config.app_id)},
+                    json={"file_type": {"image": 1, "video": 2, "audio": 3, "file": 4}[media.type],
+                          "url": media.url, "srv_send_msg": False,
+                          **({"file_name": media.filename} if media.filename else {})},
+                )
+                if upload.status_code == 401:
+                    self.token = None
+                if upload.status_code in {401, 429} or upload.status_code >= 500:
+                    return SendReceipt(state="RETRYABLE", error_code="MEDIA_UPLOAD_UNAVAILABLE")
+                if not upload.is_success:
+                    return SendReceipt(state="FAILED", error_code="MEDIA_UPLOAD_REJECTED")
+                info = upload.json()["file_info"]
+                if not isinstance(info, str) or not info:
+                    raise ValueError("invalid file_info")
+                body["media"] = {"file_info": info}
+            except (httpx.HTTPError, ValueError, KeyError):
+                # srv_send_msg=False means upload cannot itself deliver a message.
+                return SendReceipt(state="RETRYABLE", error_code="MEDIA_UPLOAD_UNAVAILABLE")
+        if envelope.official_content and envelope.official_content.media and envelope.official_content.media.local_ref:
+            try:
+                token = await self.access_token()
+            except (httpx.HTTPError, ValueError, KeyError):
+                return SendReceipt(state="RETRYABLE", error_code="TOKEN_UNAVAILABLE")
+        # Token refresh and file upload may outlive the reply window or policy.
+        # Nothing that awaits is permitted between this recheck and message POST.
+        check = await self.validate_delivery(envelope)
+        if not check.allowed:
+            return SendReceipt(state="WAITING_FOR_TRIGGER" if check.wait_for_trigger else "FAILED",
+                               error_code=check.reason)
+        if not authorized():
+            return SendReceipt(state="FAILED", error_code="AUTHORIZATION_CHANGED")
         if check.reason == "VALID_REPLY":
-            body["msg_id"] = envelope.reply_context.platform_message_id
-            if envelope.target.surface != Surface.GUILD_CHANNEL:
+            if envelope.reply_context.source == "interaction":
+                body["event_id"] = envelope.reply_context.event_id
+            else:
+                body["msg_id"] = envelope.reply_context.platform_message_id
+            if envelope.target.surface not in {Surface.GUILD_CHANNEL, Surface.GUILD_PRIVATE}:
                 body["msg_seq"] = envelope.reply_context.msg_seq
         try:
             response = await self.client.post(
@@ -251,7 +361,15 @@ class OfficialAdapter:
         if response.status_code >= 500:
             return SendReceipt(state="UNKNOWN", error_code="SERVER_ERROR")
         if not response.is_success:
-            return SendReceipt(state="FAILED", error_code=f"HTTP_{response.status_code}")
+            # Preserve bounded platform business codes for operator reconciliation;
+            # do not guess that an application rejection is safe to retry.
+            try:
+                error = response.json().get("code")
+            except (ValueError, AttributeError):
+                error = None
+            code = str(error) if isinstance(error, (int, str)) else ""
+            return SendReceipt(state="FAILED", error_code=("QQ_" + code[:64]) if code else
+                               f"HTTP_{response.status_code}")
         try:
             message_id = response.json()["id"]
             return SendReceipt(state="SENT", platform_message_id=str(message_id))

@@ -87,6 +87,7 @@ class SocialService:
     def __init__(self, db, clock, *, permissions=None):
         self.db, self.clock = db, clock
         self.permissions = permissions or PermissionService()
+        self.external_rankings = {}
 
     def _access(self, access):
         self.permissions.require(access, "memory.read", "conversation:" + access.conversation.key)
@@ -337,7 +338,7 @@ class SocialService:
             self._bump(conn, access.conversation.key)
             return record
 
-    def retrieve(self, access, query: str = "", *, limit=8, embedding=None, model_id=None, version=None):
+    def accessible_records(self, access):
         now = self.clock.now()
         with self.db.engine.connect() as conn:
             raw = conn.execute(
@@ -363,6 +364,10 @@ class SocialService:
                 for source in r.source_event_ids
             )
         ]
+        return records
+
+    def retrieve(self, access, query: str = "", *, limit=8, embedding=None, model_id=None, version=None):
+        records = self.accessible_records(access)
         tokens = keywords(query)
         lexical = sorted(
             ((len(tokens & keywords(r.text)), r) for r in records), key=lambda item: item[0], reverse=True
@@ -386,7 +391,15 @@ class SocialService:
             )[:20]
         ranks = {}
         by_id = {}
-        for ranking in (lexical, vectors):
+        external = self.external_rankings.get((access.conversation.key, access.principal.key, query), {})
+        external_ids = external.get("ids", ()) if (
+            external.get("version") == self.version(access)
+            and external.get("policy") == self.permissions.policy_version
+            and external.get("expires_at", self.clock.now()) > self.clock.now()
+        ) else ()
+        by_record = {record.memory_id: record for record in records}
+        semantic = [by_record[key] for key in external_ids if key in by_record]
+        for ranking in (lexical, vectors, semantic):
             for rank, record in enumerate(ranking):
                 ranks[record.memory_id] = ranks.get(record.memory_id, 0) + 1 / (60 + rank + 1)
                 by_id[record.memory_id] = record

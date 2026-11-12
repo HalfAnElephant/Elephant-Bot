@@ -10,14 +10,19 @@ from qqbot.domain import DTO
 from qqbot.domain.execution import RunBudget
 from qqbot.domain.social import ParticipationSettings, SpeechThresholds
 from qqbot.expressions.config import ExpressionConfig
+from qqbot.memory.openviking_config import OpenVikingConfig
 from qqbot.permissions import PermissionPolicy
+from qqbot.skills.config import SkillsConfig
 
 
 class AdapterConfig(DTO):
     instance_id: str
+    enabled: bool = True
     kind: Literal["onebot", "official"]
     bot_id: str
-    secret_env: str
+    secret_env: str = ""
+    credential_ref: str | None = None
+    credential_store_dir: str | None = None
     app_id: str | None = None
     websocket_url: str | None = None
     allowed_groups: tuple[str, ...] = ()
@@ -27,6 +32,17 @@ class AdapterConfig(DTO):
     full_mode_enabled: bool = False
     full_mode_verified: bool = False
     proactive_verified: bool = False
+    markdown_enabled: bool = True
+    rich_messages_enabled: bool = True
+    streaming_enabled: bool = False
+    typing_enabled: bool = False
+    official_messages_per_minute: int = Field(default=20, ge=1, le=20)
+    official_bot_messages_per_minute: int = Field(default=30, ge=1, le=600)
+    official_messages_per_day: int = Field(default=1000, ge=1, le=1000)
+    c2c_reply_window_seconds: int | None = Field(default=None, ge=1, le=3600)
+    c2c_max_replies: int = Field(default=4, ge=1, le=4)
+    group_reply_window_seconds: int | None = Field(default=None, ge=1, le=300)
+    group_max_replies: int | None = Field(default=None, ge=1, le=5)
     reply_window_seconds: int = Field(default=300, ge=1, le=86400)
     max_replies: int = Field(default=5, ge=1, le=5)
     signature_max_age_seconds: int = Field(default=300, ge=1, le=86400)
@@ -34,6 +50,9 @@ class AdapterConfig(DTO):
     token_url: str = "https://api.bot.qq.com/app/getAppAccessToken"
 
     def secret(self) -> str:
+        if self.credential_ref:
+            from qqbot.adapters.qq_official.credential_store import load_credential
+            return load_credential(self.credential_store_dir, self.credential_ref, self.app_id)
         value = os.environ.get(self.secret_env, "")
         if not value:
             raise ValueError(f"Missing environment variable: {self.secret_env}")
@@ -43,6 +62,10 @@ class AdapterConfig(DTO):
     def valid(self):
         if self.kind == "official" and not self.app_id:
             raise ValueError("official adapter requires app_id")
+        if self.credential_ref and (self.kind != "official" or not self.credential_store_dir):
+            raise ValueError("credential reference requires official adapter and store directory")
+        if not self.secret_env and not self.credential_ref:
+            raise ValueError("adapter requires secret_env or credential_ref")
         if self.full_mode_verified and not self.full_mode_enabled:
             raise ValueError("full_mode_verified requires enabled permission")
         return self
@@ -66,6 +89,7 @@ class JudgeConfig(DTO):
 
 
 class MemoryConfig(DTO):
+    openviking: OpenVikingConfig = OpenVikingConfig()
     maintenance_enabled: bool = False
     auto_extract: bool = False
     extractor_endpoint: str | None = None
@@ -169,6 +193,7 @@ class Settings(DTO):
     persona_path: str = "personas/elephant_default.yaml"
     judge: JudgeConfig = JudgeConfig()
     memory: MemoryConfig = MemoryConfig()
+    skills: SkillsConfig = SkillsConfig()
     speak_up: SpeakUpConfig = SpeakUpConfig()
     expression: ExpressionConfig = ExpressionConfig()
     social_evaluated_conversations: tuple[str, ...] = ()

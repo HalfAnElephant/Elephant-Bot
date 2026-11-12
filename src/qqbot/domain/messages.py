@@ -4,7 +4,9 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .official import OfficialContent
 
 
 class DTO(BaseModel):
@@ -15,6 +17,7 @@ class Surface(StrEnum):
     PRIVATE = "private"
     GROUP = "group"
     GUILD_CHANNEL = "guild_channel"
+    GUILD_PRIVATE = "guild_private"
 
 
 class ObservationMode(StrEnum):
@@ -61,9 +64,12 @@ class MentionSegment(DTO):
 
 
 class MediaSegment(DTO):
-    type: Literal["image", "audio", "file"]
+    type: Literal["image", "audio", "video", "file"]
     attachment_ref: str
     image_url: str | None = Field(default=None, max_length=8192)
+    source_url: str | None = Field(default=None, max_length=8192)
+    filename: str | None = Field(default=None, max_length=255)
+    transcript: str | None = Field(default=None, max_length=10000)
     mime_type: str | None = None
     size: int | None = Field(default=None, ge=0)
     sha256: str | None = None
@@ -79,6 +85,19 @@ class ReplySegment(DTO):
     platform_message_id: str
 
 
+class StructuredSegment(DTO):
+    type: Literal["structured"] = "structured"
+    original_type: str = Field(max_length=100)
+    payload: dict
+
+    @field_validator("payload")
+    @classmethod
+    def bounded_payload(cls, value):
+        if len(json.dumps(value, ensure_ascii=False).encode()) > 65536:
+            raise ValueError("structured segment exceeds 64 KiB")
+        return value
+
+
 class UnknownSegment(DTO):
     type: Literal["unknown"] = "unknown"
     original_type: str
@@ -86,13 +105,14 @@ class UnknownSegment(DTO):
 
 
 Segment = Annotated[
-    TextSegment | MentionSegment | MediaSegment | FaceSegment | ReplySegment | UnknownSegment,
+    TextSegment | MentionSegment | MediaSegment | FaceSegment | ReplySegment | StructuredSegment | UnknownSegment,
     Field(discriminator="type"),
 ]
 
 
 class ReplyContext(DTO):
     platform_message_id: str
+    source: Literal["message", "interaction"] = "message"
     expires_at: datetime | None = None
     event_id: str | None = None
     max_replies: int = Field(default=5, ge=1)
@@ -140,6 +160,12 @@ class AdapterCapabilities(DTO):
     supports_mention: bool = False
     supports_images: bool = False
     supports_files: bool = False
+    supports_markdown: bool = False
+    supports_keyboard: bool = False
+    supports_audio: bool = False
+    supports_video: bool = False
+    supports_typing: bool = False
+    supports_streaming: bool = False
     supports_recall: bool = False
     supports_message_lookup: bool = False
     supports_history_fetch: bool = False
@@ -150,7 +176,9 @@ class AdapterCapabilities(DTO):
 class OutboundEnvelope(DTO):
     delivery_id: str
     target: ConversationRef
-    text: str = Field(min_length=1, max_length=10000)
+    text: str = Field(default="", max_length=10000)
+    content_format: Literal["text", "markdown"] = "text"
+    official_content: OfficialContent | None = None
     reply_context: ReplyContext | None = None
     origin_kind: Literal["chat", "command", "task"] = "chat"
     origin_id: str
@@ -167,6 +195,15 @@ class OutboundEnvelope(DTO):
     parent_task_id: str | None = None
     notification_sequence: int = 0
     purpose: Literal["progress", "question", "result", "status"] | None = None
+
+
+    @model_validator(mode="after")
+    def content_present(self):
+        if not self.text.strip() and not (self.official_content and (
+            self.official_content.media or self.official_content.template_markdown or self.official_content.card
+        )):
+            raise ValueError("empty message content")
+        return self
 
 
 class DeliveryCheck(DTO):

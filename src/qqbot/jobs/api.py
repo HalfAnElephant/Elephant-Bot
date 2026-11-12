@@ -1,7 +1,7 @@
 import asyncio
 import hmac
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from qqbot.domain.tasks import TaskResult
@@ -27,6 +27,44 @@ def internal_router(service, token):
     if len(token) < 32:
         raise ValueError("internal token must contain at least 32 characters")
     router = APIRouter(prefix="/internal/tasks")
+
+    @router.post("/qq-file-upload")
+    async def upload(request: Request, authorization: str = Header(default="")):
+        import base64
+        import json
+
+        if not hmac.compare_digest(authorization, "Bearer " + token):
+            raise HTTPException(401)
+        header = request.headers.get("x-qq-upload", "")
+        if not header or len(header) > 8192:
+            raise HTTPException(422, "invalid upload metadata")
+        try:
+            raw = base64.b64decode(header, altchars=b"-_", validate=True)
+            body = WorkerRequest.model_validate(json.loads(raw))
+            if not body.run_id or not body.fencing_token or body.payload is None:
+                raise ValueError("run identity required")
+            from qqbot.jobs.rich_delivery import LocalFileMessage, local_file_upload
+            metadata = LocalFileMessage.model_validate(body.payload)
+            if request.headers.get("content-length") != str(metadata.size):
+                raise ValueError("Content-Length must match file metadata")
+            if not hasattr(service, "qq_upload_slots"):
+                service.qq_upload_slots = asyncio.Semaphore(2)
+                service.qq_upload_runs = set()
+            if service.qq_upload_slots.locked() or body.run_id in service.qq_upload_runs:
+                raise HTTPException(429, "file upload already in progress; retry later")
+            service.qq_upload_runs.add(body.run_id)
+            try:
+                async with asyncio.timeout(600), service.qq_upload_slots:
+                    return await local_file_upload(service, (body.run_id, body.fencing_token, body.worker_id),
+                                                   body.payload, request.stream())
+            finally:
+                service.qq_upload_runs.discard(body.run_id)
+        except TimeoutError as error:
+            raise HTTPException(408, "file upload timed out") from error
+        except PermissionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (ValueError, TypeError) as error:
+            raise HTTPException(422, str(error)) from error
 
     @router.post("/{operation}")
     async def invoke(operation: str, body: WorkerRequest, authorization: str = Header(default="")):
@@ -54,6 +92,19 @@ def internal_router(service, token):
             if not body.run_id or not body.fencing_token:
                 raise ValueError("run identity required")
             args = (body.run_id, body.fencing_token, body.worker_id)
+            if operation == "skills" and body.payload:
+                from qqbot.skills import skill_operation
+                return skill_operation(service, args, body.payload)
+            if operation == "qq-file-send" and body.payload:
+                from qqbot.jobs.rich_delivery import local_file_send
+                return await local_file_send(service, args, body.payload)
+            if operation in {"qq-send", "qq-status", "qq-buttons"} and body.payload:
+                from qqbot.jobs.rich_delivery import rich_buttons, rich_send, rich_status
+                if operation == "qq-buttons":
+                    return rich_buttons(service, args, body.payload)
+                if operation == "qq-send":
+                    return await rich_send(service, args, body.payload)
+                return rich_status(service, args, body.payload)
             if operation == "ledger" and body.payload:
                 return await service.ledger(*args, body.payload)
             if operation == "input-ack" and body.payload:

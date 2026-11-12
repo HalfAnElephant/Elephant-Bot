@@ -170,6 +170,10 @@ class Worker:
                 "tool_execution_end": "tool_finished",
                 "source_retrieved": "source",
                 "host_error": "failed",
+                "public_answer_start": "public_answer_start",
+                "public_answer_delta": "public_answer_delta",
+                "public_answer_end": "public_answer_end",
+                "public_answer_final": "public_answer_final",
             }
             if original == "response":
                 if event.get("command") != "prompt":
@@ -180,6 +184,8 @@ class Worker:
             if not kind:
                 return
             payload = {"kind": kind, "pi_type": original}
+            if original.startswith("public_answer_"):
+                payload.update({key: event[key] for key in ("message_id", "text", "error") if key in event})
             for key in ("toolName", "toolCallId", "isError", "durationMs", "source"):
                 if key in event:
                     payload[key] = event[key]
@@ -294,6 +300,7 @@ class Worker:
             if inspect.isawaitable(harness):
                 harness = await harness
             harness.event_sink = self.event_sink(identity)
+            harness.public_event_sink = harness.event_sink if claim.get("public_answer_events") is True else None
             gateway = getattr(harness, "gateway", None) or getattr(harness, "research", None)
             if gateway:
                 gateway.event_sink = harness.event_sink
@@ -661,7 +668,7 @@ class GeneralRun(PiHarness):
         self.server = self.server_task = self.listener = None
         github = configured_github(args)
         gateway = RunGateway(workspace, args.model, os.environ.get("QQBOT_RUNNER_OPENAI_KEY", ""),
-            args.model_endpoint, call=self.gateway_call, capacity=capacity, github=github,
+            args.model_endpoint, call=self.gateway_call, upload=self.gateway_upload, capacity=capacity, github=github,
             github_host=getattr(args, "github_host", "github.com"),
             content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
             model_window=getattr(args, "model_context_window", 32768))
@@ -670,6 +677,18 @@ class GeneralRun(PiHarness):
     def prepare_workspace(self, workspace):
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         (workspace / "outputs").mkdir(exist_ok=True, mode=0o700)
+
+    async def gateway_upload(self, metadata, content):
+        import base64
+        header = base64.urlsafe_b64encode(json.dumps({
+            "worker_id": self.worker_id, "run_id": self.claim["run_id"],
+            "fencing_token": self.claim["fencing_token"], "payload": metadata},
+            ensure_ascii=True).encode()).decode()
+        response = await self.core_client.post("/internal/tasks/qq-file-upload", content=content,
+            headers={"Content-Type": "application/octet-stream", "Content-Length": str(metadata["size"]),
+                     "X-QQ-Upload": header}, timeout=600)
+        response.raise_for_status()
+        return response.json()
 
     async def gateway_call(self, operation, payload):
         response = await self.core_client.post("/internal/tasks/" + operation, json={
