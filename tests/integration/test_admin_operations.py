@@ -3,70 +3,55 @@ import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from qqbot.app import create_app
 from qqbot.config import Settings
-from qqbot.domain import AccessContext
+from qqbot.domain import AccessContext, InboundEvent
 from qqbot.storage.task_schema import tasks
 
 
-def test_social_mode_save_restart_and_timed_silence_without_replay_registration(
-    tmp_path, nap_config, nap_event, clock, monkeypatch
-):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
-    settings = Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,))
-    auth = {"Authorization": "Bearer admin-test-token"}
-    app = create_app(settings, clock=clock, run_background=False)
-    core = app.state.core
-    event = core.inbox.accept(core.adapters["nap"].normalize(nap_event))[0]
-    cid = event.conversation.key
-    url = "/api/v1/conversations/" + cid + "/policy"
-    with TestClient(app) as client:
-        body = {"expected_version": 1, "mode": "social"}
-        assert client.patch(url, json=body).status_code == 401
-        response = client.patch(url, headers=auth, json=body)
-        assert response.status_code == 200
-        assert response.json()["mode"] == "social" and response.json()["policy_version"] == 2
-        assert core.settings.social_evaluated_conversations == ()
-        assert client.patch(url, headers=auth, json=body).status_code == 409
-        assert client.patch(url, headers=auth, json={
-            "expected_version": 2, "mode": "unknown",
-        }).status_code == 422
-        assert core.state(cid)["mode"] == "social" and core.state(cid)["policy_version"] == 2
-
-    app = create_app(settings, clock=clock, run_background=False)
-    with TestClient(app) as client:
-        core = app.state.core
-        saved = next(row for row in client.get("/api/v1/conversations", headers=auth).json() if row["id"] == cid)
-        assert saved["policy"]["mode"] == "social" and saved["policy"]["policy_version"] == 2
-        silence = {"silent_until": clock.now().isoformat(), "silent_resume_mode": "social"}
-        core.save_state(cid, mode="silent", state_json=json.dumps(silence), expected_version=2)
-        core.restore_silences()
-        assert core.state(cid)["mode"] == "social" and core.state(cid)["policy_version"] == 4
-
-
-def test_social_mode_still_requires_full_observation(tmp_path, official_config, official_event, clock, monkeypatch):
+def test_conversation_policy_only_allows_addressed_or_silent(tmp_path, official_config, official_event, clock, monkeypatch):
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
-        clock=clock, run_background=False)
+                     clock=clock, run_background=False)
     core = app.state.core
     event = core.inbox.accept(core.adapters["qq"].normalize(official_event))[0]
+    cid = event.conversation.key
+    url = "/api/v1/conversations/" + cid + "/policy"
+    auth = {"Authorization": "Bearer admin-test-token"}
     with TestClient(app) as client:
-        response = client.patch("/api/v1/conversations/" + event.conversation.key + "/policy",
-            headers={"Authorization": "Bearer admin-test-token"}, json={"expected_version": 1, "mode": "social"})
-        assert response.status_code == 422 and "全量观察能力" in response.json()["detail"]
-        assert core.state(event.conversation.key)["mode"] == "addressed_only"
-        assert core.state(event.conversation.key)["policy_version"] == 1
+        assert client.patch(url, json={"expected_version": 1, "mode": "silent"}).status_code == 401
+        assert client.patch(url, headers=auth, json={"expected_version": 1, "mode": "social"}).status_code == 422
+        assert core.state(cid)["mode"] == "addressed_only"
+        response = client.patch(url, headers=auth, json={"expected_version": 1, "mode": "silent"})
+        assert response.status_code == 200
+        assert response.json()["mode"] == "silent" and response.json()["policy_version"] == 2
+        response = client.patch(url, headers=auth, json={"expected_version": 2, "mode": "addressed_only"})
+        assert response.status_code == 200
+        assert response.json()["mode"] == "addressed_only" and response.json()["policy_version"] == 3
+        assert client.patch(url, headers=auth, json={"expected_version": 3, "mode": "shadow"}).status_code == 422
+        assert core.state(cid)["mode"] == "addressed_only" and core.state(cid)["policy_version"] == 3
 
 
-def test_config_rollback_and_artifact_download_boundary(tmp_path, nap_config, nap_event, clock, monkeypatch):
+def test_config_rollback_and_artifact_download_boundary(tmp_path, official_config, official_event, clock, monkeypatch):
     monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
-    app = create_app(Settings(database=str(tmp_path/'core.db'), adapters=(nap_config,)), clock=clock, run_background=False)
+    settings = Settings(database=str(tmp_path/'core.db'), adapters=(official_config,), owner={
+        "qq_bindings": ({"app_id": official_config.app_id, "user_openid": "300",
+                         "verified_at": clock.now().isoformat()},),
+    })
+    app = create_app(settings, clock=clock, run_background=False)
     core = app.state.core
-    event = core.inbox.accept(core.adapters['nap'].normalize(nap_event))[0]
-    access = AccessContext(principal=event.principal, conversation=event.conversation, role='owner')
-    task = core.tasks.accept(event, access, 'download fixture')
+    event = core.inbox.accept(core.adapters['qq'].normalize(official_event))[0]
+    access = core.access(event)
+    with core.db.transaction() as c:
+        dialogue = core.sessions.dialogue(c, event)
+        task_view = core.tasks.graph.submit(c, dialogue, event, access, {
+            "goal": "download fixture", "success_checks": [], "requested_outputs": [],
+            "children": [{"mode": "work", "goal": "download fixture", "delegation_key": "primary",
+                          "success_checks": [], "requested_outputs": []}],
+        }, "artifact-download-test", core.sessions.binding(), {})
+        task = c.execute(select(tasks).where(tasks.c.public_id == task_view["public_id"])).mappings().one()
     core.tasks.archive_root.mkdir()
     content = b'verified report'
     artifact_id = str(uuid4())
@@ -85,11 +70,12 @@ def test_config_rollback_and_artifact_download_boundary(tmp_path, nap_config, na
         assert first['version'] in client.get('/api/v1/config/versions',headers=auth).json()
         original = client.get('/api/v1/config/versions/'+first['version'],headers=auth).json()
         restored = client.post('/api/v1/config/apply',headers=auth,json={'expected_version':response.json()['version'],'config':original})
-        assert restored.status_code == 200
+        assert restored.status_code == 200, restored.text
         assert core.settings.send_budget_per_minute == first['config']['send_budget_per_minute']
-        url = '/api/v1/artifacts/'+task['public_id']+'/'+digest+'/download'
+        url = '/api/v1/artifacts/'+task['id']+'/'+digest+'/download'
         assert client.get(url).status_code == 401
         assert client.get(url,headers=auth).content == content
+        assert client.get('/api/v1/artifacts/'+task['public_id']+'/'+digest+'/download', headers=auth).content == content
         assert client.get(url,headers=auth).headers["Content-Disposition"].endswith("report.md")
         result["artifacts"][0]["relative_path"] = "outputs/报告.pdf"
         with core.db.transaction() as c:
@@ -102,14 +88,14 @@ def test_config_rollback_and_artifact_download_boundary(tmp_path, nap_config, na
         assert client.get(url,headers=auth).status_code == 410
 
 
-def test_unknown_delivery_resolution_does_not_resend(tmp_path, nap_config, nap_event, clock, monkeypatch):
+def test_unknown_delivery_resolution_does_not_resend(tmp_path, official_config, official_event, clock, monkeypatch):
     from sqlalchemy import select
 
     from qqbot.storage.schema import outbox
     monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
-    app = create_app(Settings(database=str(tmp_path/'core.db'), adapters=(nap_config,)), clock=clock, run_background=False)
+    app = create_app(Settings(database=str(tmp_path/'core.db'), adapters=(official_config,)), clock=clock, run_background=False)
     core = app.state.core
-    event = core.inbox.accept(core.adapters['nap'].normalize(nap_event))[0]
+    event = core.inbox.accept(core.adapters['qq'].normalize(official_event))[0]
     with core.db.transaction() as c:
         delivery_id = core.outbox.enqueue_text(c,target=event.conversation,text='unknown receipt',origin_kind='chat',origin_id=event.event_id)[0]
         c.execute(update(outbox).where(outbox.c.id==delivery_id).values(state='UNKNOWN',attempts=1))
@@ -125,10 +111,10 @@ def test_unknown_delivery_resolution_does_not_resend(tmp_path, nap_config, nap_e
             assert row['attempts']==1 and row['state']=='SENT'
 
 
-def test_pi_model_change_requires_restart_without_partial_apply(tmp_path, nap_config, clock, monkeypatch):
+def test_pi_model_change_requires_restart_without_partial_apply(tmp_path, official_config, clock, monkeypatch):
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(
-        Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,)),
+        Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
         clock=clock,
         run_background=False,
     )
@@ -160,16 +146,114 @@ def test_pi_model_change_requires_restart_without_partial_apply(tmp_path, nap_co
         assert applied["config"]["model"] == first["config"]["model"]
 
 
-def test_confirmed_question_delivery_updates_wait_and_task_view(tmp_path, nap_config, nap_event, clock, monkeypatch):
+def test_admin_task_uses_host_owner_and_idempotency(tmp_path, clock, monkeypatch):
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    app = create_app(Settings(database=str(tmp_path / "core.db"), tasks_enabled=True),
+                     clock=clock, run_background=False)
+    auth = {"Authorization": "Bearer admin-test-token"}
+    with TestClient(app) as client:
+        created = client.post("/api/v1/tasks", headers={**auth, "Idempotency-Key": "console-task-1"},
+                              json={"goal": "Review the current project status"})
+        assert created.status_code == 200
+        task = created.json()
+        assert task["kind"] == "goal" and task["public_id"]
+        duplicate = client.post("/api/v1/tasks", headers={**auth, "Idempotency-Key": "console-task-1"},
+                                json={"goal": "Review the current project status"})
+        assert duplicate.status_code == 200 and duplicate.json()["public_id"] == task["public_id"]
+        with app.state.core.db.engine.connect() as conn:
+            row = conn.execute(select(tasks).where(tasks.c.public_id == task["public_id"])).mappings().one()
+        event = InboundEvent.model_validate_json(row["event_json"])
+        assert row["owner_id"] == app.state.core.settings.owner.id
+        assert event.conversation.adapter_instance_id == "admin_api"
+        assert client.get("/api/v1/tasks", headers=auth).json()[0]["public_id"] == task["public_id"]
+        assert client.post("/api/v1/tasks", headers={**auth, "Idempotency-Key": "console-task-2"},
+                           json={"conversation_id": "fake-qq", "goal": "Not accepted"}).status_code == 422
+
+
+def test_admin_can_read_and_cancel_owner_qq_task_by_id_or_public_id(
+    tmp_path, official_config, official_event, clock, monkeypatch,
+):
+    from sqlalchemy import select
+
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    settings = Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), owner={
+        "qq_bindings": ({"app_id": official_config.app_id, "user_openid": "300",
+                         "verified_at": clock.now().isoformat()},),
+    })
+    app = create_app(settings, clock=clock, run_background=False)
+    core = app.state.core
+    event = core.inbox.accept(core.adapters["qq"].normalize(official_event))[0]
+    access = core.access(event)
+    with core.db.transaction() as conn:
+        dialogue = core.sessions.dialogue(conn, event)
+        created = core.tasks.graph.submit(conn, dialogue, event, access, {
+            "goal": "owner QQ task", "success_checks": [], "requested_outputs": [],
+            "children": [{"mode": "work", "goal": "owner QQ task", "delegation_key": "primary",
+                          "success_checks": [], "requested_outputs": []}],
+        }, "owner-qq-task-test", core.sessions.binding(), {})
+        row = conn.execute(select(tasks).where(tasks.c.public_id == created["public_id"])).mappings().one()
+
+    auth = {"Authorization": "Bearer admin-test-token"}
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/tasks", headers=auth)
+        assert listed.status_code == 200
+        assert any(item["public_id"] == row["public_id"] for item in listed.json())
+        for task_ref in (row["id"], row["public_id"]):
+            response = client.get("/api/v1/tasks/" + task_ref, headers=auth)
+            assert response.status_code == 200
+            assert response.json()["task_id"] == row["id"]
+        cancelled = client.post("/api/v1/tasks/" + row["id"] + "/cancel", headers=auth)
+        assert cancelled.status_code == 200
+        assert cancelled.json()["state"] == "CANCELLED"
+
+
+def test_memory_restore_reconcile_is_authenticated_and_uses_private_owner_scope(
+    tmp_path, clock, monkeypatch,
+):
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    app = create_app(Settings(database=str(tmp_path / "core.db")), clock=clock, run_background=False)
+    core = app.state.core
+    seen = []
+
+    async def reconcile(scope):
+        seen.append(scope)
+        return {"state": "READY"}
+
+    monkeypatch.setattr(core.openviking, "reconcile_restore", reconcile)
+    original_check = core.permissions.check
+    checked = []
+
+    def check(subject, action, resource, *args, **kwargs):
+        if action == "memory.write":
+            checked.append((action, resource))
+        return original_check(subject, action, resource, *args, **kwargs)
+
+    monkeypatch.setattr(core.permissions, "check", check)
+    with TestClient(app) as client:
+        assert client.post("/api/v1/memory/reconcile").status_code == 401
+        response = client.post("/api/v1/memory/reconcile", headers={
+            "Authorization": "Bearer admin-test-token",
+        }, json={"owner_id": "another-owner", "audience": "group"})
+        assert response.status_code == 200 and response.json() == {"state": "READY"}
+
+    assert len(seen) == 1
+    assert seen[0].owner_id == core.settings.owner.id
+    assert seen[0].workspace_id == "personal" and seen[0].audience == "private"
+    assert checked == [("memory.write", "memory:" + seen[0].key)]
+
+
+def test_confirmed_question_delivery_updates_wait_without_exposing_non_owner_task(
+    tmp_path, official_config, official_event, clock, monkeypatch,
+):
     from sqlalchemy import select
 
     from qqbot.storage.schema import outbox
     from qqbot.storage.task_schema import waits
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
-    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,)),
+    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
         clock=clock, run_background=False)
     core = app.state.core
-    event = core.inbox.accept(core.adapters["nap"].normalize(nap_event))[0]
+    event = core.inbox.accept(core.adapters["qq"].normalize(official_event))[0]
     access = AccessContext(principal=event.principal, conversation=event.conversation)
     task = core.tasks.accept(event, access, "question")
     claim = core.tasks.claim("w")
@@ -180,8 +264,7 @@ def test_confirmed_question_delivery_updates_wait_and_task_view(tmp_path, nap_co
         c.execute(update(outbox).where(outbox.c.id == delivery_id).values(state="UNKNOWN"))
     auth = {"Authorization": "Bearer admin-test-token"}
     with TestClient(app) as client:
-        view = client.get("/api/v1/tasks/" + task["public_id"], headers=auth).json()
-        assert view["deliveries"] == [{"id": delivery_id, "state": "UNKNOWN"}]
+        assert client.get("/api/v1/tasks/" + task["public_id"], headers=auth).status_code == 404
         response = client.post("/api/v1/deliveries/" + delivery_id + "/resolve", headers=auth,
             json={"state": "SENT", "evidence": "Confirmed exact question", "platform_message_id": "confirmed-question"})
         assert response.status_code == 200

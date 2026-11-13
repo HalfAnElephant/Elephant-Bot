@@ -32,6 +32,8 @@ jobs:
   checks:
     needs: validate
     uses: ./.github/workflows/ci.yml
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
   publish:
     name: Publish GitHub Release

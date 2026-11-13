@@ -1,4 +1,4 @@
-"""Bounded process ownership; only committed quiescent runs return to the idle pool."""
+"""Process ownership with bounded idle caching; only committed quiescent runs return to the idle pool."""
 import asyncio
 import logging
 import time
@@ -15,8 +15,8 @@ class PoolAcquisitionError(RuntimeError):
 
 class SessionPool:
     def __init__(self, factory, *, max_resident=4, max_idle=2, ttl=300):
-        if not 0 <= max_idle <= max_resident or max_resident < 1:
-            raise ValueError("invalid resident/idle limits")
+        if max_idle < 0 or ttl < 1:
+            raise ValueError("invalid idle pool limits")
         self.factory, self.max_resident, self.max_idle, self.ttl = factory, max_resident, max_idle, ttl
         self.entries = {}
         self.lock = asyncio.Lock()
@@ -38,15 +38,15 @@ class SessionPool:
         return stopped
 
     async def acquire(self, claim):
-        key = claim.get("context", {}).get("key") or "task:" + claim["task_id"]
-        if claim.get("plan", {}).get("workspace_ref") or claim.get("delivery") == "DETACHED":
+        key = claim.get("session_id") or claim.get("context", {}).get("key") or "task:" + claim["task_id"]
+        if not claim.get("session_id") and (claim.get("plan", {}).get("workspace_ref") or claim.get("delivery") == "DETACHED"):
             key = "task:" + claim["task_id"]
         async with self.lock:
             limits = claim.get("context", {}).get("pool")
             if limits:
-                if not 0 <= limits["max_idle"] <= limits["max_resident"] <= 32 or limits["max_resident"] < 1 or limits["ttl"] < 1:
+                if limits["max_idle"] < 0 or limits["ttl"] < 1:
                     raise ValueError("invalid host pool limits")
-                self.max_resident, self.max_idle, self.ttl = limits["max_resident"], limits["max_idle"], limits["ttl"]
+                self.max_idle, self.ttl = limits["max_idle"], limits["ttl"]
             await self._sweep()
             for entry in list(self.entries.values()):
                 if entry["key"] == key and entry["state"] == "IDLE":
@@ -61,11 +61,7 @@ class SessionPool:
                         await self._evict(entry)
                         raise
                     return entry["runner"]
-            if len(self.entries) >= self.max_resident:
-                idle = sorted((e for e in self.entries.values() if e["state"] == "IDLE"), key=lambda e: e["used"])
-                if not idle or not await self._evict(idle[0]):
-                    raise RuntimeError("resident process capacity exhausted; active and unknown processes retained")
-            process_id, session_id = str(uuid4()), str(uuid4())
+            process_id, session_id = str(uuid4()), claim.get("session_id") or str(uuid4())
             runner = self.factory(claim, process_id, session_id)
             entry = {"id": process_id, "key": key, "state": "BUSY", "used": time.monotonic(), "runner": runner}
             self.entries[process_id] = entry
@@ -101,6 +97,14 @@ class SessionPool:
     async def sweep(self):
         async with self.lock:
             await self._sweep()
+
+    async def retire_sessions(self, session_ids):
+        """Stop obsolete idle sessions while their busy runs finish the stop protocol."""
+        async with self.lock:
+            for entry in list(self.entries.values()):
+                if entry["key"] in session_ids and entry["state"] != "BUSY":
+                    await self._evict(entry)
+            return not any(entry["key"] in session_ids for entry in self.entries.values())
 
     async def close(self):
         async with self.lock:

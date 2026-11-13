@@ -17,6 +17,11 @@ async def handle_callback(adapter, core, store, body, headers):
     if payload.get("t") != "INTERACTION_CREATE" or payload.get("op") != 0:
         return adapter.callback(body, headers)
     adapter.verify(body, headers.get("x-signature-timestamp", ""), headers.get("x-signature-ed25519", ""))
+    return await handle_verified_interaction(adapter, core, store, payload)
+
+
+async def handle_verified_interaction(adapter, core, store, payload):
+    """Dispatch only after Webhook signature or authenticated official socket verification."""
     event = parse_interaction(payload, deployment_id=adapter.deployment_id,
         instance_id=adapter.config.instance_id, app_id=adapter.config.app_id, bot_id=adapter.config.bot_id)
     event_id = payload.get("id")

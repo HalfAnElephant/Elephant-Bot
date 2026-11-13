@@ -1,6 +1,5 @@
 """Check the installed wheel while running from the extracted source bundle."""
 
-import json
 import os
 import tempfile
 from importlib.resources import files
@@ -10,21 +9,18 @@ from fastapi.testclient import TestClient
 
 from qqbot.app import create_app
 from qqbot.config import load_settings
-from qqbot.dialogue import PersonaStore, render_persona
 
 
 def main():
     package = files("qqbot")
     assert "site-packages" in str(package), "Smoke test must use the installed wheel"
-    for name in ("harness/pi_bridge.ts", "harness/research_extension.ts"):
+    for name in ("harness/pi_bridge.ts",):
         assert package.joinpath(name).is_file(), f"Wheel is missing {name}"
     for name in ("alembic.ini", "uv.lock", "package-lock.json", "deploy/qqbot.service"):
         assert Path(name).is_file(), f"Source bundle is missing {name}"
     assert os.access("scripts/pi-runner-launch", os.X_OK)
 
     settings = load_settings("configs/example.yaml")
-    persona, _ = PersonaStore(settings.persona_path).snapshot("release-smoke")
-    assert render_persona(json.loads(persona))
     with tempfile.TemporaryDirectory() as folder:
         settings = settings.model_copy(update={
             "database": str(Path(folder) / "core.db"),

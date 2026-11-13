@@ -1,6 +1,17 @@
 schema_version: 1
 inspected_on: '2026-11-10'
 references:
+  aurabot_leader_persona:
+    repository: https://github.com/aureth-labs/dsh-aurabot-qq
+    source_ref: main
+    inspected_on: '2026-11-13'
+    license: MIT
+    license_evidence: [THIRD_PARTY_NOTICES.md]
+    imported_files:
+      - source: personas/dafeiyu.md
+        destination: src/qqbot/runtime/persona.md
+        source_sha256: 70295531945326e1aa77fe26d01970124e3d011080cdadaa5e68f5f5f9c70f14
+        modifications: Bind an adapted dafeiyu persona to every Leader purpose; retain the bot name and host truth, permissions and Markdown delivery requirements.
   aurabot:
     repository: https://github.com/aureth-labs/dsh-aurabot-qq
     commit: 1057a861e4e96aa2fe050000d238280a7901b9dc
@@ -122,6 +133,15 @@ references:
     copied_paths: []
     use: protocol_implementation_no_source_copy
     license: not_established_no_root_LICENSE
+  hermes_skills:
+    repository: https://github.com/NousResearch/hermes-agent
+    commit: 67664e236ddcc45824b871d575677287599af152
+    license: MIT
+    license_evidence: [src/qqbot/adapters/hermes_skills/LICENSE.hermes]
+    imported_files_manifest: src/qqbot/adapters/hermes_skills/_vendor/SOURCES.json
+    use: adapted_native_skills_tools_batch_ledger_provenance_and_conditional_review
+    target: src/qqbot/adapters/hermes_skills
+    modifications: Owner ContextVar bindings, local imports, host execution and scheduling; no plugin loading, inline shell or automatic dependency installation.
 runtime:
   python: 3.13.9
   node_test_host: 26.12.1

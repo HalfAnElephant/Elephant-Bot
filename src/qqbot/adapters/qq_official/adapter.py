@@ -32,12 +32,15 @@ class OfficialAdapter:
     def __init__(self, config, deployment_id, inbox, clock, client=None, *, permissions=None):
         self.config, self.deployment_id, self.inbox, self.clock = config, deployment_id, inbox, clock
         self.permissions = permissions or PermissionService()
-        self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
+        self._owns_client = client is None
+        self.client = client if client is not None else httpx.AsyncClient(timeout=15, follow_redirects=False)
         self.token = None
         self.token_expires = clock.now()
         self.token_lock = asyncio.Lock()
         self.full_event_observed = False
         self.relationships = RelationshipStore(inbox.db, clock)
+        self.interaction_handler = None
+        self.gateway = None
 
     def key(self):
         secret = self.config.secret().encode()
@@ -46,9 +49,17 @@ class OfficialAdapter:
 
     async def start(self):
         self.key()
+        if self.config.transport == "websocket":
+            from .gateway import QQGateway
+            if self.gateway is None:
+                self.gateway = QQGateway(self)
+            await self.gateway.start()
 
     async def stop(self):
-        await self.client.aclose()
+        if self.gateway is not None:
+            await self.gateway.stop()
+        if self._owns_client:
+            await self.client.aclose()
 
     def verify(self, body: bytes, timestamp: str, signature: str):
         try:
@@ -72,13 +83,24 @@ class OfficialAdapter:
                 raise ValueError("challenge timestamp expired")
             return {"plain_token": token, "signature": self.key().sign((stamp + token).encode()).hex()}
         self.verify(body, headers.get("x-signature-timestamp", ""), headers.get("x-signature-ed25519", ""))
-        if payload.get("op") == 0:
-            if self.relationships.accept(payload, self):
-                return {"op": 12}
-            event = self.normalize(payload)
-            if event:
-                self.inbox.accept(event)
+        self._accept_event(payload)
         return {"op": 12}
+
+    def _accept_event(self, payload):
+        if payload.get("op") != 0 or self.relationships.accept(payload, self):
+            return
+        event = self.normalize(payload)
+        if event:
+            self.inbox.accept(event)
+
+    async def accept_payload(self, payload):
+        """Accept only payloads received through an authenticated transport."""
+        if payload.get("op") == 0 and payload.get("t") == "INTERACTION_CREATE":
+            if self.interaction_handler is None:
+                raise RuntimeError("interaction handler is unavailable")
+            await self.interaction_handler(payload)
+            return
+        self._accept_event(payload)
 
     def normalize(self, payload):
         kind, data = payload.get("t"), payload["d"]
@@ -193,7 +215,7 @@ class OfficialAdapter:
         ):
             return DeliveryCheck(allowed=False, reason="IDENTITY_MISMATCH")
         if not self.permissions.check(
-            PermissionSubject.from_refs(target), "notification.send", "conversation:" + target.key
+            PermissionSubject.from_refs(target, envelope.requester), "notification.send", "conversation:" + target.key
         ).allowed:
             return DeliveryCheck(allowed=False, reason="TARGET_DENIED")
         try:

@@ -15,12 +15,12 @@ from alembic.script import ScriptDirectory
 from qqbot.config import Settings, load_runtime_settings, load_settings
 
 
-def migrate(path: str):
+def migrate(path: str, *, backup=True):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
     target_revision = ScriptDirectory.from_config(cfg).get_current_head()
-    if Path(path).exists() and Path(path).stat().st_size:
+    if backup and Path(path).exists() and Path(path).stat().st_size:
         from datetime import UTC, datetime
         with sqlite3.connect(path) as source:
             try:
@@ -33,6 +33,8 @@ def migrate(path: str):
                 os.close(descriptor)
                 with sqlite3.connect(backup_path) as destination:
                     source.backup(destination)
+    from qqbot.storage.legacy_upgrade import bridge_experimental_0010
+    bridge_experimental_0010(path)
     command.upgrade(cfg, "head")
 
 

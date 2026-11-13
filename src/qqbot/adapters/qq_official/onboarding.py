@@ -31,6 +31,10 @@ class Session:
     secret: str | None = None
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False)
+    automatic: bool = False
+    scanner_openid: str | None = None
+    provisioned: bool = False
+    result: dict = field(default_factory=dict)
 
     def public(self):
         url = "https://q.qq.com/qqbot/openclaw/connect.html?" + urlencode(
@@ -39,19 +43,23 @@ class Session:
                 "app_id": self.app_id, "error": self.error, "replace_app_id": self.replace_app_id,
                 "connect_url": url if self.state == "waiting" else None,
                 "expires_in": max(0, int(self.expires - time.monotonic())),
-                "restart_required": self.state == "saved"}
+                "restart_required": self.state == "saved" and not self.automatic,
+                "automatic": self.automatic, "provisioned": self.provisioned,
+                **{key: self.result[key] for key in ("saved_version", "saved", "activated", "connection", "owner_bound")
+                   if key in self.result}}
 
     def clear(self):
-        self.key, self.secret, self.task_id = b"", None, ""
+        self.key, self.secret, self.task_id, self.scanner_openid = b"", None, "", None
 
 
 class Onboarding:
-    def __init__(self, *, client=None, timeout=300, interval=2, now=time.monotonic):
+    def __init__(self, *, client=None, timeout=300, interval=2, now=time.monotonic, on_ready=None):
         self.client = client or httpx.AsyncClient(timeout=10, follow_redirects=False)
         self.owns_client = client is None
         self.timeout, self.interval, self.now = timeout, interval, now
         self.sessions = {}
         self.lock = asyncio.Lock()
+        self.on_ready = on_ready
 
     async def _post(self, path, payload):
         response = await self.client.post("https://q.qq.com/lite/" + path, json=payload,
@@ -68,7 +76,7 @@ class Onboarding:
         return result["data"]
 
     def _expire(self, session):
-        if self.now() >= session.expires and session.state not in {"saved", "cancelled", "expired", "failed"}:
+        if not session.provisioned and self.now() >= session.expires and session.state not in {"saved", "cancelled", "expired", "failed"}:
             session.state = "timed_out"
             session.clear()
             if session.task and session.task is not asyncio.current_task():
@@ -81,7 +89,7 @@ class Onboarding:
         self._expire(session)
         return session
 
-    async def create(self, owner, instance_id):
+    async def create(self, owner, instance_id, *, automatic=False):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", instance_id):
             raise ValueError("invalid adapter instance ID")
         async with self.lock:
@@ -89,12 +97,13 @@ class Onboarding:
                 self._expire(old)
                 if self.now() > old.expires + 300:
                     del self.sessions[key]
-            active = [s for s in self.sessions.values() if s.state in {"creating", "waiting", "ready", "validating"}]
+            active = [s for s in self.sessions.values() if s.state in {"creating", "waiting", "ready", "validating", "connecting"}]
             if len(self.sessions) >= 128 or len(active) >= 8:
                 raise ValueError("too many onboarding sessions")
             if any(s.instance_id == instance_id for s in active):
                 raise ValueError("adapter already has an onboarding session")
             session = Session(uuid4().hex, owner, instance_id, self.now(), self.now() + self.timeout)
+            session.automatic = automatic
             session.key = os.urandom(32)
             self.sessions[session.id] = session
             session.task = asyncio.create_task(self._run(session))
@@ -131,9 +140,18 @@ class Onboarding:
                     secret = AESGCM(session.key).decrypt(raw[:12], raw[12:], None).decode()
                     if not 1 <= len(secret) <= 4096 or any(ord(c) < 32 for c in secret):
                         raise ValueError("invalid credential")
-                    # Scanner OpenID does not grant administrator rights and is not retained.
+                    # Owner binding requires the administrator's explicit automatic setup request.
                     session.app_id, session.secret, session.state = app_id, secret, "ready"
                     session.key, session.task_id = b"", ""
+                    if session.automatic:
+                        scanner = data.get("user_openid")
+                        if not isinstance(scanner, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", scanner):
+                            raise ValueError("official scanner identity unavailable")
+                        session.scanner_openid = scanner
+                        if self.on_ready is None:
+                            raise ValueError("automatic provisioning unavailable")
+                        await self.on_ready(session)
+                        return
                     await asyncio.sleep(max(0, session.expires - self.now()))
                     self._expire(session)
                     return
@@ -152,7 +170,7 @@ class Onboarding:
     async def cancel(self, session_id, owner):
         async with self.lock:
             session = self.get(session_id, owner)
-            if session.state == "saved":
+            if session.provisioned or session.state == "saved":
                 raise ValueError("saved credentials cannot be cancelled; remove adapter separately")
             session.state = "cancelled"
             session.clear()

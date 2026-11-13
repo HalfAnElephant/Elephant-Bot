@@ -6,9 +6,8 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import select
 
-from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import ConversationRef, OutboundEnvelope, ReplyContext, SendReceipt, Surface
+from qqbot.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
 from qqbot.domain.official import OfficialContent, TemplateMarkdown
 from qqbot.outbox.service import Outbox
 from qqbot.storage.schema import outbox
@@ -49,29 +48,6 @@ async def test_keyboard_json_survives_restart_and_outbox_dispatch(db, clock, off
         assert c.execute(select(outbox.c.state).where(outbox.c.id == ident)).scalar_one() == "SENT"
 
 
-async def test_offline_onebot_stays_pending_then_sends(db, clock, nap_config, incoming):
-    adapter = OneBotAdapter(nap_config, "d", incoming, clock)
-    service = Outbox(db, clock)
-    with db.transaction() as c:
-        ident = service.enqueue(c, message(clock, instance="nap", bot="100"))
-    await service.dispatch_once({"nap": adapter})
-    with db.engine.connect() as c:
-        assert c.execute(select(outbox.c.state).where(outbox.c.id == ident)).scalar_one() == "PENDING"
-    adapter.websocket = object()
-    adapter.account_online = True
-    calls = []
-
-    async def send(envelope):
-        calls.append(envelope)
-        return SendReceipt(state="SENT", platform_message_id="sent")
-
-    adapter.send = send
-    await service.dispatch_once({"nap": adapter})
-    assert len(calls) == 1
-    with db.engine.connect() as c:
-        assert c.execute(select(outbox.c.state).where(outbox.c.id == ident)).scalar_one() == "SENT"
-
-
 async def test_template_obeys_markdown_flag(clock, official_config, incoming):
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as client:
         adapter = OfficialAdapter(official_config.model_copy(update={"markdown_enabled": False}),
@@ -79,15 +55,6 @@ async def test_template_obeys_markdown_flag(clock, official_config, incoming):
         result = await adapter.validate_delivery(message(clock,
             official_content=OfficialContent(template_markdown=TemplateMarkdown(template_id="tpl"))))
     assert not result.allowed and result.reason == "MARKDOWN_DISABLED"
-
-
-async def test_onebot_does_not_silently_drop_official_payload(clock, nap_config, incoming):
-    adapter = OneBotAdapter(nap_config, "d", incoming, clock)
-    adapter.websocket = object()
-    adapter.account_online = True
-    result = await adapter.validate_delivery(message(clock, instance="nap", bot="100",
-        official_content=OfficialContent(template_markdown=TemplateMarkdown(template_id="tpl"))))
-    assert not result.allowed and result.reason == "UNSUPPORTED_RICH_CONTENT"
 
 
 async def test_signed_callback_ack_recovery_and_outer_reply_id(tmp_path, clock, official_config, monkeypatch):

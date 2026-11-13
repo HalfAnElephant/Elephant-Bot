@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from qqbot.cli import migrate
 from qqbot.clock import FakeClock
-from qqbot.config import Settings
+from qqbot.config import Settings, load_runtime_settings
 from qqbot.domain import ConversationRef, InboundEvent, PrincipalRef, Surface
 from qqbot.storage.db import Database
 
@@ -24,6 +24,15 @@ def test_namespaces_and_strict_config():
         InboundEvent(event_id="1", event_type="message.created", conversation=a,
                      principal=PrincipalRef(adapter_instance_id="b", identity_namespace="qq", remote_user_id="u"),
                      platform_message_id="m", occurred_at=datetime(2026, 1, 1), received_at=clock.now(), trace_id="t")
+
+
+def test_saved_onebot_configuration_fails_with_migration_error(tmp_path):
+    settings = Settings(database=str(tmp_path / "core.db"))
+    (tmp_path / "runtime-config.json").write_text(
+        '{"adapters":[{"instance_id":"legacy","kind":"onebot","bot_id":"100","secret_env":"TOKEN"}]}'
+    )
+    with pytest.raises(ValidationError, match="OneBot/NapCat configuration was removed"):
+        load_runtime_settings(settings)
 
 
 def test_migration_and_clock(tmp_path):

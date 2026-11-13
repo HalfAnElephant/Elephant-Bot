@@ -1,10 +1,12 @@
 """Export only regular, single-link files through descriptor-relative opens."""
 
 import hashlib
+import json
 import os
 import stat
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 DEFAULT_ARTIFACT_MIME_TYPES = {
     ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json",
@@ -15,6 +17,16 @@ DEFAULT_ARTIFACT_MIME_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
+
+
+def artifact_path(relative, *, mime_types=None):
+    path = PurePosixPath(relative)
+    if len(str(path)) > 512 or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError("artifact path must be a relative workspace file of at most 512 characters")
+    mime_type = (DEFAULT_ARTIFACT_MIME_TYPES if mime_types is None else mime_types).get(path.suffix.lower())
+    if not isinstance(mime_type, str) or not mime_type:
+        raise ValueError("unsupported artifact type: " + str(path))
+    return path, mime_type
 
 
 def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, mime_types=None):
@@ -33,12 +45,7 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
     total = 0
     try:
         for relative in paths:
-            path = PurePosixPath(relative)
-            if path.is_absolute() or ".." in path.parts or not path.parts:
-                raise ValueError("artifact path must stay in workspace")
-            mime_type = mime_types.get(path.suffix.lower())
-            if not isinstance(mime_type, str) or not mime_type:
-                raise ValueError("unsupported artifact type")
+            path, mime_type = artifact_path(relative, mime_types=mime_types)
             directory = os.dup(root)
             try:
                 for component in path.parts[:-1]:
@@ -98,3 +105,59 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
         os.close(root)
         os.close(archive_fd)
     return exported
+
+
+def cleanup_artifacts(db, archive, now):
+    """Expire old exports while preserving live task trees and pending result evidence."""
+    from sqlalchemy import select
+
+    from qqbot.jobs.service import TERMINAL
+    from qqbot.storage.task_schema import runs, tasks
+
+    try:
+        directory = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return 0
+    cutoff = now - timedelta(days=30)
+    removed = 0
+    try:
+        # Keep the reference snapshot valid until deletion, including concurrent finalizers.
+        with db.transaction() as conn:
+            task_rows = conn.execute(select(tasks.c.id, tasks.c.root_task_id, tasks.c.state,
+                tasks.c.created_at, tasks.c.result_json)).mappings().all()
+            run_rows = conn.execute(select(runs.c.task_id, runs.c.slot_reserved, runs.c.result_json)).mappings().all()
+            resident = {row["task_id"] for row in run_rows if row["slot_reserved"] and row["task_id"]}
+            active = {row["id"] for row in task_rows if row["state"] not in TERMINAL} | resident
+            active.update(row["root_task_id"] for row in task_rows if row["id"] in active and row["root_task_id"])
+            has_active = bool(active) or any(row["slot_reserved"] for row in run_rows)
+            protected, referenced = set(), set()
+            keep = {row["id"] for row in task_rows if row["id"] in active
+                    or row["root_task_id"] in active or datetime.fromisoformat(row["created_at"]) >= cutoff}
+            for row in [*task_rows, *run_rows]:
+                result = json.loads(row["result_json"] or "{}")
+                ids = {item["id"] for item in result.get("artifacts", [])}
+                referenced.update(ids)
+                task_id = row["task_id"] if "task_id" in row else row["id"]
+                if task_id in keep:
+                    protected.update(ids)
+            for name in os.listdir(directory):
+                try:
+                    if str(UUID(name)) != name or name in protected:
+                        continue
+                except ValueError:
+                    continue
+                # shortcut: orphan exports await idle tasks; index spool references if traffic prevents cleanup.
+                if has_active and name not in referenced:
+                    continue
+                try:
+                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or info.st_mtime >= cutoff.timestamp()):
+                        continue
+                    os.unlink(name, dir_fd=directory)
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+    finally:
+        os.close(directory)
+    return removed

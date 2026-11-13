@@ -103,14 +103,14 @@ def test_invalid_policy_boundary(kwargs):
         rule("invalid", **kwargs)
 
 
-def test_http_permission_crud_keeps_authentication(tmp_path, nap_config, clock, monkeypatch):
+def test_http_permission_crud_keeps_authentication(tmp_path, official_config, clock, monkeypatch):
     from fastapi.testclient import TestClient
 
     from qqbot.app import create_app
     from qqbot.config import Settings
 
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
-    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(nap_config,)),
+    app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
                      clock=clock, run_background=False)
     auth = {"Authorization": "Bearer admin-test-token"}
     with TestClient(app) as client:
@@ -127,34 +127,86 @@ def test_http_permission_crud_keeps_authentication(tmp_path, nap_config, clock, 
         assert client.delete("/api/v1/permissions/blocked?expected_version=1", headers=auth).status_code == 200
 
 
-async def test_adapter_default_ignores_legacy_allowlists_but_keeps_platform_checks(
-    nap_config, official_config, incoming, clock, nap_event, official_event
+async def test_official_adapter_ignores_legacy_allowlists_but_keeps_platform_checks(
+    official_config, incoming, clock, official_event
 ):
-    from qqbot.adapters.onebot_v11.adapter import OneBotAdapter
     from qqbot.adapters.qq_official.adapter import OfficialAdapter
     from qqbot.domain import OutboundEnvelope
 
-    for adapter, raw in (
-        (OneBotAdapter(nap_config.model_copy(update={"allowed_groups": ()}), "d", incoming, clock), nap_event),
-        (OfficialAdapter(official_config.model_copy(update={"allowed_groups": ()}), "d", incoming, clock), official_event),
-    ):
-        event = adapter.normalize(raw)
-        if isinstance(adapter, OneBotAdapter):
-            adapter.websocket, adapter.account_online = object(), True
+    adapter = OfficialAdapter(official_config.model_copy(update={"allowed_groups": ()}), "d", incoming, clock)
+    event = adapter.normalize(official_event)
+    outgoing = OutboundEnvelope(
+        delivery_id="permission-test", target=event.conversation, text="hello",
+        origin_kind="chat", origin_id=event.event_id, expires_at=clock.now() + timedelta(seconds=300),
+        reply_context=event.reply_context.model_copy(update={"msg_seq": 1}),
+    )
+    assert (await adapter.validate_delivery(outgoing)).allowed
+    adapter.permissions = PermissionService(policy=PermissionPolicy(rules=(
+        rule("notification-deny", actions=("notification.send",)),
+    )))
+    assert (await adapter.validate_delivery(outgoing)).reason == "TARGET_DENIED"
+    wrong = outgoing.model_copy(update={"target": outgoing.target.model_copy(update={"bot_identity_id": "other"})})
+    assert (await adapter.validate_delivery(wrong)).reason == "IDENTITY_MISMATCH"
+    await adapter.stop()
+
+
+@pytest.mark.parametrize("private", [True, False])
+async def test_scanned_owner_reply_keeps_identity_through_durable_delivery(
+    private, official_config, incoming, clock, official_event, db,
+):
+    from types import SimpleNamespace
+
+    import httpx
+    from conftest import official_payload
+
+    from qqbot.adapters.qq_official.adapter import OfficialAdapter
+    from qqbot.admin.qq_provisioning import _owner_policy
+    from qqbot.domain import OutboundEnvelope
+    from qqbot.outbox.service import Outbox
+    from qqbot.storage.schema import outbox
+
+    policy = _owner_policy(PermissionPolicy(), SimpleNamespace(
+        instance_id=official_config.instance_id, app_id=official_config.app_id, scanner_openid="300",
+    ), official_config.bot_id)
+    permissions = PermissionService(db, clock)
+    permissions.set_policy(policy, expected_version=0, actor="test")
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "test-token", "expires_in": 7200})
+        return httpx.Response(200, json={"id": "reply-sent"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = OfficialAdapter(official_config, "d", incoming, clock, client, permissions=permissions)
+        event = adapter.normalize(official_payload(official_event, private=private, user_id="300"))
         outgoing = OutboundEnvelope(
-            delivery_id="permission-test", target=event.conversation, text="hello",
+            delivery_id="owner-reply", target=event.conversation, requester=event.principal, text="hello",
             origin_kind="chat", origin_id=event.event_id, expires_at=clock.now() + timedelta(seconds=300),
-            reply_context=event.reply_context.model_copy(update={"msg_seq": 1}),
+            reply_context=event.reply_context,
         )
-        assert (await adapter.validate_delivery(outgoing)).allowed
-        adapter.permissions = PermissionService(policy=PermissionPolicy(rules=(
-            rule("notification-deny", actions=("notification.send",)),
-        )))
+        queue = Outbox(db, clock)
+        with db.transaction() as conn:
+            queue.enqueue(conn, outgoing)
+        await queue.dispatch_once({official_config.instance_id: adapter})
+        with db.engine.connect() as conn:
+            row = conn.execute(select(outbox)).mappings().one()
+        assert row["state"] == "SENT"
+        assert row["platform_message_id"] == "reply-sent"
+        assert OutboundEnvelope.model_validate_json(row["envelope_json"]).requester == event.principal
+        assert len([call for call in calls if call.url.path.endswith("/messages")]) == 1
+
+        outgoing = outgoing.model_copy(update={"reply_context": event.reply_context.model_copy(update={"msg_seq": 1})})
+        for requester in (
+            None,
+            event.principal.model_copy(update={"remote_user_id": "outsider"}),
+            event.principal.model_copy(update={"identity_namespace": "qq_app:other"}),
+        ):
+            assert (await adapter.validate_delivery(outgoing.model_copy(update={"requester": requester}))).reason == "TARGET_DENIED"
+        permissions.delete("qq-owner:" + official_config.instance_id + ":allow",
+            expected_version=permissions.policy_version, actor="test")
         assert (await adapter.validate_delivery(outgoing)).reason == "TARGET_DENIED"
-        wrong = outgoing.model_copy(update={"target": outgoing.target.model_copy(update={"bot_identity_id": "other"})})
-        assert (await adapter.validate_delivery(wrong)).reason == "IDENTITY_MISMATCH"
-        if isinstance(adapter, OfficialAdapter):
-            await adapter.stop()
 
 
 def test_unknown_action_restrictions_are_subject_scoped():

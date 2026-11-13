@@ -1,12 +1,10 @@
 """Independent HTTP-only supervisor. No database handle is imported here."""
 
-import argparse
 import asyncio
 import inspect
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
 import time
@@ -29,8 +27,6 @@ from qqbot.harness.launcher import (
 )
 from qqbot.harness.pi import MAX_EVENT, PiHarness, compaction_settings
 from qqbot.harness.pool import PoolAcquisitionError, SessionPool
-from qqbot.harness.research import ResearchCapabilities
-from qqbot.providers import ModelCapacity
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +82,10 @@ class Worker:
         self.pool = pool
         self.replay_lock = asyncio.Lock()
         self.event_lock = asyncio.Lock()
+        self.shutting_down = False
+
+    def begin_shutdown(self):
+        self.shutting_down = True
 
     async def call(self, operation, **payload):
         response = await self.client.post(
@@ -221,6 +221,8 @@ class Worker:
                 await self.call("renew", **identity)
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 409:
+                    logger.warning("Lease ownership lost during runner stop or result delivery run_id=%s; preserving recovery evidence",
+                                   identity["run_id"])
                     return
                 logger.exception("Lease heartbeat failed run_id=%s", identity["run_id"])
             except httpx.TransportError:
@@ -282,10 +284,13 @@ class Worker:
                                  self.worker_id, getattr(harness, "process_id", None))
         return harness.stopped_verified
 
-    async def once(self):
-        async with self.replay_lock:
-            await self.replay()
-        claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
+    async def once(self, claim=None):
+        if self.shutting_down:
+            return False
+        if claim is None:
+            async with self.replay_lock:
+                await self.replay()
+            claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
         if not claim:
             return False
         identity = {key: claim[key] for key in ("run_id", "fencing_token")}
@@ -294,14 +299,14 @@ class Worker:
         harness = execution = path = None
         committed = False
         heartbeat = None
-        last_renewed = last_reminder = time.monotonic()
+        last_renewed = time.monotonic()
         try:
             harness = await self.pool.acquire(claim) if use_pool else self.harness_factory(claim)
             if inspect.isawaitable(harness):
                 harness = await harness
             harness.event_sink = self.event_sink(identity)
             harness.public_event_sink = harness.event_sink if claim.get("public_answer_events") is True else None
-            gateway = getattr(harness, "gateway", None) or getattr(harness, "research", None)
+            gateway = getattr(harness, "gateway", None)
             if gateway:
                 gateway.event_sink = harness.event_sink
             harness.event_sink({"type": "host_accepted"})
@@ -317,12 +322,13 @@ class Worker:
                 if execution.done():
                     break
                 if getattr(harness, "gateway", None):
-                    harness.gateway.provider.background = lease.get("delivery") == "DETACHED"
+                    harness.gateway.provider.background = claim.get("role", "worker") != "leader"
                     if "budget" in lease:
                         harness.gateway.tools.max_calls = lease["budget"].get("tool_calls", 60)
                     deadline = getattr(harness, "run_timeout", None)
                     if "active_seconds_remaining" in lease and deadline is not None:
-                        deadline.reschedule(asyncio.get_running_loop().time() + lease["active_seconds_remaining"])
+                        deadline.reschedule(None if lease["active_seconds_remaining"] is None else
+                            asyncio.get_running_loop().time() + lease["active_seconds_remaining"])
                 if hasattr(harness, "renewed"):
                     harness.renewed()
                 if lease["state"] != "RUNNING":
@@ -339,11 +345,6 @@ class Worker:
                     return committed
                 await self.flush_events(claim["run_id"])
                 if getattr(harness, "gateway", None) and not harness.gateway.waiting and getattr(harness, "accepting_input", True):
-                    if lease.get("notification_due") and time.monotonic() - last_reminder >= 90:
-                        await harness.append_input("silence:" + str(int(time.monotonic())),
-                            "较长时间没有已送达的反馈。若有重要的新事实或阻塞，请自然告知用户；没有新信息不重复心跳。",
-                            host_notice=True)
-                        last_reminder = time.monotonic()
                     for extra in await self.call("inputs", **identity):
                         try:
                             if extra.get("images"):
@@ -363,13 +364,14 @@ class Worker:
             if gateway:
                 result["evidence"] = gateway.evidence
                 paths = list(gateway.artifacts)
-                if result["status"] == "completed":
+                if result["status"] == "completed" and claim.get("role", "worker") == "worker":
                     paths.extend(claim.get("goal_spec", {}).get("requested_outputs", []))
                 result["artifacts"] = export_artifacts(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
             if not harness.stopped_verified and not getattr(harness, "quiescent_verified", False):
                 raise RuntimeError("runner returned without verified stop or quiescence")
             payload = {**identity, "result": result, "stopped": harness.stopped_verified,
-                       "quiescent": getattr(harness, "quiescent_verified", False)}
+                       "quiescent": getattr(harness, "quiescent_verified", False),
+                       "receipt": getattr(harness, "last_receipt", None)}
             if hasattr(harness, "process_identity"):
                 payload["process"] = harness.process_identity()
             path = await self.save_result(payload)
@@ -377,6 +379,10 @@ class Worker:
             committed = await self.deliver_result(payload, path)
             return committed
         except asyncio.CancelledError:
+            if self.shutting_down:
+                # The next daemon recovers the original run from durable evidence.
+                await self.stop_execution(harness, execution)
+                raise
             if heartbeat is None:
                 heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             stopped = await self.stop_execution(harness, execution)
@@ -439,198 +445,6 @@ class Worker:
                     await asyncio.gather(heartbeat, return_exceptions=True)
 
 
-class ResearchRun(PiHarness):
-    def __init__(self, args, claim, client):
-        self.core_client, self.claim, self.worker_id = client, claim, args.worker_id
-        self.lease_until = time.monotonic() + 25
-        workspace = Path(args.workspace) / claim["run_id"]
-        self.research_capabilities = ResearchCapabilities(
-            workspace,
-            args.model,
-            os.environ.get("QQBOT_RUNNER_OPENAI_KEY", ""),
-            upstream=getattr(args, "model_endpoint", "https://api.openai.com/v1/chat/completions"),
-            active=lambda: time.monotonic() < self.lease_until,
-            authority=self.authority,
-        )
-        self.server = None
-        self.server_task = None
-        self.listener = None
-        self.archive = Path(args.archive)
-        super().__init__(
-            args.pi,
-            workspace,
-            provider="qqbot",
-            model=args.model,
-            research=self.research_capabilities,
-            timeout=1800,
-            session_id=claim["session_id"],
-        )
-
-    async def authority(self):
-        try:
-            response = await self.core_client.post(
-                "/internal/tasks/renew",
-                json={
-                    "worker_id": self.worker_id,
-                    "run_id": self.claim["run_id"],
-                    "fencing_token": self.claim["fencing_token"],
-                },
-            )
-            response.raise_for_status()
-            if response.json()["state"] != "RUNNING":
-                return False
-            self.renewed()
-            return True
-        except (httpx.HTTPError, ValueError):
-            return False
-
-    def renewed(self):
-        self.lease_until = time.monotonic() + 25
-
-    async def start(self):
-        self.listener = socket.socket()
-        self.bind_listener()
-        self.listener.listen(16)
-        self.research_url = f"http://{self.listener.getsockname()[0]}:{self.listener.getsockname()[1]}"
-        self.server = CapabilityServer(
-            uvicorn.Config(self.research.app, log_level="warning", access_log=False)
-        )
-        self.server_task = asyncio.create_task(self.server.serve(sockets=[self.listener]))
-        for _ in range(100):
-            if self.server.started:
-                break
-            if self.server_task.done():
-                await self.server_task
-            await asyncio.sleep(0.01)
-        if not self.server.started:
-            raise RuntimeError("research capability service failed to start")
-        await self.start_runner()
-
-    def bind_listener(self):
-        self.listener.bind(("127.0.0.1", 0))
-
-    async def start_runner(self):
-        await PiHarness.start(self)
-
-    async def stop_runner(self):
-        return await PiHarness.stop(self)
-
-    async def stop(self):
-        stopped = await self.stop_runner()
-        if self.server:
-            self.server.should_exit = True
-        if self.server_task:
-            try:
-                await asyncio.wait_for(asyncio.shield(self.server_task), 2)
-            except TimeoutError:
-                self.server_task.cancel()
-                await asyncio.gather(self.server_task, return_exceptions=True)
-        if self.listener:
-            self.listener.close()
-        return stopped
-
-
-class SystemdResearchRun(ResearchRun):
-    """Production path is gated on a root-owned, target-verified Linux policy."""
-
-    def __init__(self, args, claim, client):
-        self.policy = production_policy()
-        if Path(args.pi).resolve() != Path("/opt/qqbot/node_modules/.bin/pi").resolve(strict=True):
-            raise ValueError("production Pi runtime path is fixed")
-        if Path(args.workspace).resolve() != WORKSPACES:
-            raise ValueError("production workspace root is fixed")
-        if claim["profile"] != "pi_research" or claim["session_id"] != claim["run_id"]:
-            raise ValueError("unsupported production run identity")
-        super().__init__(args, claim, client)
-        self.manifest_path = None
-
-    def bind_listener(self):
-        for port in range(self.policy["proxy_port_min"], self.policy["proxy_port_max"] + 1):
-            try:
-                self.listener.bind((self.policy["proxy_host"], port))
-                return
-            except OSError:
-                continue
-        raise RuntimeError("no available approved proxy port")
-
-    async def start_runner(self):
-        manifest = {
-            "schema_version": 1,
-            "task_id": self.claim["task_id"],
-            "run_id": self.claim["run_id"],
-            "session_id": self.claim["session_id"],
-            "profile": "pi_research",
-            "model": self.model,
-            "proxy_url": self.research_url,
-            "model_token": self.research.model_token,
-            "tool_token": self.research.tool_token,
-            "expires_at": self.claim["deadline"],
-        }
-        validate_manifest(manifest, self.claim["task_id"], self.claim["run_id"], self.policy)
-        MANIFESTS.mkdir(parents=True, mode=0o700, exist_ok=True)
-        self.manifest_path = MANIFESTS / (self.claim["run_id"] + ".json")
-        with self.manifest_path.open("x") as output:
-            os.chmod(self.manifest_path, 0o600)
-            json.dump(manifest, output)
-            output.flush()
-            os.fsync(output.fileno())
-        self.process = await asyncio.create_subprocess_exec(
-            "/usr/bin/sudo",
-            "-n",
-            LAUNCHER,
-            "start",
-            self.claim["task_id"],
-            self.claim["run_id"],
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=MAX_EVENT + 1,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-            start_new_session=True,
-        )
-        self.readers = [asyncio.create_task(self._stdout()), asyncio.create_task(self._stderr())]
-
-    async def stop_runner(self):
-        self.research.revoke()
-        if not self.process and not self.manifest_path:
-            self.stopped_verified = True
-            return True
-        if self.process and self.process.returncode is None:
-            for operation in ("clear_queue", "abort"):
-                try:
-                    await asyncio.wait_for(self.command(operation), 1)
-                except (OSError, RuntimeError, TimeoutError):
-                    pass
-        if not verify_stop_marker(self.claim["task_id"], self.claim["run_id"]):
-            stop = await asyncio.create_subprocess_exec(
-                "/usr/bin/sudo",
-                "-n",
-                LAUNCHER,
-                "stop",
-                self.claim["task_id"],
-                self.claim["run_id"],
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-            )
-            try:
-                await asyncio.wait_for(stop.wait(), 25)
-            except TimeoutError:
-                self.stopped_verified = False
-                return False
-        if self.process:
-            try:
-                await asyncio.wait_for(self.process.wait(), 5)
-            except TimeoutError:
-                self.stopped_verified = False
-                return False
-        for reader in self.readers:
-            reader.cancel()
-        await asyncio.gather(*self.readers, return_exceptions=True)
-        self.stopped_verified = verify_stop_marker(self.claim["task_id"], self.claim["run_id"])
-        return self.stopped_verified
-
-
 def configured_github(args):
     from qqbot.capabilities.github import GitHubCLI
     host = getattr(args, "github_host", "github.com")
@@ -662,12 +476,12 @@ class GeneralRun(PiHarness):
         self.args, self.claim, self.core_client = args, claim, client
         self.worker_id, self.process_id, self.session_id = args.worker_id, process_id, session_id
         self.process_epoch, self.registered = 1, False
-        workspace = Path(args.workspace) / process_id
+        workspace = Path(args.workspace) / session_id
         self.prepare_workspace(workspace)
         self.archive = Path(args.archive)
         self.server = self.server_task = self.listener = None
         github = configured_github(args)
-        gateway = RunGateway(workspace, args.model, os.environ.get("QQBOT_RUNNER_OPENAI_KEY", ""),
+        gateway = RunGateway(workspace, args.model, os.environ.get(getattr(args, "model_key_env", "QQBOT_RUNNER_OPENAI_KEY"), ""),
             args.model_endpoint, call=self.gateway_call, upload=self.gateway_upload, capacity=capacity, github=github,
             github_host=getattr(args, "github_host", "github.com"),
             content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
@@ -704,19 +518,15 @@ class GeneralRun(PiHarness):
         if not claim.get("repository") and getattr(self.args, "repository", None):
             claim["repository"] = self.args.repository
         bindings = dict(value.split("=", 1) for value in getattr(self.args, "workspace_binding", []))
-        reference = claim.get("plan", {}).get("workspace_ref")
-        if reference:
-            if reference not in bindings:
-                raise ValueError("workspace reference has no configured binding")
-            execution_workspace = Path(bindings[reference]).resolve(strict=True)
-        else:
-            execution_workspace = Path(getattr(self.args, "spool", str(Path(self.args.archive).parent / "spool"))).parent / "workspaces" / claim["task_id"]
-            execution_workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from qqbot.adapters.execution.world import execution_workspace as resolve_workspace
+        data_root = Path(getattr(self.args, "spool", str(Path(self.args.archive).parent / "spool"))).parent
+        execution_workspace = resolve_workspace(data_root, claim["task_id"],
+            claim.get("plan", {}).get("workspace_ref"), bindings, create=True)
         (execution_workspace / "outputs").mkdir(exist_ok=True, mode=0o700)
         self.gateway.workspace = execution_workspace
         self.gateway.bind(claim)
         self.timeout = claim.get("active_seconds_remaining", claim.get("plan", {}).get("budget", {}).get("active_seconds", 1800))
-        if self.timeout <= 0:
+        if self.timeout is not None and self.timeout <= 0:
             raise ValueError("task active execution budget exhausted")
         await self.gateway_call("bind-process", {"process_id": self.process_id, "session_id": self.session_id,
             "epoch": self.process_epoch, "generation": self.gateway.generation,
@@ -819,7 +629,7 @@ class SystemdGeneralRun(GeneralRun):
 
     async def start_runner(self):
         from datetime import UTC, datetime, timedelta
-        output = max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output)
+        output = max(self.gateway.provider.output_tokens or 0, self.gateway.provider.compaction_output)
         compaction = compaction_settings(self.gateway.model_window, self.claim.get("context", {}).get("limits", {}), output)
         manifest = {"schema_version": 2, "task_id": self.launch_task_id, "run_id": self.claim["run_id"],
             "session_id": self.session_id, "process_id": self.process_id, "process_epoch": self.process_epoch,
@@ -875,84 +685,3 @@ class SystemdGeneralRun(GeneralRun):
         await asyncio.gather(*self.readers, return_exceptions=True)
         self.stopped_verified = verify_stop_marker(self.launch_task_id, self.process_id)
         return self.stopped_verified
-
-
-async def main_async(args):
-    loop = asyncio.get_running_loop()
-    task = asyncio.current_task()
-    loop.add_signal_handler(signal.SIGTERM, task.cancel)
-    if args.runner_mode == "systemd":
-        production_policy()
-    token = Path(args.token_file).read_text().strip()
-    transport = httpx.AsyncHTTPTransport(uds=args.socket)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://core", headers={"Authorization": "Bearer " + token}, timeout=5
-    ) as client:
-        capacity = ModelCapacity(args.concurrency, 1)
-        if args.runner_mode == "systemd":
-            factory = lambda claim, process_id, session_id: SystemdGeneralRun(args, claim, client, process_id, session_id, capacity)
-        else:
-            factory = lambda claim, process_id, session_id: GeneralRun(args, claim, client, process_id, session_id, capacity)
-        pool = SessionPool(factory, max_resident=args.concurrency, max_idle=args.max_idle, ttl=args.idle_ttl)
-        legacy = lambda claim: (SystemdResearchRun if args.runner_mode == "systemd" else ResearchRun)(args, claim, client)
-        worker = Worker(client, args.worker_id, Spool(args.spool), legacy, pool=pool)
-        from qqbot.capabilities.gateway import standard_registry
-        from qqbot.jobs.waiters import ExternalWaiters
-        async def waiter_call(operation, payload):
-            return await worker.call(operation, payload=payload)
-        waiter = asyncio.create_task(ExternalWaiters(waiter_call, standard_registry(github=configured_github(args))).run())
-        active = set()
-        try:
-            while True:
-                if waiter.done():
-                    await waiter
-                    raise RuntimeError("external waiter stopped unexpectedly")
-                finished = {task for task in active if task.done()}
-                for finished_task in finished:
-                    try:
-                        finished_task.result()
-                    except Exception:
-                        logger.exception("Worker iteration failed worker_id=%s task=%s", args.worker_id, finished_task.get_name())
-                active -= finished
-                if len(active) < args.concurrency:
-                    active.add(asyncio.create_task(worker.once()))
-                await pool.sweep()
-                await asyncio.sleep(0.15)
-        finally:
-            waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
-            for running in active:
-                running.cancel()
-            await asyncio.gather(*active, return_exceptions=True)
-            await pool.close()
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--socket", required=True)
-    parser.add_argument("--token-file", required=True)
-    parser.add_argument("--pi", required=True)
-    parser.add_argument("--workspace", required=True)
-    parser.add_argument("--spool", required=True)
-    parser.add_argument("--archive", required=True)
-    parser.add_argument("--runner-mode", choices=["local", "systemd"], default="local")
-    parser.add_argument("--worker-id", default="local-worker")
-    parser.add_argument("--repository")
-    parser.add_argument("--github-host", default="github.com")
-    parser.add_argument("--workspace-binding", action="append", default=[])
-    parser.add_argument("--gh", default="gh")
-    parser.add_argument("--github-token-env", default="QQBOT_GITHUB_TOKEN")
-    parser.add_argument("--concurrency", type=int, default=4)
-    parser.add_argument("--max-idle", type=int, default=2)
-    parser.add_argument("--idle-ttl", type=int, default=300)
-    parser.add_argument("--model-context-window", type=int, default=32768)
-    parser.add_argument("--model", default="gpt-4o-mini")
-    parser.add_argument("--model-endpoint", default="https://api.openai.com/v1/chat/completions")
-    try:
-        asyncio.run(main_async(parser.parse_args()))
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-
-
-if __name__ == "__main__":
-    main()

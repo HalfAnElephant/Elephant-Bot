@@ -103,15 +103,17 @@ def main():
             outside = range(max(1024, policy["proxy_port_min"] - 100), policy["proxy_port_min"])
         forbidden, forbidden_port = bind_port(policy["proxy_host"], outside)
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "task_id": task_id,
             "run_id": run_id,
             "session_id": run_id,
-            "profile": "pi_research",
+            "profile": "pi",
+            "process_id": run_id, "process_epoch": 1,
+            "model_context_window": 32768, "output_tokens": 4096,
+            "soft_input_tokens": 6000, "keep_recent_tokens": 2000,
             "model": policy["approved_models"][0],
             "proxy_url": f"http://{policy['proxy_host']}:{approved_port}",
-            "model_token": "a" * 43,
-            "tool_token": "b" * 43,
+            "process_token": "a" * 43,
             "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat(),
         }
         atomic_root_json(manifest_path, manifest)

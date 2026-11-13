@@ -237,6 +237,7 @@ class Outbox:
                 continue
             adapter = adapters.get(envelope.target.adapter_instance_id)
             if adapter is None:
+                self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED"))
                 continue
             if pre_send and not pre_send(envelope):
                 self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="STALE_CONTEXT"))

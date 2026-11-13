@@ -1,5 +1,4 @@
 import json
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -15,9 +14,7 @@ from qqbot.config import Settings
 def console_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "console-admin-secret")
     monkeypatch.setenv("QQBOT_MODEL_KEY", "console-model-secret")
-    persona = tmp_path / "persona.yaml"
-    shutil.copy("personas/elephant_default.yaml", persona)
-    return Settings(database=str(tmp_path / "core.db"), persona_path=str(persona))
+    return Settings(database=str(tmp_path / "core.db"))
 
 
 AUTH = {"Authorization": "Bearer console-admin-secret"}
@@ -53,6 +50,12 @@ def test_legacy_hot_update_does_not_mask_startup_edits(console_settings, clock):
         assert config["timezone"] == "UTC" and config["send_budget_per_minute"] == 3
 
 
+def test_owner_preferences_are_bounded_to_4000_characters():
+    assert len(Settings(owner={"preferences": "x" * 4000}).owner.preferences) == 4000
+    with pytest.raises(ValueError):
+        Settings(owner={"preferences": "x" * 4001})
+
+
 def test_console_config_schema_auth_and_secret_status(console_settings, clock):
     with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
         for method, path in (
@@ -62,8 +65,6 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
             ("POST", "/api/v1/config/validate"),
             ("POST", "/api/v1/config/apply"),
             ("GET", "/api/v1/config/versions"),
-            ("GET", "/api/v1/persona"),
-            ("PUT", "/api/v1/persona"),
             ("GET", "/api/v1/permissions/schema"),
             ("PUT", "/api/v1/permissions"),
         ):
@@ -82,6 +83,11 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
         schema = client.get("/api/v1/config/schema", headers=AUTH).json()
         assert set(schema["properties"]) == set(Settings.model_fields)
         assert schema["$defs"]["ExecutionConfig"]["properties"]["notify_before_tools"]["default"] is True
+        assert schema["$defs"]["OwnerConfig"]["properties"]["preferences"]["maxLength"] == 4000
+        assert {"persona_path", "judge", "expression", "speak_up", "social_evaluated_conversations"}.isdisjoint(schema["properties"])
+        for path in ("/api/v1/persona", "/api/v1/memories?conversation_id=old", "/api/v1/expressions?conversation_id=old"):
+            assert client.get(path, headers=AUTH).status_code == 404
+        assert client.put("/api/v1/persona", headers=AUTH, json={}).status_code == 404
 
 
 def test_save_all_settings_restart_and_restore_history(console_settings, tmp_path, clock):
@@ -91,11 +97,12 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
         candidate = {
             **first["config"],
             "timezone": "UTC",
-            "speak_up": {**first["config"]["speak_up"], "enabled": False, "idle_minutes": 55},
+            "owner": {**first["config"]["owner"], "preferences": "请用中文简洁回答。"},
             "tasks_enabled": True,
             "execution": {**first["config"]["execution"], "max_active": 5, "notify_before_tools": False},
             "context": {**first["config"]["context"], "recent_messages": 20},
-            "memory": {**first["config"]["memory"], "raw_retention_days": 45},
+            "memory": {**first["config"]["memory"], "openviking": {
+                **first["config"]["memory"]["openviking"], "max_query_chars": 5000}},
             "model": {**first["config"]["model"], "model": "console-model"},
         }
         body = {"expected_version": first["saved_version"], "config": candidate}
@@ -107,7 +114,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
         pending = client.get("/api/v1/config", headers=AUTH).json()
         assert pending["config"] == first["config"] and pending["saved_config"] == candidate
         assert pending["restart_required"] is True
-        assert set(pending["changed_fields"]) == {"timezone", "speak_up", "tasks_enabled", "execution", "context", "memory", "model"}
+        assert set(pending["changed_fields"]) == {"timezone", "owner", "tasks_enabled", "execution", "context", "memory", "model"}
         assert client.post("/api/v1/config/save", headers=AUTH, json=body).status_code == 409
         assert client.post("/api/v1/config/apply", headers=AUTH, json={
             "expected_version": first["version"],
@@ -138,7 +145,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
 def test_invalid_config_and_concurrent_save_do_not_overwrite(console_settings, tmp_path, clock):
     with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
         first = client.get("/api/v1/config", headers=AUTH).json()
-        invalid = {**first["config"], "execution": {**first["config"]["execution"], "max_active": 1}}
+        invalid = {**first["config"], "execution": {**first["config"]["execution"], "max_active": -1}}
         for path in ("validate", "save", "apply"):
             response = client.post("/api/v1/config/" + path, headers=AUTH, json={
                 "expected_version": first["version"], "config": invalid,
@@ -217,53 +224,6 @@ def test_failed_config_replace_preserves_saved_and_active_configuration(console_
             assert (tmp_path / "runtime-config.json").read_bytes() == original_file
 
 
-def test_general_llm_judge_config_save_and_restart(console_settings, clock):
-    from qqbot.config import ModelConfig
-    from qqbot.policy.judge import RuleOnlyJudge, StructuredLLMJudge
-
-    settings = console_settings.model_copy(update={"model": ModelConfig(
-        endpoint="https://example.invalid/v1/chat/completions", model="chat-model",
-    )})
-    app = create_app(settings, clock=clock, run_background=False)
-    with TestClient(app) as client:
-        schema = client.get("/api/v1/config/schema", headers=AUTH).json()
-        assert "structured" in schema["$defs"]["JudgeConfig"]["properties"]["kind"]["enum"]
-        first = client.get("/api/v1/config", headers=AUTH).json()
-        model = first["config"]["model"]
-        judge = {
-            **first["config"]["judge"], "kind": "structured",
-            **{key: model[key] for key in ("endpoint", "model", "api_key_env")},
-            "thresholds": {**first["config"]["judge"]["thresholds"], "useful_contribution": 0.6},
-        }
-        response = client.post("/api/v1/config/save", headers=AUTH, json={
-            "expected_version": first["saved_version"], "config": {**first["config"], "judge": judge},
-        })
-        assert response.status_code == 200 and response.json()["restart_required"] is True
-        assert isinstance(app.state.core.judge, RuleOnlyJudge)
-
-    app = create_app(settings, clock=clock, run_background=False)
-    with TestClient(app) as client:
-        data = client.get("/api/v1/config", headers=AUTH).json()
-        assert data["config"]["judge"] == judge and data["restart_required"] is False
-        provider = app.state.core.judge
-        assert isinstance(provider, StructuredLLMJudge)
-        assert app.state.core.settings.judge.thresholds.useful_contribution == 0.6
-        assert (provider.model, provider.endpoint, provider.key) == (
-            model["model"], model["endpoint"], "console-model-secret",
-        )
-
-
-def test_jev1_provider_selected(console_settings, clock):
-    from qqbot.policy.judge import Jev1Judge
-
-    settings = console_settings.model_copy(update={"judge": console_settings.judge.model_copy(update={
-        "kind": "jev", "model": "jev1", "endpoint": "https://example.invalid/v1/chat/completions",
-    })})
-    app = create_app(settings, clock=clock, run_background=False)
-    with TestClient(app):
-        assert isinstance(app.state.core.judge, Jev1Judge)
-
-
 def test_model_metadata_hot_apply_when_execution_disabled(console_settings, clock):
     settings = console_settings.model_copy(update={"interactive_execution_enabled": False})
     with TestClient(create_app(settings, clock=clock, run_background=False)) as client:
@@ -276,51 +236,6 @@ def test_model_metadata_hot_apply_when_execution_disabled(console_settings, cloc
         assert client.get("/api/v1/config", headers=AUTH).json()["config"] == candidate
 
 
-def test_global_persona_hot_save_persistence_and_source_switch(console_settings, tmp_path, clock):
-    source = Path(console_settings.persona_path)
-    original_bytes = source.read_bytes()
-    app = create_app(console_settings, clock=clock, run_background=False)
-    with TestClient(app) as client:
-        first = client.get("/api/v1/persona", headers=AUTH).json()
-        assert "identity" in first["schema"]["properties"]
-        candidate = {**first["persona"], "name": "控制台小象"}
-        body = {"expected_version": first["version"], "persona": candidate}
-        response = client.put("/api/v1/persona", headers=AUTH, json=body)
-        assert response.status_code == 200 and response.json()["persona"] == candidate
-        assert json.loads(app.state.core.personas.snapshot("group")[0])["core"] == candidate
-        assert client.put("/api/v1/persona", headers=AUTH, json=body).status_code == 409
-        assert source.read_bytes() == original_bytes
-        assert (tmp_path / "persona-global.json").stat().st_mode & 0o777 == 0o600
-    with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
-        assert client.get("/api/v1/persona", headers=AUTH).json()["persona"] == candidate
-    other = tmp_path / "other-persona.yaml"
-    other.write_bytes(original_bytes)
-    switched = console_settings.model_copy(update={"persona_path": str(other)})
-    with TestClient(create_app(switched, clock=clock, run_background=False)) as client:
-        assert client.get("/api/v1/persona", headers=AUTH).json()["persona"] == first["persona"]
-
-
-def test_persona_write_failure_and_invalid_input_preserve_active_value(console_settings, tmp_path, clock, monkeypatch):
-    app = create_app(console_settings, clock=clock, run_background=False)
-    with TestClient(app, raise_server_exceptions=False) as client:
-        first = client.get("/api/v1/persona", headers=AUTH).json()
-        invalid = {**first["persona"], "version": 0}
-        assert client.put("/api/v1/persona", headers=AUTH, json={
-            "expected_version": first["version"], "persona": invalid,
-        }).status_code == 422
-
-        def fail_write(*args, **kwargs):
-            raise OSError("fixture disk full")
-
-        monkeypatch.setattr("qqbot.configuration.atomic_write", fail_write)
-        response = client.put("/api/v1/persona", headers=AUTH, json={
-            "expected_version": first["version"], "persona": {**first["persona"], "name": "Not committed"},
-        })
-        assert response.status_code == 500
-        assert client.get("/api/v1/persona", headers=AUTH).json() == first
-        assert not (tmp_path / "persona-global.json").exists()
-
-
 def test_permission_policy_edit_persists_and_rejects_lockout(console_settings, clock):
     with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
         schema = client.get("/api/v1/permissions/schema", headers=AUTH)
@@ -329,7 +244,7 @@ def test_permission_policy_edit_persists_and_rejects_lockout(console_settings, c
         policy = {
             "preset": "custom", "default_effect": "allow",
             "rules": [{"id": "deny-member-task", "effect": "deny", "actions": ["task.*"],
-                       "subject": {"kind": "person", "adapter_instance_id": "nap",
+                       "subject": {"kind": "person", "adapter_instance_id": "qq",
                                    "identity_namespace": "qq", "user_id": "42"}}],
         }
         body = {"expected_version": first["policy_version"], "policy": policy}

@@ -36,7 +36,7 @@ class Evidence(DTO):
 
 class TaskResult(DTO):
     agent_authored: bool = True
-    status: Literal["completed", "partial", "blocked", "failed", "waiting_input", "waiting_external"]
+    status: Literal["completed", "partial", "blocked", "failed", "waiting_input", "waiting_external", "waiting_children"]
     summary: str = Field(min_length=1, max_length=10000)
     artifacts: tuple[Artifact, ...] = Field(default=(), strict=False)
     evidence: tuple[Evidence, ...] = Field(default=(), strict=False)

@@ -163,3 +163,27 @@ def test_stderr_diagnostics_are_bounded_and_redacted(tmp_path):
     assert "PermissionError" in summary and "RPC closed" in summary
     assert "secret-upstream-key-123456" not in summary
     assert "[REDACTED]" in summary
+
+
+@pytest.mark.parametrize("hook", ["before_provider_request", "agent_settled"])
+async def test_extension_errors_stop_runner_with_redacted_diagnostic(tmp_path, hook):
+    fake = tmp_path / "fake-pi"
+    fake.write_text("""#!/usr/bin/env python3
+import sys,json
+for line in sys.stdin:
+ c=json.loads(line)
+ if c['type']=='prompt':
+  print(json.dumps({'type':'extension_error','event':HOOK,
+   'error':'Settled session has unpaired tools secret-upstream-key-123456'}),flush=True)
+ else: break
+""".replace("HOOK", repr(hook)))
+    fake.chmod(0o700)
+    harness = PiHarness(fake, tmp_path / "work", timeout=8, api_key="secret-upstream-key-123456")
+    events = []
+    harness.event_sink = events.append
+    with pytest.raises(RuntimeError, match="pi extension " + hook + ": Settled session has unpaired tools") as error:
+        await harness.run("hello")
+    assert "secret-upstream-key-123456" not in str(error.value)
+    assert "[REDACTED]" in str(error.value)
+    assert any(event["type"] == "host_error" and "[REDACTED]" in event["error"] for event in events)
+    assert harness.stopped_verified

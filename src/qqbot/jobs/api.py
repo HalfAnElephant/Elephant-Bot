@@ -21,6 +21,7 @@ class WorkerRequest(BaseModel):
     event_id: str | None = Field(default=None, max_length=128)
     seq: int | None = Field(default=None, ge=1)
     payload: dict | None = None
+    receipt: dict | None = None
 
 
 def internal_router(service, token):
@@ -107,6 +108,8 @@ def internal_router(service, token):
                 return rich_status(service, args, body.payload)
             if operation == "ledger" and body.payload:
                 return await service.ledger(*args, body.payload)
+            if operation == "session-receipt" and body.payload:
+                return service.session_receipt(*args, body.payload)
             if operation == "input-ack" and body.payload:
                 return service.acknowledge_input(*args, body.payload)
             if operation == "extend-budget" and body.payload:
@@ -134,7 +137,7 @@ def internal_router(service, token):
             if operation == "stopped":
                 return service.stopped(*args)
             if operation == "result" and body.result:
-                return service.submit(*args, body.result.model_dump(), stopped=body.stopped, quiescent=body.quiescent, process=body.process)
+                return service.submit(*args, body.result.model_dump(), stopped=body.stopped, quiescent=body.quiescent, process=body.process, receipt=body.receipt)
             raise ValueError("unsupported operation")
         except PermissionError as error:
             raise HTTPException(409, str(error)) from error

@@ -551,3 +551,30 @@ async def test_sse_disconnect_does_not_cancel_usage_commit(body):
         await source.aclose()
     assert len(committed) == 1 and committed[0]["raw"] == usage
     assert fixture.adapter.active == 0
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_unlimited_output_omits_client_token_limits_upstream(body, streaming):
+    fixture = ProviderFixture()
+    if streaming:
+        fixture.responder = lambda request: httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text="data: [DONE]\n\n")
+    response = await fixture.adapter.complete({**body, "max_tokens": 4096,
+        "max_completion_tokens": 4096, "stream": streaming})
+    if streaming:
+        async for _ in response.body_iterator:
+            pass
+    assert "max_tokens" not in fixture.requests[0]
+    assert "max_completion_tokens" not in fixture.requests[0]
+
+
+def test_unlimited_output_is_default_and_old_explicit_limits_remain_readable():
+    from qqbot.config import Settings
+    from qqbot.domain.execution import ExecutionPlan
+
+    settings = Settings()
+    assert settings.execution.interactive_budget.output_tokens_per_call is None
+    assert settings.execution.budget.output_tokens_per_call is None
+    settings.context.limits(settings.model.context_window, None)
+    old_plan = ExecutionPlan.model_validate_json('{"budget":{"output_tokens_per_call":4096}}')
+    assert old_plan.budget.output_tokens_per_call == 4096

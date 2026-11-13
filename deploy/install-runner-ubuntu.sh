@@ -38,7 +38,6 @@ install -o root -g root -m 0755 scripts/pi-runner-launch /usr/local/libexec/pi-r
 install -o root -g root -m 0755 scripts/pi-runner-entry /opt/qqbot/bin/pi-runner-entry
 install -o root -g root -m 0755 scripts/pi-isolation-probe /opt/qqbot/bin/pi-isolation-probe
 install -o root -g root -m 0755 scripts/pi-isolation-check /usr/local/libexec/pi-isolation-check
-install -o root -g root -m 0444 src/qqbot/harness/research_extension.ts /opt/qqbot/research_extension.ts
 install -o root -g root -m 0444 src/qqbot/harness/pi_bridge.ts /opt/qqbot/pi_bridge.ts
 install -o root -g root -m 0644 deploy/runner-policy.json /etc/qqbot/runner-policy.json
 runner_sudoers_tmp=$(mktemp /etc/sudoers.d/.qqbot-runner.XXXXXX)

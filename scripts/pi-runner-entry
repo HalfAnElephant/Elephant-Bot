@@ -13,12 +13,12 @@ task_id, run_id = sys.argv[1:]
 if any(str(UUID(value)) != value for value in (task_id, run_id)):
     raise SystemExit("canonical UUID required")
 manifest = json.loads(Path("/run/qqbot/manifest.json").read_text())
-general = manifest.get("schema_version") == 2
+if manifest.get("schema_version") != 2:
+    raise SystemExit("legacy research launches are retired")
+general = True
 identity_key = "process_id" if general else "run_id"
 if manifest["task_id"] != task_id or manifest[identity_key] != run_id:
     raise SystemExit("launch identity mismatch")
-if not general and manifest["session_id"] != run_id:
-    raise SystemExit("legacy session identity mismatch")
 session_id = manifest["session_id"]
 if str(UUID(session_id)) != session_id:
     raise SystemExit("canonical session UUID required")
@@ -52,7 +52,7 @@ config = {
         "qqbot": {
             "baseUrl": manifest["proxy_url"] + "/v1",
             "api": "openai-completions",
-            "apiKey": "binding-required" if general else manifest["model_token"],
+            "apiKey": "binding-required",
             "models": [
                 {
                     "id": manifest["model"],
@@ -79,10 +79,7 @@ env = {
     "PI_OFFLINE": "1",
     "PI_TELEMETRY": "0",
 }
-if general:
-    env.update(QQBOT_GATEWAY_URL=manifest["proxy_url"], QQBOT_PROCESS_TOKEN=manifest["process_token"])
-else:
-    env.update(QQBOT_RESEARCH_URL=manifest["proxy_url"], QQBOT_TOOL_TOKEN=manifest["tool_token"])
+env.update(QQBOT_GATEWAY_URL=manifest["proxy_url"], QQBOT_PROCESS_TOKEN=manifest["process_token"])
 argv = [
     "/usr/bin/node",
     "/opt/qqbot/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -97,7 +94,7 @@ argv = [
     "--no-extensions",
     "--no-builtin-tools",
     "--extension",
-    "/opt/qqbot/pi_bridge.ts" if general else "/opt/qqbot/research_extension.ts",
+    "/opt/qqbot/pi_bridge.ts",
     "--no-mcp",
     "--no-skills",
     "--no-prompt-templates",

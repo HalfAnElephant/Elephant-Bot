@@ -15,7 +15,7 @@
       <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">e.</span><span>ELEPHANT BOT</span></div>
       <p class="eyebrow">YOUR BOT. YOUR WAY.</p>
       <h1>让小象，<br>按你的方式工作。</h1>
-      <p>从接入到表达，从记忆到权限。<br>每一项设置，都在掌握之中。</p>
+      <p>从个人偏好到任务与权限。<br>每一项设置，都在掌握之中。</p>
       <div class="login-features"><span>集中配置</span><span>变更预览</span><span>版本恢复</span></div>
     </div>
     <div class="login-card">
@@ -40,14 +40,10 @@
       <nav aria-label="管理页面">
         <p class="sidebar-label">机器人设置</p>
         <button data-panel="configuration" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg><span>配置中心</span></button>
-        <button data-panel="global-persona" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg><span>全局人格</span></button>
         <button data-panel="permissions" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg><span>权限策略</span></button>
         <p class="sidebar-label">工作空间</p>
         <button data-panel="overview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span>运行总览</span></button>
-        <button data-panel="conversations" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H9l-5 4V4Z"/><path d="M8 8h8M8 12h5"/></svg><span>会话管理</span></button>
-        <button data-panel="decision-history" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h16v18H4zM8 7h8M8 12h8M8 17h5"/></svg><span>发言判别日志</span></button>
         <button data-panel="tasks" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/></svg><span>后台任务</span></button>
-        <button data-panel="memories" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7a3 3 0 0 1 3 3v14a4 4 0 0 0-4-3H4V4Zm10 3a3 3 0 0 1 3-3h3v14h-2a4 4 0 0 0-4 3"/></svg><span>记忆与词典</span></button>
       <a href="/admin/qq-onboarding">QQ 官方扫码配置</a>
 </nav>
       <div class="sidebar-footer"><div class="connection-line"><span class="status-dot" aria-hidden="true"></span><span id="connection" aria-live="polite">未连接</span></div><p>管理员工作空间</p><button id="logout" type="button">断开连接 <span aria-hidden="true">↗</span></button></div>
@@ -57,8 +53,6 @@
       <header class="topbar"><div><p class="eyebrow">ELEPHANT / WORKSPACE</p><h1 id="page-title">配置中心</h1><p id="page-subtitle">连接、行为与运行参数。</p></div><span class="topbar-badge"><span class="status-dot" aria-hidden="true"></span>管理员</span></header>
       <main id="main-content" class="content" tabindex="-1">
         <div id="notice" class="status" role="status" aria-live="polite" hidden></div>
-        <div id="conversation-picker" class="conversation-picker bar" hidden><label for="cid">当前会话<select id="cid"><option value="">请选择会话</option></select></label><button id="refresh-conversations" type="button">刷新会话</button></div>
-
         <section id="configuration" aria-labelledby="configuration-title">
           <div class="section-head"><div><h2 id="configuration-title">机器人配置</h2><p class="section-description">按分类调整机器人设置，修改后统一预览和保存。</p></div><button id="load-config" class="secondary">重新读取</button></div>
           <div id="config-state" class="editor-state" role="status">连接后自动读取配置。</div>
@@ -73,17 +67,6 @@
             <details class="technical-details"><summary>校验与生效说明</summary><p id="hot-fields" class="hint"></p><p class="hint">需重启的设置保存后保留当前运行状态。修改模型还需同步 Worker 模型参数和许可名单，再重启 Core / Worker。</p><div class="actions"><button id="validate-config">仅校验</button><button id="preview-config" disabled>仅预览变更</button></div><pre id="config-output">尚未校验</pre></details>
           </details>
           <div class="editor-actions"><div class="save-bar-info"><strong id="config-change-count">暂无修改</strong><span id="config-save-status">修改后可预览并保存</span></div><div class="actions"><button id="discard-config" class="quiet" disabled>撤销修改</button><button id="apply-config" disabled>立即应用</button><button id="save-config" class="primary" disabled>预览并保存</button></div></div>
-        </section>
-
-        <section id="global-persona" hidden aria-labelledby="global-persona-title">
-          <div class="section-head"><div><h2 id="global-persona-title">小象的表达方式</h2><p class="section-description">直接编辑身份、语气和措辞，保存后用于后续回复。</p></div><button id="load-global-persona">重新读取</button></div>
-          <div id="global-persona-state" class="editor-state" role="status">正在读取全局人格…</div>
-          <div class="source-note">这里的设置用于所有会话；会话内的单独设置优先。</div>
-          <div id="global-persona-errors" class="error-summary" role="alert" hidden></div>
-          <div id="global-persona-form" class="settings-form"></div>
-          <details class="editor-json"><summary>高级 JSON 编辑</summary><label for="global-persona-json">全局人格 JSON</label><textarea id="global-persona-json" rows="14" spellcheck="false">{}</textarea><button id="global-persona-use-json">将 JSON 载入表单</button></details>
-          <details class="technical-details"><summary>版本信息</summary><pre id="global-persona-output">尚未读取</pre></details>
-          <div class="editor-actions"><div class="save-bar-info"><strong>全局人格</strong><span>保存后立即生效</span></div><div class="actions"><button id="discard-global-persona" class="quiet" disabled>撤销修改</button><button id="save-global-persona" class="primary" disabled>保存人格</button></div></div>
         </section>
 
         <section id="permissions" hidden aria-labelledby="permissions-title">
@@ -105,66 +88,12 @@
           <details class="technical-details"><summary>服务详情</summary><pre id="service-status">尚未读取</pre><pre id="adapter-status">尚未读取</pre></details>
         </section>
 
-        <section id="conversations" hidden aria-labelledby="conversations-title">
-          <div class="section-head"><div><h2 id="conversations-title">会话工作空间</h2><p class="section-description">选择会话，调整参与方式，了解每一次发言的原因。</p></div><button id="reload-conversations" type="button">刷新会话</button></div>
-          <div class="conversation-layout">
-            <aside class="conversation-directory" aria-label="会话列表">
-              <label for="conversation-search">查找会话<input id="conversation-search" type="search" placeholder="搜索名称或会话 ID" autocomplete="off"></label>
-              <p id="conversation-count" class="hint" role="status"></p>
-              <div id="conversation-rows" class="conversation-list"></div>
-            </aside>
-            <div class="conversation-detail">
-              <div class="conversation-heading"><span class="eyebrow">当前编辑的会话</span><h3 id="selected-conversation">请选择会话</h3><p id="selected-conversation-id" class="hint mono"></p></div>
-              <fieldset id="conversation-controls" disabled>
-          <div class="form-card"><h3>发言方式</h3><div class="bar"><label for="policy-version">策略版本 · 自动校验<input id="policy-version" type="number" min="1" step="1" required readonly></label><label for="mode">发言模式<select id="mode" aria-describedby="mode-description"><option value="addressed_only">仅被提及时回复</option><option value="silent">静默</option><option value="shadow">观察模式</option><option value="social">主动参与</option></select></label><button id="save-mode" class="primary">保存模式</button></div><p id="mode-description" class="mode-description" role="status"></p><p class="hint">主动参与由管理员开启，需要全量消息能力和模型发言判别；默认规则判别器不会主动接话。策略版本用于防止覆盖其他管理员的修改。</p></div>
-          <details class="form-card"><summary>会话人格覆盖<span>高级设置</span></summary><label for="persona">新的覆盖内容 JSON</label><textarea id="persona" rows="4" spellcheck="false">{}</textarea><p class="hint">此处用于提交新的覆盖内容，不展示已保存的覆盖。支持 name、formality、reply_length、participation；保存空对象将恢复全局设置。</p><div class="actions"><button id="save-persona">保存人格覆盖</button></div></details>
-          <div class="form-card" id="conversation-policy-card">
-            <div class="section-head"><div><h3>主动参与设置</h3><p>每个群可沿用默认值，或保存独立设置。修改后立即用于后续判断。</p></div></div>
-            <p class="hint">主动接话需开启“主动参与”，且接入能完整观察群消息。权限、禁言和发送能力检查始终生效。观察模式只记录判断。</p>
-            <div id="conversation-policy-form"></div>
-          </div>
-          <div class="actions"><button id="open-decision-history" type="button">查看此会话的判别日志 →</button></div>
-          <details class="technical-details"><summary>策略与判别详情</summary><pre id="decision-output">尚未读取</pre></details>
-              </fieldset>
-            </div>
-          </div>
-          <details id="default-policy-settings" class="form-card">
-            <summary>默认发言设置<span>供所有未单独设置的群使用</span></summary>
-            <p class="hint">使用默认值的群会随这里的修改同步更新，已单独设置的群不受影响。与配置中心共用草稿，保存前会展示全部待提交变更。</p>
-            <div id="default-policy-fields" class="settings-form"></div>
-            <p id="default-policy-state" class="hint" role="status"></p>
-            <div class="actions"><button id="save-default-policy" class="primary" type="button" disabled>预览并保存默认设置</button></div>
-          </details>
-        </section>
-
-        <section id="decision-history" hidden aria-labelledby="decision-logs-title">
-          <div class="form-card" aria-labelledby="decision-logs-title">
-            <div class="section-head"><div><h3 id="decision-logs-title">发言判别日志</h3><p>逐次记录发言、等待和跳过的原因，包括重评估及当时的分数、阈值和规则输入。</p></div><button id="load-decisions" type="button">刷新判别日志</button></div>
-            <p class="hint">评分阈值和主动参与条件在“会话管理”中设置。展开记录可查看详细分数。消息摘要随来源撤回或清理而隐藏。</p>
-            <p id="decision-log-state" class="hint" role="status"></p><div id="decision-logs" class="decision-logs" aria-live="polite"><p class="empty-state">选择会话后读取发言判别日志。</p></div>
-            <div class="actions"><button id="older-decisions" type="button" hidden>加载更早记录</button></div>
-          </div>
-        </section>
-
         <section id="tasks" hidden aria-labelledby="tasks-title">
-          <div class="section-head"><div><h2 id="tasks-title">后台任务</h2><p class="section-description">查询进度、读取事件，或为当前会话提交新的目标。</p></div><button id="load-tasks">读取任务</button></div>
+          <div class="section-head"><div><h2 id="tasks-title">后台任务</h2><p class="section-description">查看 Leader 与 Workers 的持久任务，或提交一个新的工作目标。</p></div><button id="load-tasks">读取任务</button></div>
           <div class="scroll"><table><thead><tr><th>任务 ID</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="task-rows"></tbody></table></div>
-          <div class="form-card"><h3>任务操作</h3><div class="bar"><label for="task-id">任务 ID<input id="task-id" spellcheck="false" placeholder="选择上方任务或输入 ID"></label><button id="load-task">查询</button><button id="cancel-task" class="danger">取消任务</button><button id="start-events">读取事件</button><button id="stop-events">停止读取</button></div><details><summary>重试任务</summary><p class="hint">保留同一个幂等键可避免重复提交。需要新一次重试时再生成新键。</p><div class="bar"><label for="retry-key">幂等键<input id="retry-key" spellcheck="false"></label><button id="new-retry-key">生成新键</button><button id="retry-task">重试任务</button></div></details></div>
+          <div class="form-card"><h3>任务操作</h3><div class="bar"><label for="task-id">任务 ID<input id="task-id" spellcheck="false" placeholder="选择上方任务或输入 ID"></label><button id="load-task">查询</button><button id="cancel-task" class="danger">取消任务</button><button id="start-events">读取事件</button><button id="stop-events">停止读取</button></div></div>
           <div class="grid"><div class="form-card"><h3>任务详情</h3><pre id="task-output">选择任务以查看状态。</pre></div><div class="form-card"><h3>实时事件</h3><pre id="event-output" role="log" aria-live="polite">尚未开始读取。</pre></div></div>
-          <details><summary>创建后台任务</summary><label for="task-goal">任务目标</label><textarea id="task-goal" rows="4" maxlength="16000" placeholder="描述希望小象完成的工作…"></textarea><div class="bar"><label for="create-key">提交幂等键<input id="create-key" spellcheck="false"></label><button id="new-create-key">生成新键</button><button id="create-task" class="primary">创建任务</button></div></details>
-        </section>
-
-        <section id="memories" hidden aria-labelledby="memories-title">
-          <div class="section-head"><div><h2 id="memories-title">会话记忆</h2><p class="section-description">审阅记忆与词典，保留有依据的信息。</p></div></div>
-          <div class="bar"><label for="memory-status">记忆状态<select id="memory-status"><option value="">全部状态</option><option value="candidate">待审核</option><option value="active">已生效</option><option value="disputed">有争议</option><option value="superseded">已替代</option><option value="expired">已过期</option><option value="deleted">已删除</option></select></label><button id="load-memories">读取记忆</button><button id="load-jargon">读取词典</button></div>
-          <div class="scroll"><table><thead><tr><th>ID / 作用域</th><th>状态</th><th>内容</th><th>操作</th></tr></thead><tbody id="memory-rows"></tbody></table></div>
-          <div class="form-card"><h3>纠正记忆</h3><div class="grid"><label for="memory-id">记忆 ID<input id="memory-id" spellcheck="false"></label><label for="source-event">新的来源事件 ID<input id="source-event" spellcheck="false"></label></div><label for="memory-text">纠正内容</label><textarea id="memory-text" rows="3" maxlength="4000"></textarea><p class="hint">纠正需要同一会话中可追溯的新来源事件。</p><div class="actions"><button id="correct-memory" class="primary">提交纠正</button><button id="delete-memory" class="danger">删除记忆</button></div></div>
-          <details class="technical-details"><summary>记忆详情</summary><pre id="memory-output">尚未选择</pre></details>
-          <div class="form-card"><div class="section-head"><div><h3>表达素材</h3><p class="hint">从当前会话学习说话习惯。精选可控制使用范围；删除后不会重新学回同一条素材。</p></div><button id="load-expressions">读取表达素材</button></div>
-            <p id="expression-status" role="status">尚未读取</p>
-            <div class="scroll"><table><thead><tr><th>使用情境</th><th>表达方式</th><th>学习次数 / 精选</th><th>操作</th></tr></thead><tbody id="expression-rows"></tbody></table></div>
-            <details><summary>编辑选中表达</summary><input id="expression-id" type="hidden"><input id="expression-revision" type="hidden"><div class="grid"><label for="expression-situation">使用情境<input id="expression-situation" maxlength="20"></label><label for="expression-style">表达方式<input id="expression-style" maxlength="20"></label></div><label><input id="expression-checked" type="checkbox">人工精选</label><button id="save-expression">保存表达</button></details>
-          </div>
+          <details><summary>创建后台任务</summary><label for="task-goal">任务目标</label><textarea id="task-goal" rows="4" maxlength="16000" placeholder="描述希望小象完成的工作…"></textarea><div class="bar"><label for="create-key">提交幂等键<input id="create-key" spellcheck="false"></label><button id="new-create-key">生成新键</button><button id="create-task" class="primary">提交目标</button></div><p class="hint">任务由当前 host owner 身份进入 Leader 工作流；保存幂等键可安全核对提交结果。</p></details>
         </section>
       </main>
     </div>

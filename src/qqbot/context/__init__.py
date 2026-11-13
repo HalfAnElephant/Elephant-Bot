@@ -50,7 +50,6 @@ class ContextService:
     def pool_limits(self):
         execution = self.settings.execution
         return {
-            "max_resident": max(execution.max_active, execution.warm_max),
             "max_idle": execution.warm_idle_max if execution.warm_max else 0,
             "ttl": execution.warm_ttl_seconds,
         }
@@ -593,8 +592,8 @@ class ContextService:
             "expression_habits": expression_habits,
             "selected_reference": selected_reference,
             "limits": self.settings.context.limits(self.settings.model.context_window, max(
-                self.settings.execution.interactive_budget.output_tokens_per_call,
-                self.settings.execution.budget.output_tokens_per_call,
+                self.settings.execution.interactive_budget.output_tokens_per_call or 0,
+                self.settings.execution.budget.output_tokens_per_call or 0,
             )),
             "now": self.clock.now().isoformat(),
             "timezone": self.settings.timezone,

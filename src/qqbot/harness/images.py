@@ -4,7 +4,7 @@ import base64
 import time
 from urllib.parse import urljoin, urlsplit
 
-from qqbot.harness.research import PinnedHTTPS, public_addresses
+from qqbot.harness.public_web import PinnedHTTPS, public_addresses
 
 MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -14,7 +14,7 @@ def fetch_image(url, max_bytes):
     deadline = time.monotonic() + 15
     for _ in range(4):
         parsed = urlsplit(url)
-        # NapCat sometimes emits HTTP links for QQ CDNs that also serve HTTPS.
+        # QQ sometimes emits HTTP links for QQ CDNs that also serve HTTPS.
         if (parsed.scheme == "http" and parsed.hostname and not parsed.username and not parsed.password
                 and any(
             parsed.hostname == suffix or parsed.hostname.endswith("." + suffix)

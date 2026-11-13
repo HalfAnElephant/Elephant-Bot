@@ -8,8 +8,6 @@ from pydantic import Field, model_validator
 
 from qqbot.domain import DTO
 from qqbot.domain.execution import RunBudget
-from qqbot.domain.social import ParticipationSettings, SpeechThresholds
-from qqbot.expressions.config import ExpressionConfig
 from qqbot.memory.openviking_config import OpenVikingConfig
 from qqbot.permissions import PermissionPolicy
 from qqbot.skills.config import SkillsConfig
@@ -18,17 +16,17 @@ from qqbot.skills.config import SkillsConfig
 class AdapterConfig(DTO):
     instance_id: str
     enabled: bool = True
-    kind: Literal["onebot", "official"]
+    kind: Literal["official"]
+    transport: Literal["webhook", "websocket"] = "webhook"
+    intents: int = Field(default=1 << 25, strict=True, gt=0)
     bot_id: str
     secret_env: str = ""
     credential_ref: str | None = None
     credential_store_dir: str | None = None
     app_id: str | None = None
-    websocket_url: str | None = None
     allowed_groups: tuple[str, ...] = ()
     allowed_users: tuple[str, ...] = ()
     admin_users: tuple[str, ...] = ()
-    known_bot_ids: tuple[str, ...] = ()
     full_mode_enabled: bool = False
     full_mode_verified: bool = False
     proactive_verified: bool = False
@@ -49,6 +47,13 @@ class AdapterConfig(DTO):
     api_base: str = "https://api.bot.qq.com"
     token_url: str = "https://api.bot.qq.com/app/getAppAccessToken"
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_onebot(cls, value):
+        if isinstance(value, dict) and value.get("kind") == "onebot":
+            raise ValueError("OneBot/NapCat configuration was removed; migrate this adapter to QQ official credentials")
+        return value
+
     def secret(self) -> str:
         if self.credential_ref:
             from qqbot.adapters.qq_official.credential_store import load_credential
@@ -68,6 +73,12 @@ class AdapterConfig(DTO):
             raise ValueError("adapter requires secret_env or credential_ref")
         if self.full_mode_verified and not self.full_mode_enabled:
             raise ValueError("full_mode_verified requires enabled permission")
+        if self.transport == "websocket":
+            supported = (1 << 9) | (1 << 12) | (1 << 25) | (1 << 26) | (1 << 30)
+            if self.intents & ~supported:
+                raise ValueError("websocket intents must select supported message or interaction events")
+            if self.intents & (1 << 9) and not self.full_mode_enabled:
+                raise ValueError("guild full-message intent requires full_mode_enabled and platform permission")
         return self
 
 
@@ -79,51 +90,61 @@ class ModelConfig(DTO):
     context_window: int = Field(default=32768, ge=2048, le=2000000)
 
 
-class JudgeConfig(DTO):
-    kind: Literal["rule", "jev", "structured"] = "rule"
-    endpoint: str = "https://api.typesafe.ai/v1/systemone"
-    model: str = "jev-1.14.0"
-    api_key_env: str = "QQBOT_JUDGE_KEY"
-    thresholds: SpeechThresholds = SpeechThresholds()
-    participation: ParticipationSettings = ParticipationSettings()
-
-
 class MemoryConfig(DTO):
     openviking: OpenVikingConfig = OpenVikingConfig()
-    maintenance_enabled: bool = False
-    auto_extract: bool = False
-    extractor_endpoint: str | None = None
-    extractor_model: str | None = None
-    extractor_key_env: str = "QQBOT_MEMORY_KEY"
-    embedding_endpoint: str | None = None
-    embedding_model: str | None = None
-    embedding_version: str = "v1"
-    embedding_dimensions: int | None = Field(default=None, ge=1, le=65536)
-    embedding_key_env: str = "QQBOT_EMBEDDING_KEY"
-    raw_retention_days: int = Field(default=30, ge=1, le=3650)
 
 
 class ExecutionConfig(DTO):
     notify_before_tools: bool = True
-    max_active: int = Field(default=4, ge=1, le=32)
-    sustained_limit: int = Field(default=2, ge=1, le=31)
+    max_active: int = Field(default=8, ge=0, deprecated=True,
+        description="Legacy compatibility field; active Agent admission is unrestricted")
+    sustained_limit: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; background Agent admission is unrestricted")
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
     interactive_budget: RunBudget = RunBudget(
         model_calls=30, tool_calls=80, active_seconds=600, total_wall_seconds=3600,
-        output_tokens_per_call=4096,
     )
     budget: RunBudget = RunBudget()
     warm_max: int = Field(default=4, ge=0, le=32)
     warm_idle_max: int = Field(default=2, ge=0, le=32)
     warm_ttl_seconds: int = Field(default=300, ge=1, le=3600)
 
-    @model_validator(mode="after")
-    def bounded_capacity(self):
-        if self.sustained_limit >= self.max_active:
-            raise ValueError("reserve at least one execution slot for new interaction")
-        if self.warm_max and self.warm_idle_max > self.warm_max:
-            raise ValueError("idle process limit exceeds resident limit")
-        return self
+
+
+class QQOwnerBinding(DTO):
+    app_id: str = Field(min_length=1)
+    user_openid: str = Field(min_length=1)
+    verified_at: str = Field(min_length=1)
+
+
+class OwnerConfig(DTO):
+    id: str = Field(default="personal-owner", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    qq_bindings: tuple[QQOwnerBinding, ...] = ()
+    preferences: str = Field(
+        default="",
+        max_length=4000,
+        description="Explicit personal preferences such as preferred name, language, and communication style.",
+    )
+
+
+class OrchestrationConfig(DTO):
+    mode: Literal["leader_workers"] = "leader_workers"
+    pending_inputs_per_owner: int = Field(default=64, ge=0, deprecated=True,
+        description="Legacy compatibility field; pending inputs are unrestricted")
+    pending_root_tasks_per_owner: int = Field(default=5, ge=0, deprecated=True,
+        description="Legacy compatibility field; pending goals are unrestricted")
+    child_parallelism: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; child admission is unrestricted")
+    max_task_depth: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; task tree depth is unrestricted")
+    max_nodes_per_root: int = Field(default=7, ge=0, deprecated=True,
+        description="Legacy compatibility field; task node count is unrestricted")
+    leader_inbox_batch_limit: int = Field(default=16, ge=1, le=64)
+    leader_inbox_coalesce_seconds: float = Field(default=2, ge=0, le=60)
+    model_request_limit: int = Field(default=8, ge=1, le=32)
+    pi_executable: str = "node_modules/.bin/pi"
+    github_host: str = "github.com"
+    workspace_bindings: dict[str, str] = Field(default_factory=dict)
 
 
 class ContextConfig(DTO):
@@ -137,8 +158,8 @@ class ContextConfig(DTO):
     topic_idle_seconds: int = Field(default=1800, ge=60, le=86400)
     version: str = "context-v2"
 
-    def limits(self, model_window: int, output_tokens: int) -> dict:
-        output = max(output_tokens, self.compaction_output_tokens)
+    def limits(self, model_window: int, output_tokens: int | None) -> dict:
+        output = max(output_tokens or 0, self.compaction_output_tokens)
         headroom = output + 1024
         soft = self.max_tokens if self.max_tokens is not None else model_window - max(
             (model_window + 9) // 10, headroom
@@ -150,28 +171,6 @@ class ContextConfig(DTO):
             raise ValueError("context requires recent < soft threshold with output headroom inside model window")
         return {"max_bytes": self.max_request_bytes, "soft_compaction_input_tokens": soft,
                 "keep_recent_tokens": recent, "compaction_output_tokens": self.compaction_output_tokens}
-
-
-class SpeakUpConfig(DTO):
-    enabled: bool = True
-    idle_minutes: int = Field(default=40, ge=1, le=10080)
-    min_interval_minutes: int = Field(default=60, ge=1, le=10080)
-    max_interval_minutes: int = Field(default=180, ge=1, le=10080)
-    max_per_day: int = Field(default=20, ge=0, le=100)
-    awake_from: int = Field(default=8, ge=0, le=23)
-    awake_to: int = Field(default=23, ge=1, le=24)
-    nudge: bool = True
-    allow: tuple[str, ...] = ()
-
-    @model_validator(mode="after")
-    def valid_window(self):
-        if self.min_interval_minutes > self.max_interval_minutes:
-            raise ValueError("主动搭话最小间隔不能超过最大间隔")
-        if self.awake_from >= self.awake_to:
-            raise ValueError("主动搭话清醒时间必须从早到晚；全天请设为 0–24")
-        if any(not value.strip() for value in self.allow):
-            raise ValueError("主动搭话白名单会话 ID 不能为空")
-        return self
 
 
 class Settings(DTO):
@@ -188,15 +187,12 @@ class Settings(DTO):
     interactive_execution_enabled: bool = True
     permissions: PermissionPolicy = PermissionPolicy()
     execution: ExecutionConfig = ExecutionConfig()
+    owner: OwnerConfig = OwnerConfig()
+    orchestration: OrchestrationConfig = OrchestrationConfig()
     context: ContextConfig = ContextConfig()
     internal_socket: str = "var/internal.sock"
-    persona_path: str = "personas/elephant_default.yaml"
-    judge: JudgeConfig = JudgeConfig()
     memory: MemoryConfig = MemoryConfig()
     skills: SkillsConfig = SkillsConfig()
-    speak_up: SpeakUpConfig = SpeakUpConfig()
-    expression: ExpressionConfig = ExpressionConfig()
-    social_evaluated_conversations: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def distinct(self):
@@ -204,15 +200,15 @@ class Settings(DTO):
         if len(ids) != len(set(ids)):
             raise ValueError("adapter instance IDs must be unique")
         output = max(
-            self.execution.interactive_budget.output_tokens_per_call,
-            self.execution.budget.output_tokens_per_call,
+            self.execution.interactive_budget.output_tokens_per_call or 0,
+            self.execution.budget.output_tokens_per_call or 0,
         )
         self.context.limits(self.model.context_window, output)
         return self
 
 
 def load_settings(path: str | Path) -> Settings:
-    return Settings.model_validate_json(json.dumps(yaml.safe_load(Path(path).read_text()) or {}))
+    return Settings.model_validate_json(json.dumps(yaml.safe_load(Path(path).read_text()) or {}), strict=False)
 
 
 def runtime_config_path(settings: Settings) -> Path:
@@ -225,4 +221,4 @@ def load_runtime_settings(settings: Settings) -> Settings:
     if not path.exists():
         return settings
     values = json.loads(path.read_text())
-    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}))
+    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}), strict=False)

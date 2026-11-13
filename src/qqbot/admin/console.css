@@ -274,7 +274,7 @@ details[open] > summary { margin-bottom: 14px; }
 #notice.dirty, #notice.warning { color: var(--warning); border: 1px solid #ebddbd; border-radius: 7px; padding: 9px 12px; background: var(--warning-soft); }
 .error { color: var(--danger); }
 .success { color: var(--accent); }
-#configuration, #global-persona, #permissions { padding-bottom: 116px; scroll-margin-bottom: 140px; }
+#configuration, #permissions { padding-bottom: 116px; scroll-margin-bottom: 140px; }
 .editor-actions { position: fixed; z-index: 25; left: var(--sidebar-width); right: 0; bottom: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; min-height: 70px; margin: 0; padding: 13px max(32px, calc((100vw - var(--sidebar-width) - 1136px) / 2)); background: #fffffff7; border-top: 1px solid var(--line); box-shadow: 0 -4px 20px #273c2d03; }
 .editor-actions .actions { min-width: 0; margin: 0; justify-content: flex-end; gap: 7px; }
 .editor-actions button { font-size: 12px; white-space: nowrap; }
@@ -284,10 +284,10 @@ details[open] > summary { margin-bottom: 14px; }
 .save-count { font-size: 12px; font-weight: 600; color: var(--ink); }
 .save-status { font-size: 10px; color: var(--muted); }
 
-/* Policy summaries and persona sections use dedicated, compact editors. */
+/* Policy summaries use a dedicated, compact editor. */
 .permission-editor { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-.permission-editor .field > :is(label, .field-label), .persona-editor .field > :is(label, .field-label), .permission-check-form .field > :is(label, .field-label) { min-height: 0; }
-.permission-editor .field .field-key, .persona-editor .field .field-key, .permission-check-form .field .field-key { display: none; }
+.permission-editor .field > :is(label, .field-label), .permission-check-form .field > :is(label, .field-label) { min-height: 0; }
+.permission-editor .field .field-key, .permission-check-form .field .field-key { display: none; }
 .policy-default { display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 9px 26px; padding: 17px 19px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .policy-default > .field { grid-column: 1; grid-row: 1 / span 2; }
 .policy-guidance { grid-column: 2; font-size: 12px; line-height: 1.7; align-self: end; }
@@ -322,30 +322,6 @@ details[open] > summary { margin-bottom: 14px; }
 .permission-check-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; margin: 14px 0; }
 .permission-check-form > details, .permission-check-form > .subject-fields { grid-column: 1 / -1; }
 .permission-check-form > button { justify-self: start; align-self: end; }
-.persona-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.persona-section { min-width: 0; padding: 18px 19px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
-.persona-editor > .persona-section:nth-child(2) { grid-column: 2; grid-row: 1 / span 2; }
-.persona-section > h3 { margin-bottom: 15px; font-size: 14px; }
-.persona-section > .nested-fields { gap: 15px 18px; }
-.persona-section .field:has(textarea) { grid-column: 1 / -1; }
-.persona-section .field textarea { min-height: 82px; line-height: 1.65; }
-.persona-section .field > :is(label, .field-label) { font-size: 13px; }
-.persona-section .field-help { font-size: 11px; }
-.style-fields > .nested-fields { grid-template-columns: minmax(0, 1fr); }
-.style-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 13px; }
-.style-entry { position: relative; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
-.style-entry:last-child { border-bottom: 0; }
-.style-entry > .field > label { padding-right: 48px; }
-.style-entry-tools { position: absolute; top: 0; right: 0; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.style-entry-tools select { width: auto; max-width: 160px; min-height: 32px; padding: 4px 8px; font-size: 11px; }
-.style-entry-tools button { min-height: 32px; padding: 4px 9px; font-size: 11px; }
-.style-entry > .dynamic-collection { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
-.style-add > input, .style-add > select { margin-top: 8px; }
-.style-add > select { width: 96px; margin-right: 8px; }
-.style-add input, .style-add select, .style-add button { min-height: 36px; font-size: 12px; }
-.persona-advanced { grid-column: 1 / -1; margin: 0; padding: 14px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
-.persona-advanced > summary { color: var(--muted); font-size: 12px; }
-.persona-advanced .nested-fields { max-width: 600px; }
 
 /* Read-only data stays compact; empty and loading states retain their space. */
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 18px 0 24px; }
@@ -399,7 +375,6 @@ dialog::backdrop { background: #162b2259; }
   .topbar { padding-right: 24px; padding-left: 24px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-form, .nested-fields { column-gap: 20px; }
-  .persona-editor { grid-template-columns: minmax(0, 1fr); }
   .action-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rule-summary { grid-template-columns: 52px minmax(100px, .8fr) minmax(0, 1fr) 12px; gap: 9px; }
   .rule-state { display: none; }
@@ -475,9 +450,8 @@ dialog::backdrop { background: #162b2259; }
   .save-bar-info { flex: 1 0 100%; max-width: none; flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 3px 10px; }
   .save-count { font-size: 11px; }
   .save-status { font-size: 9px; text-align: right; }
-  #configuration, #global-persona, #permissions { padding-bottom: calc(190px + env(safe-area-inset-bottom)); }
-  .permission-editor, .persona-editor, .permission-rule-body, .permission-check-form { grid-template-columns: minmax(0, 1fr); }
-  .persona-editor > .persona-section:nth-child(2) { grid-column: auto; grid-row: auto; }
+  #configuration, #permissions { padding-bottom: calc(190px + env(safe-area-inset-bottom)); }
+  .permission-editor, .permission-rule-body, .permission-check-form { grid-template-columns: minmax(0, 1fr); }
   .policy-default { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 16px; }
   .policy-default > .field, .policy-guidance, .policy-default > button { grid-column: 1; grid-row: auto; }
   .policy-default > button { width: 100%; }
@@ -489,10 +463,7 @@ dialog::backdrop { background: #162b2259; }
   .rule-target { font-size: 12px; }
   .action-option { min-height: 44px; font-size: 11px; }
   .action-options { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-  .persona-section { padding: 16px; }
-  .persona-section > .nested-fields, .permission-rule-body .nested-fields { grid-template-columns: minmax(0, 1fr); }
-  .style-entry-tools select, .style-entry-tools button, .style-add input, .style-add select, .style-add button { min-height: 44px; }
-  .persona-advanced { padding: 14px 16px; }
+  .permission-rule-body .nested-fields { grid-template-columns: minmax(0, 1fr); }
   .metric-grid { gap: 11px; margin: 18px 0 26px; }
   .metric-card { padding: 18px 16px; }
   .metric-value { font-size: 26px; }

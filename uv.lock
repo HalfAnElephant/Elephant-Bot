@@ -165,6 +165,7 @@ dependencies = [
     { name = "qrcode" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -187,6 +188,7 @@ requires-dist = [
     { name = "qrcode", specifier = ">=8,<9" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.38,<1" },
+    { name = "websockets", specifier = ">=17,<18" },
 ]
 
 [package.metadata.requires-dev]

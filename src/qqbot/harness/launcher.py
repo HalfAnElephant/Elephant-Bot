@@ -25,7 +25,6 @@ STOPS = Path("/var/lib/qqbot-runner-stops")
 ROOT_DIRECTORY = Path("/var/lib/qqbot-runner-root")
 LAUNCHER = "/usr/local/libexec/pi-runner-launch"
 ENTRY = "/opt/qqbot/bin/pi-runner-entry"
-EXTENSION = "/opt/qqbot/research_extension.ts"
 GENERAL_EXTENSION = "/opt/qqbot/pi_bridge.ts"
 NETWORK_NAMESPACE = "/run/netns/qqbot-runner"
 
@@ -118,6 +117,8 @@ def validate_manifest(manifest, task_id, run_id, policy, *, check_deadline=True)
                          {"process_id", "process_epoch", "process_token", "model_context_window", "output_tokens", "soft_input_tokens", "keep_recent_tokens"})
     if type(version) is not int or version not in {1, 2} or set(manifest) != expected:
         raise ValueError("invalid launch manifest schema")
+    if check_deadline and version == 1:
+        raise ValueError("legacy research launches are retired; historical manifests are stop-only")
     if canonical_uuid(manifest["task_id"]) != task_id:
         raise ValueError("launch identity mismatch")
     canonical_uuid(manifest["run_id"])
@@ -250,7 +251,7 @@ def prepare_workspace(run_id):
 
 def systemd_argv(task_id, run_id, policy, *, general=False):
     workspace = str(WORKSPACES / run_id)
-    extension = GENERAL_EXTENSION if general else EXTENSION
+    extension = GENERAL_EXTENSION
     properties = {
         "User": "qqbot-runner",
         "Group": "qqbot-worker",
@@ -368,7 +369,7 @@ def main():
             info = directory.stat(follow_symlinks=False)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit("untrusted runner installation directory")
-        for executable in (ENTRY, GENERAL_EXTENSION if manifest["schema_version"] == 2 else EXTENSION):
+        for executable in (ENTRY, GENERAL_EXTENSION):
             info = Path(executable).stat(follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit("untrusted runner executable or extension")

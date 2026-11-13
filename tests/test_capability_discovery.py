@@ -108,16 +108,13 @@ async def test_empty_search_returns_complete_schemas_in_one_response(discovery):
     assert not calls and not any(operation == "ledger" for operation, _ in core.calls)
 
 
-async def test_binding_exposes_callable_catalog_and_host_repository(discovery):
+async def test_binding_exposes_host_repository_and_keeps_catalog_on_demand(discovery):
     gateway, _core, _calls = discovery
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
         response = await client.post("/binding", json={"binding_id": gateway.binding},
                                      headers={"Authorization": "Bearer " + gateway.process_token})
     result = response.json()
-    catalog = {entry["name"]: entry for entry in result["capability_catalog"]}
-    assert set(catalog) == set(gateway.registry.entries)
-    assert catalog["gh.exec"]["parameters"]["required"] == ["argv"]
-    assert set(catalog["gh.exec"]) == {"name", "description", "parameters"}
+    assert "capability_catalog" not in result
     assert result["repository"] == "owner/repo" and result["github_host"] == "github.com"
 
 
@@ -230,7 +227,7 @@ def sse(message):
     return "data: " + json.dumps(event) + "\n\ndata: " + json.dumps(finish) + "\n\ndata: [DONE]\n\n"
 
 
-async def test_real_pi_invokes_github_from_initial_catalog_without_search(discovery, tmp_path):
+async def test_real_pi_discovers_github_then_invokes_it(discovery, tmp_path):
     gateway, _core, calls = discovery
     requests = []
     def upstream(request):
@@ -238,8 +235,12 @@ async def test_real_pi_invokes_github_from_initial_catalog_without_search(discov
         requests.append(payload)
         if len(requests) == 1:
             system = payload["messages"][0]["content"]
-            assert '"name":"gh.exec"' in system and '"argv"' in system
+            assert "capability_search" in system
             assert "owner/repo" in str(payload["messages"])
+            message = {"role": "assistant", "tool_calls": [{"id": "fixture_search", "type": "function", "function": {
+                "name": "capability_search", "arguments": json.dumps({"query": "github PR"})}}]}
+        elif len(requests) == 2:
+            assert "gh.exec" in str(payload["messages"])
             message = {"role": "assistant", "tool_calls": [{"id": "fixture_gh", "type": "function", "function": {
                 "name": "capability_invoke", "arguments": json.dumps({"name": "gh.exec", "arguments": {
                     "argv": ["pr", "list", "--json", "number,title,url"]}})}}]}
@@ -252,7 +253,7 @@ async def test_real_pi_invokes_github_from_initial_catalog_without_search(discov
     async with real_pi(gateway, tmp_path) as runner:
         result = await runner.run("trusted goal")
     assert result.summary == "There is one fixture PR, #7."
-    assert len(calls) == 1 and len(requests) == 2
+    assert len(calls) == 1 and len(requests) == 3
     assert calls[0][1].repository == "owner/repo" and calls[0][1].principal == {"user_id": "real-user"}
 
 
@@ -278,3 +279,89 @@ async def test_real_pi_receives_bounded_actionable_gateway_error(discovery, tmp_
         result = await runner.run("trusted goal")
     assert result.summary == "The reference was invalid and can be corrected."
     assert len(requests) == 2 and not calls
+
+
+@pytest.mark.parametrize("kind", ["host", "missing_file"])
+async def test_native_host_and_workspace_errors_are_bounded_actionable_results(discovery, kind):
+    gateway, _core, _calls = discovery
+    if kind == "host":
+        async def reject(operation, payload):
+            if operation == "skills":
+                response = httpx.Response(422, json={"detail": "Invalid skill call identity. " + gateway.key},
+                    request=httpx.Request("POST", "http://runtime.local/skills"))
+                response.raise_for_status()
+            return {"accepted": True, "allowed": True}
+        gateway.call = reject
+        name, arguments = "skills_list", {}
+    else:
+        gateway.notify_before_tools = False
+        name, arguments = "capability_invoke", {"name": "workspace.read", "arguments": {"path": "missing.txt"}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, name, arguments)
+    assert response.status_code == 422
+    assert gateway.key not in response.text
+    assert ("Invalid skill call identity" if kind == "host" else "missing.txt") in response.json()["detail"]
+
+
+async def test_finalizer_cannot_export_a_child_path_as_its_own_file(discovery):
+    gateway, _core, _calls = discovery
+    claim = gateway.claim
+    gateway.revoke()
+    gateway.bind({**claim, "role": "leader", "purpose": "finalize"})
+    assert "答复前看到 WAITING_CHILDREN 不是结算失败" in gateway.system_prompt
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/child.txt"]})
+    assert response.status_code == 422 and "verified child artifacts" in response.json()["detail"]
+    assert not gateway.artifacts
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await invoke(client, gateway, "task_outcome", {"status": "completed"})
+    assert response.json()["accepted"] and response.json()["committed"] is False
+    assert "end this turn" in response.json()["next_action"]
+
+
+async def test_output_sidecar_stays_workspace_file_without_breaking_artifact_export(discovery):
+    from qqbot.harness.artifacts import export_artifacts
+    gateway, _core, _calls = discovery
+    gateway.notify_before_tools = False
+    (gateway.workspace / "outputs").mkdir()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        for path, text in [("outputs/.keep", ""), ("outputs/result.txt", "ISOLATED_OK")]:
+            response = await invoke(client, gateway, "capability_invoke",
+                {"name": "workspace.write", "arguments": {"path": path, "text": text}}, identity=path)
+            assert response.status_code == 200, response.text
+        assert gateway.artifacts == ["outputs/result.txt"]
+        rejected = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/.keep"]}, identity="bad-artifact")
+        assert rejected.status_code == 422 and "unsupported artifact type" in rejected.text
+        assert gateway.outcome is None
+        accepted = await invoke(client, gateway, "task_outcome", {"status": "completed", "attachments": ["outputs/result.txt"]}, identity="good-artifact")
+        assert accepted.status_code == 200
+    assert (gateway.workspace / "outputs/.keep").is_file()
+    archive = gateway.workspace / "archive"
+    artifacts = export_artifacts(gateway.workspace, archive, gateway.artifacts)
+    assert len(artifacts) == 1 and artifacts[0]["relative_path"] == "outputs/result.txt"
+    assert (archive / artifacts[0]["id"]).read_bytes() == b"ISOLATED_OK"
+
+
+@pytest.mark.parametrize('condition', [
+    {'capability': 'missing.capability', 'arguments': {}, 'path': 'state', 'equals': 'EXITED'},
+    {'capability': 'workspace.write', 'arguments': {'path': 'forbidden.txt', 'text': 'no'}, 'path': 'state', 'equals': 'EXITED'},
+    {'capability': 'job.inspect', 'arguments': {'job_id': 'f' * 32}, 'path': 'data.state', 'equals': 'EXITED'},
+    [],
+])
+async def test_unobservable_or_unauthorized_condition_is_rejected_before_wait_intent(discovery, condition):
+    gateway, _core, _calls = discovery
+    original_call, called = gateway.call, []
+    async def call(operation, payload):
+        called.append(operation)
+        if operation == 'jobs':
+            raise PermissionError('Job belongs to another task')
+        if operation == 'ask':
+            raise AssertionError('Unobservable condition must not become a durable wait')
+        return await original_call(operation, payload)
+    gateway.call = call
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url='http://gateway') as client:
+        response = await invoke(client, gateway, 'task_wait_external',
+            {'text': '等待结果', 'checkpoint': '原业务不重复执行', 'condition': condition})
+    assert response.status_code == 422, response.text
+    assert 'ask' not in called and not gateway.waiting
+    assert not (gateway.workspace / 'forbidden.txt').exists()

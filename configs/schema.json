@@ -13,12 +13,24 @@
           "type": "boolean"
         },
         "kind": {
-          "enum": [
-            "onebot",
-            "official"
-          ],
+          "const": "official",
           "title": "Kind",
           "type": "string"
+        },
+        "transport": {
+          "default": "webhook",
+          "enum": [
+            "webhook",
+            "websocket"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "intents": {
+          "default": 33554432,
+          "exclusiveMinimum": 0,
+          "title": "Intents",
+          "type": "integer"
         },
         "bot_id": {
           "title": "Bot Id",
@@ -65,18 +77,6 @@
           "default": null,
           "title": "App Id"
         },
-        "websocket_url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Websocket Url"
-        },
         "allowed_groups": {
           "default": [],
           "items": {
@@ -99,14 +99,6 @@
             "type": "string"
           },
           "title": "Admin Users",
-          "type": "array"
-        },
-        "known_bot_ids": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Known Bot Ids",
           "type": "array"
         },
         "full_mode_enabled": {
@@ -254,33 +246,6 @@
       "title": "AdapterConfig",
       "type": "object"
     },
-    "BlacklistedUser": {
-      "additionalProperties": false,
-      "properties": {
-        "adapter_instance_id": {
-          "minLength": 1,
-          "title": "Adapter Instance Id",
-          "type": "string"
-        },
-        "identity_namespace": {
-          "minLength": 1,
-          "title": "Identity Namespace",
-          "type": "string"
-        },
-        "user_id": {
-          "minLength": 1,
-          "title": "User Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "adapter_instance_id",
-        "identity_namespace",
-        "user_id"
-      ],
-      "title": "BlacklistedUser",
-      "type": "object"
-    },
     "ContextConfig": {
       "additionalProperties": false,
       "properties": {
@@ -360,16 +325,18 @@
           "type": "boolean"
         },
         "max_active": {
-          "default": 4,
-          "maximum": 32,
-          "minimum": 1,
+          "default": 8,
+          "deprecated": true,
+          "description": "Legacy compatibility field; active Agent admission is unrestricted",
+          "minimum": 0,
           "title": "Max Active",
           "type": "integer"
         },
         "sustained_limit": {
           "default": 2,
-          "maximum": 31,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; background Agent admission is unrestricted",
+          "minimum": 0,
           "title": "Sustained Limit",
           "type": "integer"
         },
@@ -387,7 +354,7 @@
             "tool_calls": 80,
             "active_seconds": 600,
             "total_wall_seconds": 3600,
-            "output_tokens_per_call": 4096,
+            "output_tokens_per_call": null,
             "completion_reserve": 1
           }
         },
@@ -398,7 +365,7 @@
             "tool_calls": 200,
             "active_seconds": 1800,
             "total_wall_seconds": 7200,
-            "output_tokens_per_call": 8192,
+            "output_tokens_per_call": null,
             "completion_reserve": 1
           }
         },
@@ -427,216 +394,94 @@
       "title": "ExecutionConfig",
       "type": "object"
     },
-    "ExpressionConfig": {
+    "HermesConfig": {
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "default": true,
-          "title": "Enabled",
-          "type": "boolean"
+        "create_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Create Dir"
         },
-        "expression_checked_only": {
+        "write_approval": {
+          "const": false,
           "default": false,
-          "title": "Expression Checked Only",
+          "title": "Write Approval",
           "type": "boolean"
         },
-        "expression_self_reflect": {
+        "inline_shell": {
+          "const": false,
+          "default": false,
+          "title": "Inline Shell",
+          "type": "boolean"
+        },
+        "ledger": {
           "default": true,
-          "title": "Expression Self Reflect",
+          "title": "Ledger",
           "type": "boolean"
         },
-        "learning_list": {
-          "default": [
-            {
-              "conversation_id": "",
-              "adapter_instance_id": "",
-              "type": "group",
-              "use": true,
-              "learn": true
-            }
-          ],
-          "items": {
-            "$ref": "#/$defs/LearningRule"
-          },
-          "title": "Learning List",
-          "type": "array"
-        },
-        "expression_groups": {
-          "default": [],
-          "items": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "title": "Expression Groups",
-          "type": "array"
-        },
-        "learning_blacklist": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/BlacklistedUser"
-          },
-          "title": "Learning Blacklist",
-          "type": "array"
-        },
-        "learner_endpoint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Learner Endpoint"
-        },
-        "learner_model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Learner Model"
-        },
-        "learner_key_env": {
-          "default": "QQBOT_EXPRESSION_KEY",
-          "title": "Learner Key Env",
-          "type": "string"
-        },
-        "timeout_seconds": {
-          "default": 300,
-          "maximum": 1800,
-          "minimum": 1,
-          "title": "Timeout Seconds",
+        "ledger_max_bytes": {
+          "default": 5242880,
+          "minimum": 0,
+          "title": "Ledger Max Bytes",
           "type": "integer"
         },
-        "min_messages": {
+        "creation_nudge_interval": {
           "default": 10,
-          "maximum": 100,
-          "minimum": 1,
-          "title": "Min Messages",
-          "type": "integer"
-        },
-        "max_messages": {
-          "default": 40,
-          "maximum": 100,
-          "minimum": 10,
-          "title": "Max Messages",
-          "type": "integer"
-        },
-        "learn_interval_seconds": {
-          "default": 300,
-          "maximum": 86400,
-          "minimum": 30,
-          "title": "Learn Interval Seconds",
-          "type": "integer"
-        },
-        "max_expression_learner": {
-          "default": 3,
-          "maximum": 8,
-          "minimum": 1,
-          "title": "Max Expression Learner",
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Creation Nudge Interval",
           "type": "integer"
         }
       },
-      "title": "ExpressionConfig",
+      "title": "HermesConfig",
       "type": "object"
     },
-    "JudgeConfig": {
+    "MemoryBinding": {
       "additionalProperties": false,
+      "description": "Resolved by host configuration, never a model-supplied credential selector.",
       "properties": {
-        "kind": {
-          "default": "rule",
-          "enum": [
-            "rule",
-            "jev",
-            "structured"
-          ],
-          "title": "Kind",
+        "owner_id": {
+          "title": "Owner Id",
           "type": "string"
         },
-        "endpoint": {
-          "default": "https://api.typesafe.ai/v1/systemone",
-          "title": "Endpoint",
+        "workspace_id": {
+          "default": "personal",
+          "title": "Workspace Id",
           "type": "string"
         },
-        "model": {
-          "default": "jev-1.14.0",
-          "title": "Model",
+        "account_id": {
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "user_id": {
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "title": "User Id",
           "type": "string"
         },
         "api_key_env": {
-          "default": "QQBOT_JUDGE_KEY",
+          "minLength": 1,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "title": "Api Key Env",
           "type": "string"
-        },
-        "thresholds": {
-          "$ref": "#/$defs/SpeechThresholds",
-          "default": {
-            "invites_participation": 0.8,
-            "continues_bot_topic": 0.85,
-            "useful_contribution": 0.75,
-            "private_exchange": 0.2,
-            "wait_useful_contribution": 0.5
-          }
-        },
-        "participation": {
-          "$ref": "#/$defs/ParticipationSettings",
-          "default": {
-            "cooldown_seconds": 60,
-            "min_human_messages": 3,
-            "require_member_response": true,
-            "max_recent_bot_ratio": 0.2,
-            "max_rechecks": 2,
-            "activity_window_seconds": 60,
-            "activity_max_events": 20,
-            "participation_budget_ratio": 0.2
-          }
         }
       },
-      "title": "JudgeConfig",
-      "type": "object"
-    },
-    "LearningRule": {
-      "additionalProperties": false,
-      "properties": {
-        "conversation_id": {
-          "default": "",
-          "title": "Conversation Id",
-          "type": "string"
-        },
-        "adapter_instance_id": {
-          "default": "",
-          "title": "Adapter Instance Id",
-          "type": "string"
-        },
-        "type": {
-          "default": "group",
-          "enum": [
-            "group",
-            "private"
-          ],
-          "title": "Type",
-          "type": "string"
-        },
-        "use": {
-          "default": true,
-          "title": "Use",
-          "type": "boolean"
-        },
-        "learn": {
-          "default": true,
-          "title": "Learn",
-          "type": "boolean"
-        }
-      },
-      "title": "LearningRule",
+      "required": [
+        "owner_id",
+        "account_id",
+        "user_id",
+        "api_key_env"
+      ],
+      "title": "MemoryBinding",
       "type": "object"
     },
     "MemoryConfig": {
@@ -648,107 +493,15 @@
             "endpoint": null,
             "api_key_env": "QQBOT_OPENVIKING_KEY",
             "namespace": "elephant",
+            "bindings": [],
+            "expected_version": "v0.5.4.1",
             "private_enabled": true,
             "group_enabled": false,
             "timeout_seconds": 2.0,
             "operation_budget_seconds": 8.0,
-            "max_records": 64,
-            "max_query_chars": 4000
+            "max_query_chars": 4000,
+            "recall_max_chars": 8000
           }
-        },
-        "maintenance_enabled": {
-          "default": false,
-          "title": "Maintenance Enabled",
-          "type": "boolean"
-        },
-        "auto_extract": {
-          "default": false,
-          "title": "Auto Extract",
-          "type": "boolean"
-        },
-        "extractor_endpoint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Extractor Endpoint"
-        },
-        "extractor_model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Extractor Model"
-        },
-        "extractor_key_env": {
-          "default": "QQBOT_MEMORY_KEY",
-          "title": "Extractor Key Env",
-          "type": "string"
-        },
-        "embedding_endpoint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Embedding Endpoint"
-        },
-        "embedding_model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Embedding Model"
-        },
-        "embedding_version": {
-          "default": "v1",
-          "title": "Embedding Version",
-          "type": "string"
-        },
-        "embedding_dimensions": {
-          "anyOf": [
-            {
-              "maximum": 65536,
-              "minimum": 1,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Embedding Dimensions"
-        },
-        "embedding_key_env": {
-          "default": "QQBOT_EMBEDDING_KEY",
-          "title": "Embedding Key Env",
-          "type": "string"
-        },
-        "raw_retention_days": {
-          "default": 30,
-          "maximum": 3650,
-          "minimum": 1,
-          "title": "Raw Retention Days",
-          "type": "integer"
         }
       },
       "title": "MemoryConfig",
@@ -830,6 +583,19 @@
           "title": "Namespace",
           "type": "string"
         },
+        "bindings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MemoryBinding"
+          },
+          "title": "Bindings",
+          "type": "array"
+        },
+        "expected_version": {
+          "default": "v0.5.4.1",
+          "title": "Expected Version",
+          "type": "string"
+        },
         "private_enabled": {
           "default": true,
           "title": "Private Enabled",
@@ -842,24 +608,17 @@
         },
         "timeout_seconds": {
           "default": 2.0,
-          "maximum": 10,
+          "maximum": 30,
           "minimum": 0.1,
           "title": "Timeout Seconds",
           "type": "number"
         },
         "operation_budget_seconds": {
           "default": 8.0,
-          "maximum": 30,
+          "maximum": 60,
           "minimum": 0.1,
           "title": "Operation Budget Seconds",
           "type": "number"
-        },
-        "max_records": {
-          "default": 64,
-          "maximum": 128,
-          "minimum": 1,
-          "title": "Max Records",
-          "type": "integer"
         },
         "max_query_chars": {
           "default": 4000,
@@ -867,65 +626,135 @@
           "minimum": 100,
           "title": "Max Query Chars",
           "type": "integer"
+        },
+        "recall_max_chars": {
+          "default": 8000,
+          "maximum": 32000,
+          "minimum": 256,
+          "title": "Recall Max Chars",
+          "type": "integer"
         }
       },
       "title": "OpenVikingConfig",
       "type": "object"
     },
-    "ParticipationSettings": {
+    "OrchestrationConfig": {
       "additionalProperties": false,
       "properties": {
-        "cooldown_seconds": {
-          "default": 60,
+        "mode": {
+          "const": "leader_workers",
+          "default": "leader_workers",
+          "title": "Mode",
+          "type": "string"
+        },
+        "pending_inputs_per_owner": {
+          "default": 64,
+          "deprecated": true,
+          "description": "Legacy compatibility field; pending inputs are unrestricted",
           "minimum": 0,
-          "title": "Cooldown Seconds",
+          "title": "Pending Inputs Per Owner",
           "type": "integer"
         },
-        "min_human_messages": {
-          "default": 3,
+        "pending_root_tasks_per_owner": {
+          "default": 5,
+          "deprecated": true,
+          "description": "Legacy compatibility field; pending goals are unrestricted",
           "minimum": 0,
-          "title": "Min Human Messages",
+          "title": "Pending Root Tasks Per Owner",
           "type": "integer"
         },
-        "require_member_response": {
-          "default": true,
-          "title": "Require Member Response",
-          "type": "boolean"
-        },
-        "max_recent_bot_ratio": {
-          "default": 0.2,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Max Recent Bot Ratio",
-          "type": "number"
-        },
-        "max_rechecks": {
+        "child_parallelism": {
           "default": 2,
+          "deprecated": true,
+          "description": "Legacy compatibility field; child admission is unrestricted",
           "minimum": 0,
-          "title": "Max Rechecks",
+          "title": "Child Parallelism",
           "type": "integer"
         },
-        "activity_window_seconds": {
-          "default": 60,
-          "minimum": 1,
-          "title": "Activity Window Seconds",
-          "type": "integer"
-        },
-        "activity_max_events": {
-          "default": 20,
-          "minimum": 1,
-          "title": "Activity Max Events",
-          "type": "integer"
-        },
-        "participation_budget_ratio": {
-          "default": 0.2,
-          "maximum": 1,
+        "max_task_depth": {
+          "default": 2,
+          "deprecated": true,
+          "description": "Legacy compatibility field; task tree depth is unrestricted",
           "minimum": 0,
-          "title": "Participation Budget Ratio",
+          "title": "Max Task Depth",
+          "type": "integer"
+        },
+        "max_nodes_per_root": {
+          "default": 7,
+          "deprecated": true,
+          "description": "Legacy compatibility field; task node count is unrestricted",
+          "minimum": 0,
+          "title": "Max Nodes Per Root",
+          "type": "integer"
+        },
+        "leader_inbox_batch_limit": {
+          "default": 16,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Leader Inbox Batch Limit",
+          "type": "integer"
+        },
+        "leader_inbox_coalesce_seconds": {
+          "default": 2,
+          "maximum": 60,
+          "minimum": 0,
+          "title": "Leader Inbox Coalesce Seconds",
           "type": "number"
+        },
+        "model_request_limit": {
+          "default": 8,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Model Request Limit",
+          "type": "integer"
+        },
+        "pi_executable": {
+          "default": "node_modules/.bin/pi",
+          "title": "Pi Executable",
+          "type": "string"
+        },
+        "github_host": {
+          "default": "github.com",
+          "title": "Github Host",
+          "type": "string"
+        },
+        "workspace_bindings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Workspace Bindings",
+          "type": "object"
         }
       },
-      "title": "ParticipationSettings",
+      "title": "OrchestrationConfig",
+      "type": "object"
+    },
+    "OwnerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "personal-owner",
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "qq_bindings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QQOwnerBinding"
+          },
+          "title": "Qq Bindings",
+          "type": "array"
+        },
+        "preferences": {
+          "default": "",
+          "description": "Explicit personal preferences such as preferred name, language, and communication style.",
+          "maxLength": 4000,
+          "title": "Preferences",
+          "type": "string"
+        }
+      },
+      "title": "OwnerConfig",
       "type": "object"
     },
     "PermissionPolicy": {
@@ -1021,6 +850,33 @@
       "title": "PermissionRule",
       "type": "object"
     },
+    "QQOwnerBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "app_id": {
+          "minLength": 1,
+          "title": "App Id",
+          "type": "string"
+        },
+        "user_openid": {
+          "minLength": 1,
+          "title": "User Openid",
+          "type": "string"
+        },
+        "verified_at": {
+          "minLength": 1,
+          "title": "Verified At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_id",
+        "user_openid",
+        "verified_at"
+      ],
+      "title": "QQOwnerBinding",
+      "type": "object"
+    },
     "RunBudget": {
       "additionalProperties": false,
       "properties": {
@@ -1053,11 +909,19 @@
           "type": "integer"
         },
         "output_tokens_per_call": {
-          "default": 8192,
-          "maximum": 32768,
-          "minimum": 1,
-          "title": "Output Tokens Per Call",
-          "type": "integer"
+          "anyOf": [
+            {
+              "maximum": 32768,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional per-request output limit; null uses the provider default",
+          "title": "Output Tokens Per Call"
         },
         "completion_reserve": {
           "default": 1,
@@ -1078,142 +942,46 @@
           "type": "boolean"
         },
         "group_enabled": {
-          "default": true,
+          "default": false,
           "title": "Group Enabled",
           "type": "boolean"
         },
-        "max_per_scope": {
-          "default": 100,
-          "maximum": 1000,
-          "minimum": 1,
-          "title": "Max Per Scope",
-          "type": "integer"
+        "provider": {
+          "const": "hermes",
+          "default": "hermes",
+          "title": "Provider",
+          "type": "string"
         },
-        "max_versions_per_skill": {
-          "default": 10,
-          "maximum": 50,
-          "minimum": 1,
-          "title": "Max Versions Per Skill",
-          "type": "integer"
+        "owner_storage_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Storage Root"
         },
-        "max_candidates_per_task": {
-          "default": 3,
-          "maximum": 10,
-          "minimum": 1,
-          "title": "Max Candidates Per Task",
-          "type": "integer"
+        "hermes": {
+          "$ref": "#/$defs/HermesConfig",
+          "default": {
+            "create_dir": null,
+            "write_approval": false,
+            "inline_shell": false,
+            "ledger": true,
+            "ledger_max_bytes": 5242880,
+            "creation_nudge_interval": 10
+          }
+        },
+        "background_review_enabled": {
+          "default": true,
+          "title": "Background Review Enabled",
+          "type": "boolean"
         }
       },
       "title": "SkillsConfig",
-      "type": "object"
-    },
-    "SpeakUpConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "default": true,
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "idle_minutes": {
-          "default": 40,
-          "maximum": 10080,
-          "minimum": 1,
-          "title": "Idle Minutes",
-          "type": "integer"
-        },
-        "min_interval_minutes": {
-          "default": 60,
-          "maximum": 10080,
-          "minimum": 1,
-          "title": "Min Interval Minutes",
-          "type": "integer"
-        },
-        "max_interval_minutes": {
-          "default": 180,
-          "maximum": 10080,
-          "minimum": 1,
-          "title": "Max Interval Minutes",
-          "type": "integer"
-        },
-        "max_per_day": {
-          "default": 20,
-          "maximum": 100,
-          "minimum": 0,
-          "title": "Max Per Day",
-          "type": "integer"
-        },
-        "awake_from": {
-          "default": 8,
-          "maximum": 23,
-          "minimum": 0,
-          "title": "Awake From",
-          "type": "integer"
-        },
-        "awake_to": {
-          "default": 23,
-          "maximum": 24,
-          "minimum": 1,
-          "title": "Awake To",
-          "type": "integer"
-        },
-        "nudge": {
-          "default": true,
-          "title": "Nudge",
-          "type": "boolean"
-        },
-        "allow": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Allow",
-          "type": "array"
-        }
-      },
-      "title": "SpeakUpConfig",
-      "type": "object"
-    },
-    "SpeechThresholds": {
-      "additionalProperties": false,
-      "properties": {
-        "invites_participation": {
-          "default": 0.8,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Invites Participation",
-          "type": "number"
-        },
-        "continues_bot_topic": {
-          "default": 0.85,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Continues Bot Topic",
-          "type": "number"
-        },
-        "useful_contribution": {
-          "default": 0.75,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Useful Contribution",
-          "type": "number"
-        },
-        "private_exchange": {
-          "default": 0.2,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Private Exchange",
-          "type": "number"
-        },
-        "wait_useful_contribution": {
-          "default": 0.5,
-          "maximum": 1,
-          "minimum": 0,
-          "title": "Wait Useful Contribution",
-          "type": "number"
-        }
-      },
-      "title": "SpeechThresholds",
       "type": "object"
     },
     "SubjectSelector": {
@@ -1376,14 +1144,14 @@
       "$ref": "#/$defs/ExecutionConfig",
       "default": {
         "notify_before_tools": true,
-        "max_active": 4,
+        "max_active": 8,
         "sustained_limit": 2,
         "foreground_wait_ms": 5000,
         "interactive_budget": {
           "active_seconds": 600,
           "completion_reserve": 1,
           "model_calls": 30,
-          "output_tokens_per_call": 4096,
+          "output_tokens_per_call": null,
           "tool_calls": 80,
           "total_wall_seconds": 3600
         },
@@ -1391,13 +1159,38 @@
           "active_seconds": 1800,
           "completion_reserve": 1,
           "model_calls": 60,
-          "output_tokens_per_call": 8192,
+          "output_tokens_per_call": null,
           "tool_calls": 200,
           "total_wall_seconds": 7200
         },
         "warm_max": 4,
         "warm_idle_max": 2,
         "warm_ttl_seconds": 300
+      }
+    },
+    "owner": {
+      "$ref": "#/$defs/OwnerConfig",
+      "default": {
+        "id": "personal-owner",
+        "qq_bindings": [],
+        "preferences": ""
+      }
+    },
+    "orchestration": {
+      "$ref": "#/$defs/OrchestrationConfig",
+      "default": {
+        "mode": "leader_workers",
+        "pending_inputs_per_owner": 64,
+        "pending_root_tasks_per_owner": 5,
+        "child_parallelism": 2,
+        "max_task_depth": 2,
+        "max_nodes_per_root": 7,
+        "leader_inbox_batch_limit": 16,
+        "leader_inbox_coalesce_seconds": 2.0,
+        "model_request_limit": 8,
+        "pi_executable": "node_modules/.bin/pi",
+        "github_host": "github.com",
+        "workspace_bindings": {}
       }
     },
     "context": {
@@ -1417,122 +1210,41 @@
       "title": "Internal Socket",
       "type": "string"
     },
-    "persona_path": {
-      "default": "personas/elephant_default.yaml",
-      "title": "Persona Path",
-      "type": "string"
-    },
-    "judge": {
-      "$ref": "#/$defs/JudgeConfig",
-      "default": {
-        "kind": "rule",
-        "endpoint": "https://api.typesafe.ai/v1/systemone",
-        "model": "jev-1.14.0",
-        "api_key_env": "QQBOT_JUDGE_KEY",
-        "thresholds": {
-          "continues_bot_topic": 0.85,
-          "invites_participation": 0.8,
-          "private_exchange": 0.2,
-          "useful_contribution": 0.75,
-          "wait_useful_contribution": 0.5
-        },
-        "participation": {
-          "activity_max_events": 20,
-          "activity_window_seconds": 60,
-          "cooldown_seconds": 60,
-          "max_recent_bot_ratio": 0.2,
-          "max_rechecks": 2,
-          "min_human_messages": 3,
-          "participation_budget_ratio": 0.2,
-          "require_member_response": true
-        }
-      }
-    },
     "memory": {
       "$ref": "#/$defs/MemoryConfig",
       "default": {
         "openviking": {
           "api_key_env": "QQBOT_OPENVIKING_KEY",
+          "bindings": [],
           "endpoint": null,
+          "expected_version": "v0.5.4.1",
           "group_enabled": false,
           "max_query_chars": 4000,
-          "max_records": 64,
           "namespace": "elephant",
           "operation_budget_seconds": 8.0,
           "private_enabled": true,
+          "recall_max_chars": 8000,
           "timeout_seconds": 2.0
-        },
-        "maintenance_enabled": false,
-        "auto_extract": false,
-        "extractor_endpoint": null,
-        "extractor_model": null,
-        "extractor_key_env": "QQBOT_MEMORY_KEY",
-        "embedding_endpoint": null,
-        "embedding_model": null,
-        "embedding_version": "v1",
-        "embedding_dimensions": null,
-        "embedding_key_env": "QQBOT_EMBEDDING_KEY",
-        "raw_retention_days": 30
+        }
       }
     },
     "skills": {
       "$ref": "#/$defs/SkillsConfig",
       "default": {
         "enabled": true,
-        "group_enabled": true,
-        "max_per_scope": 100,
-        "max_versions_per_skill": 10,
-        "max_candidates_per_task": 3
+        "group_enabled": false,
+        "provider": "hermes",
+        "owner_storage_root": null,
+        "hermes": {
+          "create_dir": null,
+          "creation_nudge_interval": 10,
+          "inline_shell": false,
+          "ledger": true,
+          "ledger_max_bytes": 5242880,
+          "write_approval": false
+        },
+        "background_review_enabled": true
       }
-    },
-    "speak_up": {
-      "$ref": "#/$defs/SpeakUpConfig",
-      "default": {
-        "enabled": true,
-        "idle_minutes": 40,
-        "min_interval_minutes": 60,
-        "max_interval_minutes": 180,
-        "max_per_day": 20,
-        "awake_from": 8,
-        "awake_to": 23,
-        "nudge": true,
-        "allow": []
-      }
-    },
-    "expression": {
-      "$ref": "#/$defs/ExpressionConfig",
-      "default": {
-        "enabled": true,
-        "expression_checked_only": false,
-        "expression_self_reflect": true,
-        "learning_list": [
-          {
-            "adapter_instance_id": "",
-            "conversation_id": "",
-            "learn": true,
-            "type": "group",
-            "use": true
-          }
-        ],
-        "expression_groups": [],
-        "learning_blacklist": [],
-        "learner_endpoint": null,
-        "learner_model": null,
-        "learner_key_env": "QQBOT_EXPRESSION_KEY",
-        "timeout_seconds": 300,
-        "min_messages": 10,
-        "max_messages": 40,
-        "learn_interval_seconds": 300,
-        "max_expression_learner": 3
-      }
-    },
-    "social_evaluated_conversations": {
-      "default": [],
-      "items": {
-        "type": "string"
-      },
-      "title": "Social Evaluated Conversations",
-      "type": "array"
     }
   },
   "title": "Settings",
