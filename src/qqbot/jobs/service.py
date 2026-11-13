@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -22,6 +23,24 @@ from qqbot.storage.task_schema import events, inputs, model_requests, notificati
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
 
 
+class _TaskWakeup(asyncio.Event):
+    def __init__(self):
+        super().__init__()
+        self.wait_loop = self.wait_thread = None
+
+    async def wait(self):
+        self.wait_loop = asyncio.get_running_loop()
+        self.wait_thread = threading.get_ident()
+        return await super().wait()
+
+    def set(self):
+        loop = self.wait_loop
+        if loop and loop.is_running() and threading.get_ident() != self.wait_thread:
+            loop.call_soon_threadsafe(super().set)
+            return
+        super().set()
+
+
 class TaskService:
     def __init__(self, db, clock, outbox, archive_root=None, stop_verifier=None, *, permissions=None, max_active=4, sustained_limit=2, max_resident=None, context_validator=None, budget_ceiling=None, stream_eligibility=None):
         self.db, self.clock, self.outbox = db, clock, outbox
@@ -31,7 +50,7 @@ class TaskService:
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.stream_eligibility = stream_eligibility
-        self.wakeup = asyncio.Event()
+        self.wakeup = _TaskWakeup()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
 

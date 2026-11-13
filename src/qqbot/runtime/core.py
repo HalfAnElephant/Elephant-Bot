@@ -499,7 +499,12 @@ class Core:
 
     async def cleanup_artifacts(self):
         from qqbot.harness.artifacts import cleanup_artifacts
-        await asyncio.to_thread(cleanup_artifacts, self.db, self.tasks.archive_root, self.clock.now())
+        pending = asyncio.create_task(asyncio.to_thread(cleanup_artifacts, self.db, self.tasks.archive_root, self.clock.now()))
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            await pending
+            raise
 
     def retire_adapters(self):
         """Retain unsupported transport inputs as explicit failures, never execute them."""

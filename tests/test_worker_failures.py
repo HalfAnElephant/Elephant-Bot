@@ -38,6 +38,26 @@ def environment(db, clock):
     return service, task, app
 
 
+async def test_threaded_recovery_wakes_a_waiting_debug_loop(environment):
+    service, _task, _app = environment
+    loop = asyncio.get_running_loop()
+    debug = loop.get_debug()
+    loop.set_debug(True)
+    service.wakeup.clear()
+    waiting = asyncio.create_task(service.wakeup.wait())
+    try:
+        await asyncio.sleep(0)
+        await asyncio.to_thread(service.wakeup.set)
+        assert await asyncio.wait_for(waiting, 2)
+        service.wakeup.clear()
+        service.wakeup.set()
+        assert service.wakeup.is_set()
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        loop.set_debug(debug)
+
+
 class SlowStopRunner(PiRunnerAdapter):
     def __init__(self, directory, claim, service, process_id, error="413 context exceeds application budget", verified=True):
         super().__init__(Path(__file__), directory, timeout=30)

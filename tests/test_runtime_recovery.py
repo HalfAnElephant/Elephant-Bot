@@ -241,6 +241,38 @@ async def test_maintenance_recovery_leaves_event_loop_available():
     assert calls == ["workers", "leaders", "sync"]
 
 
+@pytest.mark.parametrize("operation", ["maintenance", "cleanup_artifacts"])
+async def test_background_file_work_finishes_before_shutdown(operation, monkeypatch):
+    from qqbot.runtime.core import Core
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def blocking(*args):
+        entered.set()
+        assert release.wait(3)
+        finished.set()
+
+    async def sync():
+        pass
+
+    monkeypatch.setattr("qqbot.harness.artifacts.cleanup_artifacts", blocking)
+    core = SimpleNamespace(recovery=SimpleNamespace(recover_workers=blocking),
+        leader=SimpleNamespace(recover=lambda: None),
+        knowledge=SimpleNamespace(recover_mutations=lambda: None, sync=sync),
+        db=None, tasks=SimpleNamespace(archive_root=None), clock=SimpleNamespace(now=lambda: None))
+    work = asyncio.create_task(getattr(Core, operation)(core))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        work.cancel()
+        await asyncio.sleep(0)
+        assert not work.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+    assert finished.is_set()
+
+
 def test_native_completed_boundary_restores_original_result_artifacts_and_one_inbox(recovery):
     runtime = recovery.runtime
     claim = bound_worker(recovery)
