@@ -152,7 +152,8 @@ def export_session(path, *, session_id, after=0, limit=100, role="leader", purpo
         if raw_role not in {"user", "assistant", "toolResult"}:
             continue
         parts = message.get("content", [])
-        content = parts if isinstance(parts, str) else "\n".join(
+        separator = "" if raw_role == "assistant" else "\n"
+        content = parts if isinstance(parts, str) else separator.join(
             part.get("text", "") for part in parts if part.get("type") == "text")
         evidence_refs, event_origins = (), source_ids
         kind = "relay"
@@ -171,10 +172,11 @@ def export_session(path, *, session_id, after=0, limit=100, role="leader", purpo
             content, kind, event_origins = "\n".join(kept), source_kind, source_ids
         elif raw_role == "toolResult":
             kind = "tool_output"
-        elif content:
-            if current_role == "worker" and current.get("summary") == content and current.get("evidence_refs"):
-                kind, event_origins = "verified_fact", ("result:" + current["run_id"],)
-                evidence_refs = tuple(current["evidence_refs"])
+        elif (content and current_role == "worker" and current.get("summary") == content[:10000]
+                and current.get("evidence_refs")):
+            content = current["summary"]
+            kind, event_origins = "verified_fact", ("result:" + current["run_id"],)
+            evidence_refs = tuple(current["evidence_refs"])
         if position <= after or not content:
             continue
         if len(content) > 64000:

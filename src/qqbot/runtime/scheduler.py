@@ -9,11 +9,11 @@ import httpx
 from sqlalchemy import select, update
 
 from qqbot.capabilities.gateway import standard_registry
+from qqbot.contracts.harness import resolve_harness
 from qqbot.harness.pool import SessionPool
 from qqbot.jobs.api import WorkerRequest
 from qqbot.jobs.waiters import ExternalWaiters
 from qqbot.jobs.worker import Spool, Worker, configured_github
-from qqbot.contracts.harness import resolve_harness
 from qqbot.providers import ModelCapacity
 from qqbot.storage.task_schema import runs
 

@@ -136,6 +136,7 @@ class KnowledgeRuntime:
 
     async def sync(self):
         await self.replan()
+        await self.memory.reconcile()
         with self.core.db.engine.connect() as conn:
             records = conn.execute(select(sessions).where(sessions.c.active_run_id.is_(None))).mappings().all()
         for record in records:
@@ -158,7 +159,6 @@ class KnowledgeRuntime:
             await self.memory.sync(SourceBatch(scope=scope, session_id=record["id"], from_seq=after,
                 to_seq=exported["next_cursor"], events=exported["events"], branch=exported["branch"],
                 projection_version=exported.get("projection_version", "pi-original-v2")))
-        await self.memory.reconcile()
 
     def invalidate_root(self, conn, root, scope, operation_id, source_ids, session_ids=()):
         context = json.loads(root["context_json"])

@@ -761,12 +761,15 @@ class OpenVikingMemory:
         for session_id in dict.fromkeys(archived):
             await self._delete_remote_session(scope, session_id)
         with self.db.transaction() as conn:
-            unaffected = set(conn.execute(select(derivations.c.source_id).where(
+            protected_sources = select(sources.c.source_id).where(sources.c.scope_id == scope.key,
+                sources.c.state.in_({"FROZEN", "REVOKED"}))
+            rebuild_candidates = conn.execute(select(derivations.c.source_id).where(
                 derivations.c.scope_id == scope.key, derivations.c.uri.in_(refs["uris"]),
-                derivations.c.active == 1)).scalars()) - set(refs["source_ids"]) - set(refs.get("frozen_source_ids", ()))
+                derivations.c.active == 1, derivations.c.source_id.not_in(protected_sources))).scalars()
+            unaffected = set(rebuild_candidates) - set(refs["source_ids"]) - set(refs.get("frozen_source_ids", ()))
             if unaffected:
                 conn.execute(update(sources).where(sources.c.scope_id == scope.key,
-                    sources.c.source_id.in_(unaffected)).values(state="REBUILD"))
+                    sources.c.source_id.in_(unaffected), sources.c.state.not_in({"FROZEN", "REVOKED"})).values(state="REBUILD"))
             if refs["source_ids"]:
                 conn.execute(update(sources).where(sources.c.scope_id == scope.key,
                     sources.c.source_id.in_(refs["source_ids"])).values(state="REVOKED"))

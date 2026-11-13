@@ -6,6 +6,7 @@ import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -15,9 +16,13 @@ from test_runtime_recovery import (
     bound_worker,
     expire,
     prove_stop,
-    recovery as recovery_fixture,
-    runtime as runtime_fixture,
     task_row,
+)
+from test_runtime_recovery import (
+    recovery as recovery_fixture,
+)
+from test_runtime_recovery import (
+    runtime as runtime_fixture,
 )
 
 from qqbot.app import create_app
@@ -36,7 +41,7 @@ compaction_session = compaction_fixture
 
 
 class AlternateHarness:
-    binding = {"harness": "alternate", "compression": "checkpoint", "contract_version": "test-1"}
+    binding: ClassVar[dict] = {"harness": "alternate", "compression": "checkpoint", "contract_version": "test-1"}
     capabilities = HarnessCapabilities(append_input=True, interactive_questions=True)
     projection_version = "alternate-original-v1"
 

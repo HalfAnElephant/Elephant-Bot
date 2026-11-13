@@ -13,8 +13,8 @@ from uuid import UUID
 from sqlalchemy import select, update
 
 from qqbot.adapters.execution.world import LocalExecution
-from qqbot.contracts.harness import resolve_harness
 from qqbot.capabilities.types import Action, ToolContext
+from qqbot.contracts.harness import resolve_harness
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.tasks import TaskResult
 from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES

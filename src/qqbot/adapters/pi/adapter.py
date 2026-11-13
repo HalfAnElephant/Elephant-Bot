@@ -1,6 +1,7 @@
 """Pi implementation of the host Harness and native-log contracts."""
 import json
 from pathlib import Path
+from typing import ClassVar
 
 from qqbot.harness.pi import PiHarness
 
@@ -8,7 +9,7 @@ from . import sessions
 
 
 class PiAdapter:
-    binding = {"harness": "pi", "contract_version": "elephant-1", "package_version": "1.5.0",
+    binding: ClassVar[dict] = {"harness": "pi", "contract_version": "elephant-1", "package_version": "1.5.0",
                "compression": "native"}
     capabilities = PiHarness.capabilities
     projection_version = "pi-original-v2"

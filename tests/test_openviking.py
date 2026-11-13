@@ -640,3 +640,46 @@ async def test_uri_mutation_preserves_sibling_with_legacy_batch_union_and_freeze
     assert (await replacement.read(scope, second_uri)).content == "项目B保持有效"
     assert (await replacement.sync(source)).state == "SKIPPED"
     assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1
+
+
+async def test_later_forget_never_rebuilds_a_previously_frozen_shared_source(memory):
+    from qqbot.storage.memory_sync_schema import memory_sources
+
+    service, remote, scope, originals = memory
+    original = batch(scope, event_id="shared-source", content="项目A旧值与项目B旧值")
+    originals[original.session_id] = original
+    pending = await service.sync(original)
+    first_uri = remote.complete(relative="entities/a.md", content="项目A旧值")
+    sid = next(iter(remote.sessions))
+    second_uri = "viking://user/owner_private/memories/entities/b.md"
+    remote.files[second_uri] = "项目B旧值"
+    remote.diffs[remote.sessions[sid]["archive"] + "/memory_diff.json"]["operations"]["adds"].append({
+        "uri": second_uri, "memory_type": "entities", "after": "项目B旧值"})
+    await indexed(service, pending)
+    forgotten_a = await service.forget(MemoryDeletion(scope=scope, uris=(first_uri,), idempotency_key="first-forget-a"))
+    assert (await service.poll(forgotten_a.operation_id)).completed
+    assert (await service.read(scope, second_uri)).content == "项目B旧值"
+    update_b = batch(scope, session="new-source-b", event_id="source-b-update", content="项目B新值")
+    originals[update_b.session_id] = update_b
+    pending_b = await service.sync(update_b)
+    remote.complete(relative="entities/b.md", content="项目B新值", updates=True)
+    await indexed(service, pending_b)
+    forgotten_b = await service.revoke_source(scope, "source-b-update", idempotency_key="second-forget-b")
+    assert (await service.poll(forgotten_b.operation_id)).completed
+    assert first_uri not in remote.files and second_uri not in remote.files
+    with service.db.engine.connect() as conn:
+        states = dict(conn.execute(select(memory_sources.c.source_id, memory_sources.c.state)).all())
+    assert states == {"shared-source": "FROZEN", "source-b-update": "REVOKED"}
+    completed = next(change for change in service.changes_since(scope)
+        if change["operation_id"] == forgotten_b.operation_id and change["kind"] == "forgotten")
+    assert completed["refs"]["rebuild_source_ids"] == []
+    manifest = service.export_barriers(scope)
+    assert [source["source_id"] for source in manifest["frozen_sources"]] == ["shared-source"]
+    replacement = OpenVikingMemory(service.db, service.clock, service.config,
+        source_loader=service.source_loader, client=service.http.client)
+    replacement.restore_barriers(scope, manifest)
+    await replacement.reconcile_restore(scope)
+    calls_before_replay = list(remote.calls)
+    assert (await replacement.sync(original)).state == "SKIPPED"
+    assert (await replacement.sync(update_b)).state == "SKIPPED"
+    assert remote.calls == calls_before_replay and not remote.files

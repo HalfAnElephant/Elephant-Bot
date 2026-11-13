@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import insert, select, update
-from test_agent_runtime import leader_complete, memory_runtime, root_goal, runtime as agent_runtime
+from test_agent_runtime import leader_complete, memory_runtime, root_goal
+from test_agent_runtime import runtime as agent_runtime
 
 from qqbot.adapters.openviking.service import affected_sources
 from qqbot.adapters.pi.sessions import export_session
@@ -56,6 +57,25 @@ def test_only_worker_summary_with_frozen_host_evidence_is_a_fact(tmp_path):
     assert fact.kind == "verified_fact" and fact.origins == ("result:work",)
     assert fact.evidence_refs == ("observation-1",)
     assert export_session(path, session_id="worker")["events"][-1].kind == "relay"
+
+
+@pytest.mark.parametrize("parts", [["值为", "42"], ["已" * 10000 + "未核实的尾部"]], ids=["multiple-text-parts", "long-output"])
+def test_worker_fact_uses_exact_persisted_pi_summary(tmp_path, parts):
+    path = tmp_path / "worker.jsonl"
+    text = "".join(parts)
+    entries = native_log(path, run_id="work", role="worker", purpose="work", input_id="task-id", summary=text)
+    entries[4]["message"]["content"] = [{"type": "text", "text": part} for part in parts]
+    path.write_text("".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries))
+    turns = {"work": {"run_id": "work", "role": "worker", "purpose": "work", "summary": text[:10000],
+        "evidence_refs": ["observation-1"]}}
+    fact = export_session(path, session_id="worker", turns=turns)["events"][-1]
+    assert fact.kind == "verified_fact" and fact.content == text[:10000]
+    assert fact.origins == ("result:work",) and fact.evidence_refs == ("observation-1",)
+    assert "未核实的尾部" not in fact.content
+    legacy = export_session(path, session_id="worker", projection_version="pi-original-v1")["events"][-1]
+    assert legacy.content == "\n".join(parts)
+    turns["work"]["summary"] = "不同的宿主回执"
+    assert export_session(path, session_id="worker", turns=turns)["events"][-1].kind == "relay"
 
 
 def test_rebound_resume_prompt_keeps_already_persisted_input_origins(tmp_path):
@@ -163,3 +183,27 @@ async def test_frozen_shared_source_is_removed_from_replanned_goal(runtime, entr
     assert root["state"] == "BLOCKED" and root["stop_reason"] == "business_source_revoked"
     assert runtime.event.text not in root["goal"] and not knowledge.memory.search_calls
     assert json.loads(root["context_json"])["memory_replan"]["source_ids"] == [runtime.event.event_id]
+
+
+async def test_pending_sync_operations_drain_even_when_new_export_queue_is_full(runtime):
+    from unittest.mock import AsyncMock
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    leader_complete(runtime, claim)
+    path = runtime.path / "source.jsonl"
+    native_log(path, run_id=claim["run_id"], role="leader", purpose="user",
+        input_id=runtime.event.event_id, summary="收到")
+    with runtime.db.transaction() as conn:
+        conn.execute(insert(sessions).values(id=claim["session_id"], scope_key=claim["session_id"],
+            session_file=str(path), manifest_json="{}", active_run_id=None, epoch=0))
+    binding = MemoryBinding(owner_id=runtime.sessions.settings.owner.id, account_id="test", user_id="test", api_key_env="UNUSED")
+    memory = SimpleNamespace(config=SimpleNamespace(bindings=(binding,)), enabled=lambda _: True,
+        sync=AsyncMock(side_effect=ValueError("memory synchronization queue is full")), reconcile=AsyncMock())
+    core = runtime.leader.core
+    core.sessions, core.openviking = runtime.sessions, memory
+    knowledge = KnowledgeRuntime(core)
+    with pytest.raises(ValueError, match="queue is full"):
+        await knowledge.sync()
+    memory.reconcile.assert_awaited_once()
+    memory.sync.assert_awaited_once()
