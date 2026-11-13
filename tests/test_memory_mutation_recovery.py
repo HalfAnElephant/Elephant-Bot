@@ -81,3 +81,25 @@ async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(r
     assert next_turn["source_ids"] == [followup.event_id]
     external_forget.assert_not_called()
     native_repair.assert_not_called()
+
+
+def test_retired_memory_writer_blocks_only_its_dialogue_until_stopped(runtime):
+    knowledge, scope = memory_runtime(runtime)
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    knowledge.rotate(scope, (old["run_id"], old["fencing_token"], "leader"), MutationReceipt(
+        operation_id="forget-isolated", state="APPLIED", completed=True, memory_epoch=1))
+    waiting = runtime.event.model_copy(update={"event_id": "same-dialogue-after-forget",
+        "segments": (TextSegment(text="继续这个对话"),)})
+    runtime.sessions.enqueue(waiting, runtime.access)
+    assert runtime.sessions.claim("replacement-before-stop") is None
+    independent = runtime.event.model_copy(update={"event_id": "independent-dialogue",
+        "segments": (TextSegment(text="另一个对话的新问题"),)})
+    other = runtime.sessions.enqueue(independent, runtime.access, new_title="独立对话")
+    claim = runtime.sessions.claim("independent-leader")
+    assert claim["context"]["dialogue_id"] == other["dialogue_id"]
+    assert claim["source_ids"] == [independent.event_id]
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 1
+        assert conn.execute(select(dialogue_inputs.c.claimed_attempt_id).where(
+            dialogue_inputs.c.id == waiting.event_id)).scalar_one() is None

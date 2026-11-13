@@ -145,7 +145,7 @@ def test_save_all_settings_restart_and_restore_history(console_settings, tmp_pat
 def test_invalid_config_and_concurrent_save_do_not_overwrite(console_settings, tmp_path, clock):
     with TestClient(create_app(console_settings, clock=clock, run_background=False)) as client:
         first = client.get("/api/v1/config", headers=AUTH).json()
-        invalid = {**first["config"], "execution": {**first["config"]["execution"], "max_active": 0}}
+        invalid = {**first["config"], "execution": {**first["config"]["execution"], "max_active": -1}}
         for path in ("validate", "save", "apply"):
             response = client.post("/api/v1/config/" + path, headers=AUTH, json={
                 "expected_version": first["version"], "config": invalid,

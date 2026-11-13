@@ -50,7 +50,6 @@ class ContextService:
     def pool_limits(self):
         execution = self.settings.execution
         return {
-            "max_resident": max(execution.max_active, execution.warm_max),
             "max_idle": execution.warm_idle_max if execution.warm_max else 0,
             "ttl": execution.warm_ttl_seconds,
         }

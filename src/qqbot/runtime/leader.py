@@ -8,6 +8,7 @@ from sqlalchemy import insert, select, update
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import TaskInputSpec
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
+from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
 from qqbot.storage.schema import outbox
 from qqbot.storage.task_schema import (
@@ -19,6 +20,7 @@ from qqbot.storage.task_schema import (
     runs,
     sessions,
     tasks,
+    waits,
 )
 
 from .task_graph import TERMINAL
@@ -44,7 +46,7 @@ class LeaderRuntime:
             raise PermissionError("stale Leader attempt")
         return run, json.loads(run["request_json"])
 
-    def authorize(self, conn, run, claim, payload):
+    def authorize(self, conn, run, claim, payload, *, ending_wait=False):
         event = InboundEvent.model_validate_json(claim["event_json"])
         if not self.core.allowed(event) or run["state"] != "RUNNING":
             raise PermissionError("Leader input is no longer authorized")
@@ -53,7 +55,8 @@ class LeaderRuntime:
         root_id = claim.get("target_root_task_id")
         if root_id:
             root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
-            if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or root["goal_revision"] != claim["basis_goal_revision"]:
+            if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or (
+                    root["goal_revision"] != claim["basis_goal_revision"] and not ending_wait):
                 raise PermissionError("Leader target version is no longer current")
         action = payload.get("action", "task.execute")
         effect = payload.get("effect", "read")
@@ -68,7 +71,9 @@ class LeaderRuntime:
             raise PermissionError("Leader context sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
         if effect != "read" and not personal:
-            raise PermissionError("Leader business execution must be delegated to a Worker")
+            if not claim.get("takeover") or not root_id:
+                raise PermissionError("Leader business execution requires a stopped task takeover")
+            self.service.graph.check_authority(conn, root, payload)
         if personal and self.sessions.owner(event) is None:
             raise PermissionError("personal knowledge requires a verified owner binding")
         for resource in payload.get("resources") or ["conversation:" + access.conversation.key]:
@@ -153,11 +158,6 @@ class LeaderRuntime:
         if claim.get("target_root_task_id"):
             root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
             root_used = json.loads(root["budget_json"])
-            root_budget = json.loads(root["plan_json"])["budget"]
-            root_limit = root_budget[key] - (root_budget.get("completion_reserve", 1)
-                if key == "model_calls" and claim["purpose"] != "finalize" else 0)
-            if root_used.get(key, 0) >= root_limit:
-                raise ValueError("root budget exhausted")
             root_used[key] = root_used.get(key, 0) + 1
             conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(budget_json=json.dumps(root_used)))
         used[key] = used.get(key, 0) + 1
@@ -166,8 +166,6 @@ class LeaderRuntime:
         conn.execute(insert(model_requests).values(id=request_id, run_id=run["id"], task_id=claim["task_id"],
             kind=kind, state="RESERVED", created_at=self.clock.now().isoformat()))
         remaining = limit - used[key]
-        if claim.get("target_root_task_id"):
-            remaining = min(remaining, root_limit - root_used[key])
         return {"accepted": True, "remaining": remaining}
 
     def task_tool(self, conn, run, claim, payload):
@@ -193,9 +191,19 @@ class LeaderRuntime:
             rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, tasks.c.kind == "goal",
                 tasks.c.conversation == access.conversation.key).order_by(tasks.c.created_at.desc()).limit(20)).mappings().all()
             return [graph.status(conn, row) for row in rows]
+        if operation == "tasks.take_over":
+            if purpose not in {"finalize", "attention"} or not root_id:
+                raise PermissionError("takeover requires a bound result or escalation")
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+            if not graph.finalize_ready(conn, root):
+                raise PermissionError("takeover requires stopped work and reconciled operations")
+            claim["takeover"] = True
+            conn.execute(update(runs).where(runs.c.id == run["id"]).values(request_json=json.dumps(claim)))
+            conn.execute(update(tasks).where(tasks.c.id == root_id).values(state="RUNNING"))
+            return {"accepted": True, "takeover": True}
         if operation in {"tasks.spawn", "tasks.wait"}:
-            if purpose != "finalize" or not root_id:
-                raise PermissionError("only a bound finalize turn may add rework")
+            if purpose not in {"finalize", "attention"} or not root_id or claim.get("takeover"):
+                raise PermissionError("rework requires a bound decision turn before takeover")
             root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
             if operation == "tasks.spawn":
                 return graph.spawn(conn, root, args, access)
@@ -211,7 +219,7 @@ class LeaderRuntime:
             self.service.permissions.require(access, "task.read", "task:" + task["id"])
             return graph.status(conn, task)
         if operation == "tasks.cancel":
-            if purpose not in {"user", "finalize"}:
+            if purpose not in {"user", "finalize", "attention"}:
                 raise PermissionError("this Leader turn cannot cancel work")
             self.service.permissions.require(access, "task.cancel", "task:" + task["id"])
             graph.cancel_tree(conn, task)
@@ -225,8 +233,12 @@ class LeaderRuntime:
                 text = event.text
             else:
                 text = spec.text
+            source_id = stable_id(event.event_id, payload["call_id"])
+            if spec.kind != "notify" and not conn.execute(select(inputs.c.id).where(
+                    inputs.c.source_id == source_id)).first():
+                source_id = stable_id(event.event_id, task["id"], spec.kind)
             return self.service.add_graph_input(conn, task, event, access, text,
-                kind=spec.kind, question_id=spec.question_id, source_id=stable_id(event.event_id, payload["call_id"]))
+                kind=spec.kind, question_id=spec.question_id, source_id=source_id)
         raise ValueError("unsupported task tool for Leader")
 
     def finalize_committed_mutation(self, conn, run, claim, *, stopped, recovered=False):
@@ -311,12 +323,6 @@ class LeaderRuntime:
             if not result.agent_authored and not mutation:
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
                 source_values = {"claimed_attempt_id": None}
-                if claim.get("target_root_task_id") and claim["purpose"] != "finalize":
-                    root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
-                    root_budget = json.loads(root["plan_json"])["budget"]
-                    if json.loads(root["budget_json"]).get("model_calls", 0) >= (
-                            root_budget["model_calls"] - root_budget.get("completion_reserve", 1)):
-                        source_values.update(handled_at=now, output_ref="ROOT_EXECUTION_BUDGET_EXHAUSTED")
                 conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
                     table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(**source_values))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="FINISHED", slot_reserved=0,
@@ -329,15 +335,22 @@ class LeaderRuntime:
                 if run["role"] == "skill_review":
                     self.sessions.learning.finish_review(conn, run_id, retry=True)
                     self._review_marks.pop(run_id, None)
-                if claim.get("target_root_task_id"):
-                    self.service._settle_exhausted_roots(conn)
                 self.service.wakeup.set()
                 return {"state": "FINISHED"}
-            self.authorize(conn, run, claim, {"action": "task.execute"})
+            pending_wait = conn.execute(select(waits).where(waits.c.run_id == run_id,
+                waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
+            self.authorize(conn, run, claim, {"action": "task.execute"}, ending_wait=bool(pending_wait))
             target = None
             if claim.get("target_root_task_id"):
                 target = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
-            if claim["purpose"] == "finalize" and result.agent_authored:
+            if pending_wait:
+                conn.execute(update(waits).where(waits.c.id == pending_wait["id"]).values(state="WAITING"))
+                conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(state="WAITING_INPUT"))
+                self.service._wake(conn, target["id"], pending_wait["id"])
+            elif claim["purpose"] in {"finalize", "attention"} and result.agent_authored and (
+                    claim["purpose"] == "finalize"
+                    or target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id
+                    or self.service.graph.finalize_ready(conn, target)):
                 if not target or target["fencing"] != fencing or target["goal_revision"] != claim["basis_goal_revision"]:
                     raise PermissionError("stale finalize generation or revision")
                 if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
@@ -386,9 +399,10 @@ class LeaderRuntime:
                         event_id="final:" + target["id"] + ":" + str(target["goal_revision"]))
                     self.service._notification(conn, target, run_id, result.summary, "result", "important",
                         "final:" + target["id"] + ":" + str(target["goal_revision"]))
-            elif claim["purpose"] in {"progress", "question"} and result.agent_authored:
+            elif claim["purpose"] in {"progress", "question", "attention"} and result.agent_authored:
                 purpose = "question" if claim["purpose"] == "question" else "progress"
-                self.service._notification(conn, target, run_id, result.summary, purpose, "normal",
+                self.service._notification(conn, target, run_id, result.summary, purpose,
+                    "important" if claim["purpose"] == "attention" else "normal",
                     stable_id("leader", run_id))
             elif run["role"] != "skill_review":
                 event = InboundEvent.model_validate_json(claim["event_json"])
@@ -444,7 +458,20 @@ class LeaderRuntime:
         try:
             pending = () if mutation else unfinished_tools(path)
             submitted = [call for call in pending if call.get("name") == "tasks_submit"]
-            if pending:
+            if claim.get("target_root_task_id") and claim["purpose"] in {"attention", "finalize"}:
+                now = self.clock.now().isoformat()
+                with self.db.transaction() as conn:
+                    conn.execute(update(operations).where(operations.c.run_id == run_id,
+                        operations.c.state == "DISPATCHED").values(state="UNKNOWN", updated_at=now))
+                    conn.execute(update(operations).where(operations.c.run_id == run_id,
+                        operations.c.state == "PREPARED").values(state="FAILED",
+                            result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
+                if pending:
+                    restore_tool_results(path, [{"call": call, "is_error": True, "result": {
+                        "state": "INTERRUPTED", "stopped": True,
+                        "instruction": "上次调用随进程中断，结果尚未确认。先读取当前任务和操作记录，核对 UNKNOWN 操作，不重复外部写入。",
+                    }} for call in pending], pi_executable=self.sessions.settings.orchestration.pi_executable)
+            elif pending:
                 if len(submitted) != len(pending) or run["role"] != "leader" or claim["purpose"] != "user":
                     raise ValueError("native dispatch recovery requires an isolated owner submission")
                 receipts = []
@@ -456,12 +483,11 @@ class LeaderRuntime:
                         raise ValueError("native dispatch source no longer matches its original Dialogue")
                     owner = claim["context"]["owner_id"]
                     for call in submitted:
-                        task = conn.execute(select(tasks).where(tasks.c.owner_id == owner,
-                            tasks.c.dispatch_key == stable_id(owner, source["id"], call["id"]),
-                            tasks.c.origin_dialogue_id == source["dialogue_id"],
-                            tasks.c.coordinator_session_id == claim["session_id"])).mappings().first()
+                        task, committed_intent = self.service.graph.dispatch_receipt(conn, owner,
+                            stable_id(owner, source["id"], call["id"]))
                         intent = GoalSpec.model_validate_json(json.dumps(call["arguments"])).model_dump(mode="json")
-                        if not task or json.loads(task["context_json"]).get("dispatch_spec") != intent:
+                        if (not task or task["origin_dialogue_id"] != source["dialogue_id"]
+                                or task["coordinator_session_id"] != claim["session_id"] or committed_intent != intent):
                             raise ValueError("native dispatch has no matching committed host intent")
                         receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
                 restore_tool_results(path, receipts, pi_executable=self.sessions.settings.orchestration.pi_executable)
@@ -487,6 +513,34 @@ class LeaderRuntime:
             if run["process_id"]:
                 conn.execute(update(processes).where(processes.c.id == run["process_id"],
                     processes.c.generation == run["binding_generation"]).values(state="STOPPED", stopped_at=now))
+            if claim.get("target_root_task_id"):
+                root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                waiting = conn.execute(select(waits).where(waits.c.run_id == run_id,
+                    waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
+                child_wait = root["wait_json"] and json.loads(root["wait_json"]).get("attempt_id") == run_id
+                if waiting or child_wait:
+                    if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
+                        if waiting:
+                            conn.execute(update(waits).where(waits.c.id == waiting["id"]).values(state="CANCELLED"))
+                    elif waiting:
+                        conn.execute(update(waits).where(waits.c.id == waiting["id"]).values(state="WAITING"))
+                        conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(state="WAITING_INPUT"))
+                        self.service._wake(conn, root["id"], waiting["id"])
+                    else:
+                        condition = json.loads(root["wait_json"])
+                        condition["yielded"] = True
+                        conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
+                            state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                        self.service.graph.event(conn, root, "children_ready", {},
+                            event_id="leader-wait-recovered:" + run_id, wake=True)
+                    conn.execute(update(leader_inbox).where(leader_inbox.c.id.in_(claim["source_ids"]),
+                        leader_inbox.c.claimed_attempt_id == run_id).values(handled_at=now, output_ref="WAIT_RECOVERED"))
+                    self._account_turn(conn, current, claim)
+                    conn.execute(update(runs).where(runs.c.id == run_id).values(state="RECOVERED", slot_reserved=0,
+                        runner_stopped_at=now, quiescent_at=now))
+                    conn.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
+                    self.service.wakeup.set()
+                    return {"run_id": run_id, "state": "RECOVERED"}
             conn.execute(update(runs).where(runs.c.id == run_id).values(state="RUNNING",
                 lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
         if mutation:
@@ -517,6 +571,10 @@ class LeaderRuntime:
             conn.execute(update(runs).where(runs.c.id == run_id).values(state="RECOVERED", slot_reserved=0,
                 runner_stopped_at=now, quiescent_at=now))
             conn.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
+            if claim.get("takeover"):
+                root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                self.service.graph.event(conn, root, "needs_attention", {"reason": "leader_interrupted"},
+                    attempt_id=run_id, event_id="leader-interrupted:" + run_id, wake=True)
         self.service.wakeup.set()
         return {"run_id": run_id, "state": "RECOVERED"}
 
@@ -526,6 +584,39 @@ class LeaderRuntime:
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))
+        if operation in {"ledger", "ask"}:
+            readback_target = None
+            with self.db.transaction() as conn:
+                run, claim = self.lease(conn, *identity)
+                self.authorize(conn, run, claim, {"action": "task.execute"})
+                if operation == "ledger":
+                    readback = payload.get("operation") in {"read", "list", "reconcile"} or (
+                        payload.get("operation") == "transition" and payload.get("expected") == "UNKNOWN")
+                    if not claim.get("takeover") and not (
+                            readback and claim["purpose"] in {"attention", "finalize"} and claim.get("target_root_task_id")):
+                        raise PermissionError("Leader ledger requires a stopped task takeover")
+                    if payload.get("operation") == "reconcile":
+                        readback_target = conn.execute(select(tasks.c.public_id).join(
+                            operations, operations.c.task_id == tasks.c.id).where(
+                                operations.c.id == payload["operation_id"],
+                                tasks.c.root_task_id == claim["target_root_task_id"])).scalar_one_or_none()
+                        if not readback_target:
+                            raise PermissionError("operation belongs to another task tree")
+                else:
+                    if (claim["purpose"] not in {"finalize", "attention"}
+                            or not claim.get("target_root_task_id") or payload.get("kind", "input") != "input"):
+                        raise PermissionError("Leader questions require a bound decision and user input")
+                    conn.execute(update(tasks).where(tasks.c.id == claim["target_root_task_id"]).values(state="RUNNING"))
+            if readback_target:
+                result = await self.core.recovery.readback_operation(
+                    readback_target, self.sessions.access_for_claim(claim), payload["operation_id"])
+                with self.db.engine.connect() as conn:
+                    run, claim = self.lease(conn, *identity)
+                    self.authorize(conn, run, claim, {"action": "task.execute"})
+                return result
+            if operation == "ledger":
+                return await self.service.ledger(*identity, payload)
+            return self.service.ask(*identity, payload)
         if operation == "skills":
             with self.db.engine.connect() as conn:
                 run, claim = self.lease(conn, *identity)
@@ -622,9 +713,4 @@ class LeaderRuntime:
             if operation == "uncertain":
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="NEEDS_RECONCILIATION"))
                 return {"recorded": True}
-            if operation == "ask":
-                raise PermissionError("Leader asks in its final reply; Worker questions use persistent task waits")
-            if operation == "ledger":
-                # Leader business writes are disallowed; Hermes owns its file ledger.
-                raise PermissionError("Leader cannot dispatch external business writes")
         raise ValueError("unsupported Leader operation: " + operation)

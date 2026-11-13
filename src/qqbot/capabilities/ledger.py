@@ -12,7 +12,7 @@ class SQLiteActionLedger:
     def __init__(self, database):
         self.database = database
 
-    async def prepare(self, operation_id, context, action, arguments_hash, arguments):
+    async def prepare(self, operation_id, context, action, arguments_hash, arguments, *, scope_task_ids=None):
         with self.database.transaction() as connection:
             existing = connection.execute(select(operations).where(operations.c.id == operation_id)).mappings().first()
             if existing:
@@ -22,7 +22,8 @@ class SQLiteActionLedger:
             unsafe_remote = (action.name.startswith(("github.", "icloud."))
                              and action.effect in {"write", "unknown"}) or action.name == "git.push"
             if unsafe_remote:
-                previous = connection.execute(select(operations).where(operations.c.task_id == context.task_id,
+                previous = connection.execute(select(operations).where(
+                    operations.c.task_id.in_(scope_task_ids or [context.task_id]),
                     operations.c.arguments_hash == arguments_hash, operations.c.state != "FAILED")
                     .order_by(operations.c.updated_at.desc()).limit(1)).mappings().first()
                 if previous:

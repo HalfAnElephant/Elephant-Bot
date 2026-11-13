@@ -184,7 +184,7 @@ for (const receipt of body.receipts) {
 }
 for (const receipt of body.receipts) {
   session.appendMessage({role: 'toolResult', toolCallId: receipt.call.id, toolName: receipt.call.name,
-    content: [{type: 'text', text: JSON.stringify(receipt.result)}], details: {}, isError: false, timestamp: Date.now()});
+    content: [{type: 'text', text: JSON.stringify(receipt.result)}], details: {}, isError: receipt.is_error === true, timestamp: Date.now()});
 }
 const fd = openSync(body.path, 'r');
 try { fsyncSync(fd); } finally { closeSync(fd); }

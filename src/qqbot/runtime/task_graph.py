@@ -37,7 +37,8 @@ class TaskGraph:
             payload_json=json.dumps(payload, ensure_ascii=False), created_at=now))
         if wake:
             root = self.root(conn, task)
-            if task["parent_task_id"] == root["id"] and root["state"] not in TERMINAL | {"CANCEL_REQUESTED"}:
+            if (task["id"] == root["id"] or task["parent_task_id"] == root["id"]
+                    or kind == "needs_attention") and root["state"] not in TERMINAL | {"CANCEL_REQUESTED"}:
                 conn.execute(insert(leader_inbox).values(id=stable_id(root["id"], event_id),
                     target_session_id=root["coordinator_session_id"], root_task_id=root["id"],
                     event_id=event_id, resume_reason=kind, source_revision=root["goal_revision"], created_at=now))
@@ -46,23 +47,72 @@ class TaskGraph:
     def root(self, conn, task):
         return conn.execute(select(tasks).where(tasks.c.id == (task["root_task_id"] or task["id"]))).mappings().one()
 
+    def dispatch_receipt(self, conn, owner_id, dispatch_key):
+        task = conn.execute(select(tasks).where(tasks.c.owner_id == owner_id,
+            tasks.c.dispatch_key == dispatch_key)).mappings().first()
+        if task:
+            return task, json.loads(task["context_json"]).get("dispatch_spec")
+        receipt = conn.execute(select(agent_events).where(
+            agent_events.c.id == stable_id("dispatch-reuse", owner_id, dispatch_key),
+            agent_events.c.kind == "dispatch_reused")).mappings().first()
+        if not receipt:
+            return None, None
+        task = conn.execute(select(tasks).where(tasks.c.id == receipt["task_id"],
+            tasks.c.owner_id == owner_id)).mappings().one()
+        return task, json.loads(receipt["payload_json"])["dispatch_spec"]
+
+    @staticmethod
+    def _request_context(context):
+        return {
+            **{key: context.get(key) for key in ("scope", "principal", "preferences", "memory_scope", "memory_epoch", "retrieved_data")},
+            "images": [{key: value for key, value in image.items() if key not in {"source", "message_id"}}
+                       for image in context.get("images", ())],
+            "references": [source for source in context.get("source_manifest", ()) if source.get("kind") != "inbox"],
+        }
+
+    @staticmethod
+    def _goal_intent(intent):
+        return {**intent, "children": [{key: value for key, value in child.items() if key != "delegation_key"}
+                                      for child in intent["children"]]}
+
     def submit(self, conn, dialogue, event, access, spec, dispatch_key, binding, context):
         spec = GoalSpec.model_validate_json(json.dumps(spec))
         for path in spec.requested_outputs:
             artifact_path(path)
         self.service.permissions.require(access, "task.create", "conversation:" + access.conversation.key)
-        old = conn.execute(select(tasks).where(tasks.c.owner_id == dialogue["owner_id"],
-            tasks.c.dispatch_key == dispatch_key)).mappings().first()
+        old, previous_intent = self.dispatch_receipt(conn, dialogue["owner_id"], dispatch_key)
         intent = spec.model_dump(mode="json")
         if old:
-            if json.loads(old["context_json"]).get("dispatch_spec") != intent:
+            if previous_intent != intent:
                 raise ValueError("dispatch key reused for another goal")
-            return self.status(conn, old)
-        unfinished = conn.execute(select(func.count()).select_from(tasks).where(
-            tasks.c.owner_id == dialogue["owner_id"], tasks.c.kind == "goal",
-            tasks.c.state.not_in(TERMINAL))).scalar_one()
-        if unfinished >= self.settings.orchestration.pending_root_tasks_per_owner:
-            raise ValueError("capacity_full")
+            status = self.status(conn, old)
+            return {**status, "reused": True} if old["dispatch_key"] != dispatch_key else status
+        candidates = conn.execute(select(tasks).where(tasks.c.owner_id == dialogue["owner_id"],
+            tasks.c.kind == "goal", tasks.c.origin_dialogue_id == dialogue["id"],
+            tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
+            tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}),
+            tasks.c.goal_revision == 0).order_by(tasks.c.created_at, tasks.c.id)).mappings()
+        for candidate in candidates:
+            previous_context = json.loads(candidate["context_json"])
+            previous_spec = previous_context.get("dispatch_spec")
+            original = InboundEvent.model_validate_json(candidate["event_json"])
+            same_source = (event.event_id != original.event_id and bool(event.text.strip())
+                           and original.text == event.text and original.segments == event.segments)
+            same_goal = (original.text == event.text and previous_spec
+                         and self._goal_intent(previous_spec) == self._goal_intent(intent))
+            if (not (same_source or same_goal) or original.reply_to != event.reply_to
+                    or tuple(segment for segment in original.segments if segment.type != "text")
+                        != tuple(segment for segment in event.segments if segment.type != "text")
+                    or json.loads(candidate["binding_json"]) != binding
+                    or self._request_context(previous_context) != self._request_context(context)):
+                continue
+            validator = self.service.context_validator
+            if validator and not validator(access, previous_context):
+                continue
+            self.service.permissions.require(access, "task.read", "task:" + candidate["id"])
+            self.event(conn, candidate, "dispatch_reused", {"dispatch_spec": intent},
+                event_id=stable_id("dispatch-reuse", dialogue["owner_id"], dispatch_key))
+            return {**self.status(conn, candidate), "reused": True}
         root_id = str(uuid4())
         plan = ExecutionPlan(initial_delivery="DETACHED", foreground_wait_ms=0,
                              budget=self.settings.execution.budget)
@@ -107,15 +157,6 @@ class TaskGraph:
             if json.loads(old["context_json"]).get("child_spec") != intent:
                 raise ValueError("delegation key reused for another child")
             return {"task_id": old["id"], "public_id": old["public_id"], "state": old["state"]}
-        count = conn.execute(select(func.count()).select_from(tasks).where(tasks.c.root_task_id == root["id"])).scalar_one()
-        if count >= self.settings.orchestration.max_nodes_per_root:
-            raise ValueError("root node budget exhausted")
-        ancestor, depth = parent, 1
-        while ancestor["parent_task_id"]:
-            depth += 1
-            ancestor = conn.execute(select(tasks).where(tasks.c.id == ancestor["parent_task_id"])).mappings().one()
-        if depth > self.settings.orchestration.max_task_depth:
-            raise ValueError("task depth exceeded")
         if spec.rework_of_task_id:
             previous = conn.execute(select(tasks).where(tasks.c.id == spec.rework_of_task_id,
                 tasks.c.root_task_id == root["id"], tasks.c.state.in_(TERMINAL))).mappings().first()
@@ -202,6 +243,10 @@ class TaskGraph:
     def settled(self, conn, task, run_id, result):
         self.event(conn, task, "child_result", {"result": result}, attempt_id=run_id,
                    event_id="result:" + run_id, wake=True)
+        if task["state"] in {"FAILED", "BLOCKED", "EXPIRED", "PARTIAL"}:
+            self.event(conn, task, "needs_attention", {"result": result, "state": task["state"]},
+                attempt_id=run_id, event_id="attention:" + run_id, wake=True)
+            return
         parent_id = task["parent_task_id"]
         if parent_id:
             parent = conn.execute(select(tasks).where(tasks.c.id == parent_id)).mappings().one()

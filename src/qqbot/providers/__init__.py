@@ -93,13 +93,18 @@ def normalize_usage(raw):
 
 class ModelCapacity:
     def __init__(self, total=4, reserved=0):
-        if total < 1 or reserved != 0:
-            raise ValueError("all roles share one model capacity without reserved slots")
+        if total < 1 or not 0 <= reserved < total:
+            raise ValueError("invalid model capacity reservation")
         self.total = asyncio.Semaphore(total)
+        self.background = asyncio.Semaphore(total - reserved)
 
     @asynccontextmanager
     async def slot(self, background):
-        async with self.total:
+        if not background:
+            async with self.total:
+                yield
+            return
+        async with self.background, self.total:
             yield
 
 

@@ -167,7 +167,7 @@ def test_native_completed_boundary_restores_original_result_artifacts_and_one_in
     assert recovery.service.recover_workers() == []
     with runtime.db.engine.connect() as conn:
         assert len(conn.execute(select(runs)).all()) == 1
-        assert len(conn.execute(select(leader_inbox)).all()) == 1
+        assert len(conn.execute(select(leader_inbox).where(leader_inbox.c.handled_at.is_(None))).all()) == 1
         assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
 
 
@@ -257,7 +257,7 @@ def test_paired_wait_recovers_original_question_without_a_second_model_turn(reco
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(waits.c.state)).scalar_one() == "WAITING"
         assert len(conn.execute(select(waits)).all()) == 1
-        assert len(conn.execute(select(leader_inbox)).all()) == 1
+        assert len(conn.execute(select(leader_inbox).where(leader_inbox.c.handled_at.is_(None))).all()) == 1
 
 
 async def test_readback_uses_existing_verifier_gets_and_preserves_unknown_until_evidence(recovery):
@@ -399,6 +399,34 @@ async def test_verified_readback_allows_the_original_finished_attempt_to_settle(
         assert conn.execute(select(operations.c.state)).scalar_one() == "VERIFIED"
 
 
+@pytest.mark.parametrize("new_matches", [False, True])
+async def test_rework_readback_uses_the_executing_run_workspace(recovery, new_matches):
+    runtime = recovery.runtime
+    original = bound_worker(recovery)
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == original["task_id"]).values(state="FAILED"))
+        conn.execute(update(runs).where(runs.c.id == original["run_id"]).values(slot_reserved=0))
+        root = conn.execute(select(tasks).where(tasks.c.id == original["root_task_id"])).mappings().one()
+        rework = runtime.service.graph.spawn(conn, root, {"goal": "重做文件", "delegation_key": "retry-file",
+            "rework_of_task_id": original["task_id"]}, runtime.access)
+    claim = runtime.service.claim("retry-worker")
+    assert claim["task_id"] == rework["task_id"]
+    destination = runtime.path / "workspaces" / claim["task_id"]
+    (destination / "outputs").mkdir(parents=True)
+    (original["workspace"] / "outputs/a.txt").write_text("wrong" if new_matches else "expected")
+    (destination / "outputs/a.txt").write_text("expected" if new_matches else "wrong")
+    identity = (claim["run_id"], claim["fencing_token"], "retry-worker")
+    await runtime.service.ledger(*identity, {"operation": "prepare", "operation_id": "rework-file",
+        "arguments_hash": "new-file-hash", "arguments": {"path": "outputs/a.txt", "text": "expected"},
+        "action": {"name": "workspace.file.write", "effect": "write", "resources": ["workspace:" + str(destination)]}})
+    for before, after in (("PREPARED", "DISPATCHED"), ("DISPATCHED", "UNKNOWN")):
+        await runtime.service.ledger(*identity, {"operation": "transition", "operation_id": "rework-file",
+            "expected": before, "state": after, "result": {}})
+    previous = task_row(runtime, original["task_id"])
+    result = await recovery.service.readback_operation(previous["public_id"], runtime.access, "rework-file")
+    assert result["state"] == ("VERIFIED" if new_matches else "UNKNOWN")
+
+
 def test_late_native_result_cannot_consume_a_newer_revision(recovery):
     from qqbot.domain.messages import TextSegment
 
@@ -480,14 +508,15 @@ def test_activity_budget_charges_until_stop_not_daemon_downtime(recovery):
     assert json.loads(task_row(runtime, claim["task_id"])["budget_json"])["active_seconds"] == 5
 
 
-def test_deadline_stop_recovers_as_expired_with_jobs_still_separate(recovery):
+@pytest.mark.parametrize("reason", ["deadline", "active_budget"])
+def test_background_legacy_time_stop_recovers_native_result(recovery, reason):
     runtime = recovery.runtime
     claim = bound_worker(recovery)
     native_log(claim)
     with runtime.db.transaction() as conn:
-        conn.execute(update(tasks).where(tasks.c.id == claim["task_id"]).values(state="CANCEL_REQUESTED", stop_reason="deadline"))
+        conn.execute(update(tasks).where(tasks.c.id == claim["task_id"]).values(state="CANCEL_REQUESTED", stop_reason=reason))
     prove_stop(recovery)
-    assert recovery.service.recover_workers()[0]["state"] == "EXPIRED"
+    assert recovery.service.recover_workers()[0]["state"] == "SUCCEEDED"
 
 
 def test_reconciling_an_already_restored_result_is_idempotent(recovery):
@@ -518,3 +547,60 @@ async def test_completed_native_result_ignores_unsupported_implicit_sidecar(reco
     artifact = result["artifacts"][0]
     assert artifact["relative_path"] == "outputs/report.txt"
     assert (runtime.service.archive_root / artifact["id"]).read_bytes() == b"ISOLATED_OK"
+
+
+def test_background_old_deadline_survives_daemon_result_recovery(recovery):
+    from datetime import timedelta
+
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim)
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).values(deadline=(runtime.clock.now() - timedelta(days=1)).isoformat(),
+            budget_json=json.dumps({"active_seconds": 999999})))
+    prove_stop(recovery)
+    expire(recovery)
+    assert recovery.service.recover_workers()[0]["state"] == "SUCCEEDED"
+    assert runtime.sessions.claim("leader")["purpose"] == "finalize"
+
+
+def test_unproved_worker_stop_escalates_once_without_releasing_execution(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim)
+    runtime.clock.advance(31)
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "NEEDS_RECONCILIATION"
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "NEEDS_RECONCILIATION"
+    attention = runtime.sessions.claim("leader")
+    assert attention["purpose"] == "attention"
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == claim["run_id"])).scalar_one() == 1
+        assert len(conn.execute(select(leader_inbox)).all()) == 1
+
+
+def test_unpaired_native_tool_escalates_to_leader_decision(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim, boundary=False, tool=True, paired=False)
+    prove_stop(recovery)
+    assert recovery.service.recover_worker(claim["run_id"])["reason"] == "unpaired_tools"
+    assert runtime.sessions.claim("leader")["purpose"] == "attention"
+
+
+@pytest.mark.parametrize("protected", ["claimed", "business_blocked"])
+def test_recovered_result_preserves_claimed_decision_and_business_alerts(recovery, protected):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim)
+    event_id = "lease-lost:" + claim["run_id"] if protected == "claimed" else "business-blocked"
+    with runtime.db.transaction() as conn:
+        task = conn.execute(select(tasks).where(tasks.c.id == claim["task_id"])).mappings().one()
+        runtime.service.graph.event(conn, task, "needs_attention", {"reason": protected},
+            attempt_id=claim["run_id"], event_id=event_id, wake=True)
+        if protected == "claimed":
+            conn.execute(update(leader_inbox).where(leader_inbox.c.event_id == event_id).values(
+                claimed_attempt_id="ongoing-decision"))
+    prove_stop(recovery)
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "SUCCEEDED"
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(leader_inbox.c.handled_at).where(leader_inbox.c.event_id == event_id)).scalar_one() is None

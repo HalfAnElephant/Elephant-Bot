@@ -51,8 +51,6 @@ class Core:
                                                        if cfg.kind == "official" and cfg.markdown_enabled})
         self.stream_delivery = StreamDelivery(self)
         self.tasks = TaskService(db, clock, self.outbox, permissions=self.permissions,
-            max_active=settings.execution.max_active,
-            max_resident=max(settings.execution.max_active, settings.execution.warm_max),
             budget_ceiling=settings.execution.budget, context_validator=self.validate_context,
             stream_eligibility=self.stream_delivery.eligible)
         self.tasks.qq_adapters = adapters
@@ -332,16 +330,16 @@ class Core:
         command, _, argument = event.text.strip().partition(" ")
         access = self.access(event)
         if command == "/帮助":
-            return "/状态 /任务 [编号] /取消 <编号> /补充 <编号> <内容> /新对话 <名称> /切换对话 <名称或编号> /对话 /静默 [30m] /恢复"
+            return "直接告诉我需要做什么，或问“进度怎么样”、说“取消刚才那个”。补充内容时可以引用对应的进度消息。\n/状态 /新对话 <名称> /切换对话 <名称> /对话 /静默 [30m] /恢复"
         if command == "/状态":
-            return "服务运行中；任务由 Leader 委派，资源满额时排队。"
+            return "我在，可以正常接收消息。想了解正在处理的事情，可以问“进度怎么样”。"
         if command in {"/静默", "/恢复", "/模式"}:
             mode = "silent" if command == "/静默" else "addressed_only" if command == "/恢复" else argument.strip()
             duration = None
             if command == "/静默" and argument:
                 match = re.fullmatch(r"([1-9]\d*)([smh])", argument.strip())
                 if not match:
-                    raise ValueError("静默时长用 s/m/h，例如 30m")
+                    return "静默时长用 s/m/h，例如 30m"
                 duration = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
             await self.set_mode(event.conversation, mode, access, duration_seconds=duration)
             return "已静默；发送 /恢复 可恢复。" if mode == "silent" else "已恢复。"
@@ -352,12 +350,15 @@ class Core:
             if command == "/新对话":
                 selected = self.sessions.dialogue(conn, event, new_title=argument.strip() or "新对话")
             elif command == "/切换对话":
-                selected = self.sessions.dialogue(conn, event, select_ref=argument.strip())
+                try:
+                    selected = self.sessions.dialogue(conn, event, select_ref=argument.strip())
+                except ValueError:
+                    return "请提供一个明确的对话名称，可以用 /对话 查看已有对话。"
             elif command == "/对话":
                 owner = self.sessions.owner(event) or "guest-" + event.principal.key
                 rows = conn.execute(select(dialogues).where(dialogues.c.owner_id == owner,
                     dialogues.c.conversation_id == event.conversation.key, dialogues.c.state == "ACTIVE")).mappings()
-                return "\n".join(f"{row['id']} · {row['title']}" for row in rows) or "暂无对话。"
+                return "\n".join(row["title"] for row in rows) or "暂无对话。"
             else:
                 raise ValueError("未知命令")
         return "当前对话：" + selected["title"]
@@ -388,7 +389,13 @@ class Core:
         except (PermissionError, ValueError, LookupError) as error:
             logger.warning("Input rejected", extra={"data": {"error_type": type(error).__name__}})
             if event.conversation.surface == Surface.PRIVATE:
-                self.reply(event, str(error)[:200])
+                if isinstance(error, PermissionError):
+                    text = "这次无法操作这项内容，请确认你是在原来的对话中继续。"
+                elif isinstance(error, LookupError):
+                    text = "没有找到对应内容，请引用之前的进度消息，或重新说明目标。"
+                else:
+                    text = "这次请求暂时无法处理，请检查内容后再试。"
+                self.reply(event, text)
         except Exception:
             logger.exception("Input failed")
             return
@@ -438,7 +445,8 @@ class Core:
             with self.db.engine.connect() as conn:
                 task = conn.execute(select(tasks, notifications.c.run_id.label("notification_run_id"),
                     notifications.c.state.label("notification_state"), notifications.c.purpose.label("notice_purpose"),
-                    runs.c.run_reason.label("notice_run_reason")).join(notifications, notifications.c.task_id == tasks.c.id)
+                    runs.c.run_reason.label("notice_run_reason"),
+                    runs.c.basis_goal_revision.label("notice_revision")).join(notifications, notifications.c.task_id == tasks.c.id)
                     .outerjoin(runs, runs.c.id == notifications.c.run_id)
                     .where(notifications.c.id == envelope.origin_id)).mappings().first()
             if not task:
@@ -450,6 +458,11 @@ class Core:
             ):
                 return False
             with self.db.engine.connect() as conn:
+                if not stream_cleanup and task["root_task_id"] and task["notification_run_id"]:
+                    root_revision = conn.execute(select(tasks.c.goal_revision).where(
+                        tasks.c.id == task["root_task_id"])).scalar_one()
+                    if task["notice_revision"] != root_revision:
+                        return False
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
             event = InboundEvent.model_validate_json(task["event_json"])

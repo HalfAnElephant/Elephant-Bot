@@ -187,13 +187,11 @@ class SystemdJobProvider:
 
 
 class JobService:
-    def __init__(self, db, provider, *, context_resolver=None, clock=None, max_active=8, dispatch_guard=None):
+    def __init__(self, db, provider, *, context_resolver=None, clock=None, dispatch_guard=None):
         self.db, self.provider = db, provider
         self.context_resolver = context_resolver
         self.dispatch_guard = dispatch_guard
-        if type(max_active) is not int or not 1 <= max_active <= 64:
-            raise ValueError('Job capacity must be 1..64')
-        self.clock, self.max_active = clock or Clock(), max_active
+        self.clock = clock or Clock()
         self._locks = {}
 
     def _lock(self, job_id):
@@ -260,7 +258,9 @@ class JobService:
         root, cwd = self._workspace(scope, request.cwd)
         request = request.model_copy(update={'cwd': cwd})
         now = self.clock.now()
-        deadline = min(scope.expires_at, now + timedelta(seconds=request.timeout_seconds))
+        deadline = now + timedelta(seconds=request.timeout_seconds)
+        if scope.expires_at is not None:
+            deadline = min(scope.expires_at, deadline)
         seconds = int((deadline - now).total_seconds())
         if seconds < 1:
             raise PermissionError('Job task deadline has expired')
@@ -270,9 +270,6 @@ class JobService:
             previous = conn.execute(select(jobs).where(jobs.c.task_id == scope.task_id,
                                                         jobs.c.job_key == request.job_key)).mappings().first()
             if previous is None:
-                active = conn.execute(select(jobs.c.id).where(jobs.c.state.not_in(_TERMINAL))).all()
-                if len(active) >= self.max_active:
-                    raise ValueError('Persistent Job capacity is full')
                 job_id = uuid4().hex
                 unit = 'elephant-job-' + job_id + '.service'
                 description = 'Elephant Job ' + job_id

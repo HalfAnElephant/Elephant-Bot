@@ -1,4 +1,4 @@
-"""All parent execution slots can yield durably so their children can run."""
+"""Parent waits require paired receipts and verified stops before releasing authority."""
 import json
 from uuid import uuid4
 
@@ -33,8 +33,7 @@ def submit(runtime, claim, worker, result, **kwargs):
     return runtime.service.submit(claim["run_id"], claim["fencing_token"], worker, result, **kwargs)
 
 
-def test_full_parent_capacity_releases_only_after_paired_stopped_boundary_and_wakes_once(runtime):
-    runtime.service.max_active = 2
+def test_parent_releases_authority_only_after_paired_stopped_boundary_and_wakes_once(runtime):
     root_goal(runtime, children=2)
     parents = [(runtime.service.claim(name), name) for name in ("parent-a", "parent-b")]
     children = {}
@@ -46,7 +45,6 @@ def test_full_parent_capacity_releases_only_after_paired_stopped_boundary_and_wa
              "scope_key": parent["session_id"], "session_file": str(runtime.path / (parent["session_id"] + ".jsonl")),
              "identity": {}})
         parent["process_id"] = process_id
-    assert runtime.service.claim("child-before-yield") is None
     waiting = {"status": "waiting_children", "summary": "等待已持久化的子任务"}
     for parent, worker in parents:
         for boundary in (proof(parent, tools_paired=False), proof(parent, inflight=1)):
@@ -59,7 +57,6 @@ def test_full_parent_capacity_releases_only_after_paired_stopped_boundary_and_wa
             task = conn.execute(select(tasks).where(tasks.c.id == parent["task_id"])).mappings().one()
             assert run["slot_reserved"] == 1 and run["receipt_json"] is None
             assert json.loads(task["wait_json"])["yielded"] is False
-        assert runtime.service.claim("child-before-stop") is None
     for parent, worker in parents:
         runtime.service.process_stopped(worker, {"process_id": parent["process_id"], "epoch": 1,
                                                 "generation": 1, "stopped": True})

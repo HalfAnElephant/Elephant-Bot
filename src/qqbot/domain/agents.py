@@ -24,7 +24,7 @@ class GoalSpec(DTO):
         description="Host evidence checks. Put business acceptance criteria in goal.")
     requested_outputs: tuple[str, ...] = Field(default=(), strict=False,
         description="Exact relative workspace artifact file paths, such as outputs/report.txt. Put narrative requirements in goal.")
-    children: tuple[ChildSpec, ...] = Field(min_length=1, max_length=6, strict=False)
+    children: tuple[ChildSpec, ...] = Field(min_length=1, strict=False)
 
 
 class TaskInputSpec(DTO):
@@ -35,7 +35,7 @@ class TaskInputSpec(DTO):
 
 
 class WaitSpec(DTO):
-    children: tuple[str, ...] = Field(min_length=1, max_length=6, strict=False)
+    children: tuple[str, ...] = Field(min_length=1, strict=False)
     predicate: Literal["all", "any"] = "all"
 
 

@@ -21,7 +21,7 @@ class JobScope(DTO):
     task_id: str = Field(min_length=1, max_length=256)
     root_task_id: str = Field(min_length=1, max_length=256)
     workspace: str = Field(min_length=1, max_length=4096)
-    expires_at: AwareDatetime
+    expires_at: AwareDatetime | None = None
     world_id: Literal['local'] = 'local'
 
 

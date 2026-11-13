@@ -193,14 +193,15 @@ async def test_failed_main_with_live_cgroup_is_not_reported_finished(setup):
     assert (await service.cancel_job(handle.job_id, scope)).state == 'CANCELLED'
 
 
-async def test_capacity_unknown_jobs_and_missing_unit_do_not_open_slots(setup):
+async def test_unknown_job_keeps_its_identity_without_blocking_independent_jobs(setup):
     service, provider, scope = setup
-    service.max_active = 1
     handle = await service.start_job(request(), scope)
     del provider.units[handle.unit]
     assert (await service.inspect_job(handle.job_id, scope)).state == 'UNKNOWN'
-    with pytest.raises(ValueError, match='capacity'):
-        await service.start_job(JobStart(job_key='second', argv=('true',)), scope)
+    second = await service.start_job(JobStart(job_key='second', argv=('true',)), scope)
+    assert second.job_id != handle.job_id and second.state == 'RUNNING'
+    assert (await service.inspect_job(handle.job_id, scope)).state == 'UNKNOWN'
+    assert len(provider.launches) == 2
 
 
 @pytest.mark.parametrize('updates', [{'cwd': '../escape'}, {'cwd': '/tmp'}, {'env': {'HOME': '/owner'}},
@@ -694,7 +695,7 @@ async def test_job_waiter_reads_original_job_after_paired_yield_and_expired_atte
     assert len(fixture.provider.launches) == 1 and not fixture.provider.cancels
 
 
-@pytest.mark.parametrize('change', ['cancelled', 'cancelled_root', 'context', 'policy', 'foreign_job', 'expired_root', 'unyielded'])
+@pytest.mark.parametrize('change', ['cancelled', 'cancelled_root', 'context', 'policy', 'foreign_job', 'unyielded'])
 async def test_job_waiter_rejects_revoked_or_unrelated_observations_before_provider_read(job_waiter, change):
     fixture, started, payload = job_waiter
     with fixture.service.db.transaction() as conn:
@@ -710,9 +711,6 @@ async def test_job_waiter_rejects_revoked_or_unrelated_observations_before_provi
             fixture.service.permissions.require = revoked_policy
         elif change == 'foreign_job':
             conn.execute(jobs.update().where(jobs.c.id == started['job_id']).values(owner_id='another-owner'))
-        elif change == 'expired_root':
-            conn.execute(tasks.update().where(tasks.c.id == fixture.root['task_id']).values(
-                deadline=(fixture.core.clock.now() - timedelta(seconds=1)).isoformat()))
         else:
             conn.execute(runs.update().where(runs.c.id == fixture.claim['run_id']).values(state='RUNNING'))
     inspected = []
@@ -773,12 +771,18 @@ async def test_scheduler_recovers_jobs_before_claiming_and_shutdown_leaves_units
     async def maintain():
         await recovery_gate.wait()
         return []
-    async def once():
+    pending = [{'run_id': 'claimed-after-recovery'}]
+    async def call(*args, **kwargs):
+        assert args == ('claim',)
+        return pending.pop(0) if pending else None
+    async def once(claim):
+        assert claim['run_id'] == 'claimed-after-recovery'
         claims.append('claim')
         return False
     async def sweep():
         return None
     monkeypatch.setattr(fixture.core.job_runtime, 'maintain', maintain)
+    monkeypatch.setattr(scheduler.worker, 'call', call)
     monkeypatch.setattr(scheduler.worker, 'once', once)
     monkeypatch.setattr(scheduler.pool, 'sweep', sweep)
     await scheduler.step()
@@ -1051,3 +1055,82 @@ async def test_revision_before_job_wait_yield_does_not_leave_an_obsolete_conditi
     resumed = fixture.service.claim('new-worker')
     assert resumed['task_id'] == fixture.claim['task_id'] and resumed['session_id'] == fixture.claim['session_id']
     assert any(item['text'] == event.text for item in resumed['continuation']['inputs'])
+
+
+async def test_unbounded_task_scope_keeps_explicit_job_timeout(setup):
+    service, provider, scope = setup
+    scope = scope.model_copy(update={'expires_at': None})
+    handle = await service.start_job(request(timeout_seconds=120), scope)
+    assert provider.launches[0]['deadline_seconds'] == 120
+    assert handle.deadline == service.clock.now() + timedelta(seconds=120)
+
+
+async def test_independent_jobs_can_exceed_old_global_capacity(setup):
+    service, provider, scope = setup
+    handles = [await service.start_job(JobStart(job_key='job-' + str(index), argv=('true',)), scope)
+               for index in range(10)]
+    assert len({handle.job_id for handle in handles}) == 10 and len(provider.launches) == 10
+
+
+@pytest.mark.parametrize('old_state', ['RUNNING', 'CANCEL_REQUESTED'])
+async def test_background_job_start_and_readback_ignore_old_task_deadline(job_runtime, old_state):
+    fixture = job_runtime
+    with fixture.service.db.transaction() as conn:
+        conn.execute(tasks.update().values(deadline=(fixture.core.clock.now() - timedelta(days=1)).isoformat(),
+            stop_reason='active_budget'))
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'past-task-time', 'argv': ['true'], 'timeout_seconds': 120}})
+    assert fixture.provider.launches[0]['deadline_seconds'] == 120
+    with fixture.service.db.transaction() as conn:
+        conn.execute(tasks.update().values(state=old_state))
+    await fixture.runtime.maintain()
+    assert not fixture.provider.cancels
+    assert (await fixture.runtime.invoke(fixture.identity, {'operation': 'inspect',
+        'arguments': {'job_id': started['job_id']}}))['state'] == 'RUNNING'
+
+
+async def test_job_waiter_reads_after_old_root_deadline(job_waiter):
+    fixture, started, payload = job_waiter
+    with fixture.service.db.transaction() as conn:
+        conn.execute(tasks.update().values(deadline=(fixture.core.clock.now() - timedelta(seconds=1)).isoformat()))
+    assert (await fixture.runtime.inspect_waiter(payload))['job_id'] == started['job_id']
+
+
+async def test_takeover_leader_can_start_jobs_but_uncommitted_takeover_cannot(job_runtime):
+    fixture = job_runtime
+    worker = fixture.claim
+    fixture.service.submit(*fixture.identity, {'status': 'failed', 'summary': '需要接手处理', 'agent_authored': False})
+    leader = fixture.core.sessions.claim('leader')
+    identity = (leader['run_id'], leader['fencing_token'], 'leader')
+    arguments = {'operation': 'start', 'arguments': {'job_key': 'takeover-job', 'argv': ['true']}}
+    with pytest.raises(PermissionError, match='bound task takeover'):
+        await fixture.runtime.invoke(identity, arguments)
+    await fixture.core.leader.invoke('tasks', identity, {'operation': 'tasks.take_over', 'call_id': 'takeover', 'arguments': {}})
+    with fixture.service.db.engine.connect() as conn:
+        root = conn.execute(select(tasks).where(tasks.c.id == fixture.root['task_id'])).mappings().one()
+    fixture.runtime.workspace(root, strict=False).mkdir(parents=True)
+    started = await fixture.runtime.invoke(identity, arguments)
+    assert started['task_id'] == fixture.root['task_id']
+    assert started['root_task_id'] == fixture.root['task_id']
+    assert (await fixture.runtime.invoke(identity, arguments))['job_id'] == started['job_id']
+    assert len(fixture.provider.launches) == 1
+    assert worker['task_id'] != started['task_id']
+
+
+@pytest.mark.parametrize('failure', ['failed', 'unknown', 'timeout'])
+async def test_persistent_job_problem_wakes_leader_without_relaunch(job_runtime, failure):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'decision-job', 'argv': ['true'], 'timeout_seconds': 120}})
+    if failure == 'unknown':
+        del fixture.provider.units[started['unit']]
+    elif failure == 'failed':
+        fixture.provider.units[started['unit']] = replace(fixture.provider.units[started['unit']],
+            active_state='failed', sub_state='failed', cgroup_empty=True, pid=0, exit_code=1, result='exit-code')
+    else:
+        fixture.core.clock.advance(121)
+    await fixture.runtime.maintain()
+    attention = fixture.core.sessions.claim('leader')
+    assert attention['purpose'] == 'attention'
+    assert attention['target_root_task_id'] == fixture.root['task_id']
+    assert len(fixture.provider.launches) == 1

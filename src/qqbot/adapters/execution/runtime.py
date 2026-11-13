@@ -27,7 +27,7 @@ class JobRuntime:
         self.core, self.task_service, self.db = core, core.tasks, core.db
         self.data_root = Path(data_root)
         self.jobs = JobService(self.db, provider or SystemdJobProvider(), clock=core.clock,
-            context_resolver=lambda scope: scope, max_active=core.settings.execution.max_active,
+            context_resolver=lambda scope: scope,
             dispatch_guard=self._guard_dispatch)
         self.task_service.job_workspace_available = self.workspace_available
         self.task_service.job_tree_quiescent = self.tree_quiescent
@@ -47,10 +47,15 @@ class JobRuntime:
         with self.db.engine.connect() as conn:
             run = conn.execute(select(runs).where(runs.c.id == run_id)).mappings().first()
             if (not run or run['worker'] != worker or run['fencing'] != fence
-                    or run['role'] != 'worker' or not run['task_id']):
+                    or run['role'] not in {'worker', 'leader'} or not run['task_id']):
                 raise PermissionError('Job operation belongs to another Worker attempt')
             task = conn.execute(select(tasks).where(tasks.c.id == run['task_id'])).mappings().one()
             root = conn.execute(select(tasks).where(tasks.c.id == (task['root_task_id'] or task['id']))).mappings().one()
+            if run['role'] == 'leader':
+                run, claim = self.core.leader.lease(conn, *identity)
+                if (not claim.get('takeover') or claim.get('target_root_task_id') != root['id']
+                        or task['id'] != root['id'] or claim['purpose'] not in {'attention', 'finalize'}):
+                    raise PermissionError('Leader Job execution requires its bound task takeover')
         event = InboundEvent.model_validate_json(task['event_json'])
         owner = self.core.sessions.owner(event)
         if (not owner or task['owner_id'] != owner or root['owner_id'] != owner
@@ -63,13 +68,20 @@ class JobRuntime:
                                      'inspect' if operation == 'lookup' else operation)
         resources = ('workspace:' + str(workspace), 'task:' + task['id'])
         if operation in {'start', 'prepare', 'cancel'}:
-            self.task_service.authorize(*identity, {'action': action, 'resources': resources, 'effect': 'write'})
+            authorization = {'action': action, 'resources': resources, 'effect': 'write'}
+            if run['role'] == 'leader':
+                with self.db.engine.connect() as conn:
+                    current, claim = self.core.leader.lease(conn, *identity)
+                    self.core.leader.authorize(conn, current, claim, authorization)
+            else:
+                self.task_service.authorize(*identity, authorization)
         else:
             # Readback remains available after the initiating run is cancelled or finishes.
             for resource in resources:
                 self.task_service.permissions.require(access, action, resource)
         return JobScope(owner_id=owner, task_id=task['id'], root_task_id=root['id'], workspace=str(workspace),
-                        expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline'])))
+                        expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline']))
+                            if self.task_service._time_limited(task) and self.task_service._time_limited(root) else None)
 
     def _guard_dispatch(self, scope):
         identity = _call_identity.get()
@@ -106,7 +118,8 @@ class JobRuntime:
             self.core.leader.authorize(conn, run, claim, {'action': 'workspace.job.inspect',
                 'resources': ['workspace:' + str(workspace), 'task:' + task['id']], 'effect': 'read'})
         return JobScope(owner_id=owner, task_id=task['id'], root_task_id=root['id'], workspace=str(workspace),
-                        expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline'])))
+                        expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline']))
+                            if self.task_service._time_limited(task) and self.task_service._time_limited(root) else None)
 
     async def invoke(self, identity, payload):
         if not isinstance(payload, dict) or set(payload) != {'operation', 'arguments'}:
@@ -182,14 +195,14 @@ class JobRuntime:
         authorization = {**payload, 'action': 'workspace.job.inspect',
             'resources': ['workspace:' + scope.workspace, 'task:' + scope.task_id]}
         self.task_service.authorize_waiter(authorization)
-        if scope.expires_at <= self.core.clock.now():
+        if scope.expires_at is not None and scope.expires_at <= self.core.clock.now():
             raise PermissionError('Job waiter scope expired')
         result = await self.invoke(identity, {'operation': 'inspect', 'arguments': condition['arguments']})
         self.task_service.authorize_waiter(authorization)
         with self.db.engine.connect() as conn:
             current = conn.execute(select(waits).where(waits.c.id == wait['id'])).mappings().first()
         if (current != wait or self._authorized(identity, 'inspect') != scope
-                or scope.expires_at <= self.core.clock.now()):
+                or scope.expires_at is not None and scope.expires_at <= self.core.clock.now()):
             raise PermissionError('Job waiter authority changed during observation')
         return result
 
@@ -236,6 +249,15 @@ class JobRuntime:
                     graph.event(conn, task, 'finished', {'state': 'CANCELLED', 'public_summary': '任务进程已确认停止。'},
                         event_id='job-cancel-settled:' + task['id'])
 
+    def _requires_stop(self, task):
+        if not task:
+            return True
+        time_stop = task['stop_reason'] in {'deadline', 'active_budget'}
+        if task['state'] == 'CANCEL_REQUESTED' and time_stop and not self.task_service._time_limited(task):
+            return False
+        return (task['state'] in _STOP_TASK or task['stop_reason'] in {'user_cancel', 'revoked'}
+                or time_stop and self.task_service._time_limited(task))
+
     async def maintain(self):
         with self.db.engine.connect() as conn:
             rows = conn.execute(select(jobs.c.id, jobs.c.task_id, jobs.c.root_task_id,
@@ -248,9 +270,7 @@ class JobRuntime:
         cancelled = set()
         for row in rows:
             task, root = task_rows.get(row['task_id']), task_rows.get(row['root_task_id'])
-            stop = (not task or not root or task['state'] in _STOP_TASK or root['state'] in _STOP_TASK
-                    or task['stop_reason'] in {'user_cancel', 'revoked', 'deadline', 'active_budget'}
-                    or root['stop_reason'] in {'user_cancel', 'revoked', 'deadline', 'active_budget'})
+            stop = self._requires_stop(task) or self._requires_stop(root)
             if not stop:
                 event = InboundEvent.model_validate_json(task['event_json'])
                 stop = self.core.sessions.owner(event) != row['owner_id'] or not self.core.allowed(event)
@@ -278,7 +298,10 @@ class JobRuntime:
                 for handle in changed:
                     task = task_rows.get(handle.task_id)
                     if task:
-                        graph.event(conn, task, 'job_updated', {'job_id': handle.job_id, 'state': handle.state,
+                        attention = (handle.state in {'FAILED', 'UNKNOWN', 'WAITING_RECONCILIATION'}
+                                     or handle.state == 'CANCELLED' and handle.deadline <= self.core.clock.now())
+                        graph.event(conn, task, 'needs_attention' if attention else 'job_updated',
+                            {'job_id': handle.job_id, 'state': handle.state,
                             'exit_code': handle.exit_code, 'evidence_refs': ['job:' + handle.job_id],
                             'public_summary': '后台进程状态已更新为 ' + handle.state},
                             event_id='job:' + handle.job_id + ':' + handle.state, wake=True)

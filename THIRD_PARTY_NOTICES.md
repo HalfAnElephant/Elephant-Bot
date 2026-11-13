@@ -38,6 +38,8 @@
 
 来源为 [aureth-labs/dsh-aurabot-qq](https://github.com/aureth-labs/dsh-aurabot-qq)，固定提交 `1057a861e4e96aa2fe050000d238280a7901b9dc`。人格 v5 曾将 `personas/dafeiyu.md` 正文改名后装入 `identity`。v6 保留角色外貌和喜好，按身份、性格、表达和群私聊场景改写，沿用用户定制的服饰，移除缺乏运行支撑的能力描述，并将宿主表达规则独立组装。主动搭话参考 `src/features/companion.js`，适配本项目消息和持久化接口。
 
+当前 Leader 在 `src/qqbot/runtime/persona.md` 使用 2026-11-13 读取的 `main/personas/dafeiyu.md` 改编稿，源文件 SHA256 为 `70295531945326e1aa77fe26d01970124e3d011080cdadaa5e68f5f5f9c70f14`。保留“大象”称呼，采用上游外貌、性格、短句习惯和白米饭偏好，按真实能力与结果交付调整身份、生活、情绪、格式和控制标签描述。此改编稿随 Python 包分发，统一进入 Leader 的聊天、进度、提问和最终汇报提示。
+
 ```text
 MIT License
 

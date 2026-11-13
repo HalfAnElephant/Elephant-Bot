@@ -326,17 +326,17 @@
         },
         "max_active": {
           "default": 8,
-          "maximum": 32,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; active Agent admission is unrestricted",
+          "minimum": 0,
           "title": "Max Active",
           "type": "integer"
         },
         "sustained_limit": {
           "default": 2,
           "deprecated": true,
-          "description": "Legacy compatibility field; all Agent roles share max_active without reserved slots",
-          "maximum": 31,
-          "minimum": 1,
+          "description": "Legacy compatibility field; background Agent admission is unrestricted",
+          "minimum": 0,
           "title": "Sustained Limit",
           "type": "integer"
         },
@@ -649,36 +649,41 @@
         },
         "pending_inputs_per_owner": {
           "default": 64,
-          "maximum": 1024,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; pending inputs are unrestricted",
+          "minimum": 0,
           "title": "Pending Inputs Per Owner",
           "type": "integer"
         },
         "pending_root_tasks_per_owner": {
           "default": 5,
-          "maximum": 100,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; pending goals are unrestricted",
+          "minimum": 0,
           "title": "Pending Root Tasks Per Owner",
           "type": "integer"
         },
         "child_parallelism": {
           "default": 2,
-          "maximum": 8,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; child admission is unrestricted",
+          "minimum": 0,
           "title": "Child Parallelism",
           "type": "integer"
         },
         "max_task_depth": {
           "default": 2,
-          "maximum": 4,
-          "minimum": 1,
+          "deprecated": true,
+          "description": "Legacy compatibility field; task tree depth is unrestricted",
+          "minimum": 0,
           "title": "Max Task Depth",
           "type": "integer"
         },
         "max_nodes_per_root": {
           "default": 7,
-          "maximum": 64,
-          "minimum": 2,
+          "deprecated": true,
+          "description": "Legacy compatibility field; task node count is unrestricted",
+          "minimum": 0,
           "title": "Max Nodes Per Root",
           "type": "integer"
         },

@@ -120,7 +120,8 @@ class Scheduler:
         self.core, self.leader, self.settings = core, leader, core.settings
         data = Path(core.db.path).resolve().parent
         self.client = RuntimeClient(core, leader)
-        self.capacity = ModelCapacity(total=self.settings.orchestration.model_request_limit)
+        model_limit = self.settings.orchestration.model_request_limit
+        self.capacity = ModelCapacity(total=model_limit, reserved=int(model_limit > 1))
         from qqbot.adapters.execution.runtime import JobRuntime
         core.job_runtime = JobRuntime(core, data)
         self.job_maintenance = None
@@ -145,8 +146,8 @@ class Scheduler:
             runner.archive = Path(args.archive)
             return runner
 
-        self.pool = SessionPool(factory, max_resident=core.tasks.max_resident,
-            max_idle=min(self.settings.execution.warm_idle_max, core.tasks.max_resident),
+        self.pool = SessionPool(factory,
+            max_idle=self.settings.execution.warm_idle_max if self.settings.execution.warm_max else 0,
             ttl=self.settings.execution.warm_ttl_seconds)
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)
         async def waiter_call(operation, payload):
@@ -181,11 +182,14 @@ class Scheduler:
                     completed = True
         if failure is not None:
             raise failure
-        if len(self.active) < self.core.tasks.max_active:
-            self.active.add(asyncio.create_task(self.worker.once()))
+        async with self.worker.replay_lock:
+            await self.worker.replay()
+        while claim := await self.worker.call("claim", protocol_version=2, wait_ms=0):
+            self.active.add(asyncio.create_task(self.worker.once(claim)))
+            await asyncio.sleep(0)
         await self.pool.sweep()
-        # Admission and in-flight work do not confirm that a Worker cycle succeeded.
-        return completed
+        # A decoded empty claim confirms idle health without starting a Worker cycle.
+        return completed or not self.active
 
     async def close(self):
         self.worker.begin_shutdown()

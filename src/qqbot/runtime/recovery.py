@@ -21,6 +21,7 @@ from qqbot.domain.tasks import TaskResult
 from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, export_artifacts
 from qqbot.harness.launcher import trusted_json
 from qqbot.storage.action_schema import operations
+from qqbot.storage.agent_schema import leader_inbox
 from qqbot.storage.schema import outbox
 from qqbot.storage.task_schema import (
     inputs,
@@ -159,8 +160,8 @@ class RuntimeRecovery:
             conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state="NEEDS_RECONCILIATION"))
             graph = getattr(self.service, "graph", None)
             if graph and task["root_task_id"]:
-                graph.event(conn, current, "needs_reconciliation", {"reason": reason},
-                    event_id=stable_id("recovery-paused", run["id"], reason), wake=True)
+                graph.event(conn, current, "needs_attention", {"reason": reason},
+                    attempt_id=run["id"], event_id=stable_id("recovery-paused", run["id"], reason), wake=True)
         self.service.wakeup.set()
         return {"task_id": task["id"], "run_id": run["id"], "state": "NEEDS_RECONCILIATION", "reason": reason}
 
@@ -174,9 +175,11 @@ class RuntimeRecovery:
             return task["state"], task["stop_reason"] or "already_settled"
         if task["stop_reason"] in {"user_cancel", "revoked"}:
             return "CANCELLED", task["stop_reason"]
-        if task["deadline"] <= self.core.clock.now().isoformat() or task["stop_reason"] == "deadline":
+        if self.service._deadline_expired(task) or (
+                self.service._time_limited(task) and task["stop_reason"] == "deadline"):
             return "EXPIRED", "deadline"
-        if task["state"] == "CANCEL_REQUESTED":
+        old_time_stop = not self.service._time_limited(task) and task["stop_reason"] in {"deadline", "active_budget"}
+        if task["state"] == "CANCEL_REQUESTED" and not old_time_stop:
             return ("FAILED", task["stop_reason"]) if task["stop_reason"] else ("CANCELLED", "user_cancel")
         event = InboundEvent.model_validate_json(task["event_json"])
         access = self.service._access_for(task)
@@ -296,6 +299,13 @@ class RuntimeRecovery:
             conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state="RUNNING"))
         settled = self.service.submit(run["id"], run["fencing"], run["worker"], result.model_dump(mode="json"),
             stopped=True, receipt=proof)
+        with self.core.db.transaction() as conn:
+            resolved = ["lease-lost:" + run["id"], *[stable_id("recovery-paused", run["id"], reason)
+                for reason in ("unpaired_tools", "uncertain_operations", "wait_boundary_missing",
+                    "native_session_missing", "invalid_recovery_evidence")]]
+            conn.execute(update(leader_inbox).where(leader_inbox.c.event_id.in_(resolved),
+                leader_inbox.c.claimed_attempt_id.is_(None), leader_inbox.c.handled_at.is_(None)).values(
+                    handled_at=self.core.clock.now().isoformat(), output_ref="RECOVERED"))
         observer = getattr(self.core, "leader", None)
         if observer:
             observer.observe_operation((run["id"], run["fencing"], run["worker"]), "result", {})
@@ -322,6 +332,11 @@ class RuntimeRecovery:
                     .values(state="NEEDS_RECONCILIATION"))
                 conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
                     .values(state="NEEDS_RECONCILIATION"))
+                graph = getattr(self.service, "graph", None)
+                if graph and task["root_task_id"]:
+                    graph.event(conn, task, "needs_attention", {"reason": "worker_lease_lost"},
+                        attempt_id=run_id, event_id="lease-lost:" + run_id, wake=True)
+            self.service.wakeup.set()
             return {"task_id": task["id"], "run_id": run_id, "state": "NEEDS_RECONCILIATION"}
         self._charge_stopped_activity(run, task, process)
         now = self.core.clock.now().isoformat()
@@ -451,7 +466,7 @@ class RuntimeRecovery:
         return "UNKNOWN", data
 
     async def readback_operation(self, public_id, access, operation_id):
-        task = self._task(public_id, access)
+        self._task(public_id, access)
         record = next((row for row in self.list_operations(public_id, access) if row["operation_id"] == operation_id), None)
         if record is None:
             raise KeyError("operation does not belong to this task")
@@ -463,11 +478,14 @@ class RuntimeRecovery:
         with self.core.db.engine.connect() as conn:
             run = conn.execute(select(runs).where(runs.c.id == record["run_id"])).mappings().one()
             claim = json.loads(run["request_json"])
+            execution_task = conn.execute(select(tasks).where(tasks.c.id == run["task_id"])).mappings().one()
+            if self.service._operation_task_id(conn, execution_task) != record["task_id"]:
+                raise PermissionError("operation execution does not match its ledger scope")
         host = claim.get("host") or self.core.settings.orchestration.github_host
         if host != self.core.settings.orchestration.github_host:
             raise PermissionError("readback credential host differs from the task binding")
         context = ToolContext(task_id=record["task_id"], run_id=record["run_id"], fence=run["fencing"],
-            principal=access.principal.model_dump(mode="json"), workspace=str(self._workspace(task, strict=False)),
+            principal=access.principal.model_dump(mode="json"), workspace=str(self._workspace(execution_task, strict=False)),
             repository=claim.get("repository"), host=host)
         verification = await self._verify(context, action, record["arguments"], record["result"])
         state, result = verification or ("UNKNOWN", record["result"])

@@ -1,7 +1,6 @@
 import json
 
 import httpx
-import pytest
 from sqlalchemy import func, select, update
 from test_agent_runtime import prepare_conditional_review, root_goal
 from test_agent_runtime import runtime as agent_runtime_fixture
@@ -51,17 +50,18 @@ def ready_goal(runtime):
         for index in range(count):
             result = runtime.service.reserve_budget(claim["run_id"], claim["fencing_token"], worker,
                 {"request_id": worker + str(index), "kind": "business"})
-    assert result["remaining"] == 0
+    assert result["remaining"] == 2
     return root, a, b
 
 
-async def test_workers_cannot_spend_final_leader_reserve_and_last_request_is_toolless(runtime):
+async def test_worker_attempts_and_leader_decisions_have_independent_completion_reserves(runtime):
     root, a, b = ready_goal(runtime)
-    with pytest.raises(ValueError, match="root model_calls budget exhausted"):
-        runtime.service.reserve_budget(a["run_id"], a["fencing_token"], "a", {"request_id": "worker-final", "kind": "completion"})
+    runtime.service.reserve_budget(a["run_id"], a["fencing_token"], "a", {"request_id": "worker-final", "kind": "completion"})
     finish_worker(runtime, a, "a")
     finish_worker(runtime, b, "b")
     final = runtime.sessions.claim("leader")
+    for index in range(2):
+        await reserve_leader(runtime, final, "decision-" + str(index))
     sent = []
     async def transport(request):
         sent.append(json.loads(request.content))
@@ -80,7 +80,7 @@ async def test_workers_cannot_spend_final_leader_reserve_and_last_request_is_too
     assert sent[0]["tool_choice"] == "none"
     assert provider.business_exhausted
     with runtime.db.engine.connect() as conn:
-        assert json.loads(conn.execute(select(tasks.c.budget_json).where(tasks.c.id == root["task_id"])).scalar_one())["model_calls"] == 4
+        assert json.loads(conn.execute(select(tasks.c.budget_json).where(tasks.c.id == root["task_id"])).scalar_one())["model_calls"] == 7
     proof = {"kind": "turn_finished", "session_id": final["session_id"], "run_id": final["run_id"],
         "session_revision": "leaf", "input_ids": final["context"]["source_input_ids"], "inflight": 0, "tools_paired": True}
     runtime.leader.complete(final["run_id"], final["fencing_token"], "leader",
@@ -91,26 +91,26 @@ async def test_workers_cannot_spend_final_leader_reserve_and_last_request_is_too
         assert len(conn.execute(select(notifications)).all()) == 1
 
 
-async def test_failed_final_reserved_request_settles_once_without_reopening_inbox(runtime):
+async def test_failed_decision_preserves_goal_and_retries_without_publishing_transport_errors(runtime):
     root, a, b = ready_goal(runtime)
     finish_worker(runtime, a, "a")
     finish_worker(runtime, b, "b")
     final = runtime.sessions.claim("leader")
-    assert (await reserve_leader(runtime, final, "last-request"))["remaining"] == 0
+    assert (await reserve_leader(runtime, final, "last-request"))["remaining"] == 2
     fail_leader(runtime, final)
     fail_leader(runtime, final)
     runtime.service.recover()
-    assert runtime.sessions.claim("leader") is None
+    retry = runtime.sessions.claim("leader")
+    assert retry and retry["purpose"] == "finalize"
     with runtime.db.engine.connect() as conn:
         task = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
-        assert task["state"] == "BLOCKED"
-        assert "transport diagnostic" not in task["result_json"]
-        assert all(conn.execute(select(leader_inbox.c.handled_at)).scalars())
-        assert len(conn.execute(select(notifications)).all()) == 1
-        assert len(conn.execute(select(outbox)).all()) == 1
+        assert task["state"] == "WAITING_CHILDREN" and task["result_json"] is None
+        assert not any(conn.execute(select(leader_inbox.c.handled_at)).scalars())
+        assert not conn.execute(select(notifications)).first()
+        assert not conn.execute(select(outbox)).first()
 
 
-async def test_progress_cannot_spend_final_reserve_or_retry_its_exhausted_inbox(runtime):
+async def test_progress_can_report_after_large_root_usage_and_retry_failed_decision(runtime):
     _root, a, _b = ready_goal(runtime)
     with runtime.db.transaction() as conn:
         child = conn.execute(select(tasks).where(tasks.c.id == a["task_id"])).mappings().one()
@@ -118,15 +118,15 @@ async def test_progress_cannot_spend_final_reserve_or_retry_its_exhausted_inbox(
     runtime.clock.advance(3)
     progress = runtime.sessions.claim("leader")
     assert progress["purpose"] == "progress"
-    with pytest.raises(ValueError, match="root budget exhausted"):
-        await reserve_leader(runtime, progress, "progress-budget")
+    assert (await reserve_leader(runtime, progress, "progress-budget"))["remaining"] == 2
     fail_leader(runtime, progress)
-    assert runtime.sessions.claim("leader") is None
+    retry = runtime.sessions.claim("leader")
+    assert retry and retry["purpose"] == "progress"
     with runtime.db.engine.connect() as conn:
-        assert conn.execute(select(leader_inbox.c.handled_at)).scalar_one()
+        assert conn.execute(select(leader_inbox.c.handled_at)).scalar_one() is None
 
 
-def test_execution_budget_boundary_settles_idle_children_but_waits_for_live_resources(runtime):
+def test_root_accounting_never_automatically_stops_pending_workers(runtime):
     short_budget(runtime)
     root = root_goal(runtime)
     with runtime.db.transaction() as conn:
@@ -139,8 +139,9 @@ def test_execution_budget_boundary_settles_idle_children_but_waits_for_live_reso
     runtime.service.recover()
     runtime.service.recover()
     with runtime.db.engine.connect() as conn:
-        assert set(conn.execute(select(tasks.c.state)).scalars()) == {"BLOCKED"}
-        assert len(conn.execute(select(outbox)).all()) == 1
+        assert set(conn.execute(select(tasks.c.state)).scalars()) == {"WAITING_CHILDREN", "QUEUED"}
+        assert not conn.execute(select(outbox)).first()
+    assert runtime.service.claim("worker") is not None
 
 
 async def test_user_retries_share_one_budget_and_fixed_deadline(runtime):

@@ -35,6 +35,13 @@ class TaskService:
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
 
+    @staticmethod
+    def _time_limited(task):
+        return not task["root_task_id"] and task["delivery"] != "DETACHED"
+
+    def _deadline_expired(self, task):
+        return self._time_limited(task) and task["deadline"] <= self.clock.now().isoformat()
+
     def accept(self, event, access, goal, profile="pi", *, retry_of_task_id=None, plan=None, context=None):
         if access.principal != event.principal or access.conversation != event.conversation:
             raise PermissionError("identity mismatch")
@@ -49,12 +56,6 @@ class TaskService:
                 if old["goal"] != goal.text or old["retry_of_task_id"] != retry_of_task_id:
                     raise ValueError("source event already accepted with a different goal")
                 return dict(old)
-            for condition, limit in ((tasks.c.requester == access.principal.key, 8),
-                                     (tasks.c.conversation == access.conversation.key, 20)):
-                count = c.execute(select(func.count()).select_from(tasks).where(
-                    tasks.c.state == "QUEUED", condition)).scalar_one()
-                if count >= limit:
-                    raise ValueError("task queue full")
             task_id = str(uuid4())
             row = self.new_task(task_id, event, access, goal, plan, context=context,
                                 retry_of_task_id=retry_of_task_id)
@@ -167,7 +168,7 @@ class TaskService:
         if run["run_reason"] == "notification":
             deadline = datetime.fromisoformat(run["started_at"]) + timedelta(seconds=30)
             return self._notification_budget(task), deadline.isoformat()
-        return ExecutionPlan.model_validate_json(task["plan_json"]).budget, task["deadline"]
+        return ExecutionPlan.model_validate_json(task["plan_json"]).budget, task["deadline"] if self._time_limited(task) else None
 
     def _queue_failure_notice(self, conn, task, result, state):
         if task["root_task_id"]:
@@ -193,58 +194,18 @@ class TaskService:
             if process["state"] != "STOPPED" or process["epoch"] != run["process_epoch"] or process["generation"] != run["binding_generation"]:
                 raise PermissionError("active process stop has not been verified")
 
-    def _settle_exhausted_roots(self, conn):
-        if not hasattr(self, "graph"):
-            return
-        from qqbot.storage.agent_schema import leader_inbox
-
-        now = self.clock.now().isoformat()
-        roots = conn.execute(select(tasks).where(tasks.c.kind == "goal", tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
-        for root in roots:
-            used, plan = json.loads(root["budget_json"]), json.loads(root["plan_json"])
-            model_limit = plan["budget"]["model_calls"]
-            execution_limit = model_limit - plan["budget"].get("completion_reserve", 1)
-            if used.get("model_calls", 0) < execution_limit:
-                continue
-            if json.loads(root["context_json"]).get("memory_replan_pending"):
-                continue
-            tree = select(tasks.c.id).where(tasks.c.root_task_id == root["id"])
-            children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
-                tasks.c.id != root["id"], tasks.c.state.not_in(TERMINAL))).mappings().all()
-            if used.get("model_calls", 0) < model_limit and not children:
-                continue
-            active = conn.execute(select(runs.c.id).where(runs.c.slot_reserved == 1,
-                (runs.c.task_id.in_(tree)) | (runs.c.session_id == root["coordinator_session_id"]))).first()
-            if active or not getattr(self, "job_tree_quiescent", lambda _: True)(root):
-                continue
-            result = TaskResult(status="blocked", agent_authored=False,
-                summary="任务的执行预算已到收尾边界，已停止继续执行，并保留现有结果供查询。")
-            for child in children:
-                conn.execute(update(tasks).where(tasks.c.id == child["id"]).values(state="BLOCKED",
-                    stop_reason="root_budget", result_json=result.model_dump_json()))
-                self.graph.event(conn, child, "budget_exhausted", {"state": "BLOCKED"},
-                    event_id="root-budget:" + root["id"] + ":" + child["id"])
-            conn.execute(update(waits).where(waits.c.task_id.in_(tree), waits.c.state.in_(["INTENT", "WAITING"]))
-                .values(state="CANCELLED"))
-            conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(state="BLOCKED",
-                stop_reason="root_budget", result_json=result.model_dump_json()))
-            final_id = "final:" + root["id"] + ":" + str(root["goal_revision"])
-            self.graph.event(conn, root, "finished", {"state": "BLOCKED"}, event_id=final_id)
-            conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id == root["id"],
-                leader_inbox.c.handled_at.is_(None)).values(handled_at=now, output_ref="ROOT_BUDGET_EXHAUSTED"))
-            access = self._access_for(root)
-            if self.permissions.check(access, "notification.send", "conversation:" + root["conversation"]).allowed:
-                self._notification(conn, root, None, result.summary, "result", "important", final_id)
-
     def _record_host_terminal(self, conn, task, state, result, event_id, *, run_id=None):
-        conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, result_json=result.model_dump_json()))
+        attention = state in {"BLOCKED", "FAILED", "EXPIRED"}
+        stored_state = "WAITING_CHILDREN" if task["kind"] == "goal" and attention else state
+        conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=stored_state, result_json=result.model_dump_json()))
         if task["root_task_id"] and hasattr(self, "graph"):
-            settled = {**dict(task), "state": state}
-            self.graph.event(conn, settled, "child_result", {"result": result.model_dump(mode="json")},
+            settled = {**dict(task), "state": stored_state}
+            self.graph.event(conn, settled, "needs_attention" if attention else "child_result",
+                {"result": result.model_dump(mode="json")},
                 attempt_id=run_id, event_id=event_id, wake=True)
             if task["parent_task_id"]:
                 parent = conn.execute(select(tasks).where(tasks.c.id == task["parent_task_id"])).mappings().one()
-                if parent["kind"] != "goal":
+                if parent["kind"] != "goal" and not attention:
                     self.graph.wake_parent(conn, parent)
         self.wakeup.set()
 
@@ -257,14 +218,23 @@ class TaskService:
                 .where(tasks.c.id.in_(expired), tasks.c.state.not_in(TERMINAL))
                 .values(state="NEEDS_RECONCILIATION")
             )
+            if hasattr(self, "graph"):
+                interrupted = c.execute(select(tasks, runs.c.id.label("interrupted_run_id")).join(
+                    runs, runs.c.task_id == tasks.c.id).where(runs.c.slot_reserved == 1,
+                    runs.c.role == "worker", runs.c.lease <= now, tasks.c.root_task_id.is_not(None))).mappings().all()
+                for task in interrupted:
+                    self.graph.event(c, task, "needs_attention", {"reason": "worker_lease_lost"},
+                        attempt_id=task["interrupted_run_id"], event_id="lease-lost:" + task["interrupted_run_id"], wake=True)
             from qqbot.storage.task_schema import processes
             c.execute(update(processes).where(processes.c.id.in_(select(runs.c.process_id).where(
                 runs.c.slot_reserved == 1, runs.c.lease <= now)), processes.c.state != "STOPPED").values(state="UNKNOWN"))
-            expired_waits = c.execute(select(waits, tasks.c.deadline).join(tasks, tasks.c.id == waits.c.task_id)
+            expired_waits = c.execute(select(waits, tasks.c.deadline, tasks.c.root_task_id, tasks.c.delivery).join(tasks, tasks.c.id == waits.c.task_id)
                 .where(waits.c.state.in_(["INTENT", "WAITING"]), tasks.c.state.in_(["WAITING_INPUT", "WAITING_EXTERNAL"]))) .mappings().all()
             for waiting in expired_waits:
-                deadline = waiting["expires_at"] or waiting["delivery_deadline"] or waiting["deadline"]
-                if min(deadline, waiting["deadline"]) <= now:
+                deadline = waiting["expires_at"] or waiting["delivery_deadline"]
+                if self._time_limited(waiting):
+                    deadline = min(deadline, waiting["deadline"]) if deadline else waiting["deadline"]
+                if deadline and deadline <= now:
                     reason = "input_timeout" if waiting["delivered_at"] else "delivery_timeout"
                     if waiting["kind"] == "external":
                         reason = "external_timeout"
@@ -278,21 +248,16 @@ class TaskService:
                     self._record_host_terminal(c, task, "BLOCKED", result, "host-wait-expired:" + waiting["id"],
                         run_id=waiting["run_id"])
             for task in c.execute(select(tasks).where(tasks.c.state == "QUEUED", tasks.c.deadline <= now,
-                                                      tasks.c.failure_notice_json.is_(None))).mappings().all():
+                                                      tasks.c.failure_notice_json.is_(None), tasks.c.root_task_id.is_(None), tasks.c.delivery != "DETACHED")).mappings().all():
                 result = TaskResult(status="failed", agent_authored=False,
                                     summary="The execution deadline expired before the queued request started.")
                 c.execute(update(tasks).where(tasks.c.id == task["id"]).values(stop_reason="deadline"))
                 self._record_host_terminal(c, task, "EXPIRED", result, "host-queued-expired:" + task["id"])
                 self._queue_failure_notice(c, task, result, "EXPIRED")
-            self._settle_exhausted_roots(c)
 
     def claim(self, worker_id, protocol_version=2):
         self.recover()
         with self.db.transaction() as c:
-            if c.execute(
-                select(func.count()).select_from(runs).where(runs.c.slot_reserved == 1)
-            ).scalar_one() >= self.max_active:
-                return None
             history = tasks.alias("history")
             last_run = (
                 select(func.max(runs.c.lease))
@@ -326,10 +291,6 @@ class TaskService:
                 if item["root_task_id"] and hasattr(self, "graph"):
                     root = self.graph.root(c, item)
                     if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
-                        continue
-                    count = c.execute(select(func.count()).select_from(runs.join(tasks, runs.c.task_id == tasks.c.id))
-                        .where(runs.c.slot_reserved == 1, runs.c.role == "worker", tasks.c.root_task_id == root["id"])).scalar_one()
-                    if count >= self.graph.settings.orchestration.child_parallelism:
                         continue
                 row = item
                 break
@@ -400,7 +361,7 @@ class TaskService:
                 "notification_status": "failed" if row["failure_notice_json"] else None,
                 "goal_spec": json.loads(row["goal_json"]),
                 "plan": plan.model_dump(mode="json"),
-                "active_seconds_remaining": 30 if row["failure_notice_json"] else max(0, budget.active_seconds
+                "active_seconds_remaining": 30 if row["failure_notice_json"] else None if not self._time_limited(row) else max(0, budget.active_seconds
                     - json.loads(row["budget_json"]).get("active_seconds", 0)),
                 "context": {**json.loads(row["context_json"]), "key": session_id, "session_id": session_id,
                     "role": "worker", "purpose": "work", "source_input_ids": ["task:" + row["id"], *[r["id"] for r in continuation]]},
@@ -412,7 +373,7 @@ class TaskService:
                 "protocol_version": row["protocol_version"],
                 "profile": row["profile"],
                 "lease_expires_at": lease,
-                "deadline": deadline,
+                "deadline": deadline if self._time_limited(row) else None,
                 "permission_snapshot": json.loads(row["permission_json"]),
                 "session_id": session_id,
                 "session_relative_path": f"{session_id}/sessions/{session_id}.jsonl",
@@ -439,13 +400,13 @@ class TaskService:
             state = task["state"]
             budget, deadline = self._run_limits(run, task)
             active_key = "notification_active_seconds" if run["run_reason"] == "notification" else "active_seconds"
-            if used.get(active_key, 0) >= budget.active_seconds and state == "RUNNING":
+            if deadline is not None and used.get(active_key, 0) >= budget.active_seconds and state == "RUNNING":
                 state = "CANCEL_REQUESTED"
                 values = {"state": state}
                 if run["run_reason"] != "notification":
                     values["stop_reason"] = "active_budget"
                 c.execute(update(tasks).where(tasks.c.id == task["id"]).values(**values))
-            if deadline <= self.clock.now().isoformat() and state == "RUNNING":
+            if deadline is not None and deadline <= self.clock.now().isoformat() and state == "RUNNING":
                 state = "CANCEL_REQUESTED"
                 c.execute(
                     update(tasks).where(tasks.c.id == task["id"]).values(state=state, stop_reason="deadline")
@@ -484,7 +445,7 @@ class TaskService:
             notification_run = run["run_reason"] == "notification"
             _budget, deadline = self._run_limits(run, task)
             failure_after_stop = result.status == "failed" and stopped and task["state"] in {"RUNNING", "CANCEL_REQUESTED"}
-            if (task["state"] != "RUNNING" or deadline <= now) and not failure_after_stop:
+            if (task["state"] != "RUNNING" or deadline is not None and deadline <= now) and not failure_after_stop:
                 raise PermissionError("task no longer running")
             if stopped:
                 self._require_stopped_process(c, run)
@@ -523,7 +484,7 @@ class TaskService:
                          or self.job_tree_quiescent(task) else "CANCEL_REQUESTED")
             elif notification_run:
                 state = json.loads(task["context_json"]).get("failure_state", "FAILED")
-            elif task["stop_reason"] == "deadline" or task["deadline"] <= now:
+            elif self._time_limited(task) and (task["stop_reason"] == "deadline" or task["deadline"] <= now):
                 state = "EXPIRED"
             if revision_pending and state not in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED"}:
                 state = "QUEUED"
@@ -694,7 +655,7 @@ class TaskService:
                 if set(goal.requested_outputs) - {item.relative_path for item in validated.artifacts}:
                     raise ValueError("requested outputs missing during reconciliation")
                 self._verify_checks(c, goal.success_checks, validated, task_id)
-            if validated and task["deadline"] <= self.clock.now().isoformat():
+            if validated and self._deadline_expired(task):
                 raise PermissionError("expired task cannot accept success during recovery")
             recovery_id, fencing = str(uuid4()), task["fencing"] + 1
             now = self.clock.now().isoformat()
@@ -723,7 +684,7 @@ class TaskService:
             )
             if validated:
                 state = {"completed": "SUCCEEDED", "partial": "PARTIAL", "blocked": "BLOCKED"}.get(validated.status, "FAILED")
-            elif task["deadline"] <= now:
+            elif self._deadline_expired(task):
                 state = "EXPIRED"
             else:
                 state = {"deadline": "EXPIRED", "user_cancel": "CANCELLED", "revoked": "CANCELLED"}.get(
@@ -740,7 +701,12 @@ class TaskService:
                     result_json=validated.model_dump_json() if validated else None,
                 )
             )
-            if validated:
+            if task["root_task_id"] and hasattr(self, "graph"):
+                settled = {**dict(task), "state": state}
+                self.graph.settled(c, settled, recovery_id,
+                    (validated or TaskResult(status="failed", agent_authored=False,
+                        summary="The interrupted attempt requires review before work can continue.")).model_dump(mode="json"))
+            elif validated:
                 self._notification(c, task, recovery_id, validated.summary, "result", "important", "result:" + run_id)
             return {"state": state, "recovery_run_id": recovery_id, "fencing_token": fencing}
 
@@ -785,7 +751,7 @@ class TaskService:
                 .where(runs.c.id == run_id)
                 .values(slot_reserved=0, runner_stopped_at=self.clock.now().isoformat(), result_json=result.model_dump_json())
             )
-            c.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, result_json=result.model_dump_json()))
+            self._record_host_terminal(c, task, state, result, "stopped:" + run_id, run_id=run_id)
             state = self._queue_failure_notice(c, task, result, state)
             return {"state": state}
 
@@ -799,6 +765,15 @@ class TaskService:
             if old["task_id"] != task["id"] or old["body"] != text or old["purpose"] != purpose:
                 raise ValueError("notification identity conflict")
             return {"accepted": True, "notification_id": notification_id}
+        if purpose == "progress":
+            duplicate = c.execute(select(notifications.c.id).join(runs, runs.c.id == notifications.c.run_id)
+                .join(outbox_table, outbox_table.c.origin_id == notifications.c.id).where(
+                    notifications.c.task_id == task["id"], notifications.c.purpose == purpose,
+                    notifications.c.body == text, runs.c.basis_goal_revision == task["goal_revision"],
+                    outbox_table.c.state.in_(["PENDING", "RETRYABLE", "SENDING", "SENT", "UNKNOWN",
+                                              "WAITING_FOR_TRIGGER", "STREAM_PENDING"])).limit(1)).scalar_one_or_none()
+            if duplicate:
+                return {"accepted": True, "notification_id": duplicate}
         seq = (c.execute(select(func.max(notifications.c.sequence)).where(
             notifications.c.task_id == task["id"])).scalar_one() or 0) + 1
         stale = select(notifications.c.id).where(notifications.c.task_id == task["id"],
@@ -832,6 +807,15 @@ class TaskService:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
             if task["state"] != "RUNNING":
                 raise PermissionError("task no longer running")
+            if task["root_task_id"] and hasattr(self, "graph"):
+                if not isinstance(payload["text"], str) or not payload["text"].strip() or len(payload["text"]) > 10000:
+                    raise ValueError("notification text must contain 1..10000 characters")
+                validate_user_facing_text(payload["text"])
+                self.permissions.require(self._access_for(task), "notification.send", "conversation:" + task["conversation"])
+                self.graph.event(c, task, "worker_update", {"public_text": payload["text"]},
+                    attempt_id=run_id, event_id=payload["notification_id"], wake=True)
+                self.wakeup.set()
+                return {"accepted": True, "notification_id": payload["notification_id"]}
             return self._notification(c, task, run_id, payload["text"], "progress",
                                       payload.get("importance", "normal"), payload["notification_id"])
 
@@ -857,7 +841,7 @@ class TaskService:
             condition = payload.get("condition", {})
             if kind == "external":
                 condition = WaitCondition.model_validate_json(json.dumps(condition)).model_dump(mode="json")
-            if not task["root_task_id"]:
+            if not task["root_task_id"] or _run["role"] == "leader":
                 self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
                                    "important", question_id)
             elif kind == "input":
@@ -942,14 +926,19 @@ class TaskService:
         wait = c.execute(select(waits).where(waits.c.id == question_id)).mappings().one()
         if task["state"] not in {"WAITING_INPUT", "WAITING_EXTERNAL"} or wait["state"] != "WAITING":
             return False
-        if task["deadline"] <= self.clock.now().isoformat():
+        if self._deadline_expired(task):
             return False
         if not c.execute(select(inputs.c.id).where(inputs.c.question_id == question_id,
                                                   inputs.c.state == "PENDING")).first():
             return False
         c.execute(update(inputs).where(inputs.c.question_id == question_id, inputs.c.state == "PENDING").values(state="READY"))
         c.execute(update(waits).where(waits.c.id == question_id).values(state="CONSUMED"))
-        c.execute(update(tasks).where(tasks.c.id == task_id).values(state="QUEUED"))
+        state = "WAITING_CHILDREN" if task["kind"] == "goal" else "QUEUED"
+        c.execute(update(tasks).where(tasks.c.id == task_id).values(state=state))
+        if task["kind"] == "goal":
+            answer_ids = list(c.execute(select(inputs.c.id).where(inputs.c.question_id == question_id)).scalars())
+            self.graph.event(c, {**dict(task), "state": state}, "user_answer",
+                {"question_id": question_id, "input_ids": answer_ids}, event_id="answer:" + question_id, wake=True)
         self.wakeup.set()
         return True
 
@@ -957,7 +946,7 @@ class TaskService:
         with self.db.engine.connect() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
             _budget, deadline = self._run_limits(_run, task)
-            if task["state"] != "RUNNING" or deadline <= self.clock.now().isoformat():
+            if task["state"] != "RUNNING" or deadline is not None and deadline <= self.clock.now().isoformat():
                 raise PermissionError("run is no longer authorized")
             action = payload.get("action", "task.execute")
             resources = payload.get("resources") or [payload.get("resource", "task:" + task["id"])]
@@ -1034,18 +1023,12 @@ class TaskService:
             if task["root_task_id"] and task["root_task_id"] != task["id"]:
                 root = self.graph.root(c, task)
                 root_used = json.loads(root["budget_json"])
-                root_budget = json.loads(root["plan_json"])["budget"]
-                root_limit = root_budget[key] - (root_budget.get("completion_reserve", 1) if key == "model_calls" else 0)
-                if root_used.get(key, 0) >= root_limit:
-                    raise ValueError("root " + key + " budget exhausted")
                 root_used[key] = root_used.get(key, 0) + 1
                 c.execute(update(tasks).where(tasks.c.id == root["id"]).values(budget_json=json.dumps(root_used)))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(budget_json=json.dumps(used)))
             c.execute(insert(model_requests).values(id=request_id, task_id=task["id"], run_id=run_id,
                 kind=kind, state="RESERVED", created_at=self.clock.now().isoformat()))
             remaining = limit - used[key]
-            if task["root_task_id"] and task["root_task_id"] != task["id"]:
-                remaining = min(remaining, root_limit - root_used[key])
             return {"accepted": True, "remaining": remaining}
 
     def record_usage(self, run_id, fencing_token, worker_id, payload):
@@ -1116,8 +1099,9 @@ class TaskService:
             return {"recorded": True}
 
     def _operation_task_id(self, c, task):
-        while task["retry_of_task_id"]:
-            task = c.execute(select(tasks).where(tasks.c.id == task["retry_of_task_id"])).mappings().one()
+        while task["retry_of_task_id"] or task["rework_of_task_id"]:
+            task = c.execute(select(tasks).where(tasks.c.id == (
+                task["retry_of_task_id"] or task["rework_of_task_id"]))).mappings().one()
         return task["id"]
 
     async def ledger(self, run_id, fencing_token, worker_id, payload):
@@ -1126,13 +1110,18 @@ class TaskService:
         from qqbot.storage.action_schema import operations
         with self.db.engine.connect() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
-            if task["state"] not in {"RUNNING", "CANCEL_REQUESTED"}:
+            decision = _run["role"] == "leader" and task["kind"] == "goal"
+            readback = payload["operation"] in {"read", "list"} or (
+                payload["operation"] == "transition" and payload.get("expected") == "UNKNOWN")
+            if task["state"] not in {"RUNNING", "CANCEL_REQUESTED"} and not (decision and readback):
                 raise PermissionError("run cannot record an operation")
             operation_task_id = self._operation_task_id(c, task)
+            scope_task_ids = list(c.execute(select(tasks.c.id).where(
+                tasks.c.root_task_id == task["id"])).scalars()) if decision else [operation_task_id]
             context = ToolContext(task_id=operation_task_id, run_id=run_id, fence=fencing_token,
                 principal=self._access_for(task), workspace="")
             if payload["operation"] in {"read", "list"}:
-                query = select(operations).where(operations.c.task_id == operation_task_id)
+                query = select(operations).where(operations.c.task_id.in_(scope_task_ids))
                 if payload["operation"] == "read":
                     query = query.where(operations.c.id == payload["operation_id"])
                 rows = c.execute(query.order_by(operations.c.updated_at).limit(100)).mappings().all()
@@ -1140,7 +1129,7 @@ class TaskService:
                     "action": json.loads(row["action_json"]), "result": json.loads(row["result_json"])} for row in rows]
             if payload["operation"] == "transition":
                 old = c.execute(select(operations).where(operations.c.id == payload["operation_id"])).mappings().first()
-                if not old or old["task_id"] != operation_task_id or (
+                if not old or old["task_id"] not in scope_task_ids or (
                     (old["run_id"] != run_id or old["fence"] != fencing_token) and payload["expected"] != "UNKNOWN"
                 ):
                     raise PermissionError("operation belongs to another binding")
@@ -1150,7 +1139,7 @@ class TaskService:
             self.authorize(run_id, fencing_token, worker_id, {"action": action.name,
                 "resources": action.resources, "effect": action.effect})
             return await ledger.prepare(payload["operation_id"], context, action,
-                payload["arguments_hash"], payload["arguments"])
+                payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids)
         if payload["operation"] == "transition":
             return {"changed": await ledger.transition(payload["operation_id"], payload["expected"], payload["state"], payload["result"])}
         raise ValueError("unknown ledger operation")
@@ -1162,10 +1151,10 @@ class TaskService:
             budget = resolved_budget.model_dump()
             used = json.loads(task["budget_json"])
             elapsed = max(0, (self.clock.now() - datetime.fromisoformat(_run["accounted_at"])).total_seconds()) if _run["accounted_at"] else 0
-            return {"state": "CANCEL_REQUESTED" if deadline <= self.clock.now().isoformat() else task["state"],
+            return {"state": "CANCEL_REQUESTED" if deadline is not None and deadline <= self.clock.now().isoformat() else task["state"],
                     "delivery": task["delivery"], "budget": budget,
                     "notification_due": self._notification_due(c, task),
-                    "active_seconds_remaining": max(0, budget.get("active_seconds", 1800) - used.get("notification_active_seconds" if _run["run_reason"] == "notification" else "active_seconds", 0) - elapsed)}
+                    "active_seconds_remaining": None if deadline is None else max(0, budget.get("active_seconds", 1800) - used.get("notification_active_seconds" if _run["run_reason"] == "notification" else "active_seconds", 0) - elapsed)}
 
     def _account_active(self, c, run, task):
         used = json.loads(task["budget_json"])
@@ -1218,11 +1207,11 @@ class TaskService:
             if not wait:
                 raise PermissionError("wait is no longer active")
             task = c.execute(select(tasks).where(tasks.c.id == wait["task_id"])).mappings().one()
-            if task["state"] != "WAITING_EXTERNAL" or task["deadline"] <= self.clock.now().isoformat():
+            if task["state"] != "WAITING_EXTERNAL" or self._deadline_expired(task):
                 raise PermissionError("waiting task is no longer active")
             if task["root_task_id"] and hasattr(self, "graph"):
                 root = self.graph.root(c, task)
-                if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or root["deadline"] <= self.clock.now().isoformat():
+                if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or self._deadline_expired(root):
                     raise PermissionError("waiting root is no longer active")
             access, context = self._access_for(task), json.loads(task["context_json"])
             if self.context_validator and context and not self.context_validator(access, context):
@@ -1249,7 +1238,7 @@ class TaskService:
             if old:
                 return {"accepted": old["task_id"] == wait["task_id"]}
             task = c.execute(select(tasks).where(tasks.c.id == wait["task_id"])).mappings().one()
-            if task["state"] != "WAITING_EXTERNAL" or wait["state"] != "WAITING" or task["deadline"] <= self.clock.now().isoformat():
+            if task["state"] != "WAITING_EXTERNAL" or wait["state"] != "WAITING" or self._deadline_expired(task):
                 raise PermissionError("external wait no longer active")
             c.execute(insert(inputs).values(id=str(uuid4()), task_id=task["id"], question_id=wait["id"],
                 source_id=payload["source_id"], text=payload["observation"], state="PENDING",

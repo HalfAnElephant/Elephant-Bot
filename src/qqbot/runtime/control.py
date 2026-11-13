@@ -68,7 +68,7 @@ class HostTaskControls:
         if command == "/补充":
             reference, _, text = argument.strip().partition(" ")
             if not reference or not text.strip():
-                return "用法 /补充 <任务编号> <内容>。"
+                return "请引用需要补充的进度消息，再发送补充内容。"
             return self._route(event, TaskIntent("input", reference, text))
         return self._route(event, TaskIntent("cancel" if command == "/取消" else "status", argument.strip() or None))
 
@@ -109,15 +109,33 @@ class HostTaskControls:
         return list(referenced.values())
 
     def _selection(self, conn, candidates, action):
-        command = "/取消" if action == "cancel" else "/补充" if action == "input" else "/任务"
         if not candidates:
-            return "当前对话没有可操作的任务。可用 /任务 查看任务编号。"
+            return "当前对话没有可操作的事项。可以直接告诉我需要做什么。"
         lines = []
         for task in candidates:
             view = self.core.tasks.graph.status(conn, task)
-            title = ((view.get("goal") or "等待安全重规划").splitlines() or [""])[0][:60]
-            lines.append(f"{task['public_id']} · {task['state']} · {title}")
-        return "请选择任务，使用 " + command + " <编号>" + (" <内容>" if action == "input" else "") + "。\n" + "\n".join(lines)
+            title = ((view.get("goal") or "此前的请求").splitlines() or [""])[0][:60]
+            lines.append(title + " · " + self._progress(task["state"]))
+        prompt = "目前这些事情的进度如下。" if action == "list" else "请说明你指的是哪个目标，或引用对应的进度消息。"
+        return prompt + "\n" + "\n".join(lines)
+
+    @staticmethod
+    def _progress(state):
+        return {
+            "QUEUED": "已收到，尚未开始",
+            "RUNNING": "正在处理",
+            "WAITING_CHILDREN": "正在处理",
+            "WAITING_INPUT": "等待你补充信息",
+            "WAITING_EXTERNAL": "等待外部结果",
+            "CANCEL_REQUESTED": "正在停止",
+            "SUCCEEDED": "已完成",
+            "PARTIAL": "已完成一部分",
+            "BLOCKED": "暂时无法继续",
+            "FAILED": "这次未能完成",
+            "CANCELLED": "已取消",
+            "EXPIRED": "已超时停止",
+            "NEEDS_RECONCILIATION": "正在核实处理结果",
+        }.get(state, "正在核实进度")
 
     def _question_target(self, conn, target, notice, event):
         if notice and notice["purpose"] != "question":
@@ -158,7 +176,7 @@ class HostTaskControls:
         notice = None
         if intent and intent.action == "list":
             candidates = self._roots(conn, event, current_only=False)
-            return {"action": "list", "response": self._selection(conn, candidates, "status"),
+            return {"action": "list", "response": self._selection(conn, candidates, "list"),
                     "references": [row["public_id"] for row in candidates]}
         if intent and intent.reference:
             target = self._visible(conn, intent.reference, event)
@@ -218,7 +236,7 @@ class HostTaskControls:
         access = self.core.access(event)
         if receipt["action"] == "cancel":
             result = self.core.tasks.cancel(receipt["reference"], access)
-            response = result["public_id"] + " · " + result["state"]
+            response = self._progress(result["state"]) + "。"
         elif receipt["action"] == "input":
             with self.db.engine.connect() as conn:
                 old_input = conn.execute(select(inputs).where(inputs.c.source_id == event.event_id)).mappings().first()
@@ -229,17 +247,14 @@ class HostTaskControls:
                     raise ValueError("conflicting task input replay")
             else:
                 self.core.tasks.add_input(receipt["reference"], event, access, receipt["text"], question_id=receipt["question_id"])
-            response = receipt["reference"] + " 已接收补充。"
+            response = "已收到补充内容。"
         else:
             with self.db.engine.connect() as conn:
                 target = self._visible(conn, receipt["reference"], event)
                 view = self.core.tasks.graph.status(conn, target)
-            response = view["public_id"] + " · " + view["state"]
+            response = self._progress(view["state"]) + "。"
             if view.get("goal"):
                 response += "\n" + view["goal"][:300]
-            if view["children"]:
-                settled = sum(child["state"] in TERMINAL for child in view["children"])
-                response += f"\n子任务已结算 {settled}/{len(view['children'])}。"
             if (view.get("result") or {}).get("summary"):
                 response += "\n" + view["result"]["summary"][:600]
         receipt["response"] = response

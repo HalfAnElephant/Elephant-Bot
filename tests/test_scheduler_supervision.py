@@ -9,8 +9,15 @@ from qqbot.runtime.scheduler import Scheduler
 
 def scheduler_for(once):
     scheduler = Scheduler.__new__(Scheduler)
-    scheduler.core = SimpleNamespace(tasks=SimpleNamespace(max_active=1))
-    scheduler.worker = SimpleNamespace(once=once, begin_shutdown=lambda: None)
+    scheduler.core = SimpleNamespace(tasks=SimpleNamespace())
+    async def call(*args, **kwargs):
+        return None if scheduler.active else {"run_id": "fixture"}
+    async def replay():
+        pass
+    async def cycle(claim):
+        return await once()
+    scheduler.worker = SimpleNamespace(once=cycle, call=call, replay=replay,
+        replay_lock=asyncio.Lock(), begin_shutdown=lambda: None)
     async def sweep():
         pass
     scheduler.pool = SimpleNamespace(sweep=sweep, close=sweep)

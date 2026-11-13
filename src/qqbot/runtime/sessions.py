@@ -84,10 +84,6 @@ class SessionService:
                     raise ValueError("conflicting dialogue input replay")
                 return {"input_id": old["id"], "dialogue_id": old["dialogue_id"], "state": old["state"]}
             dialogue = self.dialogue(conn, event, new_title=new_title, select_ref=select_ref)
-            pending = conn.execute(select(func.count()).select_from(dialogue_inputs).where(
-                dialogue_inputs.c.owner_id == dialogue["owner_id"], dialogue_inputs.c.handled_at.is_(None))).scalar_one()
-            if pending >= self.settings.orchestration.pending_inputs_per_owner:
-                raise ValueError("capacity_full: pending input limit")
             context = dict(context or {})
             plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
             context["leader_turn"] = {"plan": plan.model_dump(mode="json"), "used": {},
@@ -116,7 +112,7 @@ class SessionService:
         if (self.allowed(event) and valid and self.service.permissions.check(access, "notification.send",
                 "conversation:" + event.conversation.key).allowed):
             self.service.outbox.enqueue_text(conn, target=event.conversation,
-                text="本轮处理已到执行边界，已结束本次尝试并保留处理记录。", origin_kind="chat",
+                text="这次暂时没能处理完，可以重新告诉我需要做什么。", origin_kind="chat",
                 origin_id="turn:" + dialogue["session_id"] + ":" + user["id"],
                 reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
                 anchor_message_id=event.platform_message_id, purpose="result")
@@ -124,13 +120,18 @@ class SessionService:
     def claim(self, worker_id):
         now = self.clock.now()
         with self.db.transaction() as conn:
-            if conn.execute(select(func.count()).select_from(runs).where(runs.c.slot_reserved == 1)).scalar_one() >= self.service.max_active:
-                return None
             busy = select(runs.c.session_id).where(runs.c.slot_reserved == 1, runs.c.session_id.is_not(None))
             candidates = conn.execute(select(dialogues).where(dialogues.c.state == "ACTIVE",
                 dialogues.c.session_id.not_in(busy)).order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
                 dialogues.c.created_at, dialogues.c.id)).mappings().all()
+            retired_mutations = set()
+            for raw in conn.execute(select(runs.c.request_json).where(runs.c.role == "leader", runs.c.slot_reserved == 1)).scalars():
+                active = json.loads(raw)
+                if active.get("memory_mutation"):
+                    retired_mutations.add(active["context"]["dialogue_id"])
             for dialogue in candidates:
+                if dialogue["id"] in retired_mutations:
+                    continue
                 user = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == dialogue["id"],
                     dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None))
                     .order_by(dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(1)).mappings().first()
@@ -159,6 +160,12 @@ class SessionService:
                     if self.turn_exhausted(turn, now):
                         self.close_input(conn, dialogue, user, event, context, now)
                         continue
+                    context["active_tasks"] = [self.service.graph.status(conn, task) for task in conn.execute(
+                        select(tasks).where(tasks.c.origin_dialogue_id == dialogue["id"],
+                            tasks.c.requester == event.principal.key, tasks.c.conversation == event.conversation.key,
+                            tasks.c.kind == "goal", tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))
+                        .order_by(tasks.c.created_at, tasks.c.id)).mappings()
+                        if self.service.permissions.check(access, "task.read", "task:" + task["id"]).allowed]
                     source_ids = [user["id"]]
                     goal = event.text
                 else:
@@ -168,7 +175,9 @@ class SessionService:
                         candidate = conn.execute(select(tasks).where(tasks.c.id == item["root_task_id"])).mappings().one()
                         if json.loads(candidate["context_json"]).get("memory_replan_pending"):
                             continue
-                        if candidate["state"] in TERMINAL | {"CANCEL_REQUESTED"} or candidate["goal_revision"] != item["source_revision"]:
+                        if candidate["state"] in TERMINAL | {"CANCEL_REQUESTED"} or (
+                                candidate["goal_revision"] != item["source_revision"]
+                                and item["resume_reason"] not in {"needs_attention", "needs_reconciliation", "user_answer"}):
                             conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
                                 handled_at=now.isoformat(), output_ref="SUPERSEDED"))
                             continue
@@ -178,12 +187,13 @@ class SessionService:
                             selected.append(item)
                     if not selected:
                         continue
-                    ready = self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True)
-                    if ready:
+                    attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"} for item in selected)
+                    ready = not attention and self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True)
+                    if ready or attention:
                         task_inputs = conn.execute(select(inputs).where(inputs.c.task_id == root["id"],
                             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))
                             .order_by(inputs.c.created_at, inputs.c.id)).mappings().all()
-                    purpose = "finalize" if ready else "question" if any(
+                    purpose = "attention" if attention else "finalize" if ready else "question" if any(
                         item["resume_reason"] == "needs_input" for item in selected) else "progress"
                     if purpose == "progress" and all(item["resume_reason"] == "child_result" for item in selected):
                         # A partial set of child results is held until the remaining children settle.
@@ -196,7 +206,8 @@ class SessionService:
                     snapshot = self.service.graph.status(conn, root)
                     context["task_snapshot"] = snapshot
                     source_ids = [item["id"] for item in selected]
-                    goal = ("核验并交付这一根目标的成果。" if purpose == "finalize" else
+                    goal = ("处理未完成事项的异常，依据已有结果和外部操作记录决定接手、调整后重启或向用户询问，避免重复执行已发生的操作。"
+                            if purpose == "attention" else "核验并交付这一根目标的成果。" if purpose == "finalize" else
                             "处理下列任务事实，仅汇报重要进展或必要问题。") + "\n" + json.dumps(snapshot, ensure_ascii=False)
                     if context.get("memory_replan"):
                         goal = ("依据真实用户目标和当前记忆重新规划，新增工作须关联已停止子任务。\n"
@@ -209,7 +220,7 @@ class SessionService:
                 generation = (conn.execute(select(func.max(runs.c.session_generation)).where(
                     runs.c.session_id == dialogue["session_id"])).scalar_one() or 0) + 1
                 fencing = 1
-                if purpose == "finalize":
+                if purpose in {"finalize", "attention"}:
                     fencing = root["fencing"] + 1
                     conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(fencing=fencing))
                 binding = json.loads(dialogue["binding_json"])
@@ -236,7 +247,7 @@ class SessionService:
                     "continuation": {"inputs": [dict(item) for item in task_inputs]},
                     "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),
                     "active_seconds_remaining": max(0, plan.budget.active_seconds - (turn.get("used", {}).get("active_seconds", 0) if turn else 0))}
-                conn.execute(insert(runs).values(id=run_id, task_id=root["id"] if purpose == "finalize" else None,
+                conn.execute(insert(runs).values(id=run_id, task_id=root["id"] if purpose in {"finalize", "attention"} else None,
                     worker=worker_id, fencing=fencing, lease=(now + timedelta(seconds=30)).isoformat(), slot_reserved=1,
                     session=dialogue["session_id"] + ".jsonl", session_id=dialogue["session_id"], last_seq=0,
                     role="leader", purpose=purpose, session_generation=generation,
@@ -433,9 +444,6 @@ class SessionLearning:
                     learning_sessions.c.session_id == candidate["session_id"])).mappings().one()
                 if current["claimed_attempt_id"] or current["pending_json"] != candidate["pending_json"]:
                     continue
-                used = conn.execute(select(func.count()).select_from(runs).where(runs.c.slot_reserved == 1)).scalar_one()
-                if used >= self.service.max_active:
-                    return None
                 session_id, run_id = pending["review_session_id"], str(uuid4())
                 if conn.execute(select(runs.c.id).where(runs.c.session_id == session_id, runs.c.slot_reserved == 1)).first():
                     continue

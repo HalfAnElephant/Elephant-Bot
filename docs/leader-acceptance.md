@@ -184,6 +184,18 @@ home 持久证据：
 
 遗忘后的新 Dialogue/Session 普通输入也已实际通过。唯一 Leader run `8daf7444...` 达到 HANDLED/FINISHED、epoch 2、slot 0，答复精确为“恢复正常”，原生工具调用为 0，没有 Root、Worker 或 Job，所有运行槽为 0。源、上下文及原生日志 hash 保存在 HOST summary 的 post_forget_normal_probe。运行代码的统一检查为 [CI 43300742366](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43300742366) 与 [CodeQL 43300742204](https://github.com/HalfAnElephant/Elephant-Bot/actions/runs/43300742204)。
 
+## 2026-11-13 服务器源码同步
+
+本次以 home 的 `/opt/qqbot` 为源码依据，同步到本地工作区并更新现有 PR #6。服务器 `REVISION` 仍为 `9b77a1b`，其后直接部署的修改通过逐文件内容比对纳入本次提交，单凭该文件不能识别完整运行源码。
+
+同步内容包括动态 Worker 调度、模型请求背压、活动目标复用与补充、Leader 进度合并、失败升级与受控接手、原生轮次崩溃恢复，以及统一人格文件。服务器配套测试一并纳入，并保留本地已有的扫码 owner 经持久 Outbox 投递的身份与撤权回归。README 补充当前代码入口，部署说明补充兼容字段与执行限制语义。
+
+同步范围为源码、测试、依赖锁、迁移、示例配置和部署文档。运行配置、凭据、数据库、Session 与业务产物保留在各自主机。验证沿用 PR 的统一 CI；此前提交的成功检查仅对应此前版本，本次同步结果以新提交的检查为准。该次同步没有重新执行生产故障注入或 QQ 平台验收。
+
+同步时只读检查显示 daemon 为 active/running，live 与 ready 均返回 HTTP 200，后台监督健康，官方 QQ WebSocket 为 CONNECTED。此前缺少 QQ 凭据或无 adapter 的描述属于前批次历史状态；当前连接状态仍需配合真实平台收发验收。
+
+同步审查发现一项尚未修复的静态时序风险。`LeaderRuntime.task_tool` 的 `tasks.take_over` 使用 `TaskGraph.finalize_ready`，后者仅阻断已经登记取消的非终态 Job。失败 Worker 已释放运行槽、Job 维护尚未登记取消时，持久 Job 可能仍运行而 Leader 已获准接手。该路径需要补充所有相关 Job 的停止屏障及回归验证，本次保存服务器实现与该限制。
+
 ## 尚未验收的边界
 
 1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。

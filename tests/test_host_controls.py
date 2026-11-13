@@ -35,7 +35,7 @@ async def control_runtime(tmp_path, official_config, official_event, clock):
         return normalized.model_copy(update={"mentions_bot": addressed, "reply_to": reply_to})
 
     def root(source=None, *, title=None, goal="检查项目", children=1):
-        source = source or event()
+        source = source or event(goal)
         with core.db.transaction() as conn:
             dialogue = core.sessions.dialogue(conn, source, new_title=title)
             result = core.tasks.graph.submit(conn, dialogue, source, core.access(source), {
@@ -118,7 +118,8 @@ async def test_full_slots_ambiguous_cancel_selects_then_exact_cancel_only_target
     target = next(root for root in (first, second) if root["task_id"] != busy_root)
     source = await r.receive(r.event("取消刚才那个"))
     answer = r.response(source)
-    assert first["public_id"] in answer and second["public_id"] in answer and "/取消" in answer
+    assert "第一项" in answer and "第二项" in answer and "哪个目标" in answer
+    assert first["public_id"] not in answer and second["public_id"] not in answer
     assert task_state(r, first["task_id"]) == task_state(r, second["task_id"]) == "WAITING_CHILDREN"
     await r.receive(r.event("取消 " + target["public_id"]))
     assert task_state(r, target["task_id"]) == "CANCELLED"
@@ -131,9 +132,10 @@ async def test_cancel_without_id_and_status_remain_host_controls_at_full_capacit
     root = r.root()
     r.core.tasks.claim("busy-worker")
     status = await r.receive(r.event("查看 " + root["public_id"] + " 的进度"))
-    assert root["public_id"] in r.response(status) and "WAITING_CHILDREN" in r.response(status)
+    assert "正在处理" in r.response(status) and "检查项目" in r.response(status)
+    assert root["public_id"] not in r.response(status) and "WAITING_CHILDREN" not in r.response(status)
     cancel = await r.receive(r.event("/取消"))
-    assert root["public_id"] in r.response(cancel) and task_state(r, root["task_id"]) == "CANCEL_REQUESTED"
+    assert r.response(cancel) == "正在停止。" and task_state(r, root["task_id"]) == "CANCEL_REQUESTED"
     r.no_model_input()
 
 
@@ -225,7 +227,8 @@ async def test_multiple_open_questions_require_child_selection_and_preserve_exac
     r.question(first["id"], "first-question");r.question(second["id"], "second-question")
     message = r.question_notice()
     source = await r.receive(r.event("这是给待答问题的答案", reply_to=message))
-    assert first["public_id"] in r.response(source) and second["public_id"] in r.response(source)
+    assert "检查项目0" in r.response(source) and "检查项目1" in r.response(source)
+    assert first["public_id"] not in r.response(source) and second["public_id"] not in r.response(source)
     with r.core.db.engine.connect() as conn:
         assert not conn.execute(select(inputs)).first()
     answer = await r.receive(r.event("补充 " + first["public_id"] + " 选择A？"))
@@ -302,7 +305,7 @@ async def test_lost_cancel_receipt_retries_the_bound_target_without_retargeting(
     second = r.root(title="随后创建的新任务")
     monkeypatch.setattr(r.core.tasks, "cancel", original_cancel)
     await r.core.process(source)
-    assert first["public_id"] in r.response(source)
+    assert r.response(source) == "已取消。"
     assert task_state(r, second["task_id"]) == "WAITING_CHILDREN"
     r.no_model_input()
 
@@ -344,7 +347,7 @@ async def test_lost_answer_receipt_reuses_exact_question_even_after_task_closes(
     r.root(title="随后对话")
     monkeypatch.setattr(r.core.tasks, "add_input", original_add)
     await r.core.process(source)
-    assert child["public_id"] in r.response(source)
+    assert r.response(source) == "已收到补充内容。"
     with r.core.db.engine.connect() as conn:
         saved = conn.execute(select(inputs)).mappings().all()
         assert len(saved) == 1 and saved[0]["question_id"] == "durable-answer-question"
@@ -366,4 +369,63 @@ async def test_progress_reply_is_followup_and_does_not_answer_or_wake_open_quest
         assert not conn.execute(select(inputs).where(inputs.c.kind == "answer")).first()
         assert conn.execute(select(waits.c.state).where(waits.c.id == "still-awaiting-answer")).scalar_one() == "WAITING"
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == child["id"])).scalar_one() == "WAITING_INPUT"
+    r.no_model_input()
+
+
+@pytest.mark.parametrize(("state", "expected"), [
+    ("QUEUED", "已收到，尚未开始"), ("RUNNING", "正在处理"),
+    ("WAITING_INPUT", "等待你补充信息"), ("WAITING_EXTERNAL", "等待外部结果"),
+    ("SUCCEEDED", "已完成"), ("PARTIAL", "已完成一部分"),
+    ("BLOCKED", "暂时无法继续"), ("FAILED", "这次未能完成"),
+    ("EXPIRED", "已超时停止"), ("NEEDS_RECONCILIATION", "正在核实处理结果"),
+])
+async def test_status_uses_natural_progress_and_preserves_result(control_runtime, state, expected):
+    r = control_runtime
+    root = r.root(goal="整理本周记录")
+    with r.core.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(state=state,
+            result_json=json.dumps({"status": "partial", "summary": "已整理三条记录"})))
+    source = await r.receive(r.event("/任务 " + root["public_id"]))
+    answer = r.response(source)
+    assert expected in answer and "整理本周记录" in answer and "已整理三条记录" in answer
+    assert root["public_id"] not in answer and state not in answer and "子任务" not in answer
+    r.no_model_input()
+
+
+async def test_help_service_status_and_dialogues_hide_internal_details(control_runtime):
+    r = control_runtime
+    r.root(title="研究资料")
+    for text in ("/帮助", "/状态", "/对话", "/任务", "/切换对话 不存在的名称"):
+        answer = await r.core.command(r.event(text))
+        assert answer
+        assert all(word not in answer for word in ("Leader", "Worker", "排队", "编号", "WAITING_CHILDREN", "T-"))
+    assert await r.core.command(r.event("/对话")) == "研究资料"
+    assert await r.core.command(r.event("/切换对话 研究资料")) == "当前对话：研究资料"
+    with r.core.db.engine.connect() as conn:
+        from qqbot.storage.agent_schema import dialogues
+        identifier = conn.execute(select(dialogues.c.id)).scalar_one()
+    assert await r.core.command(r.event("/切换对话 " + identifier)) == "当前对话：研究资料"
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (PermissionError("task:T-private belongs to another subject"), "无法操作"),
+    (KeyError("T-internal"), "没有找到"),
+    (ValueError("capacity_full: /var/lib/qqbot/private"), "暂时无法处理"),
+])
+async def test_rejected_private_input_hides_internal_errors(control_runtime, monkeypatch, error, expected):
+    r = control_runtime
+    def reject(_event):
+        raise error
+    monkeypatch.setattr(r.core.controls, "route", reject)
+    source = await r.receive(r.event("进度怎么样"))
+    answer = r.response(source)
+    assert expected in answer
+    assert all(value not in answer for value in ("T-", "capacity_full", "/var/lib", "subject"))
+    r.no_model_input()
+
+
+async def test_invalid_silence_duration_keeps_actionable_hint(control_runtime):
+    r = control_runtime
+    source = await r.receive(r.event("/静默 明天"))
+    assert r.response(source) == "静默时长用 s/m/h，例如 30m"
     r.no_model_input()

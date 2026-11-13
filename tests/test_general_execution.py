@@ -503,7 +503,7 @@ async def test_pool_host_limits_disable_reuse_and_failed_warm_binding_starts_col
     first.fail_binding = True
     second = await pool.acquire(claim)
     assert second is not first and first.stopped_verified
-    assert pool.max_resident == 3 and pool.ttl == 123
+    assert pool.max_idle == 1 and pool.ttl == 123
     await pool.release(second, True)
     cold = {**claim, "context": {"key": "topic", "pool": {"max_resident": 3, "max_idle": 0, "ttl": 123}}}
     third = await pool.acquire(cold)

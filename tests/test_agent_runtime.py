@@ -50,9 +50,12 @@ def runtime(tmp_path):
 
 
 def root_goal(runtime, key="dispatch-1", children=1):
+    event = runtime.event if key == "dispatch-1" else runtime.event.model_copy(update={
+        "event_id": runtime.event.event_id + ":" + key,
+        "segments": (TextSegment(text=runtime.event.text + " " + key),)})
     with runtime.db.transaction() as conn:
-        dialogue = runtime.sessions.dialogue(conn, runtime.event)
-        result = runtime.service.graph.submit(conn, dialogue, runtime.event, runtime.access,
+        dialogue = runtime.sessions.dialogue(conn, event)
+        result = runtime.service.graph.submit(conn, dialogue, event, runtime.access,
             {"goal": "检查项目", "children": [
                 {"goal": f"检查部分 {index}", "delegation_key": str(index)} for index in range(children)
             ]}, key, runtime.sessions.binding(), {})
@@ -841,7 +844,7 @@ def test_unverifiable_task_contract_is_rejected_before_any_worker_exists(runtime
         assert not conn.execute(select(runs)).first()
 
 
-def test_consumed_revision_can_progress_while_a_sibling_waits_for_capacity(runtime):
+def test_consumed_revision_can_progress_while_a_sibling_starts_independently(runtime):
     runtime.service.max_active = 1
     root = root_goal(runtime, children=2)
     first = runtime.service.claim("first")
@@ -857,13 +860,13 @@ def test_consumed_revision_can_progress_while_a_sibling_waits_for_capacity(runti
              "session_revision": "new-format", "input_ids": [incoming]}
     runtime.service.session_receipt(*identity, proof)
     assert runtime.service.authorize(*identity, write)["allowed"]
-    assert runtime.service.claim("second") is None
+    second = runtime.service.claim("second")
+    assert second is not None
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(inputs.c.id).where(inputs.c.task_id != first["task_id"],
             inputs.c.task_id != root["task_id"], inputs.c.consumed_at.is_(None))).first()
     runtime.service.submit(*identity, {"status": "completed", "summary": "新版核验完成"},
         receipt={**proof, "kind": "turn_finished", "inflight": 0, "tools_paired": True})
-    second = runtime.service.claim("second")
     second_identity = (second["run_id"], second["fencing_token"], "second")
     with pytest.raises(PermissionError, match="revision"):
         runtime.service.authorize(*second_identity, write)

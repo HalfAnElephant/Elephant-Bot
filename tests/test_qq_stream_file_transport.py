@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import shutil
 from types import SimpleNamespace
 
 import httpx
@@ -91,7 +92,7 @@ async def test_actual_general_run_bind_and_warm_workspace_change_send_stream(ric
         return {}  # This test exercises workspace binding and the real file HTTP route, not process accounting.
     app.include_router(internal_router(service, TOKEN))
     args = SimpleNamespace(workspace=str(tmp_path / "processes"), archive=str(tmp_path / "archive"),
-        pi="/bin/false", model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id=ids[2],
+        pi=shutil.which("false"), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id=ids[2],
         spool=str(tmp_path / "spool"))
     claim = {"task_id": task["id"], "run_id": ids[0], "fencing_token": ids[1],
              "permission_snapshot": {"principal": json.loads(task["permission_json"])["principal"]}}

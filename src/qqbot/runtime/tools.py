@@ -4,10 +4,12 @@ from qqbot.domain.agents import ChildSpec, GoalSpec, ProgressSpec, TaskInputSpec
 
 def task_schemas():
     definitions = {
-        "tasks.submit": ("Accept a user goal with initial Workers, then end the Leader turn. Does not wait for execution.", GoalSpec.model_json_schema()),
+        "tasks.submit": ("Accept a user goal with initial Workers, reusing matching active work. Immediately acknowledge naturally, then end the Leader turn without waiting or polling.", GoalSpec.model_json_schema()),
         "tasks.spawn": ("Create an independent work/consult child or linked rework in this task tree.", ChildSpec.model_json_schema()),
         "tasks.wait": ("Persist all/any dependency on this task's children, safely yield and release execution capacity.", WaitSpec.model_json_schema()),
-        "tasks.send_input": ("Append a bound followup, answer to an open question, or informational notify. These are distinct operations.", TaskInputSpec.model_json_schema()),
+        "tasks.take_over": ("Take over the bound goal after all Workers have stopped and external operations are reconciled. Enables direct business execution for this decision turn.",
+                            {"type": "object", "properties": {}, "additionalProperties": False}),
+        "tasks.send_input": ("Communicate new user information or revised constraints to existing work with followup; answer a real open question with answer and its question_id; notify carries information without revising the goal.", TaskInputSpec.model_json_schema()),
         "tasks.report_progress": ("Report an evidence-backed milestone; plans and heartbeats are not verified progress.", ProgressSpec.model_json_schema()),
         "tasks.status": ("Read a task's true execution, verification and delivery state.",
                          {"type": "object", "properties": {"task_ref": {"type": "string"}}, "required": ["task_ref"], "additionalProperties": False}),
@@ -29,8 +31,8 @@ def native_tools(role, purpose):
         allowed |= {"tasks.spawn", "tasks.wait", "tasks.send_input", "tasks.cancel", "tasks.report_progress"}
     elif purpose == "user":
         allowed |= {"tasks.submit", "tasks.send_input", "tasks.cancel"}
-    elif purpose == "finalize":
-        allowed |= {"tasks.spawn", "tasks.wait", "tasks.cancel"}
+    elif purpose in {"finalize", "attention"}:
+        allowed |= {"tasks.spawn", "tasks.wait", "tasks.cancel", "tasks.take_over"}
     if role == "leader" and purpose != "skill_review":
         properties = {
             "memory_search": ("Search scoped long-term memory references.", {"query": {"type": "string", "maxLength": 4000}}, ["query"]),

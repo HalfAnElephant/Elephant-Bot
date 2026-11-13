@@ -282,12 +282,13 @@ class Worker:
                                  self.worker_id, getattr(harness, "process_id", None))
         return harness.stopped_verified
 
-    async def once(self):
+    async def once(self, claim=None):
         if self.shutting_down:
             return False
-        async with self.replay_lock:
-            await self.replay()
-        claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
+        if claim is None:
+            async with self.replay_lock:
+                await self.replay()
+            claim = await self.call("claim", protocol_version=2, wait_ms=2000 if self.pool else 0)
         if not claim:
             return False
         identity = {key: claim[key] for key in ("run_id", "fencing_token")}
@@ -319,12 +320,13 @@ class Worker:
                 if execution.done():
                     break
                 if getattr(harness, "gateway", None):
-                    harness.gateway.provider.background = lease.get("delivery") == "DETACHED"
+                    harness.gateway.provider.background = claim.get("role", "worker") != "leader"
                     if "budget" in lease:
                         harness.gateway.tools.max_calls = lease["budget"].get("tool_calls", 60)
                     deadline = getattr(harness, "run_timeout", None)
                     if "active_seconds_remaining" in lease and deadline is not None:
-                        deadline.reschedule(asyncio.get_running_loop().time() + lease["active_seconds_remaining"])
+                        deadline.reschedule(None if lease["active_seconds_remaining"] is None else
+                            asyncio.get_running_loop().time() + lease["active_seconds_remaining"])
                 if hasattr(harness, "renewed"):
                     harness.renewed()
                 if lease["state"] != "RUNNING":
@@ -522,7 +524,7 @@ class GeneralRun(PiHarness):
         self.gateway.workspace = execution_workspace
         self.gateway.bind(claim)
         self.timeout = claim.get("active_seconds_remaining", claim.get("plan", {}).get("budget", {}).get("active_seconds", 1800))
-        if self.timeout <= 0:
+        if self.timeout is not None and self.timeout <= 0:
             raise ValueError("task active execution budget exhausted")
         await self.gateway_call("bind-process", {"process_id": self.process_id, "session_id": self.session_id,
             "epoch": self.process_epoch, "generation": self.gateway.generation,

@@ -215,7 +215,7 @@ class OfficialAdapter:
         ):
             return DeliveryCheck(allowed=False, reason="IDENTITY_MISMATCH")
         if not self.permissions.check(
-            PermissionSubject.from_refs(target), "notification.send", "conversation:" + target.key
+            PermissionSubject.from_refs(target, envelope.requester), "notification.send", "conversation:" + target.key
         ).allowed:
             return DeliveryCheck(allowed=False, reason="TARGET_DENIED")
         try:

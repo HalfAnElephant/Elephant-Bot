@@ -140,7 +140,7 @@ class RunGateway:
             content_store=self.store_content, content_read=self.read_content, max_calls=budget.get("tool_calls", 60))
         self.provider = ProviderAdapter(self.model, self.endpoint, self.key,
             authorize=self.authorize_action, reserve=self.reserve, record=self.record,
-            transport=self.transport, capacity=self.capacity, background=claim.get("delivery") == "DETACHED",
+            transport=self.transport, capacity=self.capacity, background=claim.get("role", "worker") != "leader",
             output_tokens=budget.get("output_tokens_per_call", 4096), model_window=self.model_window,
             compaction_output=limits.get("compaction_output_tokens", 4096))
         self.provider.upstream_session = self.upstream_session
@@ -311,6 +311,11 @@ class RunGateway:
         return await self.call("ledger", {"operation": "list"})
 
     async def reconcile_operation(self, arguments, context):
+        if self.claim.get("role") == "leader":
+            result = await self.call("ledger", {"operation": "reconcile", "operation_id": arguments["operation_id"]})
+            if result["state"] == "VERIFIED":
+                self.effects[arguments["operation_id"]] = "verified"
+            return result
         rows = await self.call("ledger", {"operation": "read", "operation_id": arguments["operation_id"]})
         if len(rows) != 1:
             raise ValueError("unknown operation")
@@ -388,6 +393,7 @@ class RunGateway:
                     "input_ids": context.get("source_input_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
                     "goal": self.claim["goal"], "goal_spec": self.claim.get("goal_spec", {}),
+                    "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
                     "retrieved_data": context.get("retrieved_data", []),
                     "memory_status": context.get("memory_status", "disabled"),
@@ -472,6 +478,8 @@ class RunGateway:
                             return result
                         if logical_name.startswith("tasks."):
                             result = await self.call("tasks", {"operation": logical_name, "arguments": logical_args, "call_id": call_id})
+                            if logical_name == "tasks.take_over" and result.get("takeover"):
+                                self.claim["takeover"] = True
                             if isinstance(result, dict) and result.get("waiting"):
                                 self.waiting, self.wait_kind = True, "waiting_children"
                             return result
@@ -514,7 +522,8 @@ class RunGateway:
                             raise ValueError("invalid artifact paths")
                         for path in attachments:
                             artifact_path(path)
-                        if attachments and self.claim.get("role") == "leader" and self.claim.get("purpose") == "finalize":
+                        if (attachments and self.claim.get("role") == "leader"
+                                and self.claim.get("purpose") == "finalize" and not self.claim.get("takeover")):
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)

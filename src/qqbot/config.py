@@ -96,9 +96,10 @@ class MemoryConfig(DTO):
 
 class ExecutionConfig(DTO):
     notify_before_tools: bool = True
-    max_active: int = Field(default=8, ge=1, le=32)
-    sustained_limit: int = Field(default=2, ge=1, le=31, deprecated=True,
-        description="Legacy compatibility field; all Agent roles share max_active without reserved slots")
+    max_active: int = Field(default=8, ge=0, deprecated=True,
+        description="Legacy compatibility field; active Agent admission is unrestricted")
+    sustained_limit: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; background Agent admission is unrestricted")
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
     interactive_budget: RunBudget = RunBudget(
         model_calls=30, tool_calls=80, active_seconds=600, total_wall_seconds=3600,
@@ -109,11 +110,6 @@ class ExecutionConfig(DTO):
     warm_idle_max: int = Field(default=2, ge=0, le=32)
     warm_ttl_seconds: int = Field(default=300, ge=1, le=3600)
 
-    @model_validator(mode="after")
-    def bounded_capacity(self):
-        if self.warm_max and self.warm_idle_max > self.warm_max:
-            raise ValueError("idle process limit exceeds resident limit")
-        return self
 
 
 class QQOwnerBinding(DTO):
@@ -134,11 +130,16 @@ class OwnerConfig(DTO):
 
 class OrchestrationConfig(DTO):
     mode: Literal["leader_workers"] = "leader_workers"
-    pending_inputs_per_owner: int = Field(default=64, ge=1, le=1024)
-    pending_root_tasks_per_owner: int = Field(default=5, ge=1, le=100)
-    child_parallelism: int = Field(default=2, ge=1, le=8)
-    max_task_depth: int = Field(default=2, ge=1, le=4)
-    max_nodes_per_root: int = Field(default=7, ge=2, le=64)
+    pending_inputs_per_owner: int = Field(default=64, ge=0, deprecated=True,
+        description="Legacy compatibility field; pending inputs are unrestricted")
+    pending_root_tasks_per_owner: int = Field(default=5, ge=0, deprecated=True,
+        description="Legacy compatibility field; pending goals are unrestricted")
+    child_parallelism: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; child admission is unrestricted")
+    max_task_depth: int = Field(default=2, ge=0, deprecated=True,
+        description="Legacy compatibility field; task tree depth is unrestricted")
+    max_nodes_per_root: int = Field(default=7, ge=0, deprecated=True,
+        description="Legacy compatibility field; task node count is unrestricted")
     leader_inbox_batch_limit: int = Field(default=16, ge=1, le=64)
     leader_inbox_coalesce_seconds: float = Field(default=2, ge=0, le=60)
     model_request_limit: int = Field(default=8, ge=1, le=32)

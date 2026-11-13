@@ -4,6 +4,12 @@ The supported runtime is one Python daemon under `qqbot`, its on-demand Pi proce
 SQLite and OpenViking. QQ uses the official adapter. There is no separate Worker
 listener or NapCat route. The daemon admits Leader, Worker and Hermes review turns
 through the same execution pool and limits actual model requests separately.
+Background Agent admission and task trees have no fixed count or total execution
+time cap. Legacy count and background duration settings remain accepted for
+configuration compatibility. Model requests retain upstream concurrency
+backpressure, and individual tools and external waits retain their timeouts.
+Interrupted or blocked Workers preserve results for a Leader decision. A Leader
+takeover requires stopped related execution and reconciled external operations.
 
 Install the locked Python and npm packages under root-owned `/opt/qqbot`, with
 Python 3.13, Node and the pinned Pi executable accessible to `qqbot`. Install

@@ -126,6 +126,7 @@ export default function (pi: ExtensionAPI) {
       content: JSON.stringify({time: binding.current_time, timezone: binding.timezone,
         repository: binding.repository, github_host: binding.github_host,
         retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
+        active_tasks: binding.active_tasks,
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
       details: {kind: "runtime"}}};
   });

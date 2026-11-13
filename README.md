@@ -4,12 +4,28 @@ QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 
 
 - 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。
 - 任务、输入、操作回执和投递状态保存在 SQLite。等待会让出执行资格，取消与恢复需要真实停止证明。
-- 所有 Agent 共用执行和模型请求额度。Linux 上的持久 Job 由 systemd user manager 监督，可跨 daemon 重启继续运行。
+- 后台 Worker 按需执行，取消固定名额与总执行时长限制，模型请求保留上游并发背压。Linux 上的持久 Job 由 systemd user manager 监督，可跨 daemon 重启继续运行。
 - QQ 保留四种官方 surface、媒体、按钮、Markdown、私聊流式及权限检查。实际能力取决于应用权限与平台验收。
 - 长期记忆按验证过的 owner、工作区和可见范围绑定。更正与忘记使用 epoch 和删除屏障；后端故障时聊天继续，不建立备用事实库。
 - Skills 使用锁定版本的 Hermes 工具、标准文件和条件复盘，Leader 与 Worker 共用各自 owner 的目录。
 
-需要 Python 3.13、uv、Node.js >= 22.19.0 和 npm。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、persona 注入、research 专用执行器与独立 Worker API 已退役。
+需要 Python 3.13、uv、Node.js >= 22.19.0 和 npm。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
+
+## 架构与代码入口
+
+QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。Core 处理身份、权限与持久 Dialogue，Scheduler 调度 Leader、Worker 和技能复盘。Leader 直接回答或提交根目标，Worker 独立执行，结果与问题回到 Leader，经 Outbox 持久投递。
+
+| 子系统 | 代码入口与职责 |
+| --- | --- |
+| 接入与管理 | `app.py`、`adapters/qq_official/`、`admin/` 负责 HTTP、官方 QQ 连接和扫码绑定 |
+| 对话与调度 | `runtime/core.py`、`sessions.py`、`scheduler.py`、`leader.py` 管理持久对话与 Agent 轮次 |
+| 任务与恢复 | `runtime/task_graph.py`、`recovery.py`、`jobs/service.py` 管理目标树、修订、租约和停止后恢复 |
+| 模型与执行 | `harness/`、`providers/`、`adapters/pi/` 连接 Pi 原生 Session、模型背压和宿主工具网关 |
+| 后台工作 | `adapters/execution/`、`capabilities/` 管理受控工作区、持久 systemd Job 与外部操作回执 |
+| 记忆与技能 | `adapters/openviking/`、`adapters/hermes_skills/` 管理长期记忆和标准技能文件 |
+| 持久化与投递 | `storage/`、`ingress/`、`outbox/` 保存输入、任务、操作证据与消息投递状态 |
+
+表中代码路径相对 `src/qqbot/`。SQLite 保存恢复依据，Pi Session 保存原生历史，OpenViking 保存长期记忆，systemd user manager 监督持久 Job。daemon 重启后的处理以停止证明和原始回执为依据。
 
 ## 本地启动
 
@@ -44,6 +60,8 @@ uv run qqbot serve --config configs/local.yaml
 
 官方 QQ owner 绑定使用 AppID 与验证过的 OpenID。旧数字 QQ 号不能直接作为官方身份。`owner.preferences` 保存明确设置的称呼、语言和沟通偏好。
 
+Leader 的聊天、进度、提问和最终汇报统一加载 `src/qqbot/runtime/persona.md`，改编自 Aurabot 大肥鱼，保留“大象”称呼。日常回复简短口语化，长结果按需使用 Markdown。QQ 只展示目标、实际进展和结果，内部编号、队列与执行分工保留在管理和调试接口中。
+
 完整配置见 [示例](configs/example.yaml) 与 [Schema](configs/schema.json)。管理页支持校验、版本、保存和有限热应用；连接、身份、模型及运行边界的修改需要重启 daemon。网页配置写入启动数据库旁的 `runtime-config.json`，历史版本在 `config-versions/`。保存配置不会自动搬迁数据库或部署服务。
 
 管理 API 使用管理员令牌，实时权限策略使用既有 PermissionService。任务详情和附件受真实持久身份、owner 和当前权限约束；管理任务可使用 `POST /api/v1/tasks`，必须提供稳定的 `Idempotency-Key`，同键不同目标会被拒绝。
@@ -57,6 +75,10 @@ uv run qqbot serve --config configs/local.yaml
 | `/静默 [30m]`、`/恢复` | 当前会话静默与恢复 |
 
 自然语言交给 Leader 判断直接答复或委派。任务完成、成果验证和 QQ 送达是独立状态；排队不表示已经启动，UNKNOWN 外部操作必须先核对。
+
+已有事项的补充进入原 Worker；相同原文、附件和上下文的活动请求复用已有工作。不同原文的需求由 Leader 结合当前目标判断。长工作委派后，Leader 简短确认并继续处理聊天，进度和结果统一经 Leader 表达，相同进度合并，新修订使待发旧进度失效。
+
+Worker 超时、阻塞或一次尝试无法继续时会保存已有结果并通知 Leader。Leader 可安排关联重试、在相关执行停止且外部操作已核对后接手，或保存问题等待用户回答。旧 `max_active`、并发、排队和任务树数量字段只作配置兼容，后台 `active_seconds`／`total_wall_seconds` 不再终止工作。单次工具、等待条件和供应商请求仍有各自的超时语义；异常交给 Leader 决策。模型调用和工具调用按每次尝试计数，根目标累计值用于记账。
 
 ## 部署和恢复
 
