@@ -210,3 +210,20 @@ async def test_automatic_onboarding_requires_the_official_scanner_identity(autom
     assert not app.state.core.config_store.read().adapters
     assert not app.state.core.config_store.read().owner.qq_bindings
     assert not app.state.adapters
+
+
+@pytest.mark.parametrize('field', ['database', 'owner'])
+async def test_pending_unrelated_configuration_is_kept_for_restart_during_scan(automatic, field):
+    app, client, _settings, _official, _scanner = automatic
+    core = app.state.core
+    original = core.settings
+    pending = original.model_copy(update={'database': original.database + '.pending'}) if field == 'database' else original.model_copy(
+        update={'owner': original.owner.model_copy(update={'id': 'pending-owner'})})
+    core.config_store.save(original, pending)
+    session, public = await scan(app, client)
+    assert public['state'] == 'failed'
+    assert public['error'] == 'configuration_pending_restart'
+    assert not session.provisioned and core.settings == original
+    assert core.config_store.read() == pending
+    assert not core.adapters and not core.permissions.policy_version
+    assert not list(core.config_store.path.parent.glob('qq-credentials/*.json'))

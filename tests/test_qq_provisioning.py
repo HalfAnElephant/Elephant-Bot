@@ -15,7 +15,13 @@ from qqbot.adapters.qq_official.onboarding import Session
 from qqbot.admin.qq_provisioning import TOKEN_URL, ProvisioningError, provision_owner
 from qqbot.config import AdapterConfig, QQOwnerBinding, Settings
 from qqbot.configuration import ConfigurationStore, version
-from qqbot.permissions import PermissionPolicy, PermissionRule, PermissionService, PermissionSubject
+from qqbot.permissions import (
+    PermissionPolicy,
+    PermissionRule,
+    PermissionService,
+    PermissionSubject,
+    SubjectSelector,
+)
 
 
 @pytest.fixture
@@ -49,6 +55,7 @@ async def provisioning(db, clock, monkeypatch):
         assert load_credential(adapter.credential_store_dir, adapter.credential_ref, adapter.app_id) == 'private-scanned-secret'
         assert fixture.session.provisioned and fixture.session.state == 'connecting' and fixture.session.secret is None
         activated.append((candidate, adapter))
+        core.settings = candidate
         return {'connected': True, 'state': 'CONNECTED', 'error': None, 'retry': False}
     async with httpx.AsyncClient(transport=httpx.MockTransport(request)) as client:
         fixture.client, fixture.activate = client, activate
@@ -77,7 +84,8 @@ async def test_first_automatic_scan_persists_verified_owner_and_exact_scoped_pol
         user_id='private-scanner-openid')
     foreign_owner = exact_owner.model_copy(update={'user_id': 'another-user'})
     foreign_app = exact_owner.model_copy(update={'identity_namespace': 'qq_app:other'})
-    assert fixture.core.permissions.check(exact_owner, 'workspace.delete', 'workspace:example').allowed
+    assert not fixture.core.permissions.check(exact_owner, 'workspace.delete', 'workspace:example').allowed
+    assert fixture.core.permissions.check(exact_owner, 'workspace.write', 'workspace:example').allowed
     assert not fixture.core.permissions.check(foreign_owner, 'task.execute', '*').allowed
     assert not fixture.core.permissions.check(foreign_app, 'task.execute', '*').allowed
     assert fixture.core.permissions.check(PermissionSubject(adapter_instance_id='other'),
@@ -109,7 +117,8 @@ async def test_automatic_rotation_enables_websocket_preserves_tuning_and_keeps_w
     rotated = saved.adapters[0]
     assert result['activated'] and rotated.enabled and rotated.transport == 'websocket'
     changed = {key for key in AdapterConfig.model_fields if getattr(existing, key) != getattr(rotated, key)}
-    assert changed == {'credential_ref', 'enabled', 'transport', 'admin_users'}
+    assert changed == {'credential_ref', 'enabled', 'transport', 'admin_users', 'token_url'}
+    assert rotated.token_url == TOKEN_URL
     assert rotated.admin_users == ('existing-admin', 'private-scanner-openid')
     assert load_credential(fixture.directory, reference, '12345') == 'working-old-secret'
     assert saved.owner == previous.owner and len(stored_files(fixture)) == 2
@@ -122,6 +131,7 @@ async def test_existing_app_cannot_rebind_another_scanner_or_change_private_owne
         'qq_bindings': (QQOwnerBinding(app_id='12345', user_openid='original-owner', verified_at='2025-01-01'),),
         'preferences': 'Original private owner preferences.'})})
     fixture.core.config_store.save(fixture.core.settings, previous)
+    fixture.core.settings = previous
     with pytest.raises(ProvisioningError, match='owner_binding_conflict'):
         await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
     assert fixture.core.config_store.read() == previous
@@ -183,15 +193,17 @@ async def test_validation_await_rechecks_session_current_authority_and_scanned_i
     assert not fixture.core.config_store.path.exists() and not stored_files(fixture) and not fixture.activated
 
 
-async def test_configuration_rebases_latest_unrelated_saved_settings_without_hot_applying_them(provisioning):
+async def test_pending_saved_settings_during_validation_stop_provisioning_without_hot_applying_them(provisioning):
     fixture = provisioning
     async def changed():
         previous = fixture.core.config_store.read()
         fixture.core.config_store.save(previous, previous.model_copy(update={'send_budget_per_minute': 7}))
     fixture.remote.before = changed
-    await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+    with pytest.raises(ProvisioningError, match='configuration_pending_restart'):
+        await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
     assert fixture.core.config_store.read().send_budget_per_minute == 7
     assert fixture.core.settings.send_budget_per_minute == 0
+    assert not stored_files(fixture) and not fixture.activated and fixture.core.permissions.policy_version == 0
 
 
 async def test_configuration_failure_restores_policy_and_keeps_old_working_config(provisioning, monkeypatch):
@@ -272,13 +284,15 @@ async def test_same_owner_rescan_preserves_subsequent_high_priority_permission_r
     await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
     owner = PermissionSubject(adapter_instance_id='qq-personal', identity_namespace='qq_app:12345',
         user_id='private-scanner-openid')
-    assert fixture.core.permissions.check(owner, 'workspace.delete', 'workspace:restricted').allowed
+    assert fixture.core.permissions.check(owner, 'workspace.write', 'workspace:restricted').allowed
     fixture.core.permissions.upsert(PermissionRule(id='subsequent-owner-restriction', priority=1000,
-        effect='deny', actions=('workspace.delete',), resources=('workspace:restricted',)),
+        effect='deny', actions=('workspace.write',), resources=('workspace:restricted',),
+        subject=SubjectSelector(kind='person', adapter_instance_id='qq-personal',
+            identity_namespace='qq_app:12345', user_id='private-scanner-openid')),
         expected_version=fixture.core.permissions.policy_version, actor='administrator')
     before = fixture.core.permissions.list()
     other = PermissionSubject(adapter_instance_id='another-adapter')
-    before_other = fixture.core.permissions.check(other, 'workspace.delete', 'workspace:restricted')
+    before_other = fixture.core.permissions.check(other, 'workspace.write', 'workspace:restricted')
     fixture.session = replace(fixture.session, id='rescan-session', state='validating', provisioned=False,
         secret='private-scanned-secret', scanner_openid='private-scanner-openid', result={},
         expires=time.monotonic() + 300)
@@ -287,8 +301,8 @@ async def test_same_owner_rescan_preserves_subsequent_high_priority_permission_r
     after = fixture.core.permissions.list()
     assert {key: value for key, value in before.items() if key != 'policy_version'} == {
         key: value for key, value in after.items() if key != 'policy_version'}
-    assert not fixture.core.permissions.check(owner, 'workspace.delete', 'workspace:restricted').allowed
-    after_other = fixture.core.permissions.check(other, 'workspace.delete', 'workspace:restricted')
+    assert not fixture.core.permissions.check(owner, 'workspace.write', 'workspace:restricted').allowed
+    after_other = fixture.core.permissions.check(other, 'workspace.write', 'workspace:restricted')
     assert (before_other.effect, before_other.matched_rule) == (after_other.effect, after_other.matched_rule)
 
 
@@ -331,3 +345,92 @@ async def test_shutdown_cancellation_awaits_activation_cleanup_and_preserves_sav
         await task
     assert cleaned.is_set() and fixture.session.provisioned and fixture.session.state == 'connecting'
     assert fixture.core.config_store.read().adapters[0].secret() == 'private-scanned-secret'
+
+
+@pytest.mark.parametrize('deny_priority', [42, 43])
+async def test_bootstrap_policy_preserves_group_owner_denials_and_rejects_an_empty_priority_interval(
+    provisioning, deny_priority
+):
+    fixture = provisioning
+    policy = PermissionPolicy(rules=(
+        PermissionRule(id='existing-broad-allow', priority=40, effect='allow'),
+        PermissionRule(id='future-group-owner-denial', priority=deny_priority, effect='deny',
+            actions=('workspace.delete',), subject=SubjectSelector(kind='group_member',
+                adapter_instance_id='qq-personal', bot_identity_id='12345', identity_namespace='qq_app:12345',
+                user_id='private-scanner-openid', group_id='future-group')),
+        PermissionRule(id='other-adapter-high-allow', priority=1000000, effect='allow',
+            subject=SubjectSelector(kind='adapter', adapter_instance_id='another-adapter')),
+        PermissionRule(id='other-namespace-low-deny', priority=-1000000, effect='deny',
+            subject=SubjectSelector(adapter_instance_id='qq-personal', identity_namespace='qq_app:other')),
+        PermissionRule(id='other-bot-low-deny', priority=-1000000, effect='deny',
+            subject=SubjectSelector(adapter_instance_id='qq-personal', bot_identity_id='another-bot')),
+    ))
+    previous = fixture.core.settings.model_copy(update={'permissions': policy})
+    fixture.core.config_store.save(fixture.core.settings, previous)
+    fixture.core.settings = previous
+    fixture.core.permissions.initial_policy = policy
+    if deny_priority == 42:
+        with pytest.raises(ProvisioningError, match='permission_rule_conflict'):
+            await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+        assert fixture.core.config_store.read() == previous and fixture.core.permissions.policy_version == 0
+        assert not stored_files(fixture) and not fixture.activated
+        return
+    await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+    generated = {rule.id: rule.priority for rule in fixture.core.config_store.read().permissions.rules if rule.id.startswith('qq-owner:')}
+    assert generated == {'qq-owner:qq-personal:deny': 41, 'qq-owner:qq-personal:allow': 42}
+    owner = PermissionSubject(adapter_instance_id='qq-personal', bot_identity_id='12345',
+        identity_namespace='qq_app:12345', user_id='private-scanner-openid', group_id='future-group')
+    assert not fixture.core.permissions.check(owner, 'workspace.delete', '*').allowed
+    assert fixture.core.permissions.check(owner, 'workspace.write', '*').allowed
+    assert not fixture.core.permissions.check(owner.model_copy(update={'user_id': 'another-user'}), 'task.execute', '*').allowed
+    assert fixture.core.permissions.check(PermissionSubject(adapter_instance_id='another-adapter'), 'task.execute', '*').allowed
+
+
+@pytest.mark.parametrize('change_before_validation', [False, True])
+async def test_pending_model_save_is_rejected_before_or_after_token_validation(provisioning, change_before_validation):
+    fixture = provisioning
+    async def save_pending():
+        previous = fixture.core.config_store.read()
+        fixture.core.config_store.save(previous, previous.model_copy(update={
+            'model': previous.model.model_copy(update={'model': 'pending-model'})}))
+    if change_before_validation:
+        await save_pending()
+    else:
+        fixture.remote.before = save_pending
+    with pytest.raises(ProvisioningError, match='configuration_pending_restart'):
+        await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+    assert len(fixture.remote.calls) == (0 if change_before_validation else 1)
+    assert fixture.core.config_store.read().model.model == 'pending-model'
+    assert fixture.core.settings.model.model is None
+    assert not stored_files(fixture) and not fixture.activated and fixture.core.permissions.policy_version == 0
+
+
+@pytest.mark.parametrize('api_base', [
+    'http://api.bot.qq.com', 'https://qq.invalid', 'https://api.bot.qq.com:444',
+    'https://user@api.bot.qq.com', 'https://api.bot.qq.com?redirect=other',
+    'https://api.bot.qq.com#fragment', 'https://api.bot.qq.com/subpath',
+])
+async def test_automatic_rotation_rejects_nonofficial_api_destination_before_sending_new_secret(provisioning, api_base):
+    fixture = provisioning
+    existing = AdapterConfig(instance_id='qq-personal', kind='official', bot_id='12345', app_id='12345',
+        secret_env='OLD_SECRET', api_base=api_base, token_url='https://old-token.invalid')
+    previous = fixture.core.settings.model_copy(update={'adapters': (existing,)})
+    fixture.core.config_store.save(fixture.core.settings, previous)
+    fixture.core.settings = previous
+    with pytest.raises(ProvisioningError, match='official_api_required'):
+        await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+    assert not fixture.remote.calls and not stored_files(fixture) and not fixture.activated
+    assert fixture.core.config_store.read() == previous and fixture.core.permissions.policy_version == 0
+
+
+@pytest.mark.parametrize('host', ['api.bot.qq.com', 'api.sgroup.qq.com', 'sandbox.api.sgroup.qq.com'])
+async def test_official_rotation_replaces_arbitrary_old_token_endpoint_with_fixed_https_destination(provisioning, host):
+    fixture = provisioning
+    existing = AdapterConfig(instance_id='qq-personal', kind='official', bot_id='12345', app_id='12345',
+        secret_env='OLD_SECRET', api_base='https://' + host, token_url='http://old-token.invalid')
+    previous = fixture.core.settings.model_copy(update={'adapters': (existing,)})
+    fixture.core.config_store.save(fixture.core.settings, previous)
+    fixture.core.settings = previous
+    result = await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
+    assert result['activated'] and fixture.core.config_store.read().adapters[0].token_url == TOKEN_URL
+    assert [url for url, body in fixture.remote.calls] == [TOKEN_URL]

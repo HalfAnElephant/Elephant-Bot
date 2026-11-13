@@ -7,6 +7,7 @@ import re
 import time
 from datetime import UTC
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -76,10 +77,21 @@ def _existing(settings, session):
     if any(item.app_id == session.app_id and item.user_openid != session.scanner_openid
            for item in settings.owner.qq_bindings):
         raise ProvisioningError("owner_binding_conflict")
+    if existing:
+        try:
+            endpoint = urlsplit(existing.api_base)
+            valid = (endpoint.scheme == "https" and endpoint.hostname in {
+                "api.bot.qq.com", "api.sgroup.qq.com", "sandbox.api.sgroup.qq.com"}
+                and endpoint.port in {None, 443} and endpoint.username is None and endpoint.password is None
+                and endpoint.path in {"", "/"} and not endpoint.query and not endpoint.fragment)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ProvisioningError("official_api_required")
     return existing
 
 
-def _owner_policy(previous, session):
+def _owner_policy(previous, session, bot_id):
     prefix = "qq-owner:" + session.instance_id + ":"
     rule_ids = {prefix + "deny", prefix + "allow"}
     existing = {rule.id: rule for rule in previous.rules if rule.id in rule_ids}
@@ -95,7 +107,17 @@ def _owner_policy(previous, session):
             raise ProvisioningError("permission_rule_conflict")
         return previous
     retained = tuple(rule for rule in previous.rules if rule.id not in rule_ids)
-    priority = max((rule.priority for rule in retained), default=0) + 1
+    relevant = [rule for rule in retained if rule.enabled
+        and rule.subject.adapter_instance_id in {None, session.instance_id}
+        and rule.subject.bot_identity_id in {None, bot_id}
+        and rule.subject.identity_namespace in {None, "qq_app:" + session.app_id}]
+    unsafe_allows = [rule.priority for rule in relevant
+        if rule.effect == "allow" and rule.subject.user_id != session.scanner_openid]
+    owner_denies = [rule.priority for rule in relevant
+        if rule.effect == "deny" and rule.subject.user_id in {None, session.scanner_openid}]
+    priority = max(unsafe_allows) + 1 if unsafe_allows else min((rule.priority for rule in relevant), default=0) - 2
+    if any(priority + 1 >= denied for denied in owner_denies):
+        raise ProvisioningError("permission_rule_conflict")
     rules = (
         PermissionRule(id=prefix + "deny", priority=priority, effect="deny",
             subject=deny_subject),
@@ -116,7 +138,10 @@ async def provision_owner(core, session, *, client, activate) -> dict:
     _pending(session)
     with core.config_store.lock:
         _authorize(core, session)
-        _existing(core.config_store.read(), session)
+        previous = core.config_store.read()
+        if previous != core.settings:
+            raise ProvisioningError("configuration_pending_restart")
+        _existing(previous, session)
     try:
         master_key()
     except ValueError:
@@ -140,11 +165,13 @@ async def provision_owner(core, session, *, client, activate) -> dict:
             raise ProvisioningError("session_changed")
         _authorize(core, session)
         previous = core.config_store.read()
+        if previous != core.settings:
+            raise ProvisioningError("configuration_pending_restart")
         existing = _existing(previous, session)
         snapshot = core.permissions.list()
         previous_policy = PermissionPolicy.model_validate({key: value for key, value in snapshot.items()
                                                           if key != "policy_version"})
-        policy = _owner_policy(previous_policy, session)
+        policy = _owner_policy(previous_policy, session, existing.bot_id if existing else session.app_id)
         directory = Path(existing.credential_store_dir) if existing and existing.credential_ref else core.config_store.path.parent / "qq-credentials"
         reference = candidate = committed_policy_version = None
         stage = "credential_save_failed"
@@ -153,11 +180,12 @@ async def provision_owner(core, session, *, client, activate) -> dict:
             if not hmac.compare_digest(load_credential(directory, reference, session.app_id).encode(), session.secret.encode()):
                 raise ValueError("credential readback mismatch")
             updates = {"secret_env": "", "credential_ref": reference,
-                "credential_store_dir": str(directory.resolve()), "enabled": True, "transport": "websocket"}
+                "credential_store_dir": str(directory.resolve()), "enabled": True, "transport": "websocket",
+                "token_url": TOKEN_URL}
             adapter = existing.model_copy(update={**updates,
                 "admin_users": tuple(dict.fromkeys((*existing.admin_users, session.scanner_openid)))}) if existing else AdapterConfig(
                     instance_id=session.instance_id, kind="official", bot_id=session.app_id, app_id=session.app_id,
-                    admin_users=(session.scanner_openid,), token_url=TOKEN_URL, **updates)
+                    admin_users=(session.scanner_openid,), **updates)
             bindings = previous.owner.qq_bindings
             if not any(item.app_id == session.app_id for item in bindings):
                 bindings += (QQOwnerBinding(app_id=session.app_id, user_openid=session.scanner_openid,

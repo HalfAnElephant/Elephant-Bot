@@ -165,6 +165,14 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         async with activation_lock:
             if core.config_store.read() != candidate:
                 raise ValueError("configuration changed before adapter activation")
+            expected = core.settings.model_copy(update={"adapters": candidate.adapters, "permissions": candidate.permissions,
+                "owner": core.settings.owner.model_copy(update={"qq_bindings": candidate.owner.qq_bindings})})
+            if (expected != candidate
+                    or tuple(item for item in core.settings.adapters if item.instance_id != cfg.instance_id)
+                    != tuple(item for item in candidate.adapters if item.instance_id != cfg.instance_id)
+                    or tuple(item for item in core.settings.owner.qq_bindings if item.app_id != cfg.app_id)
+                    != tuple(item for item in candidate.owner.qq_bindings if item.app_id != cfg.app_id)):
+                raise ValueError("adapter activation cannot apply unrelated pending configuration")
             old = adapters.get(cfg.instance_id)
             if old and old.config == cfg and old.gateway and old.gateway.snapshot()["healthy"]:
                 return old.gateway.snapshot()
