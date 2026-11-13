@@ -525,3 +525,80 @@ def test_stale_proactive_draft_without_tools_ends_without_failure_notice(
         assert '不得编造' in explanation['goal'] and '403' in explanation['goal']
     else:
         assert service.claim('explainer') is None
+
+
+def test_archive_cleanup_keeps_live_trees_recent_references_and_pending_exports(setup, tmp_path):
+    import os
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from qqbot.harness.artifacts import cleanup_artifacts
+
+    service, event, access, clock = setup
+    archive = service.archive_root
+    archive.mkdir()
+    cutoff = clock.now() - timedelta(days=30)
+    old = (cutoff - timedelta(days=1)).isoformat()
+    names = {key: str(uuid4()) for key in ("expired", "shared", "active", "run", "orphan", "fresh", "link", "hard")}
+    for key in ("expired", "shared", "active", "run", "orphan", "fresh"):
+        path = archive / names[key]
+        path.write_text(key)
+        stamp = clock.now().timestamp() if key == "fresh" else cutoff.timestamp() - 1
+        os.utime(path, (stamp, stamp))
+    private = tmp_path / "private.txt"
+    private.write_text("private")
+    (archive / names["link"]).symlink_to(private)
+    os.link(private, archive / names["hard"])
+    os.utime(private, (0, 0))
+    (archive / "unrelated.txt").write_text("keep")
+
+    expired = service.accept(event, access, "expired")
+    recent = service.accept(event.model_copy(update={"event_id": "recent"}), access, "recent")
+    active = service.accept(event.model_copy(update={"event_id": "active"}), access, "active")
+    claim = service.claim("worker")
+    def result(*keys):
+        return json.dumps({"artifacts": [{"id": names[key]} for key in keys]})
+    with service.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == expired["id"]).values(
+            state="SUCCEEDED", created_at=old, result_json=result("expired", "shared")))
+        conn.execute(update(tasks).where(tasks.c.id == recent["id"]).values(
+            state="SUCCEEDED", created_at=cutoff.isoformat(), result_json=result("shared")))
+        conn.execute(update(tasks).where(tasks.c.id == active["id"]).values(
+            state="WAITING_INPUT", created_at=old, result_json=result("active")))
+        conn.execute(update(runs).where(runs.c.id == claim["run_id"]).values(
+            task_id=active["id"], result_json=result("run")))
+    assert cleanup_artifacts(service.db, archive, clock.now()) == 1
+    assert not (archive / names["expired"]).exists()
+    assert all((archive / names[key]).exists() for key in ("shared", "active", "run", "orphan", "fresh"))
+    with service.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == active["id"]).values(state="FAILED"))
+        conn.execute(update(runs).where(runs.c.id == claim["run_id"]).values(slot_reserved=0))
+    assert cleanup_artifacts(service.db, archive, clock.now()) == 3
+    assert all(not (archive / names[key]).exists() for key in ("active", "run", "orphan"))
+    assert (archive / names["shared"]).exists() and (archive / names["fresh"]).exists()
+    assert (archive / names["link"]).is_symlink() and (archive / names["hard"]).exists()
+    assert private.read_text() == "private" and (archive / "unrelated.txt").exists()
+    assert cleanup_artifacts(service.db, archive, clock.now()) == 0
+
+
+def test_archive_cleanup_keeps_old_child_outputs_while_root_is_active(setup):
+    import os
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from qqbot.harness.artifacts import cleanup_artifacts
+
+    service, event, access, clock = setup
+    root = service.accept(event, access, "root")
+    child = service.accept(event.model_copy(update={"event_id": "child"}), access, "child")
+    service.archive_root.mkdir()
+    identity = str(uuid4())
+    artifact = service.archive_root / identity
+    artifact.write_text("child output")
+    os.utime(artifact, (0, 0))
+    with service.db.transaction() as conn:
+        conn.execute(update(tasks).values(created_at=(clock.now() - timedelta(days=40)).isoformat()))
+        conn.execute(update(tasks).where(tasks.c.id == child["id"]).values(state="SUCCEEDED", root_task_id=root["id"],
+            result_json=json.dumps({"artifacts": [{"id": identity}]})))
+    assert cleanup_artifacts(service.db, service.archive_root, clock.now()) == 0
+    assert artifact.read_text() == "child output"
