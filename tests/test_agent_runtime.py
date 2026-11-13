@@ -997,6 +997,7 @@ def test_revoked_handoff_blocks_its_worker_and_allows_another_task(runtime, monk
     monkeypatch.setattr(runtime.service.permissions, "require", require_current)
     claim = runtime.service.claim("worker")
     assert claim["root_task_id"] == other["task_id"]
+    assert runtime.service.claim("next-worker") is None
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == rework["task_id"])).scalar_one() == "BLOCKED"
         assert not conn.execute(select(runs).where(runs.c.task_id == rework["task_id"])).first()
