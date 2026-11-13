@@ -235,13 +235,6 @@ export default function (pi: ExtensionAPI) {
       })});
     }
     pi.registerTool({...definition, parameters: schema, label: definition.name,
-      prepareArguments: withUserMessage ? (args: any) => {
-        // Old pending calls predate the explicit communication choice.
-        if (args && typeof args === "object" && !Array.isArray(args) && !("user_message" in args)) {
-          return {...args, user_message: null};
-        }
-        return args;
-      } : undefined,
       async execute(id, parameters, signal) {
         if (!binding) throw new Error("No active run binding");
         const current = binding;

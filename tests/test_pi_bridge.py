@@ -431,9 +431,9 @@ async def test_locked_leader_sees_elapsed_time_and_notification_acceptance(compa
     gateway.revoke()
     gateway.bind({**state.claim, "role": "leader", "purpose": "user"})
     calls = [
-        ("capability_search", {"query": "github"}),
+        ("capability_search", {"query": "github", "user_message": None}),
         ("task_notify", {"text": "收到，我正在确认仓库名称～"}),
-        ("capability_search", {"query": "web"}),
+        ("capability_search", {"query": "web", "user_message": None}),
     ]
     requests = []
     def upstream(request):
@@ -458,7 +458,7 @@ async def test_locked_leader_sees_elapsed_time_and_notification_acceptance(compa
         for message in request["messages"] if message["role"] == "tool") for request in requests[1:])
 
 
-@pytest.mark.parametrize("scenario", ["message", "quiet", "old_call", "notification_denied", "business_failure", "worker", "stale_notice", "string_null"])
+@pytest.mark.parametrize("scenario", ["message", "quiet", "notification_denied", "business_failure", "worker", "stale_notice", "string_null"])
 async def test_locked_pi_business_call_keeps_explicit_communication_separate(compaction_session, scenario):
     from qqbot.capabilities.types import Action, Capability
 
@@ -490,7 +490,7 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
     gateway.bind({**state.claim, "role": "worker" if scenario == "worker" else "leader", "purpose": "user",
         "event_json": json.dumps({"reply_context": {"max_replies": 4}})})
     arguments = {"name": "fixture.read", "arguments": {"value": "original"}}
-    if scenario not in {"old_call", "worker"}:
+    if scenario != "worker":
         arguments["user_message"] = None if scenario == "quiet" else "收到，我来核实一下～"
         if scenario == "string_null":
             arguments["user_message"] = "null"
@@ -510,7 +510,7 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
         assert "user_message" not in schema["properties"]
     else:
         assert "user_message" in schema["required"]
-    expected_order = ["read"] if scenario in {"quiet", "old_call", "worker", "string_null"} else ["notice", "read"]
+    expected_order = ["read"] if scenario in {"quiet", "worker", "string_null"} else ["notice", "read"]
     assert order == (["notice"] if scenario == "stale_notice" else expected_order)
     messages = (await state.runner.rpc("get_messages"))["messages"]
     tool_result = next(message for message in messages if message.get("role") == "toolResult")
@@ -521,3 +521,46 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
         feedback = json.loads(tool_result["content"][1]["text"])["host_interaction"]
         assert feedback["progress_notice_accepted"] is (scenario == "message")
         assert feedback["reply_messages_remaining"] == (3 if scenario == "message" else 4)
+
+
+async def test_locked_leader_requires_new_communication_choice_with_legacy_history(compaction_session):
+    from qqbot.capabilities.types import Action, Capability
+
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    order, requests = [], []
+    async def host(operation, payload):
+        if operation == "notify":
+            order.append("notice")
+            return {"accepted": True}
+        return await original_call(operation, payload)
+    gateway.call = host
+    gateway.registry.register(Capability("fixture.read", "Read fixture"),
+        lambda a, c: order.append("read") or {"checked": True}, lambda a, c: Action("fixture.read", ()))
+    arguments = {"name": "fixture.read", "arguments": {}}
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        index = len(requests)
+        if index in {1, 3, 4}:
+            args = {**arguments, "user_message": "收到，我来核实一下～"} if index == 4 else arguments
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": f"history-{index}",
+                "type": "function", "function": {"name": "capability_invoke", "arguments": json.dumps(args)}}]}
+        else:
+            message = {"role": "assistant", "content": "核实好了。"}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    await state.runner.run("之前的查询", keep_alive=True)
+    assert order == ["read"]
+    gateway.bind({**state.claim, "run_id": "updated-leader", "role": "leader", "purpose": "user"})
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    await state.runner.run("继续核实", keep_alive=True)
+    schema = next(tool["function"]["parameters"] for tool in requests[2]["tools"]
+        if tool["function"]["name"] == "capability_invoke")
+    assert "user_message" in schema["required"]
+    assert any(message.get("tool_call_id") == "history-3" and "user_message" in str(message["content"])
+        for message in requests[3]["messages"] if message.get("role") == "tool")
+    messages = (await state.runner.rpc("get_messages"))["messages"]
+    rejected = next(message for message in messages if message.get("toolCallId") == "history-3")
+    assert rejected["isError"] is True
+    assert order == ["read", "notice", "read"]
