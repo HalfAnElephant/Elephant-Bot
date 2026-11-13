@@ -6,6 +6,7 @@ import ipaddress
 import json
 import socket
 import ssl
+import time
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
 
@@ -26,17 +27,25 @@ def public_addresses(host, port):
 
 
 class PinnedHTTPS(http.client.HTTPSConnection):
-    def __init__(self, host, port, addresses):
+    def __init__(self, host, port, addresses, *, deadline=None):
         super().__init__(host, port, timeout=10, context=ssl.create_default_context())
         self.addresses = addresses
+        self.deadline = deadline if deadline is not None else time.monotonic() + 15
+
+    def remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("public fetch deadline exceeded")
+        return remaining
 
     def connect(self):
         last_error = None
-        for family, kind, protocol, _, address in self.addresses:
+        for family, kind, protocol, _, address in self.addresses[:4]:
             connection = socket.socket(family, kind, protocol)
-            connection.settimeout(self.timeout)
             try:
+                connection.settimeout(min(self.timeout, self.remaining()))
                 connection.connect(address)
+                connection.settimeout(self.remaining())
                 self.sock = self._context.wrap_socket(connection, server_hostname=self.host)
                 return
             except OSError as error:
@@ -45,20 +54,27 @@ class PinnedHTTPS(http.client.HTTPSConnection):
         raise last_error or OSError("no public address")
 
 
-def fetch_public(url):
+def fetch_public(url, *, authorize_url=None):
+    deadline = time.monotonic() + 15
     for _ in range(4):
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("only public HTTPS URLs without credentials are allowed")
         if parsed.port not in {None, 443}:
             raise ValueError("only HTTPS port 443 is allowed")
-        connection = PinnedHTTPS(parsed.hostname, 443, public_addresses(parsed.hostname, 443))
+        if authorize_url:
+            authorize_url(url)
+        connection = PinnedHTTPS(parsed.hostname, 443, public_addresses(parsed.hostname, 443), deadline=deadline)
+        response = None
         try:
+            connection.timeout = connection.remaining()
             connection.request(
                 "GET",
                 (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
                 headers={"User-Agent": "ElephantBot/0.1", "Accept-Encoding": "identity"},
             )
+            sock = connection.sock
+            sock.settimeout(connection.remaining())
             response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
@@ -80,7 +96,13 @@ def fetch_public(url):
                 raise ValueError("unsupported public source type")
             if response.getheader("Content-Encoding", "identity") != "identity":
                 raise ValueError("compressed responses are disabled")
-            content = response.read(MAX_PAGE + 1)
+            content = bytearray()
+            while len(content) <= MAX_PAGE:
+                sock.settimeout(connection.remaining())
+                chunk = response.read1(min(65536, MAX_PAGE + 1 - len(content)))
+                if not chunk:
+                    break
+                content.extend(chunk)
             if len(content) > MAX_PAGE:
                 raise ValueError("public source exceeds size limit")
             text = content.decode("utf-8", errors="replace")
@@ -91,6 +113,8 @@ def fetch_public(url):
                 "text": text,
             }
         finally:
+            if response is not None:
+                response.close()
             connection.close()
     raise ValueError("too many redirects")
 

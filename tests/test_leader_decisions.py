@@ -172,3 +172,20 @@ async def test_unknown_external_operation_blocks_takeover(runtime):
             arguments_json="{}", result_json="{}", state="UNKNOWN", updated_at=runtime.clock.now().isoformat()))
     with pytest.raises(PermissionError, match="reconciled operations"):
         await tool(runtime, attention, "tasks.take_over")
+
+
+@pytest.mark.parametrize("state", ["INTENT", "STARTING", "RUNNING", "UNKNOWN"])
+async def test_takeover_waits_for_job_even_before_cancellation_is_registered(runtime, state):
+    from qqbot.storage.job_schema import jobs
+    root, worker, attention = failed_attention(runtime)
+    now = runtime.clock.now().isoformat()
+    with runtime.db.transaction() as conn:
+        conn.execute(jobs.insert().values(id="old-job", job_key="old-job", task_id=worker["task_id"],
+            root_task_id=root["task_id"], owner_id="owner", workspace="/tmp/workspace", world_id="local",
+            arguments_hash="hash", request_json="{}", state=state, unit="old-job.service", description="job",
+            deadline=now, created_at=now, updated_at=now, log_ref="old-job.log"))
+    with pytest.raises(PermissionError, match="stopped work"):
+        await tool(runtime, attention, "tasks.take_over")
+    with runtime.db.transaction() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == "old-job").values(state="EXITED", stopped_at=now))
+    assert (await tool(runtime, attention, "tasks.take_over"))["takeover"]

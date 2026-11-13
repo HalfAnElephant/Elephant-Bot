@@ -296,7 +296,7 @@ class TaskGraph:
         pending = conn.execute(select(inputs.c.id).where(inputs.c.task_id == root["id"],
             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))).first()
         stopping = conn.execute(select(jobs.c.id).where(jobs.c.root_task_id == root["id"],
-            jobs.c.cancel_requested_at.is_not(None), jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))).first()
+            jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))).first()
         return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain
                     and not stopping and (allow_pending_inputs or not pending))
 
