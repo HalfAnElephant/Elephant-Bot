@@ -10,7 +10,7 @@ from qqbot.domain.execution import ExecutionPlan
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_inbox
 from qqbot.storage.learning_schema import learning_events, learning_sessions
 from qqbot.storage.stream_schema import stream_runs
-from qqbot.storage.task_schema import inputs, runs, tasks
+from qqbot.storage.task_schema import inputs, runs, sessions, tasks
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
 
@@ -140,6 +140,26 @@ class SessionService:
             for dialogue in candidates:
                 if dialogue["id"] in retired_mutations:
                     continue
+                history = conn.execute(select(sessions.c.manifest_json).where(
+                    sessions.c.id == dialogue["session_id"])).scalar_one_or_none()
+                history = json.loads(history) if history else {}
+                if history.get("task_sources") and self.service.context_validator:
+                    source = conn.execute(select(dialogue_inputs.c.event_json).where(
+                        dialogue_inputs.c.dialogue_id == dialogue["id"])
+                        .order_by(dialogue_inputs.c.created_at.desc()).limit(1)).scalar_one_or_none()
+                    if not source:
+                        source = conn.execute(select(tasks.c.event_json).where(
+                            tasks.c.origin_dialogue_id == dialogue["id"])
+                            .order_by(tasks.c.created_at.desc()).limit(1)).scalar_one_or_none()
+                    if source and not self.service.context_validator(self.service._access_for({
+                            "event_json": source, "permission_json": "{}"}), history):
+                        replacement = str(uuid4())
+                        conn.execute(update(dialogues).where(dialogues.c.id == dialogue["id"]).values(session_id=replacement))
+                        conn.execute(update(tasks).where(tasks.c.origin_dialogue_id == dialogue["id"],
+                            tasks.c.kind == "goal").values(coordinator_session_id=replacement))
+                        conn.execute(update(leader_inbox).where(leader_inbox.c.target_session_id == dialogue["session_id"],
+                            leader_inbox.c.handled_at.is_(None)).values(target_session_id=replacement))
+                        continue
                 user = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == dialogue["id"],
                     dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
                     dialogue_inputs.c.id.not_in(pending_sources))
@@ -170,12 +190,16 @@ class SessionService:
                     if self.turn_exhausted(turn, now):
                         self.close_input(conn, dialogue, user, event, context, now)
                         continue
-                    context["active_tasks"] = [self.service.graph.status(conn, task) for task in conn.execute(
+                    context["active_tasks"] = []
+                    for task in conn.execute(
                         select(tasks).where(tasks.c.origin_dialogue_id == dialogue["id"],
                             tasks.c.requester == event.principal.key, tasks.c.conversation == event.conversation.key,
                             tasks.c.kind == "goal", tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))
-                        .order_by(tasks.c.created_at, tasks.c.id)).mappings()
-                        if self.service.permissions.check(access, "task.read", "task:" + task["id"]).allowed]
+                        .order_by(tasks.c.created_at, tasks.c.id)).mappings():
+                        if self.service.permissions.check(access, "task.read", "task:" + task["id"]).allowed:
+                            snapshot = self.service.graph.status(conn, task, access=access)
+                            context["active_tasks"].append(snapshot)
+                            self.service.graph.merge_snapshot_dependencies(context, task, snapshot)
                     source_ids = [user["id"]]
                     goal = event.text
                 else:
@@ -190,6 +214,11 @@ class SessionService:
                                 and item["resume_reason"] not in {"needs_attention", "needs_reconciliation", "user_answer"}):
                             conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
                                 handled_at=now.isoformat(), output_ref="SUPERSEDED"))
+                            continue
+                        if not self.service.graph.handoff_valid(candidate):
+                            self.service.graph.cancel_tree(conn, candidate, reason="revoked")
+                            conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
+                                handled_at=now.isoformat(), output_ref="CONTEXT_REVOKED"))
                             continue
                         if root is None:
                             root = candidate
@@ -223,6 +252,9 @@ class SessionService:
                     if context.get("memory_replan"):
                         goal = ("依据真实用户目标和当前记忆重新规划，新增工作须关联已停止子任务。\n"
                             + root["goal"] + "\n" + json.dumps(snapshot, ensure_ascii=False))
+                if history.get("task_sources"):
+                    self.service.graph.merge_source_dependencies(context, history["task_sources"],
+                        history.get("source_manifest", ()))
                 access = self.service._access_for({"event_json": event.model_dump_json(), "permission_json": "{}"})
                 self.service.permissions.require(access, "model.request", "conversation:" + event.conversation.key)
                 if not self.allowed(event):

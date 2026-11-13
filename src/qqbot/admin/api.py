@@ -542,7 +542,9 @@ def router(core, authenticate):
     def artifact(task_id: str, digest: str):
         row, access = task_row(task_id)
         require_permission("task.read", "task:" + row["id"])
-        core.tasks.get(row["public_id"], access)
+        visible = core.tasks.get(row["public_id"], access)
+        if visible.get("context_revoked"):
+            raise HTTPException(409, "artifact handoff sources are no longer authorized")
         if core.clock.now() > datetime.fromisoformat(row["created_at"]) + timedelta(days=30):
             raise HTTPException(410, "artifact download expired")
         result = json.loads(row["result_json"] or "{}")
@@ -563,6 +565,9 @@ def router(core, authenticate):
             raise HTTPException(409, "artifact unavailable") from error
         if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != digest:
             raise HTTPException(409, "artifact digest changed")
+        visible = core.tasks.get(row["public_id"], access)
+        if visible.get("context_revoked"):
+            raise HTTPException(409, "artifact handoff sources are no longer authorized")
         filename = PurePosixPath(item.get("relative_path") or item["id"]).name[:255] or item["id"]
         return Response(
             content,

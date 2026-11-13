@@ -132,8 +132,12 @@ class TaskService:
     def get(self, public_id, access):
         with self.db.engine.connect() as c:
             row = dict(self._visible(c, public_id, access))
+        revoked_handoff = hasattr(self, "graph") and not self.graph.handoff_valid(row)
+        if revoked_handoff:
+            row.update(goal=None, result_json=None)
         return {
             "task_id": row["id"],
+            **({"context_revoked": True} if revoked_handoff else {}),
             **{
                 k: row[k]
                 for k in (
@@ -313,12 +317,14 @@ class TaskService:
                     if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
                         continue
                     try:
+                        if not self.graph.handoff_valid(item):
+                            raise PermissionError("persisted handoff context is no longer authorized")
                         handoff = self.graph.input_handoff(c, item)
                     except PermissionError:
                         self._record_host_terminal(c, item, "BLOCKED", TaskResult(status="blocked", agent_authored=False,
                             summary="交接资料的读取授权已失效，需要重新确认任务输入。"), "handoff-revoked:" + item["id"])
                         continue
-                row = item
+                row = c.execute(select(tasks).where(tasks.c.id == item["id"])).mappings().one()
                 break
             if not row:
                 return None
@@ -423,6 +429,9 @@ class TaskService:
     def renew(self, run_id, fencing_token, worker_id):
         with self.db.transaction() as c:
             run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if hasattr(self, "graph") and not self.graph.handoff_valid(task):
+                self.graph.cancel_tree(c, task, reason="revoked")
+                task = c.execute(select(tasks).where(tasks.c.id == task["id"])).mappings().one()
             used = self._account_active(c, run, task)
             state = task["state"]
             budget, deadline = self._run_limits(run, task)
@@ -457,6 +466,9 @@ class TaskService:
                     return {"state": task["state"]}
                 raise PermissionError("result conflicts with committed run")
             run, task = self._lease(c, run_id, fencing_token, worker_id)
+            revoked_handoff = hasattr(self, "graph") and not self.graph.handoff_valid(task)
+            if revoked_handoff and result.agent_authored:
+                raise PermissionError("handoff context sources or authorization changed")
             if task["root_task_id"] and result.agent_authored:
                 proof = json.loads(run["receipt_json"]) if run["receipt_json"] else receipt
                 if not proof or proof.get("kind") not in {"turn_finished", "run_yielded"}:
@@ -516,6 +528,9 @@ class TaskService:
             if revision_pending and state not in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED"}:
                 state = "QUEUED"
                 c.execute(update(inputs).where(inputs.c.task_id == task["id"], inputs.c.consumed_at.is_(None)).values(state="READY"))
+            if revoked_handoff and state not in {"CANCELLED", "CANCEL_REQUESTED"}:
+                state = "BLOCKED"
+                c.execute(update(tasks).where(tasks.c.id == task["id"]).values(stop_reason="context_revoked"))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, result_json=result.model_dump_json()))
             values = {"slot_reserved": 0, "quiescent_at": now, "result_json": result.model_dump_json()}
             if stopped:
@@ -1187,6 +1202,12 @@ class TaskService:
     def control(self, run_id, fencing_token, worker_id):
         with self.db.engine.connect() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if hasattr(self, "graph") and not self.graph.handoff_valid(task):
+                with self.db.transaction() as writer:
+                    _run, task = self._lease(writer, run_id, fencing_token, worker_id)
+                    if not self.graph.handoff_valid(task):
+                        self.graph.cancel_tree(writer, task, reason="revoked")
+                        task = writer.execute(select(tasks).where(tasks.c.id == task["id"])).mappings().one()
             resolved_budget, deadline = self._run_limits(_run, task)
             budget = resolved_budget.model_dump()
             used = json.loads(task["budget_json"])

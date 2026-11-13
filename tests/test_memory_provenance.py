@@ -8,7 +8,7 @@ from sqlalchemy import insert, select, update
 from test_agent_runtime import leader_complete, memory_runtime, root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.adapters.openviking.service import affected_sources
+from qqbot.adapters.openviking.service import OpenVikingMemory, affected_sources
 from qqbot.adapters.pi.sessions import export_session
 from qqbot.contracts.memory import MemoryBinding, MutationReceipt
 from qqbot.runtime.knowledge import KnowledgeRuntime
@@ -91,8 +91,8 @@ def test_rebound_resume_prompt_keeps_already_persisted_input_origins(tmp_path):
     assert page["events"][0].kind == "relay" and page["events"][0].origins == ("result:worker-run",)
 
 
-@pytest.mark.asyncio
-async def test_runtime_syncs_worker_evidence_and_leader_relay_with_same_source(runtime):
+@pytest.mark.parametrize("validator_owner", ["core", "tasks"])
+async def test_runtime_syncs_worker_evidence_and_leader_relay_with_same_source(runtime, validator_owner):
     root_goal(runtime)
     worker = runtime.service.claim("worker")
     summary = "已核对项目事实42"
@@ -138,7 +138,18 @@ async def test_runtime_syncs_worker_evidence_and_leader_relay_with_same_source(r
     core = runtime.leader.core
     core.sessions, core.openviking = runtime.sessions, Memory()
     knowledge = KnowledgeRuntime(core)
+    allow_source = True
+    def validate_context(access, context):
+        assert access.principal == runtime.access.principal
+        return allow_source or not context.get("task_sources")
+    if validator_owner == "core":
+        core.validate_context = validate_context
+        runtime.service.context_validator = lambda *_: True
+    else:
+        runtime.service.context_validator = validate_context
     with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == worker["task_id"]).values(
+            context_json=json.dumps({"task_sources": ["handoff-source"]})))
         conn.execute(insert(memory_streams).values(id="old-worker-projection", scope_id=knowledge.scope(runtime.event).key,
             session_id=worker["context"]["session_id"], branch="main", projection_version="pi-original-v1",
             epoch=0, exported_seq=999, extracted_seq=999, indexed_seq=999))
@@ -151,6 +162,16 @@ async def test_runtime_syncs_worker_evidence_and_leader_relay_with_same_source(r
     assert all(event.kind == "relay" and event.origins == facts[0].origins for event in relays)
     with runtime.db.engine.connect() as conn:
         assert len(conn.execute(select(sessions)).all()) == 2
+    accepted = next(batch for batch in core.openviking.batches if batch.session_id == worker["session_id"])
+    expected_refs = [OpenVikingMemory._source_ref(event) for event in accepted.events]
+    allow_source = False
+    with runtime.db.engine.connect() as conn:
+        completed = conn.execute(select(tasks).where(tasks.c.id == worker["task_id"])).mappings().one()
+    assert not validate_context(runtime.service._access_for(completed), json.loads(completed["context_json"]))
+    restored = knowledge.load_source(accepted.scope, accepted.session_id, accepted.from_seq, accepted.to_seq,
+        accepted.branch, accepted.projection_version)
+    assert restored == accepted
+    assert [OpenVikingMemory._source_ref(event) for event in restored.events] == expected_refs
 
 
 @pytest.mark.parametrize("entry", ["active-mutation", "restored-ledger"])
@@ -207,3 +228,81 @@ async def test_pending_sync_operations_drain_even_when_new_export_queue_is_full(
         await knowledge.sync()
     memory.reconcile.assert_awaited_once()
     memory.sync.assert_awaited_once()
+
+
+async def test_large_worker_exports_advance_in_utf8_bounded_pages_and_resume_exact_ranges(runtime):
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    root_goal(runtime)
+    worker = runtime.service.claim("worker")
+    runtime.service.submit(worker["run_id"], worker["fencing_token"], "worker",
+        {"status": "completed", "summary": "已核对大输出"}, receipt={"kind": "turn_finished",
+            "session_id": worker["session_id"], "run_id": worker["run_id"], "session_revision": "worker-leaf",
+            "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True})
+    leader_complete(runtime, runtime.sessions.claim("leader"))
+    later_event = runtime.event.model_copy(update={"event_id": "later-dialogue-input"})
+    runtime.sessions.enqueue(later_event, runtime.access, new_title="后续独立对话")
+    later = runtime.sessions.claim("leader")
+    leader_complete(runtime, later)
+    worker_entries = None
+    for claim in (worker, later):
+        path = runtime.path / (claim["session_id"] + ".jsonl")
+        entries = native_log(path, run_id=claim["run_id"], role=claim["role"], purpose=claim["purpose"],
+            input_id=claim["context"]["source_input_ids"][0], summary="已核对大输出" if claim is worker else "收到")
+        if claim is worker:
+            outputs = []
+            for index in range(9):
+                outputs.extend([
+                    {"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall",
+                        "id": str(index), "name": "process.read", "arguments": {"limit": 65536}}]}},
+                    {"type": "message", "message": {"role": "toolResult", "toolCallId": str(index),
+                        "toolName": "process.read", "content": [{"type": "text", "text": "𠮷" * 64000}]}},
+                ])
+            entries[4:4] = outputs
+            for index, item in enumerate(entries):
+                item.update(id=str(index), parentId=str(index - 1) if index else None)
+            path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in entries))
+            worker_entries = entries
+        with runtime.db.transaction() as conn:
+            conn.execute(insert(sessions).values(id=claim["session_id"], scope_key=claim["session_id"],
+                session_file=str(path), manifest_json="{}", active_run_id=None, epoch=0))
+    binding = MemoryBinding(owner_id=runtime.sessions.settings.owner.id, account_id="test", user_id="test", api_key_env="UNUSED")
+    batches = []
+    async def sync(batch):
+        assert sum(len(event.content.encode()) for event in batch.events) <= 512 * 1024
+        assert knowledge.load_source(batch.scope, batch.session_id, batch.from_seq, batch.to_seq,
+            batch.branch, batch.projection_version) == batch
+        batches.append(batch)
+        with runtime.db.transaction() as conn:
+            conn.execute(sqlite_insert(memory_streams).values(id=batch.session_id,
+                scope_id=batch.scope.key, session_id=batch.session_id, branch=batch.branch,
+                projection_version=batch.projection_version, epoch=0, exported_seq=batch.to_seq,
+                extracted_seq=batch.to_seq, indexed_seq=batch.to_seq).on_conflict_do_update(
+                    index_elements=[memory_streams.c.id], set_={"exported_seq": batch.to_seq,
+                        "extracted_seq": batch.to_seq, "indexed_seq": batch.to_seq}))
+    async def reconcile():
+        pass
+    core = runtime.leader.core
+    core.sessions = runtime.sessions
+    core.openviking = SimpleNamespace(config=SimpleNamespace(bindings=(binding,)), enabled=lambda _: True,
+        sync=sync, reconcile=reconcile)
+    knowledge = KnowledgeRuntime(core)
+    await knowledge.sync()
+    assert {batch.session_id for batch in batches} == {worker["session_id"], later["session_id"]}
+    assert 0 < next(batch.to_seq for batch in batches if batch.session_id == worker["session_id"]) < len(worker_entries)
+    for _ in range(10):
+        await knowledge.sync()
+        with runtime.db.engine.connect() as conn:
+            cursor = conn.execute(select(memory_streams.c.exported_seq).where(
+                memory_streams.c.session_id == worker["session_id"])).scalar_one()
+        if cursor == len(worker_entries):
+            break
+    assert cursor == len(worker_entries)
+    worker_pages = [batch for batch in batches if batch.session_id == worker["session_id"]]
+    assert [batch.from_seq for batch in worker_pages] == [0, *[batch.to_seq for batch in worker_pages[:-1]]]
+    assert len([event for batch in worker_pages for event in batch.events if event.role == "tool"]) == 9
+    legacy = export_session(runtime.path / (worker["session_id"] + ".jsonl"), session_id=worker["session_id"],
+        limit=2, projection_version="pi-original-v1")
+    restored = knowledge.load_source(knowledge.scope(runtime.event), worker["session_id"], 0,
+        legacy["next_cursor"], legacy["branch"], "pi-original-v1")
+    assert restored.events == legacy["events"]

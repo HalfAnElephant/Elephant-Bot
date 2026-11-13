@@ -154,6 +154,10 @@ class KnowledgeRuntime:
                     memory_streams.c.projection_version == projection)
                     .order_by(memory_streams.c.epoch.desc()).limit(1)).scalar_one_or_none() or 0
             exported = self._export(record, binding, turns, after=after)
+            limit = len(exported["events"])
+            while limit > 1 and sum(len(event.content.encode()) for event in exported["events"]) > 512 * 1024:
+                limit = max(1, limit // 2)
+                exported = self._export(record, binding, turns, after=after, limit=limit)
             if exported["next_cursor"] <= after:
                 continue
             await self.memory.sync(SourceBatch(scope=scope, session_id=record["id"], from_seq=after,

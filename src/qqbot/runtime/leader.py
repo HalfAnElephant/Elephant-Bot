@@ -72,6 +72,8 @@ class LeaderRuntime:
         validator = getattr(self.core, "validate_context", None)
         if not mutation and validator and not validator(access, claim["context"]):
             raise PermissionError("Leader context sources are no longer authorized")
+        if not mutation and root_id and not self.service.graph.handoff_valid(root):
+            raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
         if effect != "read" and not personal:
             if not claim.get("takeover") or not root_id:
@@ -171,6 +173,26 @@ class LeaderRuntime:
         remaining = limit - used[key]
         return {"accepted": True, "remaining": remaining}
 
+    def _task_snapshots(self, conn, run, claim, source_tasks, access):
+        graph = self.service.graph
+        snapshots, read_content = [], False
+        for task in source_tasks:
+            snapshot = graph.status(conn, task, access=access)
+            snapshots.append(snapshot)
+            read_content = graph.merge_snapshot_dependencies(claim["context"], task, snapshot) or read_content
+        if read_content:
+            conn.execute(update(runs).where(runs.c.id == run["id"]).values(
+                request_json=json.dumps(claim, ensure_ascii=False)))
+            history = conn.execute(select(sessions.c.manifest_json).where(
+                sessions.c.id == claim["session_id"])).scalar_one_or_none()
+            if history is not None:
+                history = json.loads(history)
+                graph.merge_source_dependencies(history, claim["context"]["task_sources"],
+                    claim["context"].get("source_manifest", ()))
+                conn.execute(update(sessions).where(sessions.c.id == claim["session_id"]).values(
+                    manifest_json=json.dumps(history, ensure_ascii=False)))
+        return snapshots
+
     def task_tool(self, conn, run, claim, payload):
         if claim.get("memory_mutation"):
             raise PermissionError("memory mutation ended this Leader turn")
@@ -193,7 +215,7 @@ class LeaderRuntime:
         if operation == "tasks.list":
             rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, tasks.c.kind == "goal",
                 tasks.c.conversation == access.conversation.key).order_by(tasks.c.created_at.desc()).limit(20)).mappings().all()
-            return [graph.status(conn, row) for row in rows]
+            return self._task_snapshots(conn, run, claim, rows, access)
         if operation == "tasks.take_over":
             if purpose not in {"finalize", "attention"} or not root_id:
                 raise PermissionError("takeover requires a bound result or escalation")
@@ -220,7 +242,7 @@ class LeaderRuntime:
             raise PermissionError("Leader attempt is bound to another root")
         if operation == "tasks.status":
             self.service.permissions.require(access, "task.read", "task:" + task["id"])
-            return graph.status(conn, task)
+            return self._task_snapshots(conn, run, claim, [task], access)[0]
         if operation == "tasks.cancel":
             if purpose not in {"user", "finalize", "attention"}:
                 raise PermissionError("this Leader turn cannot cancel work")
@@ -722,11 +744,16 @@ class LeaderRuntime:
                 known = conn.execute(select(sessions).where(sessions.c.id == claim["session_id"])).mappings().first()
                 if known and known["active_run_id"] not in {None, run_id}:
                     raise PermissionError("session already has a writer")
+                history = json.loads(known["manifest_json"]) if known else dict(claim["binding"])
+                if claim["context"].get("task_sources"):
+                    self.service.graph.merge_source_dependencies(history, claim["context"]["task_sources"],
+                        claim["context"].get("source_manifest", ()))
                 if known:
-                    conn.execute(update(sessions).where(sessions.c.id == known["id"]).values(active_run_id=run_id))
+                    conn.execute(update(sessions).where(sessions.c.id == known["id"]).values(active_run_id=run_id,
+                        manifest_json=json.dumps(history, ensure_ascii=False)))
                 else:
                     conn.execute(insert(sessions).values(id=claim["session_id"], scope_key=claim["session_id"],
-                        session_file=payload["session_file"], manifest_json=json.dumps(claim["binding"]), active_run_id=run_id, epoch=1))
+                        session_file=payload["session_file"], manifest_json=json.dumps(history, ensure_ascii=False), active_run_id=run_id, epoch=1))
                 if run["process_id"] and run["process_id"] != payload["process_id"]:
                     raise PermissionError("attempt already bound to another process")
                 conn.execute(update(runs).where(runs.c.id == run_id).values(process_id=payload["process_id"],
