@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.adapters.qq_official.interaction_delivery import handle_callback
+from qqbot.adapters.qq_official.interaction_delivery import handle_callback, handle_verified_interaction
 from qqbot.adapters.qq_official.interactions import InteractionStore
 from qqbot.adapters.qq_official.interactions import router as interaction_router
 from qqbot.adapters.qq_official.menus import router as menu_router
@@ -126,12 +126,16 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         except SQLAlchemyError:
             database_ready = False
         background = background_health()
-        is_ready = app.state.ready and database_ready and background["healthy"]
+        connections = {key: adapter.gateway.snapshot() for key, adapter in adapters.items() if adapter.gateway}
+        disconnected = [key for key, connection in connections.items() if not connection["healthy"]]
+        is_ready = app.state.ready and database_ready and background["healthy"] and not disconnected
         return JSONResponse(
             {
                 "ready": is_ready,
                 "database": "ok" if database_ready else "unavailable",
                 "background": background,
+                "connections": connections,
+                "disconnected": disconnected,
                 "external_acceptance": "not_implied_by_readiness",
             },
             status_code=200 if is_ready else 503,
@@ -145,9 +149,54 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             raise HTTPException(401, "administrator authentication required")
 
     app.include_router(admin_router(core, admin))
-    install_qq_onboarding(app, core, admin, client=official_client)
     interaction_store = InteractionStore(db, clock)
     app.state.qq_interactions = interaction_store
+
+    def attach_interactions(adapter):
+        async def interaction(payload):
+            return await handle_verified_interaction(adapter, core, interaction_store, payload)
+        adapter.interaction_handler = interaction
+
+    for adapter in adapters.values():
+        attach_interactions(adapter)
+    activation_lock = asyncio.Lock()
+
+    async def activate_official(candidate, cfg):
+        async with activation_lock:
+            if core.config_store.read() != candidate:
+                raise ValueError("configuration changed before adapter activation")
+            old = adapters.get(cfg.instance_id)
+            if old and old.config == cfg and old.gateway and old.gateway.snapshot()["healthy"]:
+                return old.gateway.snapshot()
+            if old:
+                await old.stop()
+            adapter = OfficialAdapter(cfg, candidate.deployment_id, incoming, clock, official_client)
+            adapter.permissions = core.permissions
+            attach_interactions(adapter)
+            core.settings = candidate
+            core.sessions.settings = candidate
+            core.sessions.learning.settings = candidate
+            core.tasks.graph.settings = candidate
+            if core.scheduler:
+                core.scheduler.settings = candidate
+            core.outbox.markdown_adapters = frozenset(item.instance_id for item in candidate.adapters
+                if item.enabled and item.markdown_enabled)
+            adapters[cfg.instance_id] = adapter
+            try:
+                await adapter.start()
+                for _ in range(100):
+                    snapshot = adapter.gateway.snapshot()
+                    if snapshot["connected"] or snapshot["state"] in {"FAILED", "FATAL"}:
+                        return snapshot
+                    await asyncio.sleep(0.1)
+                return adapter.gateway.snapshot()
+            except BaseException:
+                await adapter.stop()
+                if adapters.get(cfg.instance_id) is adapter:
+                    adapters.pop(cfg.instance_id)
+                raise
+
+    install_qq_onboarding(app, core, admin, client=official_client, activate=activate_official)
     app.include_router(interaction_router(adapters, interaction_store, admin, core.permissions))
     app.include_router(menu_router(adapters, admin, core.permissions))
     app.include_router(qq_delivery_router(core, admin))
@@ -201,6 +250,8 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
                     "id": key,
                     "kind": a.config.kind,
                     "full_event_observed": getattr(a, "full_event_observed", None),
+                    "transport": a.config.transport,
+                    "connection": a.gateway.snapshot() if a.gateway else None,
                 }
                 for key, a in adapters.items()
             ],
@@ -233,6 +284,8 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         adapter = adapters.get(instance_id)
         if not isinstance(adapter, OfficialAdapter):
             raise HTTPException(404)
+        if adapter.config.transport != "webhook":
+            raise HTTPException(409, "adapter receives through the official WebSocket")
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)

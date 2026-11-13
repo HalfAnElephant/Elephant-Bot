@@ -86,3 +86,7 @@ performs read-only checks of remote extraction/mutation state before reopening
 recall. Until those checks succeed, chat can continue without recalled memory;
 old synchronization work remains fenced. Restore needs the newest deletion ledger,
 not one stored alongside the old snapshot.
+
+## Automatic QQ onboarding
+
+After the one-time `QQBOT_CREDENTIAL_KEY` environment setup, `/admin/qq-onboarding` defaults to automatic owner setup. The server validates the official scan response, saves encrypted credentials and owner-bound permissions, and connects through QQ WebSocket. Enabled configurations reconnect on daemon startup. Per-instance `transport` selects Webhook or WebSocket, and `intents` records the permitted subscription. Connection status is included in `/health/ready` and `/api/v1/qq/onboarding/status`. See [the onboarding workflow](../docs/operations/qq-onboarding.md).

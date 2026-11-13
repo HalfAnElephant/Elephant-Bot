@@ -1,1 +1,32 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>QQ 官方机器人扫码配置</title><link rel="stylesheet" href="/admin/assets/console.css"><script defer src="/admin/qq-onboarding.js"></script></head><body><main class="content"><h1>QQ 官方机器人扫码配置</h1><p><a href="/admin">返回控制台</a></p><p>扫码配置官方机器人应用，不是登录个人 QQ。扫码者不会自动成为管理员。完成后需确认保存。新适配器默认禁用，请配置统一权限策略与 Webhook，再明确启用并重启。</p><form id="qq-bind-form" autocomplete="off"><label>管理员令牌<input id="qq-token" type="password" required autocomplete="off"></label><label>实例名称<input id="qq-instance" pattern="[A-Za-z0-9_-]{1,64}" required value="qq-official"></label><label>轮换现有凭证的 AppID（新建留空）<input id="qq-replace-app" maxlength="128"></label><p>轮换前须禁用实例并重启；只允许同一 AppID，旧加密文件保留供管理员核对，不会在腾讯侧自动撤销。</p><button id="qq-start" type="submit">创建扫码会话</button></form><p id="qq-state" role="status" aria-live="polite">密钥只在服务端处理。需先在部署环境设置 QQBOT_CREDENTIAL_KEY。</p><img id="qq-qr" hidden alt="用手机 QQ 扫码确认机器人应用绑定"><p><a id="qq-connect" hidden target="_blank" rel="noreferrer noopener">在 QQ 打开官方绑定页面</a></p><div class="actions"><button id="qq-apply" hidden>确认应用并保存</button><button id="qq-cancel" hidden>取消本地绑定会话</button></div><p>取消不会撤销已经在腾讯侧完成的授权。刷新或关闭页面会停止本页面轮询，未保存会话在超时后清理；凭证不会显示或存储在浏览器。</p></main></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QQ 官方机器人扫码接入</title>
+  <link rel="stylesheet" href="/admin/assets/console.css">
+  <script defer src="/admin/qq-onboarding.js"></script>
+</head>
+<body>
+<main class="content">
+  <h1>QQ 官方机器人扫码接入</h1>
+  <p><a href="/admin">返回控制台</a></p>
+  <p>用手机 QQ 扫码并确认授权后，服务自动保存加密凭据、绑定个人 owner、设置访问权限并建立官方长连接。</p>
+  <form id="qq-bind-form" autocomplete="off">
+    <label>管理员令牌<input id="qq-token" type="password" required autocomplete="off"></label>
+    <label>实例名称<input id="qq-instance" pattern="[A-Za-z0-9_-]{1,64}" required value="qq-official"></label>
+    <label><input id="qq-automatic" type="checkbox" checked>自动接入，并将扫码账号绑定为个人 owner</label>
+    <label id="qq-replace-label" hidden>轮换现有凭证的 AppID<input id="qq-replace-app" maxlength="128"></label>
+    <button id="qq-start" type="submit">创建扫码会话</button>
+  </form>
+  <p id="qq-state" role="status" aria-live="polite">应用凭据只在服务端处理。</p>
+  <img id="qq-qr" hidden alt="用手机 QQ 扫码确认机器人应用授权">
+  <p><a id="qq-connect" hidden target="_blank" rel="noreferrer noopener">在 QQ 打开官方绑定页面</a></p>
+  <div class="actions">
+    <button id="qq-apply" hidden>确认应用并保存</button>
+    <button id="qq-cancel" hidden>取消扫码会话</button>
+  </div>
+  <p>自动模式支持新建及同应用重新授权。已有 owner 身份保持核验；应用或扫码身份不匹配时显示失败原因。关闭页面后，已接受的自动配置继续在服务端执行。</p>
+</main>
+</body>
+</html>

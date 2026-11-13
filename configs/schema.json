@@ -17,6 +17,21 @@
           "title": "Kind",
           "type": "string"
         },
+        "transport": {
+          "default": "webhook",
+          "enum": [
+            "webhook",
+            "websocket"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "intents": {
+          "default": 33554432,
+          "exclusiveMinimum": 0,
+          "title": "Intents",
+          "type": "integer"
+        },
         "bot_id": {
           "title": "Bot Id",
           "type": "string"

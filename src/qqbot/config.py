@@ -17,6 +17,8 @@ class AdapterConfig(DTO):
     instance_id: str
     enabled: bool = True
     kind: Literal["official"]
+    transport: Literal["webhook", "websocket"] = "webhook"
+    intents: int = Field(default=1 << 25, strict=True, gt=0)
     bot_id: str
     secret_env: str = ""
     credential_ref: str | None = None
@@ -71,6 +73,12 @@ class AdapterConfig(DTO):
             raise ValueError("adapter requires secret_env or credential_ref")
         if self.full_mode_verified and not self.full_mode_enabled:
             raise ValueError("full_mode_verified requires enabled permission")
+        if self.transport == "websocket":
+            supported = (1 << 9) | (1 << 12) | (1 << 25) | (1 << 26) | (1 << 30)
+            if self.intents & ~supported:
+                raise ValueError("websocket intents must select supported message or interaction events")
+            if self.intents & (1 << 9) and not self.full_mode_enabled:
+                raise ValueError("guild full-message intent requires full_mode_enabled and platform permission")
         return self
 
 
