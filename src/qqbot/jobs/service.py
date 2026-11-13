@@ -939,6 +939,8 @@ class TaskService:
             raw = conn.execute(select(tasks.c.context_json).where(tasks.c.id == task_id)).scalar_one()
             context = json.loads(raw)
             for key in ("source_manifest", "images", "files"):
+                if not sources.get(key):
+                    continue
                 known = context.setdefault(key, [])
                 for source in sources.get(key, ()):
                     if source not in known:
@@ -1069,7 +1071,7 @@ class TaskService:
                     if sources:
                         item[key] = sources
                 manifest = [source for source in context.get("source_manifest", ()) if source.get("id") == original_id]
-                if manifest:
+                if manifest and ("images" in item or "files" in item):
                     item["source_manifest"] = manifest
                 result.append(item)
             return result

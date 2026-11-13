@@ -4,11 +4,21 @@ import json
 from pydantic import ValidationError
 from sqlalchemy import or_, select
 
+from qqbot.domain.agents import ProgressSpec
 from qqbot.domain.tasks import Artifact
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import agent_events
 from qqbot.storage.job_schema import jobs
 from qqbot.storage.task_schema import observations, runs, tasks, waits
+
+
+def milestone_spec(payload_json):
+    """Historical text-only events remain readable without becoming evidence-bearing milestones."""
+    try:
+        spec = ProgressSpec.model_validate_json(payload_json)
+    except ValidationError:
+        return None
+    return spec if spec.evidence_refs else None
 
 
 def registered_artifacts(conn, task_ids):
@@ -93,8 +103,15 @@ def task_progress(graph, conn, task, root, *, access, stale, delivery_states):
         agent_events.c.source_revision == root["goal_revision"], agent_events.c.kind.in_({
             "milestone", "child_result", "finished", "children_ready"}))
         .order_by(agent_events.c.created_at.desc(), agent_events.c.seq.desc())).mappings().all()
-    times.extend(row["created_at"] for row in milestones)
-    latest = next((json.loads(row["payload_json"]) for row in milestones if row["kind"] == "milestone"), None)
+    latest = None
+    for row in milestones:
+        if row["kind"] == "milestone":
+            spec = milestone_spec(row["payload_json"])
+            if spec is None:
+                continue
+            if latest is None:
+                latest = spec.model_dump(mode="json")
+        times.append(row["created_at"])
     progress["phase"] = latest["phase"] if latest else None
     progress["latest_milestone"] = latest
     progress["verified_completed"] = completed[-40:]

@@ -95,7 +95,7 @@ async def test_scheduled_result_uses_existing_proactive_authority_and_unknown_fe
     access = AccessContext(principal=event.principal, conversation=event.conversation)
     task = service.accept(event, access, 'Scheduled report', context={'schedule_fire_id': 'trusted-fire'})
     with db.transaction() as conn:
-        row = conn.execute(select(tasks).where(tasks.c.id == task['task_id'])).mappings().one()
+        row = conn.execute(select(tasks).where(tasks.c.id == task['id'])).mappings().one()
         service._notification(conn, row, None, '预约报告已完成', 'result', 'important', 'scheduled-result')
     await outgoing.dispatch_once({'qq': adapter})
     with db.engine.connect() as conn:

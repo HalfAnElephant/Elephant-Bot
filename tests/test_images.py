@@ -188,6 +188,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
     claim = {**gateway.claim, 'context': {'scope': 'conversation', 'workspace_id': 'alpha', 'files': [
         {'source': 'original-event', 'message_id': '43', 'attachment_ref': 'file-ref',
          'filename': 'slides.pptx', 'url': 'https://cdn.example/file'}]}}
+    gateway.gateway.revoke()
     gateway.gateway.bind(claim)
     body = {'messages': [{'role': 'system', 'content': 'trusted'}, {'role': 'user', 'content': 'Read file'}]}
     first = await gateway.gateway.with_attachments(body)
@@ -219,6 +220,7 @@ async def test_document_download_failure_is_explicit(gateway, monkeypatch):
     def failed(*args):
         raise ValueError('expired')
     monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', failed)
+    gateway.gateway.revoke()
     gateway.gateway.bind({**gateway.claim, 'context': {'files': [
         {'source': 'e', 'message_id': '1', 'filename': 'original.pdf', 'url': 'https://cdn.example/file'}]}})
     body = {'messages': [{'role': 'user', 'content': 'Read'}]}

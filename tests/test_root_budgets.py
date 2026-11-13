@@ -115,6 +115,10 @@ async def test_progress_can_report_after_large_root_usage_and_retry_failed_decis
     with runtime.db.transaction() as conn:
         child = conn.execute(select(tasks).where(tasks.c.id == a["task_id"])).mappings().one()
         runtime.service.graph.event(conn, child, "milestone", {"public_text": "第一阶段完成"}, wake=True)
+        root = conn.execute(select(tasks).where(tasks.c.id == _root["task_id"])).mappings().one()
+        snapshot = runtime.service.graph.status(conn, root)["progress"]
+        assert snapshot["phase"] is None and snapshot["latest_milestone"] is None
+        assert snapshot["last_effective_progress_at"] is None
     runtime.clock.advance(3)
     progress = runtime.sessions.claim("leader")
     assert progress["purpose"] == "progress"
@@ -207,3 +211,28 @@ async def test_expired_review_intent_does_not_start_a_new_attempt(runtime):
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(learning_sessions.c.pending_json)).scalar_one() is None
         assert conn.execute(select(func.count()).select_from(runs).where(runs.c.role == "skill_review")).scalar_one() == 0
+
+
+def test_new_milestone_ignores_legacy_payloads_during_phase_dedup(runtime):
+    root, worker, _other = ready_goal(runtime)
+    with runtime.db.transaction() as conn:
+        child = conn.execute(select(tasks).where(tasks.c.id == worker["task_id"])).mappings().one()
+        for index, payload in enumerate((
+            {"public_text": "旧格式进度"},
+            {"phase": "checking", "public_text": "没有证据的旧格式"},
+        )):
+            runtime.service.graph.event(conn, child, "milestone", payload, event_id=f"legacy-{index}", wake=True)
+    identity = (worker["run_id"], worker["fencing_token"], "a")
+    runtime.service.observation(*identity, {"id": "verified-current", "data": {"checked": 1},
+        "sha256": "a" * 64, "retrieved_at": runtime.clock.now().isoformat()})
+    arguments = {"phase": "checking", "public_text": "当前已核实进度", "evidence_refs": ["verified-current"]}
+    assert runtime.service.task_operation(*identity, {"operation": "tasks.report_progress",
+        "call_id": "current", "arguments": arguments})["accepted"]
+    assert runtime.service.task_operation(*identity, {"operation": "tasks.report_progress",
+        "call_id": "reworded", "arguments": {**arguments, "public_text": "同一事实换措辞"}}) == {
+            "accepted": False, "reason": "coalesced"}
+    with runtime.db.engine.connect() as conn:
+        task = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        progress = runtime.service.graph.status(conn, task)["progress"]
+    assert progress["phase"] == "checking"
+    assert progress["latest_milestone"]["evidence_refs"] == ["verified-current"]

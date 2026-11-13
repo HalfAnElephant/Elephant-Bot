@@ -416,7 +416,7 @@ class TaskGraph:
         self.service.wakeup.set()
 
     def progress(self, conn, task, run_id, payload, call_id):
-        from .progress import registered_artifacts
+        from .progress import milestone_spec, registered_artifacts
         spec = ProgressSpec.model_validate_json(json.dumps(payload))
         root = self.root(conn, task)
         if task["goal_revision"] != root["goal_revision"] or not self.handoff_valid(task):
@@ -435,7 +435,11 @@ class TaskGraph:
         previous = conn.execute(select(agent_events).where(agent_events.c.task_id == task["id"],
             agent_events.c.kind == "milestone", agent_events.c.source_revision == task["goal_revision"])
             .order_by(agent_events.c.seq.desc())).mappings().all()
-        phase_events = [event for event in previous if json.loads(event["payload_json"])["phase"] == spec.phase]
+        phase_events = []
+        for event in previous:
+            previous_spec = milestone_spec(event["payload_json"])
+            if previous_spec is not None and previous_spec.phase == spec.phase:
+                phase_events.append(event)
         evidence = {reference.removeprefix("artifact:") for reference in spec.evidence_refs}
         known = {reference.removeprefix("artifact:") for event in phase_events
                  for reference in json.loads(event["payload_json"])["evidence_refs"]}

@@ -19,11 +19,11 @@ from qqbot.storage.task_schema import tasks
 @pytest.fixture
 async def project_core(tmp_path, clock, official_config):
     settings = Settings(database=str(tmp_path / 'projects.db'), adapters=(official_config,),
-        owner={'id': 'owner', 'qq_bindings': [{'app_id': 'app', 'user_openid': '300', 'verified_at': clock.now().isoformat()}]},
+        owner={'id': 'owner', 'qq_bindings': ({'app_id': 'app', 'user_openid': '300', 'verified_at': clock.now().isoformat()},)},
         orchestration={'workspace_bindings': {'alpha': str(tmp_path / 'alpha'), 'beta': str(tmp_path / 'beta')}},
-        memory={'openviking': {'endpoint': 'http://127.0.0.1:1933', 'bindings': [
+        memory={'openviking': {'endpoint': 'http://127.0.0.1:1933', 'bindings': tuple(
             {'owner_id': 'owner', 'workspace_id': name, 'account_id': 'elephant',
-             'user_id': name, 'api_key_env': 'PROJECT_MEMORY_TEST_KEY'} for name in ('personal', 'alpha', 'beta')]}})
+             'user_id': name, 'api_key_env': 'PROJECT_MEMORY_TEST_KEY'} for name in ('personal', 'alpha', 'beta'))}})
     core = create_app(settings, clock=clock, run_background=False).state.core
     yield core
     await core.stop()
