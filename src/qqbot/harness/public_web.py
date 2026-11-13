@@ -29,7 +29,7 @@ def public_addresses(host, port, *, timeout=None):
                   "sys.argv[1], int(sys.argv[2]), type=socket.SOCK_STREAM)))")
         try:
             result = subprocess.run([sys.executable, "-I", "-c", script, host, str(port)],
-                                    capture_output=True, text=True, timeout=timeout)
+                                    capture_output=True, text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired:
             raise TimeoutError("public DNS deadline exceeded") from None
         if result.returncode:
@@ -94,7 +94,7 @@ def fetch_public(url, *, authorize_url=None):
                 headers={"User-Agent": "ElephantBot/0.1", "Accept-Encoding": "identity"},
             )
             sock = connection.sock
-            def interrupt():
+            def interrupt(sock=sock):
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
