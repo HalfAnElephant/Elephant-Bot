@@ -66,8 +66,8 @@ def test_native_compaction_scales_with_actual_model_window(window):
     from qqbot.harness.pi import compaction_settings
 
     settings = Settings(model=ModelConfig(context_window=window))
-    output = max(settings.execution.budget.output_tokens_per_call,
-                 settings.execution.interactive_budget.output_tokens_per_call,
+    output = max(settings.execution.budget.output_tokens_per_call or 0,
+                 settings.execution.interactive_budget.output_tokens_per_call or 0,
                  settings.context.compaction_output_tokens)
     limits = settings.context.limits(window, output)
     assert limits["soft_compaction_input_tokens"] == window - max((window + 9) // 10, output + 1024)
@@ -80,6 +80,7 @@ def test_native_compaction_scales_with_actual_model_window(window):
 def test_config_allows_explicit_threshold_with_output_headroom():
     values = Settings().model_dump(mode="json")
     values["context"].update(max_tokens=23552, keep_recent_tokens=4000)
+    values["execution"]["budget"]["output_tokens_per_call"] = 8192
     settings = Settings.model_validate_json(json.dumps(values))
     assert settings.context.max_tokens + settings.execution.budget.output_tokens_per_call + 1024 == settings.model.context_window
 

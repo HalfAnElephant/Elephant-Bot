@@ -111,7 +111,7 @@ class ModelCapacity:
 class ProviderAdapter:
     def __init__(self, model, endpoint, key, *, authorize, reserve, record, transport=None,
                  capacity=None, background=False, max_bytes=16777216,
-                 output_tokens=4096, model_window=32768,
+                 output_tokens=None, model_window=32768,
                  compaction_output=4096, stream_supported=True, on_exhausted=None):
         self.model, self.endpoint, self.key = model, endpoint, key
         self.upstream_session = str(uuid4())
@@ -183,7 +183,9 @@ class ProviderAdapter:
             else:
                 payload.pop("tool_choice", None)
             payload["messages"] = [{"role": "system", "content": COMPLETION_INSTRUCTION}, *payload["messages"]]
-        payload.update(max_tokens=output, stream=bool(body.get("stream")))
+        payload["stream"] = bool(body.get("stream"))
+        if output is not None:
+            payload["max_tokens"] = output
         if payload["stream"]:
             payload["stream_options"] = {"include_usage": True}
         self._check_size(payload)

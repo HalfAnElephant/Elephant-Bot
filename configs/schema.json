@@ -354,7 +354,7 @@
             "tool_calls": 80,
             "active_seconds": 600,
             "total_wall_seconds": 3600,
-            "output_tokens_per_call": 4096,
+            "output_tokens_per_call": null,
             "completion_reserve": 1
           }
         },
@@ -365,7 +365,7 @@
             "tool_calls": 200,
             "active_seconds": 1800,
             "total_wall_seconds": 7200,
-            "output_tokens_per_call": 8192,
+            "output_tokens_per_call": null,
             "completion_reserve": 1
           }
         },
@@ -909,11 +909,19 @@
           "type": "integer"
         },
         "output_tokens_per_call": {
-          "default": 8192,
-          "maximum": 32768,
-          "minimum": 1,
-          "title": "Output Tokens Per Call",
-          "type": "integer"
+          "anyOf": [
+            {
+              "maximum": 32768,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional per-request output limit; null uses the provider default",
+          "title": "Output Tokens Per Call"
         },
         "completion_reserve": {
           "default": 1,
@@ -1143,7 +1151,7 @@
           "active_seconds": 600,
           "completion_reserve": 1,
           "model_calls": 30,
-          "output_tokens_per_call": 4096,
+          "output_tokens_per_call": null,
           "tool_calls": 80,
           "total_wall_seconds": 3600
         },
@@ -1151,7 +1159,7 @@
           "active_seconds": 1800,
           "completion_reserve": 1,
           "model_calls": 60,
-          "output_tokens_per_call": 8192,
+          "output_tokens_per_call": null,
           "tool_calls": 200,
           "total_wall_seconds": 7200
         },

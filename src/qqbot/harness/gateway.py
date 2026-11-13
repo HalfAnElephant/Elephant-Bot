@@ -141,7 +141,7 @@ class RunGateway:
         self.provider = ProviderAdapter(self.model, self.endpoint, self.key,
             authorize=self.authorize_action, reserve=self.reserve, record=self.record,
             transport=self.transport, capacity=self.capacity, background=claim.get("role", "worker") != "leader",
-            output_tokens=budget.get("output_tokens_per_call", 4096), model_window=self.model_window,
+            output_tokens=budget.get("output_tokens_per_call"), model_window=self.model_window,
             compaction_output=limits.get("compaction_output_tokens", 4096))
         self.provider.upstream_session = self.upstream_session
         self.provider.max_bytes = limits.get("max_bytes", self.provider.max_bytes)
@@ -384,17 +384,19 @@ class RunGateway:
                 if generation != self.generation or self.revoked:
                     raise HTTPException(403, "binding no longer active")
                 context = self.claim.get("context", {})
+                event = json.loads(self.claim.get("event_json") or "{}")
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
                     "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
                     "repository": self.context.repository, "github_host": self.context.host,
-                    "model_window": self.model_window, "output_tokens": max(self.provider.output_tokens, self.provider.compaction_output),
+                    "model_window": self.model_window, "output_tokens": max(self.provider.output_tokens or self.model_window, self.provider.compaction_output),
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],
                     "input_ids": context.get("source_input_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
                     "goal": self.claim["goal"], "goal_spec": self.claim.get("goal_spec", {}),
                     "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
+                    "reply_limit": (event.get("reply_context") or {}).get("max_replies"),
                     "retrieved_data": context.get("retrieved_data", []),
                     "memory_status": context.get("memory_status", "disabled"),
                     "current_time": context.get("now"), "timezone": context.get("timezone", "Asia/Shanghai"), "continuation": self.claim.get("continuation", {})}
@@ -411,8 +413,10 @@ class RunGateway:
                         "observation_refs": list(self.observations), "effect_refs": list(self.effects),
                         "limitations": (self.outcome or {}).get("unresolved_items", [])}
                     body["attachments"] = list(self.artifacts)
+                result = await self.call("session-receipt", body)
+                if body.get("kind") in {"turn_finished", "run_yielded"}:
                     self.session_receipt = body
-                return await self.call("session-receipt", body)
+                return result
 
         @self.app.post("/mode")
         async def mode(request: Request, authorization: str = Header(default="")):

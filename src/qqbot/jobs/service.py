@@ -162,7 +162,7 @@ class TaskService:
     def _notification_budget(task):
         original = ExecutionPlan.model_validate_json(task["plan_json"]).budget
         return RunBudget(model_calls=2, tool_calls=0, active_seconds=30, total_wall_seconds=30,
-                         output_tokens_per_call=min(original.output_tokens_per_call, 1024))
+                         output_tokens_per_call=min(original.output_tokens_per_call or 1024, 1024))
 
     def _run_limits(self, run, task):
         if run["run_reason"] == "notification":

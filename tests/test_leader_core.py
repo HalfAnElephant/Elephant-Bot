@@ -364,3 +364,43 @@ async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official
     finally:
         await core.stop()
         core.db.close()
+
+
+async def test_leader_can_acknowledge_mid_turn_and_late_progress_is_fenced(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
+
+    from qqbot.domain import OutboundEnvelope
+    from qqbot.storage.schema import outbox
+
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        event = core.adapters["qq"].normalize(official_payload(official_event, private=True,
+            text="查看一下 yourtjhub 现在有多少 Issue"))
+        event = event.model_copy(update={"event_id": "progress:source"})
+        event, _ = core.inbox.accept(event)
+        await core.process(event)
+        claim = core.sessions.claim("leader")
+        identity = (claim["run_id"], claim["fencing_token"], "leader")
+        payload = {"text": "收到，我现在去查一下～", "notification_id": "first"}
+        first = await core.leader.invoke("notify", identity, payload)
+        repeated = await core.leader.invoke("notify", identity, {**payload, "notification_id": "retried"})
+        assert first == repeated and first["accepted"]
+        assert first["reply_messages_remaining"] == event.reply_context.max_replies - 1
+        with core.db.engine.connect() as conn:
+            rows = conn.execute(select(outbox)).mappings().all()
+            assert len(rows) == 1
+            progress = OutboundEnvelope.model_validate_json(rows[0]["envelope_json"])
+            assert progress.purpose == "progress" and core.pre_send(progress)
+            assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == claim["run_id"])).scalar_one() == 1
+            assert conn.execute(select(dialogue_inputs.c.handled_at)).scalar_one() is None
+        receipt = {"kind": "turn_finished", "session_id": claim["session_id"], "run_id": claim["run_id"],
+            "session_revision": "leaf", "input_ids": claim["source_ids"], "inflight": 0, "tools_paired": True}
+        core.leader.complete(*identity, {"status": "completed", "summary": "当前有 64 个未关闭的 Issue。"},
+            stopped=True, quiescent=False, receipt=receipt)
+        assert not core.pre_send(progress)
+        with core.db.engine.connect() as conn:
+            final = conn.execute(select(outbox.c.envelope_json).where(outbox.c.origin_id.like("turn:%"))).scalar_one()
+        assert core.pre_send(OutboundEnvelope.model_validate_json(final))
+    finally:
+        await core.stop()
+        core.db.close()

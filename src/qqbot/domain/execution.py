@@ -31,7 +31,8 @@ class RunBudget(DTO):
     tool_calls: int = Field(default=200, ge=0, le=1000)
     active_seconds: int = Field(default=1800, ge=1, le=86400)
     total_wall_seconds: int = Field(default=7200, ge=1, le=604800)
-    output_tokens_per_call: int = Field(default=8192, ge=1, le=32768)
+    output_tokens_per_call: int | None = Field(default=None, ge=1, le=32768,
+        description="Optional per-request output limit; null uses the provider default")
     completion_reserve: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")

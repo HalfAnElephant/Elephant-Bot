@@ -415,15 +415,18 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
-        if envelope.origin_kind == "chat" and envelope.origin_id.startswith("turn:"):
+        origin_id = envelope.origin_id
+        if envelope.origin_kind == "chat" and origin_id.startswith("progress:"):
+            origin_id = origin_id.split(":", 2)[-1]
+        if envelope.origin_kind == "chat" and origin_id.startswith("turn:"):
             from qqbot.storage.agent_schema import dialogue_inputs
 
             from .task_graph import TERMINAL
 
-            session_id, _, source_id = envelope.origin_id.removeprefix("turn:").partition(":")
+            session_id, _, source_id = origin_id.removeprefix("turn:").partition(":")
             with self.db.engine.connect() as conn:
                 source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == source_id)).mappings().first()
-                if not source:
+                if not source or envelope.purpose == "progress" and source["handled_at"]:
                     return False
                 completed = conn.execute(select(runs.c.request_json, runs.c.result_json).where(
                     runs.c.id == source["claimed_attempt_id"], runs.c.session_id == session_id,

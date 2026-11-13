@@ -627,7 +627,7 @@ class SystemdGeneralRun(GeneralRun):
 
     async def start_runner(self):
         from datetime import UTC, datetime, timedelta
-        output = max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output)
+        output = max(self.gateway.provider.output_tokens or 0, self.gateway.provider.compaction_output)
         compaction = compaction_settings(self.gateway.model_window, self.claim.get("context", {}).get("limits", {}), output)
         manifest = {"schema_version": 2, "task_id": self.launch_task_id, "run_id": self.claim["run_id"],
             "session_id": self.session_id, "process_id": self.process_id, "process_epoch": self.process_epoch,

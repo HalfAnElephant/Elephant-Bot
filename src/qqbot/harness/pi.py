@@ -176,7 +176,7 @@ class PiRunnerAdapter:
         }
         limits = self.gateway.claim.get("context", {}).get("limits", {}) if self.gateway else {}
         compaction = compaction_settings(self.gateway.model_window, limits,
-            max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output)) if self.gateway else {
+            max(self.gateway.provider.output_tokens or 0, self.gateway.provider.compaction_output)) if self.gateway else {
                 "enabled": True, "reserveTokens": 32768 - 6000, "keepRecentTokens": 2000}
         (profile / "settings.json").write_text(json.dumps({
             "cacheWarming": "off", "defaultThinkingLevel": "off",
@@ -189,7 +189,7 @@ class PiRunnerAdapter:
             (profile / "models.json").write_text(json.dumps({"providers": {"qqbot": {
                 "baseUrl": self.gateway_url + "/v1", "api": "openai-completions", "apiKey": "binding-required",
                 "models": [{"id": self.model, "name": self.model, "reasoning": False, "input": ["text"],
-                    "contextWindow": self.gateway.model_window, "maxTokens": max(self.gateway.provider.output_tokens, self.gateway.provider.compaction_output),
+                    "contextWindow": self.gateway.model_window, "maxTokens": max(self.gateway.provider.output_tokens or self.gateway.model_window, self.gateway.provider.compaction_output),
                     "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}]}}}))
         if self.api_key:
             if self.provider != "openai":
@@ -322,6 +322,12 @@ class PiRunnerAdapter:
                     elif kind == "agent_settled":
                         async with self.input_lock:
                             self.accepting_input = False
+                        receipt = self.gateway.session_receipt if self.gateway else None
+                        yielded = (self.gateway and self.gateway.waiting and receipt
+                                   and receipt.get("kind") == "run_yielded"
+                                   and receipt.get("tools_paired") is True and receipt.get("inflight") == 0)
+                        if yielded and error in {"This operation was aborted", "aborted"}:
+                            error = None
                         if error or (not text.strip() and not (self.gateway and self.gateway.waiting)):
                             raise RuntimeError(error or "no final assistant output")
                         validate_user_facing_text(text)

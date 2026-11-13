@@ -10,7 +10,7 @@ from qqbot.domain.agents import TaskInputSpec
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
-from qqbot.storage.schema import outbox
+from qqbot.storage.schema import outbox, reply_counters
 from qqbot.storage.task_schema import (
     events,
     inputs,
@@ -665,7 +665,29 @@ class LeaderRuntime:
             if operation == "inputs":
                 return []
             if operation == "notify":
-                return {"accepted": False, "reason": "Leader replies when its short turn ends"}
+                if run["role"] != "leader":
+                    raise PermissionError("only the Leader can send user-facing progress")
+                self.authorize(conn, run, claim, {"action": "notification.send"})
+                text = TaskResult(status="completed", summary=payload["text"]).summary
+                validate_user_facing_text(text)
+                notice_id = stable_id("leader-progress", claim["session_id"], claim["source_ids"][0], text)
+                event = InboundEvent.model_validate_json(claim["event_json"])
+                if claim.get("target_root_task_id"):
+                    target = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                    result = self.service._notification(conn, target, run_id, text, "progress",
+                        payload.get("importance", "normal"), notice_id)
+                else:
+                    deliveries = self.core.outbox.enqueue_text(conn, target=event.conversation, text=text,
+                        origin_kind="chat", origin_id="progress:" + notice_id + ":turn:" + claim["session_id"] + ":" + claim["source_ids"][0],
+                        reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
+                        anchor_message_id=event.platform_message_id, purpose="progress")
+                    result = {"accepted": bool(deliveries), "notification_id": notice_id}
+                remaining = None
+                if event.reply_context:
+                    counter = stable_id(event.conversation.key, event.reply_context.platform_message_id)
+                    used = conn.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter)).scalar_one_or_none() or 0
+                    remaining = max(0, event.reply_context.max_replies - used)
+                return {**result, "reply_messages_remaining": remaining}
             if operation == "bind-process":
                 self.authorize(conn, run, claim, {"action": "task.execute"})
                 if payload["session_id"] != claim["session_id"]:

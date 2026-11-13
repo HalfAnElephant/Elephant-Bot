@@ -1,6 +1,5 @@
 """Task tree rules on the existing task/attempt/operation repositories."""
 import json
-from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import func, insert, or_, select, update
@@ -353,13 +352,8 @@ class TaskGraph:
         if not verified:
             return {"accepted": False, "reason": "no_verified_evidence"}
         last = conn.execute(select(agent_events).where(agent_events.c.task_id == task["id"],
-            agent_events.c.kind == "milestone").order_by(agent_events.c.seq.desc()).limit(2)).mappings().all()
-        now = self.clock.now()
-        recent = [row for row in last if (now - datetime.fromisoformat(row["created_at"])).total_seconds() < 600]
-        if (now - datetime.fromisoformat(task["created_at"])).total_seconds() < 60 or len(recent) >= 2:
-            return {"accepted": False, "reason": "coalesced"}
-        if last and ((now - datetime.fromisoformat(last[0]["created_at"])).total_seconds() < 60
-                     or json.loads(last[0]["payload_json"]) == spec.model_dump(mode="json")):
+            agent_events.c.kind == "milestone").order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
+        if last and json.loads(last["payload_json"]) == spec.model_dump(mode="json"):
             return {"accepted": False, "reason": "coalesced"}
         self.event(conn, task, "milestone", spec.model_dump(mode="json"), attempt_id=run_id,
                    event_id=call_id, wake=True)

@@ -224,7 +224,7 @@ if (typeof document !== 'undefined') (() => {
     max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', keep_recent_tokens: '近期消息保留 Token', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
     id: '标识', preferences: '个人偏好', qq_bindings: 'QQ 官方身份绑定', user_openid: '用户 OpenID', verified_at: '验证时间',
     preset: '预设', default_effect: '默认行为', rules: '权限规则', enabled: '启用', priority: '优先级', subject: '主体范围', actions: '操作匹配', resources: '资源匹配', effect: '行为', adapter_instance_id: '接入实例 ID', bot_identity_id: '机器人身份 ID', identity_namespace: '身份命名空间', group_id: '群 ID', user_id: '用户 ID',
-    model_calls: '模型调用次数', tool_calls: '工具调用次数', active_seconds: '活跃执行（秒）', total_wall_seconds: '总时长（秒）', output_tokens_per_call: '每次输出 Token', input_tokens: '输入 Token 预算', output_tokens: '输出 Token 预算', completion_reserve: '完成阶段预留模型调用',
+    model_calls: '模型调用次数', tool_calls: '工具调用次数', active_seconds: '活跃执行（秒）', total_wall_seconds: '总时长（秒）', output_tokens_per_call: '每次输出 Token 上限', input_tokens: '输入 Token 预算', output_tokens: '输出 Token 预算', completion_reserve: '完成阶段预留模型调用',
     pending_inputs_per_owner: '每个 owner 待处理输入上限', pending_root_tasks_per_owner: '每个 owner 根任务上限', child_parallelism: '子任务并行度', max_task_depth: '最大任务深度', max_nodes_per_root: '每个根任务节点上限', leader_inbox_batch_limit: 'Leader 收件批次上限', leader_inbox_coalesce_seconds: 'Leader 收件合并时间（秒）', model_request_limit: '模型请求并发上限', pi_executable: 'Pi 可执行文件', github_host: 'GitHub 主机', workspace_bindings: '工作区绑定',
     provider: '技能提供方', owner_storage_root: 'owner 技能存储根目录', hermes: 'Hermes 设置', background_review_enabled: '启用后台复盘', create_dir: '技能创建目录', write_approval: '写入审批', inline_shell: '内联 Shell', ledger: '记录技能变更', ledger_max_bytes: '变更记录上限（字节）', creation_nudge_interval: '技能创建提醒间隔',
     namespace: '命名空间', bindings: '用户凭据绑定', expected_version: '预期 OpenViking 版本', private_enabled: '启用私聊记忆', group_enabled: '启用群记忆', operation_budget_seconds: '操作预算（秒）', max_query_chars: '最大查询字符数', recall_max_chars: '召回内容上限（字符）', owner_id: 'Owner ID', workspace_id: '工作区 ID', account_id: 'OpenViking 账户 ID',
@@ -237,7 +237,8 @@ if (typeof document !== 'undefined') (() => {
     effect: {allow: '允许', deny: '拒绝'}, default_effect: {allow: '允许', deny: '拒绝'}
   };
   const helps = {
-    notify_before_tools: '默认开启。需要调用工具时先简短告知用户，再开始操作；直接能回答的聊天照常回复。保存后重启生效。',
+    notify_before_tools: '旧执行记录的兼容设置。Leader 根据实际过程自主决定接收确认和进度通知。',
+    output_tokens_per_call: '勾选“暂不设置”时使用模型服务默认输出长度。填写数字可设置单次请求的输出 Token 上限。',
     adapters: '添加 QQ 官方机器人接入。账号、群号与用户 ID 均使用字符串。',
     permissions: '仅用作初始策略；数据库已有权限策略时，以“权限策略”页为准。',
     model: 'Core 模型元信息；实际请求使用 Worker 的模型、地址和凭据，请保持一致。',

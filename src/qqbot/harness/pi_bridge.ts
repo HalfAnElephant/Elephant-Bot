@@ -8,6 +8,10 @@ export default function (pi: ExtensionAPI) {
   const base = process.env.QQBOT_GATEWAY_URL!;
   let binding: any = null;
   let waiting = false;
+  let turnStartedAt = 0;
+  let progressNoticeAccepted = false;
+  let replyMessagesRemaining: number | null = null;
+  const messageTools = new Set(["capability_search", "capability_invoke", "content_read"]);
   const deliveredInputs = new Set<string>();
   let activeInputs = new Set<string>();
   let finalSummary = "";
@@ -61,8 +65,11 @@ export default function (pi: ExtensionAPI) {
       pi.appendEntry("qqbot-input", {id: envelope.input_id});
       return persistInput(`[[elephant-input:${envelope.input_id}]]\n` + envelope.text, [envelope.input_id]);
     }
-    binding = current;
+    binding = {...current, binding_id: envelope.binding_id};
     waiting = false;
+    turnStartedAt = Date.now();
+    progressNoticeAccepted = false;
+    replyMessagesRemaining = binding.reply_limit ?? null;
     finalSummary = "";
     outcome = null;
     activeInputs = new Set(binding.input_ids || []);
@@ -96,6 +103,7 @@ export default function (pi: ExtensionAPI) {
         legacySource = null;
       }
     }
+    for (const definition of definitions) register(definition);
     for (const schema of binding.native_tools || []) {
       register({name: schema.name.replace("tasks.", "tasks_"), description: schema.description,
                 parameters: Type.Unsafe(schema.parameters)});
@@ -121,7 +129,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => {
     if (!binding) throw new Error("Missing trusted run binding");
     event.systemPromptOptions.customPrompt = binding.system_prompt;
-    event.systemPromptOptions.sections.elephant_tools = "使用 capability_search 按需发现业务能力及参数；不要把完整目录复制进提示词。content_read 只接受实际返回的 content_ref。";
+    event.systemPromptOptions.sections.elephant_tools = "先判断直接处理还是使用 tasks_submit 委派。直接处理或 Worker 执行时，用 capability_search 按需发现业务能力及参数；不要把完整目录复制进提示词。content_read 只接受实际返回的 content_ref。";
     return {message: {customType: "elephant-runtime", display: false,
       content: JSON.stringify({time: binding.current_time, timezone: binding.timezone,
         repository: binding.repository, github_host: binding.github_host,
@@ -153,8 +161,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("turn_end", (event, ctx) => {
     const message: any = event.message;
     if (message.role === "assistant") finalSummary = (message.content || []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
-    if (waiting) {
-      const calls = (message.content || []).filter((p: any) => p.type === "toolCall");
+    const calls = (message.content || []).filter((p: any) => p.type === "toolCall");
+    if (waiting && calls.length) {
       if (calls.length !== event.toolResultEntryIds.length) throw new Error("Wait tool results are not durably paired");
       pi.appendEntry("elephant-yield-boundary", {run_id: binding.run_id, paired_results: event.toolResultEntryIds});
       durable(ctx);
@@ -203,7 +211,7 @@ export default function (pi: ExtensionAPI) {
       parameters: Type.Object({name: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown())})},
     {name: "content_read", description: "Read a large result using its returned content_ref (content:<sha256>). Use this only when an actual reference was returned.",
       parameters: Type.Object({reference: Type.String(), offset: Type.Optional(Type.Integer({minimum: 0})), limit: Type.Optional(Type.Integer({minimum: 1, maximum: 65536}))})},
-    {name: "task_notify", description: "Reliably enqueue meaningful natural-language progress. Accepted does not mean delivered. Do not report every tool call.",
+    {name: "task_notify", description: "Send a natural-language acknowledgement or meaningful progress when the user would otherwise wait, then continue working in this turn. Decide when it helps. Accepted does not mean delivered. Do not report every tool call.",
       parameters: Type.Object({text: Type.String({minLength: 1, maxLength: 10000}), importance: Type.Optional(Type.Union([Type.Literal("normal"), Type.Literal("important")]))})},
     {name: "task_ask_user", description: "Persist a specific question and verified continuation checkpoint, then end this run. Must be alone in its tool batch.",
       parameters: Type.Object({text: Type.String({minLength: 1}), checkpoint: Type.String({minLength: 1, maxLength: 32000})})},
@@ -219,15 +227,68 @@ export default function (pi: ExtensionAPI) {
         unresolved_items: Type.Optional(Type.Array(Type.String()))})},
   ];
   function register(definition: any) {
-    pi.registerTool({...definition, label: definition.name,
+    const withUserMessage = binding?.role === "leader" && messageTools.has(definition.name);
+    let schema = definition.parameters;
+    if (withUserMessage) {
+      schema = Type.Object({...schema.properties, user_message: Type.Union([Type.String({minLength: 1, maxLength: 10000}), Type.Null()], {
+        description: "What should the user hear before this operation? Use a natural acknowledgement when beginning work. After acknowledging, normally choose JSON null for routine calls or repeated reassurance. Send another message for a meaningful finding, changed approach or blocker. Describe intentions or verified progress, never claim this operation already succeeded.",
+      })});
+    }
+    pi.registerTool({...definition, parameters: schema, label: definition.name,
+      prepareArguments: withUserMessage ? (args: any) => {
+        // Old pending calls predate the explicit communication choice.
+        if (args && typeof args === "object" && !Array.isArray(args) && !("user_message" in args)) {
+          return {...args, user_message: null};
+        }
+        return args;
+      } : undefined,
       async execute(id, parameters, signal) {
         if (!binding) throw new Error("No active run binding");
         const current = binding;
-        const result = await request("/tools/" + definition.name, {call_id: id, arguments: parameters}, current.tool_token, signal);
+        let argumentsForHost = parameters;
+        let messageResult: any = null;
+        if (messageTools.has(definition.name)) {
+          const {user_message: requestedMessage, ...businessArguments} = parameters;
+          const user_message = requestedMessage === "null" ? null : requestedMessage;
+          argumentsForHost = businessArguments;
+          if (user_message != null) {
+            if (current.role !== "leader") throw new Error("User-facing messages require the Leader role");
+            try {
+              const noticeId = createHash("sha256").update("user-message:" + id).digest("hex");
+              messageResult = await request("/tools/task_notify", {call_id: noticeId,
+                arguments: {text: user_message}}, current.tool_token, signal);
+              if (messageResult.accepted) progressNoticeAccepted = true;
+              if ("reply_messages_remaining" in messageResult) replyMessagesRemaining = messageResult.reply_messages_remaining;
+            } catch (error) {
+              const active = await request("/binding", {binding_id: current.binding_id}, process.env.QQBOT_PROCESS_TOKEN!, signal);
+              if (active.generation !== current.generation) throw new Error("Run binding changed during notification");
+              messageResult = {accepted: false, error: String(error)};
+            }
+          }
+        }
+        let result: any;
+        try {
+          result = await request("/tools/" + definition.name, {call_id: id, arguments: argumentsForHost}, current.tool_token, signal);
+        } catch (error) {
+          if (messageResult) throw new Error(String(error) + "\n" + JSON.stringify({user_message_result: messageResult}));
+          throw error;
+        }
         if (binding.generation !== current.generation) throw new Error("Run binding changed during tool execution");
         if (result.waiting) waiting = true;
         if (definition.name === "task_outcome") outcome = parameters;
-        return {content: [{type: "text", text: JSON.stringify(result)}], details: {}};
+        if (definition.name === "task_notify") {
+          if (result.accepted) progressNoticeAccepted = true;
+          if ("reply_messages_remaining" in result) replyMessagesRemaining = result.reply_messages_remaining;
+        }
+        const content = [{type: "text" as const, text: JSON.stringify(result)}];
+        if (current.role === "leader") {
+          content.push({type: "text", text: JSON.stringify({host_interaction: {
+            elapsed_turn_seconds: Math.max(0, (Date.now() - turnStartedAt) / 1000),
+            progress_notice_accepted: progressNoticeAccepted, reply_messages_remaining: replyMessagesRemaining,
+            user_message_result: messageResult,
+          }})});
+        }
+        return {content, details: {}};
       },
     });
   }

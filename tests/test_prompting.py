@@ -27,6 +27,10 @@ async def test_leader_binding_includes_persona_and_public_contract(tmp_path, pur
         assert "甜美" in prompt and "白米饭" in prompt and "鲸鱼耳朵" in prompt
         assert "请叫我小陈" in prompt and "本轮用途：" + purpose in prompt
         assert "不展示内部任务编号" in prompt and "按需要使用 Markdown" in prompt
+        assert "包括天气和 Issue 数量" in prompt and "task_notify" in prompt
+        assert "先委派再设计实现" in prompt and "通知时机由你" in prompt
+        assert "收到用户请求本身就足以发一句自然的接收确认" in prompt
+        assert "接收确认、每条进度通知和最终答复分别构成完整消息" in prompt
         assert "提交成功后简短说明已接受/排队" not in prompt
         assert "禁止 Markdown" not in PERSONA
     finally:

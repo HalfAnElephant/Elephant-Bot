@@ -199,7 +199,7 @@ async def test_locked_pi_rebind_precedes_auto_compaction_and_post_request_passes
     assert all(request["kind"] == "compaction" for request in second[:-1])
     assert 1 <= len(second[:-1]) <= 2
     assert all(request["payload"]["max_tokens"] == 1000 for request in second[:-1])
-    assert second[-1]["payload"]["max_tokens"] == gateway.provider.output_tokens
+    assert "max_tokens" not in second[-1]["payload"]
     assert gateway.provider.max_bytes == 16 * 1024 * 1024
     assert len(json.dumps(second[-1]["payload"]).encode()) < gateway.provider.max_bytes
     assert any("Verified checkpoint" in str(message) for message in second[-1]["payload"]["messages"])
@@ -377,3 +377,147 @@ async def test_locked_pi_image_reaches_upstream_without_entering_session(compact
                for message in messages if isinstance(message.get("content"), list) for part in message["content"])
     session = state.runner.session_path.read_text()
     assert data not in session and "https://cdn.example/signed-image" not in session
+
+
+@pytest.mark.parametrize(("tool_name", "arguments", "expected_status"), [
+    ("tasks_wait", {"children": ["child"]}, "waiting_children"),
+    ("task_ask_user", {"text": "请提供仓库全名。", "checkpoint": "等待仓库身份"}, "waiting_input"),
+])
+async def test_locked_pi_committed_wait_abort_yields_without_retry(compaction_session, tool_name, arguments, expected_status):
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    async def host(operation, payload):
+        if operation == "session-receipt":
+            return {"accepted": True}
+        if operation == "tasks":
+            assert payload["operation"] == "tasks.wait"
+            return {"waiting": True}
+        if operation == "ask":
+            return {"accepted": True, "waiting": True}
+        return await original_call(operation, payload)
+    gateway.call = host
+    gateway.revoke()
+    gateway.bind({**state.claim, "session_id": state.runner.session_path.stem,
+        "context": {**state.claim["context"], "source_input_ids": ["fixture-input"]}})
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        message = {"role": "assistant", "content": None, "tool_calls": [{"id": "wait_call", "type": "function",
+            "function": {"name": tool_name, "arguments": json.dumps(arguments)}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("Wait for the committed condition", keep_alive=True)
+    assert result.status == expected_status
+    assert gateway.session_receipt["kind"] == "run_yielded"
+    assert gateway.session_receipt["tools_paired"] is True
+    assert state.runner.quiescent_verified
+    messages = (await state.runner.rpc("get_messages"))["messages"]
+    assert any(message.get("errorMessage") == "This operation was aborted" for message in messages)
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    yields = [entry for entry in entries if entry.get("customType") == "elephant-yield-boundary"]
+    assert len(yields) == 1
+
+
+async def test_locked_leader_sees_elapsed_time_and_notification_acceptance(compaction_session):
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    async def host(operation, payload):
+        if operation == "notify":
+            return {"accepted": True}
+        return await original_call(operation, payload)
+    gateway.call = host
+    gateway.revoke()
+    gateway.bind({**state.claim, "role": "leader", "purpose": "user"})
+    calls = [
+        ("capability_search", {"query": "github"}),
+        ("task_notify", {"text": "收到，我正在确认仓库名称～"}),
+        ("capability_search", {"query": "web"}),
+    ]
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        index = len(requests) - 1
+        message = {"role": "assistant", "content": "查好了。"}
+        if index < len(calls):
+            name, arguments = calls[index]
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": f"feedback-{index}",
+                "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("查一下仓库", keep_alive=True)
+    assert result.summary == "查好了。"
+    messages = (await state.runner.rpc("get_messages"))["messages"]
+    feedback = [json.loads(part["text"])["host_interaction"] for message in messages
+        if message.get("role") == "toolResult" for part in message["content"][1:]]
+    assert [item["progress_notice_accepted"] for item in feedback] == [False, True, True]
+    assert all(item["elapsed_turn_seconds"] >= 0 for item in feedback)
+    assert all("max_tokens" not in request for request in requests)
+    assert all(any("elapsed_turn_seconds" in json.dumps(message.get("content"))
+        for message in request["messages"] if message["role"] == "tool") for request in requests[1:])
+
+
+@pytest.mark.parametrize("scenario", ["message", "quiet", "old_call", "notification_denied", "business_failure", "worker", "stale_notice", "string_null"])
+async def test_locked_pi_business_call_keeps_explicit_communication_separate(compaction_session, scenario):
+    from qqbot.capabilities.types import Action, Capability
+
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    order = []
+    revoked = {"binding": False}
+    async def host(operation, payload):
+        if operation == "authorize" and payload["action"] == "task.execute" and revoked["binding"]:
+            revoked["binding"] = False
+            return {"allowed": False}
+        if operation == "notify":
+            order.append("notice")
+            if scenario in {"notification_denied", "stale_notice"}:
+                revoked["binding"] = scenario == "stale_notice"
+                raise PermissionError("notification.send denied")
+            return {"accepted": True, "reply_messages_remaining": 3}
+        return await original_call(operation, payload)
+    gateway.call = host
+    def read(arguments, context):
+        order.append("read")
+        assert arguments == {"value": "original"}
+        if scenario == "business_failure":
+            raise OSError("fixture query failed")
+        return {"checked": True}
+    gateway.registry.register(Capability("fixture.read", "Read fixture"), read, lambda a, c: Action("fixture.read", ()))
+    gateway.revoke()
+    gateway.bind({**state.claim, "role": "worker" if scenario == "worker" else "leader", "purpose": "user",
+        "event_json": json.dumps({"reply_context": {"max_replies": 4}})})
+    arguments = {"name": "fixture.read", "arguments": {"value": "original"}}
+    if scenario not in {"old_call", "worker"}:
+        arguments["user_message"] = None if scenario == "quiet" else "收到，我来核实一下～"
+        if scenario == "string_null":
+            arguments["user_message"] = "null"
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        message = {"role": "assistant", "content": "查询受阻。" if scenario in {"business_failure", "stale_notice"} else "核实好了。"}
+        if len(requests) == 1:
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": "explicit-choice", "type": "function",
+                "function": {"name": "capability_invoke", "arguments": json.dumps(arguments)}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("核实这个数据", keep_alive=True)
+    assert result.summary == ("查询受阻。" if scenario in {"business_failure", "stale_notice"} else "核实好了。")
+    schema = next(tool["function"]["parameters"] for tool in requests[0]["tools"] if tool["function"]["name"] == "capability_invoke")
+    if scenario == "worker":
+        assert "user_message" not in schema["properties"]
+    else:
+        assert "user_message" in schema["required"]
+    expected_order = ["read"] if scenario in {"quiet", "old_call", "worker", "string_null"} else ["notice", "read"]
+    assert order == (["notice"] if scenario == "stale_notice" else expected_order)
+    messages = (await state.runner.rpc("get_messages"))["messages"]
+    tool_result = next(message for message in messages if message.get("role") == "toolResult")
+    assert tool_result["isError"] is (scenario in {"business_failure", "stale_notice"})
+    if scenario == "business_failure":
+        assert '"accepted":true' in "".join(part.get("text", "") for part in tool_result["content"])
+    elif scenario not in {"worker", "stale_notice"}:
+        feedback = json.loads(tool_result["content"][1]["text"])["host_interaction"]
+        assert feedback["progress_notice_accepted"] is (scenario == "message")
+        assert feedback["reply_messages_remaining"] == (3 if scenario == "message" else 4)

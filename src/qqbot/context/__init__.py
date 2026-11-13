@@ -592,8 +592,8 @@ class ContextService:
             "expression_habits": expression_habits,
             "selected_reference": selected_reference,
             "limits": self.settings.context.limits(self.settings.model.context_window, max(
-                self.settings.execution.interactive_budget.output_tokens_per_call,
-                self.settings.execution.budget.output_tokens_per_call,
+                self.settings.execution.interactive_budget.output_tokens_per_call or 0,
+                self.settings.execution.budget.output_tokens_per_call or 0,
             )),
             "now": self.clock.now().isoformat(),
             "timezone": self.settings.timezone,

@@ -919,3 +919,19 @@ async def test_review_without_reusable_content_finishes_without_business_or_deli
         assert conn.execute(select(runs.c.result_json).where(runs.c.id == source["run_id"])).scalar_one() == original
         assert conn.execute(select(outbox.c.id)).scalars().all() == deliveries
         assert not conn.execute(select(tasks)).first()
+
+
+def test_verified_worker_progress_has_no_fixed_time_or_count_threshold(runtime):
+    root_goal(runtime)
+    worker = runtime.service.claim("worker")
+    identity = (worker["run_id"], worker["fencing_token"], "worker")
+    for index in range(3):
+        observation_id = f"verified-{index}"
+        runtime.service.observation(*identity, {"id": observation_id, "data": {"checked": index},
+            "sha256": "a" * 64, "retrieved_at": runtime.clock.now().isoformat()})
+        payload = {"operation": "tasks.report_progress", "call_id": f"milestone-{index}",
+            "arguments": {"phase": f"check-{index}", "public_text": f"已核验第 {index + 1} 项。",
+                "evidence_refs": [observation_id]}}
+        assert runtime.service.task_operation(*identity, payload)["accepted"]
+    repeated = {**payload, "call_id": "duplicate-last-milestone"}
+    assert runtime.service.task_operation(*identity, repeated) == {"accepted": False, "reason": "coalesced"}

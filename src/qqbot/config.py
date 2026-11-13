@@ -103,7 +103,6 @@ class ExecutionConfig(DTO):
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
     interactive_budget: RunBudget = RunBudget(
         model_calls=30, tool_calls=80, active_seconds=600, total_wall_seconds=3600,
-        output_tokens_per_call=4096,
     )
     budget: RunBudget = RunBudget()
     warm_max: int = Field(default=4, ge=0, le=32)
@@ -159,8 +158,8 @@ class ContextConfig(DTO):
     topic_idle_seconds: int = Field(default=1800, ge=60, le=86400)
     version: str = "context-v2"
 
-    def limits(self, model_window: int, output_tokens: int) -> dict:
-        output = max(output_tokens, self.compaction_output_tokens)
+    def limits(self, model_window: int, output_tokens: int | None) -> dict:
+        output = max(output_tokens or 0, self.compaction_output_tokens)
         headroom = output + 1024
         soft = self.max_tokens if self.max_tokens is not None else model_window - max(
             (model_window + 9) // 10, headroom
@@ -201,8 +200,8 @@ class Settings(DTO):
         if len(ids) != len(set(ids)):
             raise ValueError("adapter instance IDs must be unique")
         output = max(
-            self.execution.interactive_budget.output_tokens_per_call,
-            self.execution.budget.output_tokens_per_call,
+            self.execution.interactive_budget.output_tokens_per_call or 0,
+            self.execution.budget.output_tokens_per_call or 0,
         )
         self.context.limits(self.model.context_window, output)
         return self
