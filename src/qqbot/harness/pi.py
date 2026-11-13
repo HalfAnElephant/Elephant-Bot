@@ -29,8 +29,9 @@ class PublicAnswerEvents:
     `public_answer_final` occurs at agent_settled, not at a tool-call turn boundary.
     """
 
-    def __init__(self, redact=lambda value: value, max_chars=10000):
+    def __init__(self, redact=lambda value: value, max_chars=10000, *, public_prefix=None):
         self.redact, self.max_chars = redact, max_chars
+        self.public_prefix = public_prefix
         self.message_id = None
         self.text = self.emitted = ""
         self.failed = False
@@ -39,13 +40,16 @@ class PublicAnswerEvents:
     def accept(self, event):
         kind = event.get("type")
         message = event.get("message") or {}
+        if kind == "message_start" and message.get("role") != "assistant":
+            self.message_id = None
+            return []
         if kind == "message_start" and message.get("role") == "assistant":
             self.message_id = str(uuid4())
             self.text = self.emitted = ""
             self.failed = False
             self.last_complete = None
             return [{"type": "public_answer_start", "message_id": self.message_id}]
-        if kind == "message_update" and message.get("role") == "assistant" and self.message_id:
+        if kind == "message_update" and message.get("role", "assistant") == "assistant" and self.message_id:
             change = event.get("assistantMessageEvent") or {}
             if change.get("type") != "text_delta" or not isinstance(change.get("delta"), str):
                 return []
@@ -64,6 +68,7 @@ class PublicAnswerEvents:
                 "error", "aborted"}
             emitted = self._emit(True)
             self.last_complete = None if self.failed else (self.message_id, self.redact(self.text))
+            self.message_id = None
             return emitted
         if kind == "agent_settled" and self.last_complete:
             message_id, text = self.last_complete
@@ -79,7 +84,8 @@ class PublicAnswerEvents:
             safe = self.redact(self.text)
             # Retain enough of the newest text to catch split credentials; callers
             # can additionally disable streaming for tasks with sensitive output.
-            visible = safe if final else safe[:max(0, len(safe) - 256)]
+            visible = safe if final else (self.public_prefix(self.text) if self.public_prefix
+                                          else safe[:max(0, len(safe) - 256)])
             if not visible.startswith(self.emitted):
                 raise ValueError("public text prefix changed")
         except ValueError:
@@ -88,7 +94,9 @@ class PublicAnswerEvents:
         if self.failed:
             return [{"type": "public_answer_end", "message_id": self.message_id,
                      "text": self.emitted, "error": True}] if final else []
-        if not final and len(visible) - len(self.emitted) < 128:
+        # Emit the first safe text immediately, then bound cumulative spool writes.
+        if not final and (visible == self.emitted or (
+                self.emitted and len(visible) - len(self.emitted) < 16)):
             return []
         self.emitted = visible
         return [{"type": "public_answer_end" if final else "public_answer_delta",
@@ -124,7 +132,7 @@ class PiRunnerAdapter:
         self.actual_session_id = None
         self.event_sink = None
         self.public_event_sink = None
-        self.public_answers = PublicAnswerEvents(self.safe_diagnostic)
+        self.public_answers = PublicAnswerEvents(self.safe_diagnostic, public_prefix=self.public_text_prefix)
         self.process = None
         self.queue = asyncio.Queue(maxsize=8)
         self.responses = {}
@@ -268,12 +276,42 @@ class PiRunnerAdapter:
                 await self.queue.put({"type": "host_error", "error": self.error})
                 return
 
-    def safe_diagnostic(self, text):
+    def credential_values(self):
         secrets = [self.api_key]
         if self.gateway:
             secrets += [self.gateway.model_token, self.gateway.tool_token, self.gateway.key, self.gateway.process_token]
-        for secret in filter(None, secrets):
+        return tuple(filter(None, secrets))
+
+    def public_text_prefix(self, text):
+        text = self.safe_diagnostic(text, partial=False)
+        for secret in self.credential_values():
+            for length in range(len(secret), 7, -1):
+                suffix = secret[-length:]
+                if suffix.startswith(text):
+                    return ""
+                if text.startswith(suffix):
+                    text = "[REDACTED]" + text[length:]
+                    break
+        cutoff = len(text)
+        for secret in self.credential_values():
+            for length in range(min(len(secret) - 1, len(text)), 0, -1):
+                if text.endswith(secret[:length]):
+                    cutoff = min(cutoff, len(text) - length)
+                    break
+        # Hold possible protocol markup and unfinished Bearer credentials across chunks.
+        markup = text.find("<")
+        if markup >= 0:
+            cutoff = min(cutoff, markup)
+        bearer = re.search(r"(?i)(?:b|be|bea|bear|beare|bearer\s*)$", text)
+        if bearer:
+            cutoff = min(cutoff, bearer.start())
+        return text[:cutoff]
+
+    def safe_diagnostic(self, text, *, partial=True):
+        for secret in self.credential_values():
             text = text.replace(secret, "[REDACTED]")
+            if not partial:
+                continue
             for length in range(min(len(secret), len(text)), 7, -1):
                 if text.startswith(secret[-length:]):
                     text = "[REDACTED]" + text[length:]
@@ -294,7 +332,7 @@ class PiRunnerAdapter:
         self.busy, self.quiescent_verified = True, False
         self.accepting_input = True
         self.steered_inputs = set()
-        self.public_answers = PublicAnswerEvents(self.safe_diagnostic)
+        self.public_answers = PublicAnswerEvents(self.safe_diagnostic, public_prefix=self.public_text_prefix)
         text, error, settled = "", None, False
         try:
             if not self.process:

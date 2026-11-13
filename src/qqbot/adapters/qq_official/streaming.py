@@ -128,8 +128,6 @@ class OfficialStream:
             candidate = self.text + delta
             if len(candidate) > self.max_chars:
                 raise ValueError("stream character limit exceeded")
-            if self.remain_msg_len is not None and len(candidate) - len(self.sent_text) > self.remain_msg_len:
-                raise ValueError("platform stream capacity exceeded")
             validate_user_facing_text(candidate)
             self.text = candidate
             return await self._flush()
@@ -199,6 +197,7 @@ class OfficialStream:
         self.sent_text = self.text
         self.index += 1
         remaining = data.get("remain_msg_len")
+        # QQ can return zero after accepting a frame; keep this as telemetry, not writable capacity.
         if isinstance(remaining, int) and not isinstance(remaining, bool) and remaining >= 0:
             self.remain_msg_len = remaining
         self.state = "FINISHED" if final else "OPEN"

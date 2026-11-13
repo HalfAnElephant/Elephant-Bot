@@ -783,7 +783,7 @@ class TaskService:
             state = self._queue_failure_notice(c, task, result, state)
             return {"state": state}
 
-    def _notification(self, c, task, run_id, text, purpose, importance, notification_id):
+    def _notification(self, c, task, run_id, text, purpose, importance, notification_id, *, defer_reply=False):
         if not isinstance(text, str) or not text.strip() or len(text) > 10000:
             raise ValueError("notification text must contain 1..10000 characters")
         validate_user_facing_text(text)
@@ -814,12 +814,16 @@ class TaskService:
         c.execute(insert(notifications).values(id=notification_id, task_id=task["id"], run_id=run_id,
             sequence=seq, purpose=purpose, importance=importance, body=text, created_at=now.isoformat(), state="ACCEPTED"))
         event = InboundEvent.model_validate_json(task["event_json"])
+        streaming = bool(purpose == "result" and run_id and c.execute(select(stream_runs.c.run_id).where(
+            stream_runs.c.run_id == run_id)).first())
         deliveries = self.outbox.enqueue_text(c, target=event.conversation, text=text,
             origin_kind="task", origin_id=notification_id, reply_context=event.reply_context,
             ttl_seconds=86400, requester=event.principal, anchor_message_id=event.platform_message_id,
-            parent_task_id=task["id"], notification_sequence=seq, purpose=purpose)
-        if purpose == "result" and run_id and c.execute(select(stream_runs.c.run_id).where(
-            stream_runs.c.run_id == run_id)).first():
+            parent_task_id=task["id"], notification_sequence=seq, purpose=purpose,
+            defer_reply=defer_reply or streaming)
+        if streaming:
+            c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
+                result_origin_kind="task", result_origin_id=notification_id))
             c.execute(update(outbox_table).where(outbox_table.c.id.in_(deliveries)).values(state="STREAM_PENDING"))
         if purpose == "progress" and importance == "normal":
             last_sent = c.execute(select(func.max(outbox_table.c.sent_at)).where(

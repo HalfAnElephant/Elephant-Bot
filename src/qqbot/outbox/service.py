@@ -16,20 +16,20 @@ class Outbox:
         self.db, self.clock = db, clock
         self.markdown_adapters = frozenset(markdown_adapters)
 
-    def enqueue(self, c, envelope: OutboundEnvelope) -> str:
+    def enqueue(self, c, envelope: OutboundEnvelope, *, defer_reply=False) -> str:
         # Rich payloads are atomic. Never duplicate a keyboard or media by text splitting.
         if envelope.content_format == "markdown" or envelope.official_content is not None:
-            return self._enqueue_one(c, envelope)
+            return self._enqueue_one(c, envelope, defer_reply=defer_reply)
         text = envelope.text if envelope.plain_text else plain_text(envelope.text)
         deliveries = []
         for offset, part in enumerate(split_text(text)):
             deliveries.append(self._enqueue_one(c, envelope.model_copy(update={
                 "text": part, "plain_text": True, "part_no": envelope.part_no + offset,
                 "delivery_id": envelope.delivery_id if offset == 0 else str(uuid4()),
-            })))
+            }), defer_reply=defer_reply))
         return deliveries[0]
 
-    def _enqueue_one(self, c, envelope):
+    def _enqueue_one(self, c, envelope, *, defer_reply=False):
         key = stable_id(
             envelope.origin_kind,
             envelope.origin_id,
@@ -40,20 +40,11 @@ class Outbox:
         old = c.execute(select(outbox.c.id).where(outbox.c.dedupe_key == key)).scalar()
         if old:
             return old
-        reply = envelope.reply_context
-        if reply and reply.expires_at:
-            counter_key = stable_id(envelope.target.key, reply.platform_message_id)
-            seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar()
-            next_seq = (seq or 0) + 1
-            if seq is None:
-                c.execute(insert(reply_counters).values(key=counter_key, seq=next_seq))
-            else:
-                c.execute(
-                    update(reply_counters).where(reply_counters.c.key == counter_key).values(seq=next_seq)
-                )
-            envelope = envelope.model_copy(
-                update={"reply_context": reply.model_copy(update={"msg_seq": next_seq})}
-            )
+        if defer_reply and envelope.reply_context:
+            envelope = envelope.model_copy(update={
+                "reply_context": envelope.reply_context.model_copy(update={"msg_seq": None})})
+        else:
+            envelope = self._reserve_reply(c, envelope)
         c.execute(
             insert(outbox).values(
                 id=envelope.delivery_id,
@@ -71,6 +62,23 @@ class Outbox:
             )
         )
         return envelope.delivery_id
+
+    def _reserve_reply(self, c, envelope):
+        reply = envelope.reply_context
+        if reply and reply.expires_at:
+            counter_key = stable_id(envelope.target.key, reply.platform_message_id)
+            seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar()
+            next_seq = (seq or 0) + 1
+            if seq is None:
+                c.execute(insert(reply_counters).values(key=counter_key, seq=next_seq))
+            else:
+                c.execute(
+                    update(reply_counters).where(reply_counters.c.key == counter_key).values(seq=next_seq)
+                )
+            envelope = envelope.model_copy(
+                update={"reply_context": reply.model_copy(update={"msg_seq": next_seq})}
+            )
+        return envelope
 
     def enqueue_text(
         self,
@@ -91,6 +99,7 @@ class Outbox:
         parent_task_id=None,
         notification_sequence=0,
         purpose=None,
+        defer_reply=False,
     ):
         ids = []
         if (target.adapter_instance_id in self.markdown_adapters and target.surface in {"private", "group", "guild_channel", "guild_private"}
@@ -105,8 +114,8 @@ class Outbox:
                     persona_version=persona_version, policy_version=policy_version,
                     anchor_message_id=anchor_message_id, requester=requester,
                     parent_task_id=parent_task_id, notification_sequence=notification_sequence, purpose=purpose,
-                ))]
-        bubbles = [text] if origin_kind == "command" or purpose == "question" else chat_bubbles(text)
+                ), defer_reply=defer_reply)]
+        bubbles = [text] if defer_reply or origin_kind == "command" or purpose == "question" else chat_bubbles(text)
         parts = [part for bubble in bubbles for part in split_text(plain_text(bubble))]
         for part_no, part in enumerate(parts):
             ids.append(
@@ -131,13 +140,16 @@ class Outbox:
                         parent_task_id=parent_task_id,
                         notification_sequence=notification_sequence,
                         purpose=purpose,
-                    ),
+                    ), defer_reply=defer_reply,
                 )
             )
         return ids
 
     def _prepare_pending(self, c, row):
         envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
+        if envelope.reply_context and not envelope.reply_context.msg_seq:
+            envelope = self._reserve_reply(c, envelope)
+            c.execute(update(outbox).where(outbox.c.id == row["id"]).values(envelope_json=envelope.model_dump_json()))
         if envelope.plain_text or envelope.content_format == "markdown" or envelope.official_content is not None:
             return envelope
         parts = split_text(plain_text(envelope.text))

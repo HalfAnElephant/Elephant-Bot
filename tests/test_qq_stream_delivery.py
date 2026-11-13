@@ -23,7 +23,7 @@ def stream_setup(db, clock, incoming, official_config):
         if req.url.path.endswith("getAppAccessToken"):
             return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
         calls.append(json.loads(req.content))
-        return httpx.Response(200, json={"id": "stream-1", "remain_msg_len": 10000})
+        return httpx.Response(200, json={"id": "stream-1", "remain_msg_len": 0})
     client = httpx.AsyncClient(transport=httpx.MockTransport(request))
     cfg = official_config.model_copy(update={"streaming_enabled": True})
     adapter = OfficialAdapter(cfg, "d", incoming, clock, client)
@@ -305,20 +305,22 @@ async def test_locked_pi_worker_to_native_qq_final_without_duplicate(stream_setu
             await s.client.aclose()
 
 
-async def test_persisted_server_length_budget_prevents_oversend(stream_setup):
+@pytest.mark.parametrize("pending_chars", [0, 1])
+async def test_persisted_server_pending_length_does_not_limit_updates(stream_setup, pending_chars):
     s = stream_setup
     append(s, 1, "public_answer_delta", "Hel")
     await s.bridge.dispatch_once()
     with s.core.db.transaction() as c:
-        c.execute(update(stream_messages).values(remain_msg_len=1))
+        c.execute(update(stream_messages).values(remain_msg_len=pending_chars))
     bridge = StreamDelivery(s.core)
     bridge.recover()
     append(s, 2, "public_answer_end", "Hello")
+    append(s, 3, "public_answer_final", "Hello")
     submit(s)
     await bridge.dispatch_once()
     assert len(s.calls) == 2 and s.calls[-1]["input_state"] == 10
-    assert s.calls[-1]["content_raw"] == "Hel"
-    assert states(s) == ["PENDING"]
+    assert s.calls[-1]["content_raw"] == "Hello"
+    assert states(s) == ["SENT"]
     await s.client.aclose()
 
 
@@ -371,15 +373,64 @@ async def test_error_empty_end_closes_existing_prefix(stream_setup):
 async def test_typing_renews_but_preserves_answer_sequence(stream_setup):
     s = stream_setup
     s.core.adapters["qq"].config = s.core.adapters["qq"].config.model_copy(update={"typing_enabled": True})
-    for _ in range(6):
+    for _ in range(4):
         await s.bridge.dispatch_once()
-        s.core.clock.advance(26)
-        s.service.renew(s.claim["run_id"], s.claim["fencing_token"], "worker")
+        for _ in range(4):
+            s.core.clock.advance(14)
+            s.service.renew(s.claim["run_id"], s.claim["fencing_token"], "worker")
     assert len(s.calls) == 3
     assert [call["msg_seq"] for call in s.calls] == [1, 2, 3]
     append(s, 1, "public_answer_end", "Answer")
     await s.bridge.dispatch_once()
     assert s.calls[-1]["msg_seq"] == 4
+
+
+async def test_throttled_prefix_flushes_without_another_event(stream_setup):
+    s = stream_setup
+    append(s, 1, "public_answer_delta", "First")
+    await s.bridge.dispatch_once()
+    transport = next(iter(s.bridge.live.values()))
+    elapsed = [0.0]
+    transport.monotonic = lambda: elapsed[0]
+    transport.last_attempt = 0.0
+    append(s, 2, "public_answer_delta", "First buffered")
+    await s.bridge.dispatch_once()
+    assert len(s.calls) == 1
+    elapsed[0] = 1.0
+    await s.bridge.dispatch_once()
+    assert [call["content_raw"] for call in s.calls] == ["First", "First buffered"]
+    await s.bridge.dispatch_once()
+    assert len(s.calls) == 2
+    await s.client.aclose()
+
+
+async def test_typing_preserves_answer_budget_after_other_deliveries(stream_setup):
+    from qqbot.domain import stable_id
+
+    s = stream_setup
+    s.core.adapters["qq"].config = s.core.adapters["qq"].config.model_copy(update={"typing_enabled": True})
+    with s.core.db.transaction() as c:
+        c.execute(insert(reply_counters).values(key=stable_id(s.event.conversation.key, "m"), seq=3))
+    await s.bridge.dispatch_once()
+    assert not s.calls
+    append(s, 1, "public_answer_end", "Answer")
+    await s.bridge.dispatch_once()
+    assert s.calls[0]["msg_seq"] == 4
+    await s.client.aclose()
+
+
+async def test_public_text_takes_priority_over_typing(stream_setup):
+    s = stream_setup
+    s.core.adapters["qq"].config = s.core.adapters["qq"].config.model_copy(update={"typing_enabled": True})
+    append(s, 1, "public_answer_delta", "Visible")
+    await s.bridge.dispatch_once()
+    assert len(s.calls) == 1 and s.calls[0]["content_raw"] == "Visible"
+    for _ in range(4):
+        s.core.clock.advance(14)
+        s.service.renew(s.claim["run_id"], s.claim["fencing_token"], "worker")
+    await s.bridge.dispatch_once()
+    assert len(s.calls) == 1
+    await s.client.aclose()
 
 
 async def test_result_without_end_closes_prefix_before_fallback(stream_setup):

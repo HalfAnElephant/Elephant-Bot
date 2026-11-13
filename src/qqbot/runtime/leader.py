@@ -8,9 +8,11 @@ from sqlalchemy import insert, select, update
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import TaskInputSpec
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
+from qqbot.jobs.streaming import PUBLIC_KINDS, validate_public_event
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
 from qqbot.storage.schema import outbox, reply_counters
+from qqbot.storage.stream_schema import stream_runs
 from qqbot.storage.task_schema import (
     events,
     inputs,
@@ -274,7 +276,10 @@ class LeaderRuntime:
         self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
             origin_kind="chat", origin_id=origin_id,
             reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-            anchor_message_id=event.platform_message_id, purpose="result")
+            anchor_message_id=event.platform_message_id, purpose="result",
+            defer_reply=claim.get("public_answer_events", False))
+        if claim.get("public_answer_events"):
+            self.core.stream_delivery.hold_result(conn, run["id"], "chat", origin_id)
         conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == source["id"]).values(
             state="HANDLED", handled_at=now, claimed_attempt_id=run["id"]))
         conn.execute(update(runs).where(runs.c.id == run["id"]).values(**values))
@@ -397,19 +402,28 @@ class LeaderRuntime:
                     conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(state=state, result_json=result.model_dump_json()))
                     self.service.graph.event(conn, target, "finished", {"state": state}, attempt_id=run_id,
                         event_id="final:" + target["id"] + ":" + str(target["goal_revision"]))
-                    self.service._notification(conn, target, run_id, result.summary, "result", "important",
-                        "final:" + target["id"] + ":" + str(target["goal_revision"]))
+                    notice = self.service._notification(conn, target, run_id, result.summary, "result", "important",
+                        "final:" + target["id"] + ":" + str(target["goal_revision"]),
+                        defer_reply=claim.get("public_answer_events", False))
+                    if claim.get("public_answer_events"):
+                        self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif claim["purpose"] in {"progress", "question", "attention"} and result.agent_authored:
                 purpose = "question" if claim["purpose"] == "question" else "progress"
-                self.service._notification(conn, target, run_id, result.summary, purpose,
+                notice = self.service._notification(conn, target, run_id, result.summary, purpose,
                     "important" if claim["purpose"] == "attention" else "normal",
-                    stable_id("leader", run_id))
+                    stable_id("leader", run_id), defer_reply=claim.get("public_answer_events", False))
+                if claim.get("public_answer_events"):
+                    self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif run["role"] != "skill_review":
                 event = InboundEvent.model_validate_json(claim["event_json"])
                 self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
                     origin_kind="chat", origin_id="turn:" + claim["session_id"] + ":" + claim["source_ids"][0],
                     reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-                    anchor_message_id=event.platform_message_id, purpose="result")
+                    anchor_message_id=event.platform_message_id, purpose="result",
+                    defer_reply=claim.get("public_answer_events", False))
+                if claim.get("public_answer_events"):
+                    self.core.stream_delivery.hold_result(conn, run_id, "chat",
+                        "turn:" + claim["session_id"] + ":" + claim["source_ids"][0])
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]), table.c.claimed_attempt_id == run_id).values(
                 handled_at=now, **({"state": "HANDLED"} if table is dialogue_inputs else {"output_ref": run_id})))
@@ -721,14 +735,24 @@ class LeaderRuntime:
                     retrieved_at=payload["retrieved_at"], sha256=payload["sha256"], data_json=json.dumps(payload["data"])))
                 return {"accepted": True}
             if operation == "event":
+                validate_public_event(payload)
+                encoded = json.dumps(payload, ensure_ascii=False)
+                seq = values["seq"]
+                if not isinstance(seq, int) or seq < 1 or len(encoded.encode()) > 2 * 1024 * 1024:
+                    raise ValueError("invalid event sequence or payload")
+                if payload.get("kind") in PUBLIC_KINDS and not conn.execute(select(stream_runs.c.run_id).where(
+                        stream_runs.c.run_id == run_id)).first():
+                    raise PermissionError("public answer stream was not enabled for this run")
                 prior = conn.execute(select(events).where(events.c.event_id == values["event_id"])).mappings().first()
                 if prior:
-                    return {"accepted": prior["run_id"] == run_id}
-                if values["seq"] != run["last_seq"] + 1:
+                    if prior["run_id"] != run_id or prior["seq"] != seq or prior["payload"] not in {encoded, json.dumps(payload)}:
+                        raise ValueError("conflicting event replay")
+                    return {"accepted": True}
+                if seq != run["last_seq"] + 1:
                     raise ValueError("event sequence gap")
                 conn.execute(insert(events).values(event_id=values["event_id"], run_id=run_id,
-                    seq=values["seq"], payload=json.dumps(payload)))
-                conn.execute(update(runs).where(runs.c.id == run_id).values(last_seq=values["seq"]))
+                    seq=seq, payload=encoded))
+                conn.execute(update(runs).where(runs.c.id == run_id).values(last_seq=seq))
                 return {"accepted": True}
             if operation == "recovery-status":
                 return {"discard_spool": False}

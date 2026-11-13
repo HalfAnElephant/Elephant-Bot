@@ -69,6 +69,24 @@ class StreamDelivery:
             c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
                 state="UNKNOWN" if unknown else "DISABLED", error=reason))
 
+    def hold_result(self, conn, run_id, origin_kind, origin_id):
+        gate = conn.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
+            result_origin_kind=origin_kind, result_origin_id=origin_id))
+        if gate.rowcount:
+            conn.execute(update(outbox).where(outbox.c.origin_kind == origin_kind,
+                outbox.c.origin_id == origin_id, outbox.c.state == "PENDING").values(state="STREAM_PENDING"))
+
+    def _source(self, conn, run):
+        if run["role"] == "leader":
+            claim = json.loads(run["request_json"])
+            task_id = claim.get("target_root_task_id")
+            event_json = claim["event_json"]
+        else:
+            task_id = run["task_id"]
+            event_json = None
+        task = conn.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one() if task_id else None
+        return InboundEvent.model_validate_json(event_json or task["event_json"]), task
+
     def _create(self, run_id, message_key, *, kind="answer"):
         with self.db.transaction() as c:
             old = c.execute(select(stream_messages).where(stream_messages.c.run_id == run_id,
@@ -76,30 +94,34 @@ class StreamDelivery:
             if old:
                 return dict(old)
             run = c.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
-            task = c.execute(select(tasks).where(tasks.c.id == run["task_id"])).mappings().one()
-            event = InboundEvent.model_validate_json(task["event_json"])
+            event, task = self._source(c, run)
             reply = event.reply_context
-            if not self.eligible(event) or task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
+            if not self.eligible(event) or (task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}):
                 raise ValueError("stream is no longer eligible")
             counter_key = stable_id(event.conversation.key, reply.platform_message_id)
             seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar_one_or_none()
             next_seq = (seq or 0) + 1
-            if next_seq > reply.max_replies:
+            limit = reply.max_replies - 1 if kind == "typing" else reply.max_replies
+            if next_seq > limit:
                 raise ValueError("stream reply budget exhausted")
             if seq is None:
                 c.execute(insert(reply_counters).values(key=counter_key, seq=next_seq))
             else:
                 c.execute(update(reply_counters).where(reply_counters.c.key == counter_key).values(seq=next_seq))
             ident = stable_id("qq-stream", run_id, message_key, kind)
-            notice_seq = (c.execute(select(func.max(notifications.c.sequence)).where(
-                notifications.c.task_id == task["id"])).scalar_one() or 0) + 1
-            c.execute(insert(notifications).values(id=ident, task_id=task["id"], run_id=run_id,
-                sequence=notice_seq, purpose="progress", importance="normal", body="",
-                created_at=self.clock.now().isoformat(), state="STREAMING"))
+            notice_seq = 0
+            if task:
+                notice_seq = (c.execute(select(func.max(notifications.c.sequence)).where(
+                    notifications.c.task_id == task["id"])).scalar_one() or 0) + 1
+                c.execute(insert(notifications).values(id=ident, task_id=task["id"], run_id=run_id,
+                    sequence=notice_seq, purpose="progress", importance="normal", body="",
+                    created_at=self.clock.now().isoformat(), state="STREAMING"))
             envelope = OutboundEnvelope(delivery_id=str(uuid4()), target=event.conversation, text="stream",
-                reply_context=reply.model_copy(update={"msg_seq": next_seq}), origin_kind="task", origin_id=ident,
+                reply_context=reply.model_copy(update={"msg_seq": next_seq}),
+                origin_kind="task" if task else "chat", origin_id=ident if task else "qq-stream:" + ident,
                 expires_at=min(reply.expires_at, self.clock.now() + timedelta(hours=1)),
-                requester=event.principal, anchor_message_id=event.platform_message_id, parent_task_id=task["id"],
+                requester=event.principal, anchor_message_id=event.platform_message_id,
+                parent_task_id=task["id"] if task else None,
                 notification_sequence=notice_seq, purpose="progress")
             row = {"id": ident, "run_id": run_id, "message_key": message_key, "kind": kind, "state": "NEW", "text": "", "sent_text": "",
                        "stream_id": None, "next_index": 0, "final_marker": 0, "envelope_json": envelope.model_dump_json(),
@@ -141,10 +163,6 @@ class StreamDelivery:
         if not text.startswith(transport.text):
             self._disable(row["run_id"], "PUBLIC_ANSWER_REPLACED")
             return
-        if (transport.remain_msg_len is not None
-                and len(text) - len(transport.sent_text) > transport.remain_msg_len):
-            self._disable(row["run_id"], "STREAM_LENGTH_EXHAUSTED")
-            return
         with self.db.transaction() as c:
             c.execute(update(stream_messages).where(stream_messages.c.id == row["id"]).values(
                 state="SENDING", text=text))
@@ -180,8 +198,8 @@ class StreamDelivery:
         if kind == "public_answer_start":
             return  # Do not allocate scarce reply budget for an empty/tool-only message.
         with self.db.engine.connect() as c:
-            task = c.execute(select(tasks.c.event_json).where(tasks.c.id == gate["task_id"])).scalar_one()
-        event = InboundEvent.model_validate_json(task)
+            run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
+            event, _task = self._source(c, run)
         config = self.core.adapters[event.conversation.adapter_instance_id].config
         if not config.streaming_enabled:
             return
@@ -210,28 +228,38 @@ class StreamDelivery:
             gate = c.execute(select(stream_runs).where(stream_runs.c.run_id == run_id)).mappings().one()
             run = c.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
             if not run["result_json"]:
+                if run["state"] == "RECOVERED" and not run["slot_reserved"]:
+                    c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
+                        state="RECONCILIATION" if gate["state"] == "UNKNOWN" else "DONE"))
+                    self._drop_live(run_id)
                 return
             # Never resolve before all spooled events acknowledged before submit have been processed.
             if gate["state"] == "ACTIVE" and gate["cursor_seq"] < run["last_seq"]:
                 return
             result = json.loads(run["result_json"])
-            target = c.execute(select(notifications).where(notifications.c.id == "result:" + run_id)).mappings().first()
-            if target is None:
+            origin_id = gate["result_origin_id"]
+            origin_kind = gate["result_origin_kind"]
+            if origin_id is None:
+                # Read streams created before the final-delivery binding was added.
+                target = c.execute(select(notifications.c.id).where(
+                    notifications.c.id == "result:" + run_id)).scalar_one_or_none()
+                origin_id, origin_kind = target, "task"
+            if origin_id is None:
                 if gate["state"] in {"UNKNOWN", "RECONCILIATION"}:
                     c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="RECONCILIATION"))
-                    self._drop_live(gate["task_id"])
+                    self._drop_live(run_id)
                     return
                 # Wait/cancel/failure-control runs may legitimately have no final notice.
                 # Their public streams must not remain active indefinitely.
                 c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="DONE"))
-                self._drop_live(gate["task_id"])
+                self._drop_live(run_id)
                 return
-            pending = outbox.c.origin_id == target["id"]
+            pending = (outbox.c.origin_id == origin_id) & (outbox.c.origin_kind == origin_kind)
             if gate["state"] in {"UNKNOWN", "RECONCILIATION"}:
                 c.execute(update(outbox).where(pending, outbox.c.state == "STREAM_PENDING").values(
                     state="UNKNOWN", receipt_json=json.dumps({"state": "UNKNOWN", "error_code": "STREAM_RECEIPT_UNCERTAIN"})))
                 c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="RECONCILIATION"))
-                self._drop_live(gate["task_id"])
+                self._drop_live(run_id)
                 return
             final = c.execute(select(stream_messages).where(stream_messages.c.run_id == run_id,
                 stream_messages.c.final_marker == 1, stream_messages.c.state == "FINISHED",
@@ -239,25 +267,43 @@ class StreamDelivery:
             if final:
                 c.execute(update(outbox).where(pending, outbox.c.state == "STREAM_PENDING").values(
                     state="SENT", platform_message_id=final["stream_id"], sent_at=self.clock.now().isoformat()))
-                c.execute(update(notifications).where(notifications.c.id == target["id"]).values(state="DELIVERED"))
+                if origin_kind == "task":
+                    c.execute(update(notifications).where(notifications.c.id == origin_id).values(state="DELIVERED"))
             else:
+                unused = c.execute(select(stream_messages.c.envelope_json).where(
+                    stream_messages.c.run_id == run_id, stream_messages.c.kind == "answer",
+                    stream_messages.c.stream_id.is_(None), stream_messages.c.state == "CANCELLED")
+                    .order_by(stream_messages.c.created_at).limit(1)).scalar_one_or_none()
+                first = c.execute(select(outbox).where(pending, outbox.c.state == "STREAM_PENDING")
+                    .order_by(outbox.c.part_no).limit(1)).mappings().first()
+                if unused and first:
+                    reserved = OutboundEnvelope.model_validate_json(unused).reply_context
+                    envelope = OutboundEnvelope.model_validate_json(first["envelope_json"])
+                    if (reserved and envelope.reply_context and not envelope.reply_context.msg_seq
+                            and reserved.platform_message_id == envelope.reply_context.platform_message_id):
+                        # A rejected or unsent stream leaves its sequence available for the fallback.
+                        envelope = envelope.model_copy(update={"reply_context": reserved})
+                        c.execute(update(outbox).where(outbox.c.id == first["id"]).values(
+                            envelope_json=envelope.model_dump_json()))
                 c.execute(update(outbox).where(pending, outbox.c.state == "STREAM_PENDING").values(state="PENDING"))
             c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="DONE"))
-            self._drop_live(gate["task_id"])
+            self._drop_live(run_id)
 
-    def _drop_live(self, task_id):
-        for key, transport in list(self.live.items()):
-            if transport.envelope.parent_task_id == task_id:
-                self.live.pop(key, None)
+    def _drop_live(self, run_id):
+        with self.db.engine.connect() as conn:
+            ids = conn.execute(select(stream_messages.c.id).where(stream_messages.c.run_id == run_id)).scalars().all()
+        for ident in ids:
+            self.live.pop(ident, None)
 
     async def _close_if_settled(self, run_id):
         """Close only acknowledged prefixes; never claim local teardown closed QQ."""
         with self.db.engine.connect() as c:
             gate = c.execute(select(stream_runs).where(stream_runs.c.run_id == run_id)).mappings().one()
             run = c.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
-            task_state = c.execute(select(tasks.c.state).where(tasks.c.id == gate["task_id"])).scalar_one()
+            _event, task = self._source(c, run)
             settled = bool(run["result_json"]) and gate["cursor_seq"] >= run["last_seq"]
-            stop = task_state in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION", "FAILED"}
+            stop = ((task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION", "FAILED"})
+                    or run["state"] in {"CANCELLED", "NEEDS_RECONCILIATION", "FAILED", "RECOVERED"})
             if not (settled or stop or gate["state"] != "ACTIVE"):
                 return
             rows = [dict(row) for row in c.execute(select(stream_messages).where(
@@ -312,23 +358,26 @@ class StreamDelivery:
                 state = c.execute(select(stream_runs.c.state).where(stream_runs.c.run_id == run_id)).scalar_one()
                 c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
                     state="UNKNOWN" if state == "UNKNOWN" else "DISABLED"))
-            self._drop_live(gate["task_id"])
+            self._drop_live(run_id)
 
     async def _typing(self, gate):
         with self.db.engine.connect() as c:
-            task = c.execute(select(tasks).where(tasks.c.id == gate["task_id"])).mappings().one()
+            run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
+            event, task = self._source(c, run)
             old = c.execute(select(stream_messages).where(stream_messages.c.run_id == gate["run_id"],
                 stream_messages.c.kind == "typing").order_by(stream_messages.c.created_at.desc())).mappings().first()
             count = c.execute(select(func.count()).select_from(stream_messages).where(
                 stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "typing")).scalar_one()
-        event = InboundEvent.model_validate_json(task["event_json"])
+            answer = c.execute(select(stream_messages.c.id).where(
+                stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer")).first()
         adapter = self.core.adapters.get(event.conversation.adapter_instance_id)
-        if (not adapter or not adapter.config.typing_enabled or task["state"] != "RUNNING"
-                or not self.eligible(event)):
+        if (not adapter or not adapter.config.typing_enabled or run["state"] != "RUNNING"
+                or (task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION", "FAILED"})
+                or answer or not self.eligible(event)):
             return
         # Reserve at least one passive reply for the answer. Never retry uncertain status.
         if count >= event.reply_context.max_replies - 1 or (old and (
-            old["state"] != "SENT" or datetime.fromisoformat(old["created_at"]) + timedelta(seconds=25) > self.clock.now()
+            old["state"] != "SENT" or datetime.fromisoformat(old["created_at"]) + timedelta(seconds=55) > self.clock.now()
         )):
             return
         try:
@@ -343,7 +392,8 @@ class StreamDelivery:
         # This status message is never retried. A lost typing receipt does not
         # make a later, separately sequenced answer uncertain.
         try:
-            receipt = await send_typing(adapter, envelope, authorize=lambda: self.core.pre_send(envelope))
+            receipt = await send_typing(adapter, envelope, seconds=60,
+                                        authorize=lambda: self.core.pre_send(envelope))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - Persist uncertain outcome of a status write.
@@ -359,11 +409,12 @@ class StreamDelivery:
                     stream_runs.c.state.in_(["ACTIVE", "UNKNOWN", "DISABLED"]))).mappings()]
             for gate in gates:
                 with self.db.engine.connect() as c:
-                    task_state = c.execute(select(tasks.c.state).where(tasks.c.id == gate["task_id"])).scalar_one()
-                    terminal = task_state != "RUNNING"
-                    stopping = task_state in {"CANCELLED", "CANCEL_REQUESTED", "FAILED", "EXPIRED", "NEEDS_RECONCILIATION"}
-                if gate["state"] == "ACTIVE" and not terminal:
-                    await self._typing(gate)
+                    run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
+                    _event, task = self._source(c, run)
+                    terminal = run["state"] != "RUNNING"
+                    stopping = ((task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION"})
+                                or (task and task["state"] == "FAILED" and not run["result_json"])
+                                or run["state"] in {"CANCELLED", "NEEDS_RECONCILIATION", "FAILED", "RECOVERED"})
                 if gate["state"] == "ACTIVE" and not stopping:
                     with self.db.engine.connect() as c:
                         items = [dict(row) for row in c.execute(select(events).where(events.c.run_id == gate["run_id"],
@@ -380,5 +431,17 @@ class StreamDelivery:
                                 stream_runs.c.run_id == gate["run_id"])).scalar_one()
                         if state != "ACTIVE":
                             break
+                    with self.db.engine.connect() as c:
+                        state = c.execute(select(stream_runs.c.state).where(
+                            stream_runs.c.run_id == gate["run_id"])).scalar_one()
+                        buffered = [dict(row) for row in c.execute(select(stream_messages).where(
+                            stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
+                            stream_messages.c.state.in_(["NEW", "OPEN"]),
+                            stream_messages.c.text != stream_messages.c.sent_text)).mappings()]
+                    if state == "ACTIVE":
+                        for row in buffered:
+                            await self._send(row, row["text"])
+                        if not terminal:
+                            await self._typing(gate)
                 await self._close_if_settled(gate["run_id"])
                 self._resolve_result(gate["run_id"])

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from datetime import timedelta
 
 import httpx
@@ -8,7 +9,7 @@ import pytest
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
 from qqbot.adapters.qq_official.streaming import OfficialStream, send_typing
 from qqbot.domain import OutboundEnvelope, Surface
-from qqbot.harness.pi import PublicAnswerEvents
+from qqbot.harness.pi import PiRunnerAdapter, PublicAnswerEvents
 
 
 def outgoing(adapter, clock, official_event, *, private=True):
@@ -28,7 +29,7 @@ def adapter_with(config, incoming, clock, response=None):
         calls.append(request)
         if response:
             return await response(request)
-        return httpx.Response(200, json={"id": "stream-id", "remain_msg_len": 1000})
+        return httpx.Response(200, json={"id": "stream-id", "remain_msg_len": 0})
     return OfficialAdapter(config, "d", incoming, clock,
         httpx.AsyncClient(transport=httpx.MockTransport(transport))), calls
 
@@ -112,8 +113,8 @@ async def test_stream_capacity_scope_expiry_and_typing(official_config, incoming
         await stream.append("a" * 11)
     await stream.append("ok")
     stream.remain_msg_len = 1
-    with pytest.raises(ValueError, match="capacity"):
-        await stream.append("xx")
+    await stream.append("xx")
+    assert stream.text == "okxx"
     clock.advance(301)
     assert (await stream.finish()).error_code == "DELIVERY_EXPIRED"
     await qq.stop()
@@ -223,3 +224,103 @@ async def test_reply_expiry_during_token_refresh_blocks_send(official_config, in
     assert (await stream.append("hello")).state == "FAILED"
     assert not calls
     await qq.stop()
+
+
+def public_projection(tmp_path, secret=None):
+    adapter = PiRunnerAdapter(sys.executable, tmp_path, api_key=secret)
+    return adapter.public_answers
+
+
+def public_delta(project, text):
+    return project.accept(pi_event("message_update", assistantMessageEvent={
+        "type": "text_delta", "delta": text}))
+
+
+def test_public_prefix_streams_short_chinese_and_finishes(tmp_path):
+    project = public_projection(tmp_path)
+    project.accept(pi_event("message_start"))
+    assert public_delta(project, "你好，正在查询。")[0]["text"] == "你好，正在查询。"
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "content": [{"type": "text", "text": "你好，正在查询。"}]}))[0]
+    assert not end["error"] and end["text"] == "你好，正在查询。"
+    assert project.accept({"type": "agent_settled"})[0]["text"] == end["text"]
+
+
+def test_public_prefix_accepts_compact_rpc_updates_only_inside_assistant_message(tmp_path):
+    project = public_projection(tmp_path)
+    update = {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "你好"}}
+    assert project.accept(update) == []
+    start = project.accept(pi_event("message_start"))[0]
+    assert project.accept(update)[0]["text"] == "你好"
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "content": [{"type": "text", "text": "你好"}]}))[0]
+    assert end["message_id"] == start["message_id"]
+    assert project.accept(update) == []
+    project.accept(pi_event("message_start"))
+    project.accept({"type": "message_start", "message": {"role": "toolResult"}})
+    assert project.accept(update) == []
+
+
+@pytest.mark.parametrize("secret", ["credential-123456789", "aaaaaaaaaa"])
+def test_public_prefix_holds_split_known_credentials(tmp_path, secret):
+    for split in range(1, len(secret)):
+        project = public_projection(tmp_path, secret)
+        project.accept(pi_event("message_start"))
+        first = public_delta(project, "你好 " + secret[:split])
+        assert first[0]["text"] == "你好 "
+        second = public_delta(project, secret[split:] + " 完成，凭据已经安全隐藏。")
+        assert second[0]["text"] == "你好 [REDACTED] 完成，凭据已经安全隐藏。"
+
+
+def test_public_prefix_holds_split_bearer_and_protocol(tmp_path):
+    text = "你好 Bearer unknown-token 完成"
+    for split in range(1, len(text)):
+        project = public_projection(tmp_path)
+        project.accept(pi_event("message_start"))
+        events = public_delta(project, text[:split]) + public_delta(project, text[split:])
+        events += project.accept(pi_event("message_end", message={"role": "assistant",
+            "content": [{"type": "text", "text": text}]}))
+        assert all("unknown" not in event["text"] for event in events)
+        assert events[-1]["text"] == "你好 Bearer [REDACTED] 完成"
+    project.accept(pi_event("message_start"))
+    assert public_delta(project, "你好 <")[0]["text"] == "你好 "
+    assert public_delta(project, "|DSML| calls><|DSML| invoke") == []
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "content": [{"type": "text", "text": "你好 <|DSML| calls><|DSML| invoke"}]}))[0]
+    assert end["error"] and end["text"] == "你好 "
+    assert project.accept({"type": "agent_settled"}) == []
+
+
+def test_public_prefix_failed_message_never_finalizes(tmp_path):
+    project = public_projection(tmp_path)
+    project.accept(pi_event("message_start"))
+    assert public_delta(project, "你好")[0]["text"] == "你好"
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "stopReason": "error", "content": [{"type": "text", "text": "你好"}]}))[0]
+    assert end["error"] and end["text"] == "你好"
+    assert project.accept({"type": "agent_settled"}) == []
+
+
+def test_public_prefix_preserves_truncated_credential_redaction(tmp_path):
+    secret = "credential-123456789"
+    project = public_projection(tmp_path, secret)
+    project.accept(pi_event("message_start"))
+    assert public_delta(project, secret[-8:][:3]) == []
+    assert public_delta(project, secret[-8:][3:] + " 完成")[0]["text"] == "[REDACTED] 完成"
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "content": [{"type": "text", "text": secret[-8:] + " 完成"}]}))[0]
+    assert not end["error"] and end["text"] == "[REDACTED] 完成"
+
+
+def test_public_prefix_bounds_events_for_ten_thousand_single_character_chunks(tmp_path):
+    project = public_projection(tmp_path)
+    project.accept(pi_event("message_start"))
+    events = public_delta(project, "好")
+    assert events[0]["text"] == "好"
+    for _ in range(9999):
+        events.extend(public_delta(project, "好"))
+    assert len(events) == 625
+    assert all(event["type"] == "public_answer_delta" for event in events)
+    end = project.accept(pi_event("message_end", message={"role": "assistant",
+        "content": [{"type": "text", "text": "好" * 10000}]}))[0]
+    assert not end["error"] and end["text"] == "好" * 10000
