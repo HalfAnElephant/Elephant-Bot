@@ -57,6 +57,8 @@ class RuntimeRecovery:
         identity = json.loads(process["identity_json"]) if process else json.loads(run["request_json"]) if run else {}
         if not isinstance(identity, dict):
             return False
+        if process and identity.get("launch_task_id") == task_id and process["state"] == "STOPPED":
+            return True
         epoch = identity.get("host_epoch")
         if not isinstance(epoch, str) or not EPOCH.fullmatch(epoch) or epoch == self.epoch:
             return False
@@ -111,6 +113,8 @@ class RuntimeRecovery:
         identity = json.loads(process["identity_json"]) if process else {}
         if not isinstance(identity, dict):
             return False
+        if process and process["state"] == "STOPPED":
+            return True
         return self.stopped(identity.get("launch_task_id", task["id"]), run["process_id"] or run["id"])
 
     def _path(self, run, process):
@@ -324,6 +328,9 @@ class RuntimeRecovery:
         if run["state"] == "EVIDENCE_REQUIRED":
             return {"task_id": task["id"], "run_id": run_id, "state": "NEEDS_RECONCILIATION", "reason": "invalid_recovery_evidence"}
         proved = self._stop_proved(run, task, process)
+        # A live supervisor retains result ownership until its lease expires.
+        if process and process["state"] == "STOPPED" and run["lease"] > self.core.clock.now().isoformat():
+            return {"task_id": task["id"], "run_id": run_id, "state": task["state"]}
         if run["lease"] > self.core.clock.now().isoformat() and not proved:
             return {"task_id": task["id"], "run_id": run_id, "state": task["state"]}
         if not proved:

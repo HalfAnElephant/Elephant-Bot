@@ -11,25 +11,30 @@ async def until(condition):
             await asyncio.sleep(0.001)
 
 
-async def test_supervisor_bounds_retries_and_exposes_terminal_failure():
+async def test_supervisor_keeps_retrying_and_recovers_after_repeated_failures():
     supervisor = LoopSupervisor(lambda: False)
     supervisor.retry_base = 0.001
     calls = 0
+    recover = False
 
     async def step():
         nonlocal calls
         calls += 1
-        raise RuntimeError("private details")
+        if not recover:
+            raise RuntimeError("private details")
 
     task = supervisor.start("execution", step, interval=1, critical=True)
-    await asyncio.wait_for(task, 2)
+    await until(lambda: calls > supervisor.max_failures)
     state = supervisor.snapshot()["execution"]
-    assert calls == supervisor.max_failures
-    assert state["state"] == "FAILED" and not state["healthy"] and state["exited"]
+    assert calls > supervisor.max_failures
+    assert state["state"] == "FAILED" and not state["healthy"] and not state["exited"]
     assert state["last_error"] == "RuntimeError"
     assert "private details" not in str(state)
+    recover = True
+    await until(lambda: supervisor.snapshot()["execution"]["last_success"] is not None)
+    assert supervisor.snapshot()["execution"]["healthy"] and not task.done()
     await supervisor.stop()
-    assert supervisor.snapshot()["execution"]["state"] == "FAILED"
+    assert supervisor.snapshot()["execution"]["state"] == "STOPPED"
 
 
 async def test_transient_failure_recovers_and_duplicate_registration_is_rejected():

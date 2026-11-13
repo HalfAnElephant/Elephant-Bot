@@ -35,7 +35,7 @@ def supervise(scheduler, *, stall_seconds=0.01):
     return supervisor
 
 
-async def test_repeated_async_worker_failures_exhaust_supervision_without_spawn_resets():
+async def test_repeated_async_worker_failures_keep_retrying_without_spawn_resets():
     attempts = 0
     async def once():
         nonlocal attempts
@@ -44,13 +44,15 @@ async def test_repeated_async_worker_failures_exhaust_supervision_without_spawn_
     scheduler = scheduler_for(once)
     supervisor = supervise(scheduler)
     try:
-        await asyncio.wait_for(supervisor.tasks["scheduler"], 2)
+        async with asyncio.timeout(2):
+            while supervisor.snapshot()["scheduler"]["failures"] <= supervisor.max_failures:
+                await asyncio.sleep(0.001)
         state = supervisor.snapshot()["scheduler"]
-        assert attempts == supervisor.max_failures
+        assert attempts > supervisor.max_failures
         assert state["state"] == "FAILED"
-        assert state["failures"] == supervisor.max_failures
+        assert state["failures"] > supervisor.max_failures
         assert state["healthy"] is False
-        assert state["exited"] is True
+        assert state["exited"] is False
     finally:
         await supervisor.stop()
         await scheduler.close()

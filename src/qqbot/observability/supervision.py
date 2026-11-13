@@ -63,7 +63,6 @@ class LoopSupervisor:
                     )
                     if state["failures"] >= self.max_failures:
                         state["state"] = "FAILED"
-                        return
                     delay = min(30, self.retry_base * 2 ** min(state["failures"] - 1, 5))
                     state["next_retry_at"] = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
                 else:

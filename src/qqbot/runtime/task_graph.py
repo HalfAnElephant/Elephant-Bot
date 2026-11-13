@@ -285,7 +285,7 @@ class TaskGraph:
         self.service.wakeup.set()
         return True
 
-    def finalize_ready(self, conn, root, *, allow_pending_inputs=False):
+    def finalize_ready(self, conn, root, *, allow_pending_inputs=False, allow_running_jobs=False):
         if json.loads(root["context_json"]).get("memory_replan_pending"):
             return False
         children = conn.execute(select(tasks.c.state).where(tasks.c.root_task_id == root["id"], tasks.c.id != root["id"])).scalars().all()
@@ -295,8 +295,11 @@ class TaskGraph:
             select(tasks.c.id).where(tasks.c.root_task_id == root["id"])), operations.c.state.in_(UNSETTLED))).first()
         pending = conn.execute(select(inputs.c.id).where(inputs.c.task_id == root["id"],
             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))).first()
-        stopping = conn.execute(select(jobs.c.id).where(jobs.c.root_task_id == root["id"],
-            jobs.c.cancel_requested_at.is_not(None), jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))).first()
+        job_query = select(jobs.c.id).where(jobs.c.root_task_id == root["id"],
+            jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"}))
+        if allow_running_jobs:
+            job_query = job_query.where(jobs.c.cancel_requested_at.is_not(None))
+        stopping = conn.execute(job_query).first()
         return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain
                     and not stopping and (allow_pending_inputs or not pending))
 

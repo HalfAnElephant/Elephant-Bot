@@ -429,3 +429,22 @@ async def test_invalid_silence_duration_keeps_actionable_hint(control_runtime):
     source = await r.receive(r.event("/静默 明天"))
     assert r.response(source) == "静默时长用 s/m/h，例如 30m"
     r.no_model_input()
+
+
+async def test_answer_after_old_execution_deadline_remains_bound_to_open_question(control_runtime):
+    r = control_runtime
+    root = r.root(children=2)
+    first, second = child_rows(r, root["task_id"])
+    r.question(first["id"], "long-question")
+    with r.core.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.root_task_id == root["task_id"]).values(
+            deadline=(r.core.clock.now() - timedelta(hours=1)).isoformat()))
+        conn.execute(update(waits).where(waits.c.id == "long-question").values(
+            expires_at=(r.core.clock.now() + timedelta(hours=20)).isoformat()))
+    await r.receive(r.event("回答 " + first["public_id"] + " 继续"))
+    with r.core.db.engine.connect() as conn:
+        row = conn.execute(select(inputs)).mappings().one()
+        assert row["task_id"] == first["id"] and row["question_id"] == "long-question"
+        assert row["kind"] == "answer" and row["text"] == "继续"
+        assert not conn.execute(select(inputs).where(inputs.c.task_id == second["id"])).first()
+        assert conn.execute(select(waits.c.state).where(waits.c.id == "long-question")).scalar_one() == "CONSUMED"

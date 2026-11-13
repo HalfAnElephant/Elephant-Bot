@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -22,6 +23,24 @@ from qqbot.storage.task_schema import events, inputs, model_requests, notificati
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
 
 
+class _TaskWakeup(asyncio.Event):
+    def __init__(self):
+        super().__init__()
+        self.wait_loop = self.wait_thread = None
+
+    async def wait(self):
+        self.wait_loop = asyncio.get_running_loop()
+        self.wait_thread = threading.get_ident()
+        return await super().wait()
+
+    def set(self):
+        loop = self.wait_loop
+        if loop and loop.is_running() and threading.get_ident() != self.wait_thread:
+            loop.call_soon_threadsafe(super().set)
+            return
+        super().set()
+
+
 class TaskService:
     def __init__(self, db, clock, outbox, archive_root=None, stop_verifier=None, *, permissions=None, max_active=4, sustained_limit=2, max_resident=None, context_validator=None, budget_ceiling=None, stream_eligibility=None):
         self.db, self.clock, self.outbox = db, clock, outbox
@@ -31,7 +50,7 @@ class TaskService:
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.stream_eligibility = stream_eligibility
-        self.wakeup = asyncio.Event()
+        self.wakeup = _TaskWakeup()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
 
@@ -730,7 +749,16 @@ class TaskService:
 
     def uncertain(self, run_id, fencing_token, worker_id):
         with self.db.transaction() as c:
-            _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if run["process_id"]:
+                from qqbot.storage.task_schema import processes, sessions
+                process = c.execute(select(processes).where(processes.c.id == run["process_id"])).mappings().one()
+                if (process["state"] == "STOPPED" and process["epoch"] == run["process_epoch"]
+                        and process["generation"] == run["binding_generation"]):
+                    now = self.clock.now().isoformat()
+                    c.execute(update(runs).where(runs.c.id == run_id).values(state="NEEDS_RECONCILIATION",
+                        slot_reserved=0, runner_stopped_at=now, quiescent_at=now, lease=now))
+                    c.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(state="NEEDS_RECONCILIATION"))
             return {"state": "NEEDS_RECONCILIATION"}
 
@@ -1402,6 +1430,8 @@ class TaskService:
         from qqbot.domain.agents import TaskInputSpec
         with self.db.transaction() as conn:
             _run, task = self._lease(conn, run_id, fencing_token, worker_id)
+            if not task["root_task_id"]:
+                raise PermissionError("Worker task has no root goal")
             self.graph.check_authority(conn, task, {"action": "task.execute"})
             access = self._access_for(task)
             operation, arguments = payload["operation"], payload.get("arguments", {})

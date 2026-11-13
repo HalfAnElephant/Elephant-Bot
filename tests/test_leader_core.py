@@ -404,3 +404,32 @@ async def test_leader_can_acknowledge_mid_turn_and_late_progress_is_fenced(tmp_p
     finally:
         await core.stop()
         core.db.close()
+
+
+def test_admin_can_manage_verified_legacy_tasks_without_stored_owner(tmp_path, official_config, clock, monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import update
+
+    from qqbot.domain import InboundEvent
+
+    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-fixture")
+    app = create_app(Settings(database=str(tmp_path / "legacy-admin.db"), tasks_enabled=True),
+        clock=clock, run_background=False)
+    core = app.state.core
+    auth = {"Authorization": "Bearer admin-fixture"}
+    with TestClient(app) as client:
+        created = core.enqueue_admin_task("legacy request", idempotency_key="legacy-task")
+        with core.db.transaction() as conn:
+            row = conn.execute(select(tasks).where(tasks.c.id == created["task_id"])).mappings().one()
+            event = InboundEvent.model_validate_json(row["event_json"])
+        legacy = core.tasks.accept(event.model_copy(update={"event_id": "legacy-source"}), core.access(event), "legacy")
+        url = "/api/v1/tasks/" + legacy["public_id"]
+        assert client.get(url, headers=auth).status_code == 200
+        assert legacy["public_id"] in [row["public_id"] for row in client.get("/api/v1/tasks", headers=auth).json()]
+        with core.db.transaction() as conn:
+            conn.execute(update(tasks).where(tasks.c.id == legacy["id"]).values(owner_id="other-owner"))
+        assert client.get(url, headers=auth).status_code == 404
+        assert legacy["public_id"] not in [row["public_id"] for row in client.get("/api/v1/tasks", headers=auth).json()]
+        with core.db.transaction() as conn:
+            conn.execute(update(tasks).where(tasks.c.id == legacy["id"]).values(owner_id=None))
+        assert client.post(url + "/cancel", headers=auth).status_code == 200

@@ -180,7 +180,8 @@ async def test_review_readback_requires_submitted_identity_commit(context):
     assert await verifier(context, action, arguments, {"exit_code": 0}) is None
 
 
-async def test_git_push_uses_sanitized_repo_and_verifies_remote(context, tmp_path):
+@pytest.mark.parametrize("branch", ["fix", "release/1.2.0"])
+async def test_git_push_uses_sanitized_repo_and_verifies_remote(context, tmp_path, branch):
     import asyncio
 
     from qqbot.capabilities import GitService
@@ -193,20 +194,20 @@ async def test_git_push_uses_sanitized_repo_and_verifies_remote(context, tmp_pat
     service = GitService(lambda ctx: {"GH_TOKEN": "host-secret"})
     original = service._run
     async def run(arguments, directory, ctx, authenticate=False):
-        if arguments[0] == "init":
+        if arguments[0] in {"init", "check-ref-format"}:
             return await original(arguments, directory, ctx)
         assert "credential-leak" not in (directory / "config").read_text()
         assert authenticate
         if arguments[0] == "push":
-            assert arguments[-1] == commit + ":refs/heads/fix"
+            assert arguments[-1] == commit + ":refs/heads/" + branch
             return {"exit_code": 0, "stdout": "accepted", "stderr": ""}
-        return {"exit_code": 0, "stdout": commit + "\trefs/heads/fix\n", "stderr": ""}
+        return {"exit_code": 0, "stdout": commit + "\trefs/heads/" + branch + "\n", "stderr": ""}
     service._run = run
-    result = await service({"operation": "push", "commit": commit, "branch": "fix"}, context)
+    result = await service({"operation": "push", "commit": commit, "branch": branch}, context)
     assert result["verified"]
     (tmp_path / ".git" / "objects" / "evil").symlink_to("/etc/passwd")
     with pytest.raises((ValueError, OSError)):
-        await service({"operation": "push", "commit": commit, "branch": "fix"}, context)
+        await service({"operation": "push", "commit": commit, "branch": branch}, context)
 
 
 async def test_process_launch_isolated_and_cleanup(context, monkeypatch):
@@ -401,7 +402,7 @@ async def test_git_clone_followup_fetch_push_use_same_bounded_path(context, tmp_
             (clone / ".git" / "objects" / "aa" / ("b" * 38)).write_bytes(b"fixture object")
             (clone / "README.md").write_text("fixture")
             return {"exit_code": 0, "stdout": "", "stderr": ""}
-        if arguments[0] == "init":
+        if arguments[0] in {"init", "check-ref-format"}:
             return await original(arguments, directory, ctx)
         assert (directory / "objects" / "aa" / ("b" * 38)).read_bytes() == b"fixture object"
         if arguments[0] == "fetch":
@@ -416,7 +417,7 @@ async def test_git_clone_followup_fetch_push_use_same_bounded_path(context, tmp_
     assert fetched["verified"] and fetched["path"] == clone["path"]
     assert (tmp_path / clone["path"] / ".git" / "objects" / "cc" / ("d" * 38)).read_bytes() == b"fetched fixture"
     pushed = await service({"operation": "push", "path": clone["path"], "commit": commit, "branch": "fix"}, context)
-    assert pushed["verified"] and operations_seen == ["clone", "init", "fetch", "init", "push", "ls-remote"]
+    assert pushed["verified"] and operations_seen == ["clone", "init", "fetch", "check-ref-format", "init", "push", "ls-remote"]
     (tmp_path / "projects" / "linked").symlink_to(tmp_path / clone["path"], target_is_directory=True)
     for path in ("../outside", str(tmp_path / clone["path"]), "projects/linked"):
         with pytest.raises((ValueError, OSError)):
@@ -596,3 +597,41 @@ async def test_api_execution_preserves_option_order_and_literal_body(context, tm
     body = json.dumps({"title": "literal", "body": 'https://example.org/source\n中文 "$HOME" `text`'}, ensure_ascii=False)
     result = await GitHubCLI(str(program))({"argv": argv, "stdin": body}, context)
     assert json.loads(result["stdout"]) == {"argv": argv, "stdin": body}
+
+
+@pytest.mark.parametrize("operation", ["clone", "push"])
+@pytest.mark.parametrize("branch", ["release/1.2.0", "v2.1.0", "feature/topic"])
+async def test_git_branch_selection_uses_native_ref_rules(context, tmp_path, operation, branch):
+    from qqbot.capabilities import GitService
+    service = GitService(lambda ctx: {})
+    original = service._run
+    calls = []
+    async def run(arguments, directory, ctx, authenticate=False):
+        calls.append(arguments)
+        if arguments[0] == "check-ref-format":
+            return await original(arguments, directory, ctx)
+        assert arguments[0] == "clone" and arguments[arguments.index("--branch") + 1] == branch
+        return {"exit_code": 1, "stdout": "", "stderr": "fixture network unavailable"}
+    service._run = run
+    if operation == "clone":
+        await service({"operation": operation, "branch": branch}, context)
+        assert [call[0] for call in calls] == ["check-ref-format", "clone"]
+    else:
+        # A valid branch reaches repository lookup before any authenticated network call.
+        with pytest.raises(FileNotFoundError):
+            await service({"operation": operation, "commit": "a" * 40, "branch": branch}, context)
+        assert [call[0] for call in calls] == ["check-ref-format"]
+
+
+@pytest.mark.parametrize("operation", ["clone", "push"])
+@pytest.mark.parametrize("branch", ["-main", "bad..ref", "bad@{ref", "bad//ref", "bad.lock", "bad ref", ""])
+async def test_invalid_git_branch_fails_before_network(context, operation, branch):
+    from qqbot.capabilities import GitService
+    service = GitService(lambda ctx: {})
+    original = service._run
+    async def run(arguments, directory, ctx, authenticate=False):
+        assert arguments[0] == "check-ref-format" and not authenticate
+        return await original(arguments, directory, ctx)
+    service._run = run
+    with pytest.raises(ValueError, match="invalid Git branch"):
+        await service({"operation": operation, "commit": "a" * 40, "branch": branch}, context)

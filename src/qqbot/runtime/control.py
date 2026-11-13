@@ -143,7 +143,7 @@ class HostTaskControls:
         root = self.core.tasks.graph.root(conn, target)
         query = select(waits.c.id, waits.c.task_id).join(tasks, tasks.c.id == waits.c.task_id).where(
             waits.c.kind == "input", waits.c.state.in_(["INTENT", "WAITING"]),
-            tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]), tasks.c.deadline > self.core.clock.now().isoformat(),
+            tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]),
             (waits.c.expires_at.is_(None)) | (waits.c.expires_at > self.core.clock.now().isoformat()))
         if target["kind"] == "goal":
             query = query.where((tasks.c.root_task_id == root["id"]) | (tasks.c.id == root["id"]))

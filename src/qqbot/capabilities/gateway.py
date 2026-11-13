@@ -123,6 +123,18 @@ class ToolGateway:
         try:
             if not await resolve(self.authority(context)):
                 raise PermissionError("run authority revoked before dispatch")
+            if name in {"web.fetch", "web.search"}:
+                loop = asyncio.get_running_loop()
+
+                async def authorize_url(url):
+                    redirected = Action(name, ("domain:" + (urlsplit(url).hostname or ""),))
+                    decision = await resolve(self.permission(context, redirected))
+                    allowed = decision if isinstance(decision, bool) else getattr(decision, "allowed", False)
+                    if not await resolve(self.authority(context)) or not allowed:
+                        raise PermissionError("public URL denied by current policy")
+
+                arguments["_authorize_url"] = lambda url: asyncio.run_coroutine_threadsafe(
+                    authorize_url(url), loop).result(timeout=15)
             data = await asyncio.wait_for(resolve(execute(arguments, context)), capability.timeout_seconds)
             state = "ok"
             if side_effect:
@@ -190,7 +202,7 @@ def standard_registry(*, github=None):
             if not isinstance(query, str) or not 1 <= len(query) <= 500:
                 raise ValueError("search query must be 1..500 characters")
             url = "https://cn.bing.com/search?format=rss&q=" + quote(query)
-        return await asyncio.to_thread(fetch_public, url)
+        return await asyncio.to_thread(fetch_public, url, authorize_url=arguments.get("_authorize_url"))
     registry.register(Capability("web.fetch", "Fetch public HTTPS source", {"url": {"type": "string"}}), web,
                       lambda a, c: Action("web.fetch", ("domain:" + (urlsplit(a["url"]).hostname or ""),)))
     registry.register(Capability("web.search", "Search fresh public web sources", {"query": {"type": "string"}}),

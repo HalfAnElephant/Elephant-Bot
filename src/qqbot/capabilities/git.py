@@ -167,6 +167,13 @@ class GitService:
         async with self.locks.setdefault(context.workspace, asyncio.Lock()):
             with tempfile.TemporaryDirectory(prefix="elephant-git-") as temporary:
                 root = Path(temporary)
+                branch = arguments.get("branch")
+                if operation == "push" or operation == "clone" and branch is not None:
+                    if not isinstance(branch, str) or not 1 <= len(branch) <= 1024 or "\x00" in branch:
+                        raise ValueError("invalid Git branch")
+                    checked = await self._run(["check-ref-format", "--branch", branch], root, context)
+                    if checked["exit_code"]:
+                        raise ValueError("invalid Git branch")
                 if operation == "clone":
                     if not path.parts:
                         raise ValueError("clone requires a new workspace subdirectory")
@@ -177,7 +184,10 @@ class GitService:
                             pass
                         else:
                             raise ValueError("clone destination already exists")
-                        result = await self._run(["clone", "--template=", "--", url, "repository"], root,
+                        command = ["clone", "--template="]
+                        if branch is not None:
+                            command.extend(["--branch", branch])
+                        result = await self._run([*command, "--", url, "repository"], root,
                                                  context, authenticate=True)
                         if result["exit_code"] == 0:
                             os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
@@ -207,8 +217,6 @@ class GitService:
                             commit, branch = arguments["commit"], arguments["branch"]
                             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
                                 raise ValueError("push requires full commit hash")
-                            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_/-]*", branch) or "//" in branch:
-                                raise ValueError("invalid push branch")
                             result = await self._run(["push", "--porcelain", "--", url,
                                 commit + ":refs/heads/" + branch], root, context, authenticate=True)
                             observed = await self._run(["ls-remote", "--refs", "--", url, "refs/heads/" + branch],

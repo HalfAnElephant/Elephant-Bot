@@ -226,7 +226,7 @@ def router(core, authenticate):
         if not row:
             raise HTTPException(404, "task unavailable")
         row = dict(row)
-        if row.get("owner_id") != core.settings.owner.id:
+        if row.get("owner_id") not in {None, core.settings.owner.id}:
             raise HTTPException(404, "task unavailable")
         try:
             event = InboundEvent.model_validate_json(row["event_json"])
@@ -279,11 +279,18 @@ def router(core, authenticate):
         require_permission("task.read", "task:*")
         with core.db.engine.connect() as c:
             rows = c.execute(select(tasks).where(
-                tasks.c.owner_id == core.settings.owner.id,
-                tasks.c.kind == "goal",
+                (tasks.c.owner_id == core.settings.owner.id) | tasks.c.owner_id.is_(None),
+                (tasks.c.kind == "goal") | tasks.c.owner_id.is_(None),
                 tasks.c.parent_task_id.is_(None),
             ).order_by(tasks.c.created_at.desc()).limit(100)).mappings().all()
-            return [{**core.tasks.graph.status(c, row), "created_at": row["created_at"]} for row in rows]
+            visible = []
+            for row in rows:
+                try:
+                    task_row(row["id"])
+                except HTTPException:
+                    continue
+                visible.append({**core.tasks.graph.status(c, row), "created_at": row["created_at"]})
+            return visible
 
     @router.get("/api/v1/tasks/{public_id}")
     def get_task(public_id: str):

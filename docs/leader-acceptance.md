@@ -194,7 +194,7 @@ home 持久证据：
 
 同步时只读检查显示 daemon 为 active/running，live 与 ready 均返回 HTTP 200，后台监督健康，官方 QQ WebSocket 为 CONNECTED。此前缺少 QQ 凭据或无 adapter 的描述属于前批次历史状态；当前连接状态仍需配合真实平台收发验收。
 
-同步审查发现一项尚未修复的静态时序风险。`LeaderRuntime.task_tool` 的 `tasks.take_over` 使用 `TaskGraph.finalize_ready`，后者仅阻断已经登记取消的非终态 Job。失败 Worker 已释放运行槽、Job 维护尚未登记取消时，持久 Job 可能仍运行而 Leader 已获准接手。该路径需要补充所有相关 Job 的停止屏障及回归验证，本次保存服务器实现与该限制。
+同步审查发现 Leader 接手的静态时序风险。失败 Worker 已释放运行槽、Job 维护尚未登记取消时，持久 Job 可能仍运行。后续 review 修复将 `TaskGraph.finalize_ready` 的停止屏障覆盖到所有非终态 Job，回归覆盖 INTENT、STARTING、RUNNING 和 UNKNOWN，要求 Job 终止后才能接手。
 
 ## 尚未验收的边界
 
@@ -204,3 +204,14 @@ home 持久证据：
 4. 模型自动技能学习与自然触发的独立条件复盘已实际发生，“无可存内容”分支已有宿主定点验证。全角色真实并发效果仍未执行。
 
 部署成功与完整验收分别记录。当前能证明单 daemon、任务树、真实业务模型/Job、受保护制品交付及列明恢复路径工作；尚不能宣布实施计划第 12.1 节全部通过。
+
+
+## 2026-11-13 PR review 收口
+
+PR#6 承接 Leader/Workers 主线。PR#4 的 GitHub 授权与效果回读、安全制品、持久续接等价值由当前实现保留，技能使用 Pi/Hermes，长期记忆使用 OpenViking。OneBot、social/Judge、黑话与 research 专用运行链按实施计划退役。
+
+本批修复同 daemon 已证停 Worker 的租约恢复、恢复 IO 阻塞、超出旧执行 deadline 的有效问题答复、网页逐跳授权和共享请求时限，以及旧 owner 字段为空任务的管理可见性。未知进程继续等待停止证明。后台循环持续退避重试并保持健康告警。Git clone 恢复 branch 参数，分支校验使用 Git 原生规则。
+
+制品每小时按既有 30 天下载契约清理，保留活动任务树、占槽 run 与未到期引用。持续存在活动任务时，未入库的孤儿导出延后清理，以保全 spool 恢复证据。
+
+本批统一验证以 PR#6 当前提交的 CI 和 CodeQL 为准。本批未执行生产故障注入和 QQ 客户端验收。

@@ -1134,3 +1134,27 @@ async def test_persistent_job_problem_wakes_leader_without_relaunch(job_runtime,
     assert attention['purpose'] == 'attention'
     assert attention['target_root_task_id'] == fixture.root['task_id']
     assert len(fixture.provider.launches) == 1
+
+
+async def test_finalizer_can_read_live_job_but_takeover_and_completion_wait_for_stop(job_runtime):
+    fixture = job_runtime
+    started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
+        'arguments': {'job_key': 'takeover-barrier', 'argv': ['true']}})
+    claim, identity = _job_leader(fixture)
+    read = await fixture.runtime.invoke(identity, {'operation': 'inspect',
+        'arguments': {'job_id': started['job_id']}})
+    assert read['state'] == 'RUNNING'
+    with pytest.raises(PermissionError, match='stopped work'):
+        await fixture.core.leader.invoke('tasks', identity,
+            {'operation': 'tasks.take_over', 'call_id': 'takeover', 'arguments': {}})
+    with pytest.raises(PermissionError, match='not settled'):
+        fixture.core.leader.complete(identity[0], identity[1], identity[2],
+            {'status': 'completed', 'summary': '任务已经完成。'}, stopped=True, quiescent=False,
+            receipt={'kind': 'turn_finished', 'session_id': claim['session_id'], 'run_id': claim['run_id'],
+                     'session_revision': 'job-finalizer', 'input_ids': claim['source_ids'],
+                     'inflight': 0, 'tools_paired': True})
+    with fixture.service.db.transaction() as conn:
+        conn.execute(jobs.update().where(jobs.c.id == started['job_id']).values(state='EXITED',
+            stopped_at=fixture.core.clock.now().isoformat()))
+    assert (await fixture.core.leader.invoke('tasks', identity,
+        {'operation': 'tasks.take_over', 'call_id': 'takeover', 'arguments': {}}))['takeover']

@@ -1,8 +1,10 @@
+import asyncio
 import importlib.machinery
 import importlib.util
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -146,6 +148,129 @@ def test_missing_stop_proof_retains_writer_and_capacity(recovery):
     with recovery.runtime.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
     assert task_row(recovery.runtime, claim["task_id"])["state"] == "NEEDS_RECONCILIATION"
+
+
+def test_current_daemon_verified_stop_recovers_after_lease_expiry(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    recovery.service.epoch = OLD_EPOCH
+    with runtime.db.engine.connect() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == claim["run_id"])).mappings().one()
+    runtime.service.process_stopped("daemon", {"process_id": run["process_id"], "epoch": 1,
+        "generation": 1, "stopped": True})
+    assert recovery.service.stopped(claim["task_id"], run["process_id"])
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "RUNNING"
+    expire(recovery)
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "QUEUED"
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == claim["run_id"])).scalar_one() == 0
+    next_claim = runtime.service.claim("daemon")
+    assert next_claim["task_id"] == claim["task_id"]
+    assert next_claim["run_id"] != claim["run_id"]
+
+
+def test_stopped_process_from_another_binding_does_not_release_run(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    with runtime.db.transaction() as conn:
+        conn.execute(update(processes).values(state="STOPPED", generation=2))
+    expire(recovery)
+    assert recovery.service.recover_worker(claim["run_id"])["state"] == "NEEDS_RECONCILIATION"
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == claim["run_id"])).scalar_one() == 1
+
+
+def test_uncertain_stopped_attempt_releases_capacity_and_preserves_recovery(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    native_log(claim)
+    recovery.service.epoch = OLD_EPOCH
+    with runtime.db.engine.connect() as conn:
+        run = conn.execute(select(runs).where(runs.c.id == claim["run_id"])).mappings().one()
+    runtime.service.process_stopped("daemon", {"process_id": run["process_id"], "epoch": 1,
+        "generation": 1, "stopped": True})
+    assert runtime.service.uncertain(claim["run_id"], claim["fencing_token"], "daemon")["state"] == "NEEDS_RECONCILIATION"
+    with runtime.db.engine.connect() as conn:
+        saved = conn.execute(select(runs).where(runs.c.id == claim["run_id"])).mappings().one()
+    assert saved["slot_reserved"] == 0 and saved["runner_stopped_at"]
+    assert recovery.service.recover_workers()[0]["state"] == "SUCCEEDED"
+    assert recovery.service.recover_workers() == []
+
+
+def test_legacy_worker_cannot_query_tasks_without_a_root(recovery):
+    runtime = recovery.runtime
+    claim = bound_worker(recovery)
+    with runtime.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == claim["task_id"]).values(root_task_id=None))
+    with pytest.raises(PermissionError, match="no root goal"):
+        runtime.service.task_operation(claim["run_id"], claim["fencing_token"], "daemon", {"operation": "tasks.list"})
+
+
+async def test_maintenance_recovery_leaves_event_loop_available():
+    from qqbot.runtime.core import Core
+
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    calls = []
+
+    def workers():
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(3)
+        calls.append("workers")
+
+    def leaders():
+        assert threading.get_ident() != loop_thread
+        calls.append("leaders")
+
+    async def sync():
+        calls.append("sync")
+
+    core = SimpleNamespace(recovery=SimpleNamespace(recover_workers=workers),
+        leader=SimpleNamespace(recover=leaders),
+        knowledge=SimpleNamespace(recover_mutations=lambda: None, sync=sync))
+    maintenance = asyncio.create_task(Core.maintenance(core))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not maintenance.done()
+        # A renewal or cancellation can run while native recovery is blocked.
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await maintenance
+    assert calls == ["workers", "leaders", "sync"]
+
+
+@pytest.mark.parametrize("operation", ["maintenance", "cleanup_artifacts"])
+async def test_background_file_work_finishes_before_shutdown(operation, monkeypatch):
+    from qqbot.runtime.core import Core
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def blocking(*args):
+        entered.set()
+        assert release.wait(3)
+        finished.set()
+
+    async def sync():
+        pass
+
+    monkeypatch.setattr("qqbot.harness.artifacts.cleanup_artifacts", blocking)
+    core = SimpleNamespace(recovery=SimpleNamespace(recover_workers=blocking),
+        leader=SimpleNamespace(recover=lambda: None),
+        knowledge=SimpleNamespace(recover_mutations=lambda: None, sync=sync),
+        db=None, tasks=SimpleNamespace(archive_root=None), clock=SimpleNamespace(now=lambda: None))
+    work = asyncio.create_task(getattr(Core, operation)(core))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        work.cancel()
+        await asyncio.sleep(0)
+        assert not work.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+    assert finished.is_set()
 
 
 def test_native_completed_boundary_restores_original_result_artifacts_and_one_inbox(recovery):
