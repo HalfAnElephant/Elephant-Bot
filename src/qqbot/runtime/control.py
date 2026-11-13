@@ -296,8 +296,7 @@ class HostTaskControls:
         if facts:
             response += "\n已有" + "、".join(facts) + "。"
         if progress["last_effective_progress_at"]:
-            age = max(0, int((self.core.clock.now() - datetime.fromisoformat(progress["last_effective_progress_at"])).total_seconds()))
-            response += f"\n最近有效进展在 {age} 秒前。"
+            response += "\n最近有效进展时间 " + progress["last_effective_progress_at"]
         if view.get("goal"):
             response += "\n" + view["goal"][:300]
         if (view.get("result") or {}).get("summary"):

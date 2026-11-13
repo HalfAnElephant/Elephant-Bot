@@ -192,6 +192,9 @@ class KnowledgeRuntime:
                 projection_version=exported.get("projection_version", "pi-original-v2")))
 
     def invalidate_root(self, conn, root, scope, operation_id, source_ids, session_ids=()):
+        root = conn.execute(select(tasks).where(tasks.c.id == root["id"])).mappings().one()
+        if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
+            return
         context = json.loads(root["context_json"])
         previous = context.get("memory_replan_pending") or context.get("memory_replan") or {}
         operation_ids = list(dict.fromkeys([*previous.get("operation_ids", []), operation_id]))
@@ -312,13 +315,15 @@ class KnowledgeRuntime:
                     inputs.c.actor == root["requester"]).order_by(inputs.c.created_at, inputs.c.id)).mappings()]
                 revoked_hashes = set(conn.execute(select(memory_sources.c.content_hash).where(
                     memory_sources.c.scope_id == scope.key, memory_sources.c.source_id.in_(affected))).scalars())
-            blocked = bool(source_ids.intersection(affected)) or any((item.get("source_event_id") or item["source_id"]) in affected or
+                retained_sources = {event.event_id, *((item.get("source_event_id") or item["source_id"]) for item in business_inputs)}
+                sources_valid = self.sources_valid(event, source_ids | retained_sources,
+                    workspace_id=context.get("workspace_id", "personal"), conn=conn)
+            blocked = not sources_valid or bool(source_ids.intersection(affected)) or any((item.get("source_event_id") or item["source_id"]) in affected or
                 hashlib.sha256(item["text"].encode()).hexdigest() in revoked_hashes for item in business_inputs)
             goal = "\n".join([event.text, *(item["text"] for item in business_inputs)])
             fresh = {key: value for key, value in context.items() if key in {
                 "limits", "timezone", "model_context_window", "scope", "principal", "preferences", "owner_id",
                 "workspace_id", "structured_request"}}
-            retained_sources = {event.event_id, *((item.get("source_event_id") or item["source_id"]) for item in business_inputs)}
             fresh["source_manifest"] = [item for item in context.get("source_manifest", []) if item["id"] in retained_sources]
             fresh["images"] = [item for item in context.get("images", []) if item.get("source") in retained_sources]
             fresh["files"] = [item for item in context.get("files", []) if item.get("source") in retained_sources]
@@ -365,7 +370,11 @@ class KnowledgeRuntime:
             now = self.core.clock.now().isoformat()
             with self.core.db.transaction() as conn:
                 current = conn.execute(select(tasks).where(tasks.c.id == root["id"])).mappings().one()
-                if json.loads(current["context_json"]).get("memory_replan_pending") != marker:
+                # Recall may yield while a real followup changes the accepted source snapshot.
+                if (current["goal_revision"] != root["goal_revision"]
+                        or current["context_json"] != root["context_json"]
+                        or current["fencing"] != root["fencing"]
+                        or current["state"] in TERMINAL | {"CANCEL_REQUESTED"}):
                     continue
                 revision = current["goal_revision"] + 1
                 conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(

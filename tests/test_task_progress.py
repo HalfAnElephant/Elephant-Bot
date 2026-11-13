@@ -219,8 +219,12 @@ async def test_control_delivery_accepts_unchanged_facts_and_ignores_budget_heart
     runtime = control_runtime
     root = runtime.root(goal="检查旧项目")
     claim = runtime.core.tasks.claim("worker")
+    progress_at = runtime.core.clock.now().isoformat()
+    runtime.core.tasks.observation(claim["run_id"], claim["fencing_token"], "worker", {
+        "id": "status-evidence", "data": {"checked": True}, "sha256": "a" * 64, "retrieved_at": progress_at})
     source = await runtime.receive(runtime.event("/任务 " + root["public_id"]))
     envelopes = control_deliveries(runtime, source)
+    assert progress_at in "\n".join(item.text for item in envelopes)
     assert envelopes and all(runtime.core.controls.delivery_valid(item) is True for item in envelopes)
     runtime.core.clock.advance(5)
     runtime.core.tasks.renew(claim["run_id"], claim["fencing_token"], "worker")

@@ -106,7 +106,8 @@ def test_host_structured_source_is_atomic_idempotent_and_memory_scoped(project_c
             requested_outputs=('outputs/other.txt',))
 
 
-async def test_host_memory_replan_preserves_structured_checks_and_real_followups(project_core):
+@pytest.mark.parametrize("forget_followup", [False, True])
+async def test_host_memory_replan_preserves_structured_checks_and_real_followups(project_core, forget_followup):
     core = project_core
     receipt = core.enqueue_admin_task('处理资料', idempotency_key='replan', workspace_id='alpha',
         success_checks=('artifact',), requested_outputs=('outputs/final.txt',))
@@ -120,7 +121,15 @@ async def test_host_memory_replan_preserves_structured_checks_and_real_followups
         scope = core.knowledge.scope(event, workspace_id='alpha')
         core.tasks.add_graph_input(conn, root, followup, core.access(event), followup.text)
         conn.execute(update(memory_owners).where(memory_owners.c.id == scope.key).values(epoch=1))
-        core.knowledge.invalidate_root(conn, root, scope, 'corrected', ['unrelated-memory-source'])
+        if forget_followup:
+            from qqbot.storage.memory_sync_schema import memory_barriers
+            conn.execute(memory_barriers.insert().values(id='revoked-followup', scope_id=scope.key,
+                epoch=1, operation_id='corrected', source_id=followup.event_id, created_at=core.clock.now().isoformat()))
+        affected = [followup.event_id] if forget_followup else ['unrelated-memory-source']
+        core.knowledge.invalidate_root(conn, root, scope, 'corrected', affected)
+        marked = json.loads(conn.execute(select(tasks.c.context_json).where(tasks.c.id == root['id'])).scalar_one())
+        assert marked['files'][0]['source'] == followup.event_id
+        assert followup.event_id in {source['id'] for source in marked['source_manifest']}
     core.openviking.status = AsyncMock(return_value={'state': 'READY', 'memory_epoch': 1})
     core.openviking.search = AsyncMock(return_value=MemorySearchResult(status='ready', memory_epoch=1))
     await core.knowledge.replan()
@@ -128,6 +137,12 @@ async def test_host_memory_replan_preserves_structured_checks_and_real_followups
         root = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
         goal = json.loads(root['goal_json'])
         assert root['goal_revision'] == 2
+        if forget_followup:
+            context = json.loads(root['context_json'])
+            assert root['state'] == 'BLOCKED' and root['stop_reason'] == 'business_source_revoked'
+            assert not context['files'] and not context['images'] and not context['source_manifest']
+            assert 'structured_request' not in context
+            return
         assert goal['success_checks'] == ['artifact']
         assert goal['requested_outputs'] == ['outputs/final.txt']
         assert '仅使用公开资料' in root['goal']
@@ -245,3 +260,47 @@ def test_skill_write_failures_are_durable_deduplicated_and_redacted(project_core
     assert len(rows) == 1
     assert json.loads(rows[0]['detail']) == {'run_id': 'run', 'error_type': 'SkillManageRejected'}
     assert 'private body' not in rows[0]['detail']
+
+
+async def test_host_memory_replan_retries_when_followup_arrives_during_recall(project_core):
+    core = project_core
+    receipt = core.enqueue_admin_task('处理资料', idempotency_key='replan-concurrent', workspace_id='alpha',
+        success_checks=('artifact',), requested_outputs=('outputs/final.txt',))
+    with core.db.transaction() as conn:
+        root = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
+        event = InboundEvent.model_validate_json(root['event_json'])
+        scope = core.knowledge.scope(event, workspace_id='alpha')
+        conn.execute(update(memory_owners).where(memory_owners.c.id == scope.key).values(epoch=1))
+        core.knowledge.invalidate_root(conn, root, scope, 'corrected', ['unrelated-memory-source'])
+    late = host_event(core, 'followup-during-recall', '增加这份真实补充资料')
+    late = late.model_copy(update={'segments': (*late.segments, MediaSegment(type='file',
+        attachment_ref='late-file', source_url='https://cdn.example/late', filename='late.pptx'))})
+    appended = False
+    async def append_during_recall(*_args):
+        nonlocal appended
+        if not appended:
+            appended = True
+            accepted, _ = core.inbox.accept(late)
+            with core.db.transaction() as conn:
+                current = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
+                core.tasks.add_graph_input(conn, current, accepted, core.access(accepted), accepted.text)
+        return MemorySearchResult(status='ready', memory_epoch=1)
+    core.openviking.status = AsyncMock(return_value={'state': 'READY', 'memory_epoch': 1})
+    core.openviking.search = AsyncMock(side_effect=append_during_recall)
+    await core.knowledge.replan()
+    with core.db.engine.connect() as conn:
+        current = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
+        context = json.loads(current['context_json'])
+        assert current['goal_revision'] == 1
+        assert context['memory_replan_pending']['operation_ids'] == ['corrected']
+        assert context['files'][0]['source'] == late.event_id
+    await core.knowledge.replan()
+    with core.db.engine.connect() as conn:
+        current = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
+        context = json.loads(current['context_json'])
+        goal = json.loads(current['goal_json'])
+        assert current['goal_revision'] == 2
+        assert late.text in current['goal']
+        assert context['files'][0]['source'] == late.event_id
+        assert 'memory_replan_pending' not in context
+        assert goal['success_checks'] == ['artifact'] and goal['requested_outputs'] == ['outputs/final.txt']
