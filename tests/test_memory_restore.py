@@ -4,7 +4,7 @@ from sqlalchemy import insert, select
 from qqbot.contracts.memory import MemoryScope
 from qqbot.storage.agent_schema import dialogues
 from qqbot.storage.db import Database
-from qqbot.storage.memory_sync_schema import memory_barriers, memory_documents, memory_owners
+from qqbot.storage.memory_sync_schema import memory_barriers, memory_documents, memory_owners, memory_sources
 from qqbot.storage.operations import backup, export_deletions, restore
 
 
@@ -24,6 +24,8 @@ def test_restore_replays_latest_memory_epoch_and_rotates_native_session(db, tmp_
             epoch=1,state="ACTIVE",index_state="INDEXED",updated_at=clock.now().isoformat()))
         conn.execute(insert(memory_barriers).values(id="forget",scope_id=scope.key,epoch=1,operation_id="mutation",
             source_id="original-user-fact",uri="viking://user/owner/memories/profile/fact.md",created_at=clock.now().isoformat()))
+        conn.execute(insert(memory_sources).values(id="frozen",scope_id=scope.key,source_id="ambiguous-batch-source",
+            revision="1",event_id="original",operation_id="old-extraction",content_hash="source-hash",state="FROZEN"))
     ledger=tmp_path/"deletions.json"
     export_deletions(db.path,ledger)
     target=tmp_path/"restored.db"
@@ -35,6 +37,7 @@ def test_restore_replays_latest_memory_epoch_and_rotates_native_session(db, tmp_
             assert owner["epoch"]==1 and owner["state"]=="RESTORE_REQUIRED"
             assert conn.execute(select(memory_barriers.c.source_id)).scalar_one()=="original-user-fact"
             assert conn.execute(select(memory_documents.c.content_hash)).scalar_one()=="new-corrected-hash"
+            assert conn.execute(select(memory_sources.c.state)).scalar_one()=="FROZEN"
             assert conn.execute(select(dialogues.c.session_id)).scalar_one()!="old-pi-session"
     finally:
         restored.close()

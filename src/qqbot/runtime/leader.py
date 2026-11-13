@@ -2,6 +2,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import insert, select, update
 
@@ -447,7 +448,7 @@ class LeaderRuntime:
         return [self.recover_attempt(run_id) for run_id in expired]
 
     def recover_attempt(self, run_id):
-        from qqbot.adapters.pi.sessions import boundary_receipts, restore_tool_results, unfinished_tools
+        from qqbot.contracts.harness import resolve_harness
         from qqbot.domain.agents import GoalSpec
 
         with self.db.engine.connect() as conn:
@@ -467,10 +468,11 @@ class LeaderRuntime:
                     .values(state="NEEDS_RECONCILIATION"))
             return {"run_id": run_id, "state": "NEEDS_RECONCILIATION"}
         proof = json.loads(run["receipt_json"]) if run["receipt_json"] else None
-        path = identity.get("actual_session_file") or run["session"]
         mutation = claim.get("memory_mutation")
         try:
-            pending = () if mutation else unfinished_tools(path)
+            adapter = resolve_harness(self.core, claim.get("binding", {}))
+            path = adapter.session_path(Path(self.db.path).resolve().parent, run, process)
+            pending = () if mutation else adapter.unfinished_tools(path)
             submitted = [call for call in pending if call.get("name") == "tasks_submit"]
             if claim.get("target_root_task_id") and claim["purpose"] in {"attention", "finalize"}:
                 now = self.clock.now().isoformat()
@@ -481,10 +483,10 @@ class LeaderRuntime:
                         operations.c.state == "PREPARED").values(state="FAILED",
                             result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
                 if pending:
-                    restore_tool_results(path, [{"call": call, "is_error": True, "result": {
+                    adapter.restore_tool_results(path, [{"call": call, "is_error": True, "result": {
                         "state": "INTERRUPTED", "stopped": True,
                         "instruction": "上次调用随进程中断，结果尚未确认。先读取当前任务和操作记录，核对 UNKNOWN 操作，不重复外部写入。",
-                    }} for call in pending], pi_executable=self.sessions.settings.orchestration.pi_executable)
+                    }} for call in pending])
             elif pending:
                 if len(submitted) != len(pending) or run["role"] != "leader" or claim["purpose"] != "user":
                     raise ValueError("native dispatch recovery requires an isolated owner submission")
@@ -504,14 +506,14 @@ class LeaderRuntime:
                                 or task["coordinator_session_id"] != claim["session_id"] or committed_intent != intent):
                             raise ValueError("native dispatch has no matching committed host intent")
                         receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
-                restore_tool_results(path, receipts, pi_executable=self.sessions.settings.orchestration.pi_executable)
+                adapter.restore_tool_results(path, receipts)
         except (OSError, ValueError, KeyError):
             with self.db.transaction() as conn:
                 conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
                     .values(state="NEEDS_RECONCILIATION"))
             return {"run_id": run_id, "state": "NEEDS_RECONCILIATION"}
         try:
-            native = [item for item in boundary_receipts(path) if item.get("run_id") == run_id]
+            native = [item for item in adapter.boundary_receipts(path) if item.get("run_id") == run_id]
             if native:
                 proof = {**native[-1], **(proof or {})}
         except (OSError, ValueError, KeyError):

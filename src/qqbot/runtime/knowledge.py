@@ -4,16 +4,16 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 
-from qqbot.adapters.openviking.service import BACKEND_ERRORS, digest
-from qqbot.adapters.pi.sessions import export_session, mutation_calls
+from qqbot.adapters.openviking.service import BACKEND_ERRORS, affected_sources, digest
+from qqbot.contracts.harness import resolve_harness
 from qqbot.contracts.memory import MemoryCorrection, MemoryDeletion, MemoryScope, MutationReceipt, SourceBatch
 from qqbot.dialogue.planner import plan_turn
 from qqbot.domain import InboundEvent, Surface, stable_id
 from qqbot.domain.execution import TaskGoal, TurnInput
 from qqbot.storage.action_schema import operations
-from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
+from qqbot.storage.agent_schema import agent_events, dialogue_inputs, dialogues, leader_inbox
 from qqbot.storage.memory_sync_schema import (
     memory_barriers,
     memory_operations,
@@ -23,7 +23,7 @@ from qqbot.storage.memory_sync_schema import (
 )
 from qqbot.storage.schema import outbox
 from qqbot.storage.stream_schema import stream_messages, stream_runs
-from qqbot.storage.task_schema import inputs, notifications, processes, runs, sessions, tasks
+from qqbot.storage.task_schema import inputs, notifications, observations, processes, runs, sessions, tasks
 
 from .task_graph import TERMINAL
 
@@ -47,17 +47,58 @@ class KnowledgeRuntime:
 
     def load_source(self, scope, session_id, after, to_seq, branch, projection_version):
         with self.core.db.engine.connect() as conn:
-            claim_json = conn.execute(select(runs.c.request_json).where(runs.c.session_id == session_id,
-                runs.c.role == "leader").order_by(runs.c.started_at.desc()).limit(1)).scalar_one_or_none()
             record = conn.execute(select(sessions).where(sessions.c.id == session_id)).mappings().first()
-        claim = json.loads(claim_json) if claim_json else {}
-        event = InboundEvent.model_validate_json(claim["event_json"]) if claim else None
-        if not record or event is None or self.scope(event) != scope:
+        event, binding, turns = self._session_context(session_id)
+        if not record or event is None or not self.core.allowed(event) or self.scope(event) != scope:
             raise PermissionError("memory export session is not bound to this owner")
-        exported = export_session(record["session_file"], session_id=session_id, after=after)
+        exported = self._export(record, binding, turns, after=after, projection_version=projection_version)
         events = tuple(e for e in exported["events"] if e.seq <= to_seq)
         return SourceBatch(scope=scope, session_id=session_id, from_seq=after, to_seq=to_seq,
                            events=events, branch=branch, projection_version=projection_version)
+
+    def _session_context(self, session_id):
+        with self.core.db.engine.connect() as conn:
+            records = conn.execute(select(runs).where(runs.c.session_id == session_id)
+                .order_by(runs.c.started_at, runs.c.id)).mappings().all()
+            event, binding, turns = None, {}, {}
+            for run in records:
+                claim = json.loads(run["request_json"])
+                task = conn.execute(select(tasks).where(tasks.c.id == run["task_id"])).mappings().first()
+                raw_event = claim.get("event_json") or (task["event_json"] if task else None)
+                if raw_event:
+                    event = InboundEvent.model_validate_json(raw_event)
+                binding = claim.get("binding") or (json.loads(task["binding_json"]) if task else binding)
+                result = json.loads(run["result_json"]) if run["result_json"] else {}
+                evidence = []
+                scope = self.scope(event) if event else None
+                epoch = conn.execute(select(memory_owners.c.epoch).where(
+                    memory_owners.c.id == scope.key)).scalar_one_or_none() if scope else None
+                context = json.loads(task["context_json"]) if task else {}
+                if (event is not None and run["role"] == "worker" and run["state"] == "FINISHED"
+                        and result.get("status") == "completed"
+                        and self.core.allowed(event) and context.get("memory_epoch", 0) == (epoch or 0)):
+                    evidence = list(conn.execute(select(observations.c.id).where(
+                        observations.c.task_id == run["task_id"], observations.c.run_id == run["id"],
+                        observations.c.id.in_(result.get("observation_refs", ())))).scalars())
+                    evidence.extend(conn.execute(select(operations.c.id).where(
+                        operations.c.task_id == run["task_id"], operations.c.run_id == run["id"],
+                        operations.c.id.in_(result.get("effect_refs", ())), operations.c.state == "VERIFIED")).scalars())
+                turns[run["id"]] = {"run_id": run["id"], "role": run["role"], "purpose": run["purpose"],
+                    "summary": result.get("summary"), "evidence_refs": evidence}
+        return event, binding, turns
+
+    def _export(self, record, binding, turns, **options):
+        input_origins = {}
+        if any(turn["role"] == "leader" for turn in turns.values()):
+            with self.core.db.engine.connect() as conn:
+                relays = conn.execute(select(leader_inbox.c.id, agent_events.c.attempt_id)
+                    .join(agent_events, leader_inbox.c.event_id == agent_events.c.id)
+                    .join(runs, agent_events.c.attempt_id == runs.c.id)
+                    .where(or_(leader_inbox.c.target_session_id == record["id"],
+                        leader_inbox.c.claimed_attempt_id.in_(turns)), runs.c.role == "worker")).all()
+            input_origins = {input_id: ["result:" + run_id] for input_id, run_id in relays}
+        return resolve_harness(self.core, binding).export_session(record["session_file"], session_id=record["id"],
+            turns=turns, input_origins=input_origins, **options)
 
     async def prepare(self, event, context):
         scope = self.scope(event)
@@ -96,28 +137,27 @@ class KnowledgeRuntime:
     async def sync(self):
         await self.replan()
         with self.core.db.engine.connect() as conn:
-            records = conn.execute(select(sessions, dialogues.c.owner_id).join(dialogues,
-                dialogues.c.session_id == sessions.c.id).where(sessions.c.active_run_id.is_(None))).mappings().all()
+            records = conn.execute(select(sessions).where(sessions.c.active_run_id.is_(None))).mappings().all()
         for record in records:
-            with self.core.db.engine.connect() as conn:
-                raw = conn.execute(select(runs.c.request_json).where(runs.c.session_id == record["id"],
-                    runs.c.role == "leader").order_by(runs.c.started_at.desc()).limit(1)).scalar_one_or_none()
-            if not raw:
+            event, binding, turns = self._session_context(record["id"])
+            if (event is None or not self.core.allowed(event) or not turns
+                    or all(turn["role"] == "skill_review" for turn in turns.values())):
                 continue
-            claim = json.loads(raw)
-            event = InboundEvent.model_validate_json(claim["event_json"])
             scope = self.scope(event)
             if scope is None or not self.memory.enabled(scope):
                 continue
             with self.core.db.engine.connect() as conn:
+                projection = getattr(resolve_harness(self.core, binding), "projection_version", "pi-original-v2")
                 after = conn.execute(select(memory_streams.c.exported_seq).where(
-                    memory_streams.c.session_id == record["id"], memory_streams.c.scope_id == scope.key)
+                    memory_streams.c.session_id == record["id"], memory_streams.c.scope_id == scope.key,
+                    memory_streams.c.projection_version == projection)
                     .order_by(memory_streams.c.epoch.desc()).limit(1)).scalar_one_or_none() or 0
-            exported = export_session(record["session_file"], session_id=record["id"], after=after)
+            exported = self._export(record, binding, turns, after=after)
             if exported["next_cursor"] <= after:
                 continue
             await self.memory.sync(SourceBatch(scope=scope, session_id=record["id"], from_seq=after,
-                to_seq=exported["next_cursor"], events=exported["events"], branch=exported["branch"]))
+                to_seq=exported["next_cursor"], events=exported["events"], branch=exported["branch"],
+                projection_version=exported.get("projection_version", "pi-original-v2")))
         await self.memory.reconcile()
 
     def invalidate_root(self, conn, root, scope, operation_id, source_ids, session_ids=()):
@@ -192,10 +232,12 @@ class KnowledgeRuntime:
                     fences = [dict(row) for row in conn.execute(select(memory_barriers).where(
                         memory_barriers.c.scope_id == scope.key, memory_barriers.c.epoch > context.get("memory_epoch", -1))
                         .order_by(memory_barriers.c.epoch)).mappings()]
+                    frozen_sources = list(conn.execute(select(memory_sources.c.source_id).where(
+                        memory_sources.c.scope_id == scope.key, memory_sources.c.state == "FROZEN")).scalars())
                 if epoch is not None and epoch != context.get("memory_epoch") and fences:
                     with self.core.db.transaction() as conn:
                         self.invalidate_root(conn, root, scope, fences[-1]["operation_id"],
-                            [item["source_id"] for item in fences if item["source_id"]])
+                            [item["source_id"] for item in fences if item["source_id"]] + frozen_sources)
                     continue
             if not marker:
                 continue
@@ -231,14 +273,15 @@ class KnowledgeRuntime:
                 continue
             event = InboundEvent.model_validate_json(root["event_json"])
             source_ids = {event.event_id, *(item["id"] for item in context.get("source_manifest", []))}
-            blocked = bool(source_ids.intersection(marker["source_ids"]))
             with self.core.db.engine.connect() as conn:
+                affected = set(marker["source_ids"]) | set(conn.execute(select(memory_sources.c.source_id).where(
+                    memory_sources.c.scope_id == scope.key, memory_sources.c.state == "FROZEN")).scalars())
                 business_inputs = [dict(row) for row in conn.execute(select(inputs).where(
                     inputs.c.task_id == root["id"], inputs.c.kind.in_(["followup", "answer"]),
                     inputs.c.actor == root["requester"]).order_by(inputs.c.created_at, inputs.c.id)).mappings()]
                 revoked_hashes = set(conn.execute(select(memory_sources.c.content_hash).where(
-                    memory_sources.c.scope_id == scope.key, memory_sources.c.source_id.in_(marker["source_ids"]))).scalars())
-            blocked = blocked or any(item["source_id"] in marker["source_ids"] or
+                    memory_sources.c.scope_id == scope.key, memory_sources.c.source_id.in_(affected))).scalars())
+            blocked = bool(source_ids.intersection(affected)) or any(item["source_id"] in affected or
                 hashlib.sha256(item["text"].encode()).hexdigest() in revoked_hashes for item in business_inputs)
             goal = "\n".join([event.text, *(item["text"] for item in business_inputs)])
             fresh = {key: value for key, value in context.items() if key in {
@@ -258,7 +301,7 @@ class KnowledgeRuntime:
             if not blocked and (fresh.get("memory_status") != "ready" or not self.valid(fresh)):
                 continue
             fresh["memory_replan"] = {"operation_ids": marker["operation_ids"],
-                "source_ids": marker["source_ids"], "from_revision": root["goal_revision"],
+                "source_ids": sorted(affected), "from_revision": root["goal_revision"],
                 "instruction": "依据这条真实用户输入和当前记忆重新规划。旧任务仅提供关联ID和操作ID。新增工作必须使用rework_of_task_id关联已停止的旧子任务。"}
             now = self.core.clock.now().isoformat()
             with self.core.db.transaction() as conn:
@@ -305,7 +348,7 @@ class KnowledgeRuntime:
                 if json.loads(root["context_json"]).get("memory_scope") == scope.model_dump():
                     self.invalidate_root(conn, root, scope, receipt.operation_id, receipt.affected_source_ids, old_session_ids)
 
-    def mutation_request(self, scope, claim, call_id, operation, args, session_file):
+    def mutation_request(self, scope, claim, call_id, operation, args, session_file, *, projection_version=None):
         event = InboundEvent.model_validate_json(claim["event_json"])
         key = hashlib.sha256((event.event_id + ":" + call_id).encode()).hexdigest()
         if operation == "memory_forget":
@@ -313,7 +356,10 @@ class KnowledgeRuntime:
                 uris=tuple(args.get("uris", ())), source_event_ids=tuple(args.get("source_event_ids", ())))
         after, source = 0, None
         while True:
-            exported = export_session(session_file, session_id=claim["session_id"], after=after)
+            _, binding, turns = self._session_context(claim["session_id"])
+            exported = self._export({"id": claim["session_id"], "session_file": session_file},
+                binding or claim.get("binding", {}), turns, after=after,
+                **({"projection_version": projection_version} if projection_version else {}))
             source = next((item for item in exported["events"] if event.event_id in item.origins and item.role == "user"), None)
             if source or not exported["has_more"]:
                 break
@@ -321,7 +367,8 @@ class KnowledgeRuntime:
         if source is None:
             raise PermissionError("the original correction statement is not durably exported")
         return MemoryCorrection(scope=scope, uri=args["uri"], session_id=claim["session_id"],
-            source=source, idempotency_key=key)
+            source=source, idempotency_key=key,
+            projection_version=projection_version or exported.get("projection_version", "pi-original-v2"))
 
     def recover_mutations(self):
         """Read committed receipts for stopped native calls without repeating the mutation."""
@@ -367,23 +414,27 @@ class KnowledgeRuntime:
                 process = process_rows[attempt["process_id"]]
                 path = Path(json.loads(process["identity_json"]).get("actual_session_file") or attempt["session"])
                 try:
-                    for call in mutation_calls(path, run_id=attempt["id"], input_ids=claim["source_ids"]):
-                        request = self.mutation_request(scope, claim, call["id"], call["name"], call["arguments"], path)
-                        operation_id = stable_id("memory-mutation", scope.key, request.idempotency_key)
+                    for call in resolve_harness(self.core, claim.get("binding", {})).mutation_calls(
+                            path, run_id=attempt["id"], input_ids=claim["source_ids"]):
+                        key = hashlib.sha256((event.event_id + ":" + call["id"]).encode()).hexdigest()
+                        operation_id = stable_id("memory-mutation", scope.key, key)
                         with self.core.db.engine.connect() as conn:
                             row = conn.execute(select(memory_operations).join(memory_owners,
                                 memory_owners.c.id == memory_operations.c.scope_id).where(memory_operations.c.id == operation_id,
                                 memory_operations.c.scope_id == scope.key, memory_operations.c.kind == (
                                     "FORGET" if call["name"] == "memory_forget" else "CORRECT"),
-                                memory_operations.c.payload_hash == digest(request.model_dump(mode="json")),
                                 memory_owners.c.epoch >= memory_operations.c.epoch,
                                 memory_owners.c.state != "RESTORE_REQUIRED", memory_operations.c.id.in_(
                                     select(memory_barriers.c.operation_id).where(memory_barriers.c.scope_id == scope.key)))) .mappings().first()
                         if row:
                             refs = json.loads(row["refs_json"])
+                            request = self.mutation_request(scope, claim, call["id"], call["name"], call["arguments"], path,
+                                projection_version=refs.get("projection_version"))
+                            if row["payload_hash"] != digest(request.model_dump(mode="json")):
+                                continue
                             receipt = MutationReceipt(operation_id=row["id"], state=row["state"], completed=row["state"] == "APPLIED",
                                 memory_epoch=row["epoch"], changed_uris=tuple(refs.get("uris", ())),
-                                affected_source_ids=tuple(refs.get("source_ids", ())), error_type=row["error_type"])
+                                affected_source_ids=affected_sources(refs), error_type=row["error_type"])
                             matches.append((attempt, claim, receipt))
                 except (OSError, ValueError, TypeError, KeyError, AttributeError, PermissionError):
                     continue

@@ -38,11 +38,13 @@ class SessionService:
         return None
 
     def binding(self):
-        return {"harness": "pi", "contract_version": "elephant-1", "package_version": "1.5.0",
+        runtime = getattr(self, "runtime_binding", {"harness": "pi", "contract_version": "elephant-1",
+            "package_version": "1.5.0", "compression": "native", "execution_world": "local"})
+        return {**runtime,
             "model": self.settings.model.model, "endpoint": self.settings.model.endpoint,
             "credential_env": self.settings.model.api_key_env,
-            "context_window": self.settings.model.context_window, "compression": "native",
-            "execution_world": "local", "workspace_bindings": self.settings.orchestration.workspace_bindings,
+            "context_window": self.settings.model.context_window,
+            "workspace_bindings": self.settings.orchestration.workspace_bindings,
             "prompt_version": "leader-workers-v1"}
 
     def dialogue(self, conn, event, *, new_title=None, select_ref=None):
@@ -399,7 +401,9 @@ class SessionLearning:
     def claim_review(self, worker_id):
         if not self.settings.skills.enabled or not self.settings.skills.background_review_enabled:
             return None
-        from qqbot.adapters.pi.sessions import review_snapshot
+        from pathlib import Path
+
+        from qqbot.contracts.harness import resolve_harness
         from qqbot.domain.execution import ExecutionPlan
         from qqbot.storage.task_schema import processes
 
@@ -430,9 +434,10 @@ class SessionLearning:
             with self.db.engine.connect() as conn:
                 source = conn.execute(select(runs).where(runs.c.id == pending["source_run_id"])).mappings().one()
                 process = conn.execute(select(processes).where(processes.c.id == source["process_id"])).mappings().first()
-            identity = json.loads(process["identity_json"]) if process else {}
             try:
-                snapshot = review_snapshot(identity.get("actual_session_file") or source["session"], run_id=source["id"])
+                adapter = resolve_harness(self.sessions, claim.get("binding", {}))
+                path = adapter.session_path(Path(self.db.path).resolve().parent, source, process)
+                snapshot = adapter.review_snapshot(path, run_id=source["id"])
             except (OSError, ValueError, KeyError):
                 continue
             event = InboundEvent.model_validate_json(claim["event_json"])

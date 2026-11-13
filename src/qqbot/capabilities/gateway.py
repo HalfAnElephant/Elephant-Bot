@@ -186,7 +186,9 @@ def workspace_file(context, relative, flags, mode=0o600):
         os.close(directory)
 
 
-def standard_registry(*, github=None):
+def standard_registry(*, github=None, execution=None):
+    from qqbot.adapters.execution.world import LocalExecution
+    execution = execution or LocalExecution()
     registry = CapabilityRegistry()
     cli = github or GitHubCLI()
     from .verification import GitHubVerifier
@@ -211,20 +213,14 @@ def standard_registry(*, github=None):
         offset, limit = arguments.get("offset", 0), arguments.get("limit", 8192)
         if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 65536:
             raise ValueError("invalid file page")
-        with os.fdopen(workspace_file(context, arguments["path"], os.O_RDONLY), "rb") as file:
-            file.seek(offset)
-            content = file.read(limit + 1)
+        content = await execution.read_file(context, arguments["path"], offset, limit + 1)
         return {"text": content[:limit].decode(errors="replace"),
                 "next_offset": offset + limit if len(content) > limit else None}
     async def write(arguments, context):
         content = arguments["text"].encode()
         if len(content) > 1048576:
             raise ValueError("file exceeds write budget")
-        # New files only avoid a failed write destroying a pre-existing document.
-        with os.fdopen(workspace_file(context, arguments["path"], os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as file:
-            file.write(content)
-            file.flush()
-            os.fsync(file.fileno())
+        await execution.write_file(context, arguments["path"], content)
         return {"path": arguments["path"], "bytes": len(content)}
     for name, handler, effect in (("read", read, "read"), ("write", write, "write")):
         registry.register(Capability("workspace." + name, "Bounded workspace file " + name), handler,

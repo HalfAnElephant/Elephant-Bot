@@ -78,7 +78,7 @@ Leader 的聊天、进度、提问和最终汇报统一加载 `src/qqbot/runtime
 
 已有事项的补充进入原 Worker；相同原文、附件和上下文的活动请求复用已有工作。不同原文的需求由 Leader 结合当前目标判断。长工作委派后，Leader 简短确认并继续处理聊天，进度和结果统一经 Leader 表达，相同进度合并，新修订使待发旧进度失效。
 
-Worker 超时、阻塞或一次尝试无法继续时会保存已有结果并通知 Leader。Leader 可安排关联重试、在相关执行停止且外部操作已核对后接手，或保存问题等待用户回答。旧 `max_active`、并发、排队和任务树数量字段只作配置兼容，后台 `active_seconds`／`total_wall_seconds` 不再终止工作。单次工具、等待条件和供应商请求仍有各自的超时语义；异常交给 Leader 决策。模型调用和工具调用按每次尝试计数，根目标累计值用于记账。
+Worker 超时、阻塞或一次尝试无法继续时会保存已有结果并通知 Leader。Leader 可安排关联重试、在相关执行停止且外部操作已核对后接手，或保存问题等待用户回答。旧 `max_active`、并发、排队和任务树数量字段只作配置兼容，后台 `active_seconds`／`total_wall_seconds` 不再终止工作。单次工具、等待条件和供应商请求仍有各自的超时语义；异常交给 Leader 决策。各 Task 与独立 Leader 输入轮次分别保留模型/工具调用预算，同一 Task 的 continuation 与 attempt 共用累计用量；Leader 输入 retry 也沿用原预算。根目标只累计记录全树 `model_calls`／`tool_calls`，不另行汇总活跃时间或总墙钟时间。
 
 ## 部署和恢复
 

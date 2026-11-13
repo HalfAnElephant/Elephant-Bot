@@ -1,5 +1,4 @@
 """Recover stopped attempts from native receipts without replaying uncertain writes."""
-import asyncio
 import hashlib
 import json
 import logging
@@ -13,12 +12,12 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
-from qqbot.adapters.execution.world import execution_workspace
-from qqbot.adapters.pi.sessions import recovery_snapshot
+from qqbot.adapters.execution.world import LocalExecution
+from qqbot.contracts.harness import resolve_harness
 from qqbot.capabilities.types import Action, ToolContext
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.tasks import TaskResult
-from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, export_artifacts
+from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES
 from qqbot.harness.launcher import trusted_json
 from qqbot.storage.action_schema import operations
 from qqbot.storage.agent_schema import leader_inbox
@@ -47,6 +46,7 @@ class RuntimeRecovery:
         self.core, self.service, self.directory = core, core.tasks, Path(directory)
         self.epoch = os.environ.get("INVOCATION_ID", "")
         self.data_root = Path(core.db.path).resolve().parent
+        self.execution = getattr(core, "execution", None) or LocalExecution()
         self.verifier = verifier
         self._github = self._icloud = None
 
@@ -117,10 +117,9 @@ class RuntimeRecovery:
             return True
         return self.stopped(identity.get("launch_task_id", task["id"]), run["process_id"] or run["id"])
 
-    def _path(self, run, process):
-        identity = json.loads(process["identity_json"]) if process else {}
-        path = Path(identity.get("actual_session_file") or run["session"])
-        return path if path.is_absolute() else self.data_root / "pi" / path
+    def _path(self, run, task, process):
+        binding = json.loads(task["binding_json"])
+        return resolve_harness(self.core, binding).session_path(self.data_root, run, process)
 
     def _charge_stopped_activity(self, run, task, process):
         identity = json.loads(process["identity_json"] if process else run["request_json"])
@@ -251,7 +250,9 @@ class RuntimeRecovery:
 
     def _workspace(self, task, *, strict=True):
         binding = json.loads(task["binding_json"])
-        return execution_workspace(self.data_root, task["id"], json.loads(task["plan_json"]).get("workspace_ref"),
+        if binding.get("execution_world", "local") != self.execution.world_id:
+            raise ValueError("persisted task requires an unavailable execution world")
+        return self.execution.workspace(self.data_root, task["id"], json.loads(task["plan_json"]).get("workspace_ref"),
             binding.get("workspace_bindings", {}), strict=strict)
 
     def _result(self, run, task, proof, spool):
@@ -281,7 +282,8 @@ class RuntimeRecovery:
         if result["status"] == "completed":
             paths.extend(requested)
         if paths:
-            result["artifacts"] = export_artifacts(self._workspace(task), self.service.archive_root, list(dict.fromkeys(paths)))
+            result["artifacts"] = self.execution.export_artifacts(self._workspace(task), self.service.archive_root,
+                                                                 list(dict.fromkeys(paths)))
         return TaskResult.model_validate_json(json.dumps(result))
 
     def _commit(self, run, task, proof, result):
@@ -356,7 +358,8 @@ class RuntimeRecovery:
         if terminal:
             return self._settle_terminal(run, task, *terminal)
         try:
-            snapshot = recovery_snapshot(self._path(run, process), run_id=run_id)
+            snapshot = resolve_harness(self.core, json.loads(task["binding_json"])).recovery_snapshot(
+                self._path(run, task, process), run_id=run_id)
             if snapshot["pending_tools"]:
                 return self._pause(run, task, "unpaired_tools")
             with self.core.db.engine.connect() as conn:
@@ -462,11 +465,7 @@ class RuntimeRecovery:
                 return "VERIFIED", {"delivery_id": delivery["id"], "state": delivery["state"],
                     "delivered": delivery["state"] == "SENT", "verified_effect": "durable_enqueue"}
         if action.name == "workspace.file.write":
-            from qqbot.capabilities.gateway import workspace_file
-            def read_file():
-                with os.fdopen(workspace_file(context, arguments["path"], os.O_RDONLY), "rb") as source:
-                    return source.read(1048577)
-            content = await asyncio.to_thread(read_file)
+            content = await self.execution.read_file(context, arguments["path"], 0, 1048577)
             if content == arguments["text"].encode():
                 return "VERIFIED", {"path": arguments["path"], "sha256": hashlib.sha256(content).hexdigest(),
                     "verified_effect": "file_content_matches"}
@@ -533,7 +532,8 @@ class RuntimeRecovery:
         terminal = self._terminal_reason(task)
         if terminal:
             return self._settle_terminal(run, task, *terminal)
-        snapshot = recovery_snapshot(self._path(run, process), run_id=run_id)
+        snapshot = resolve_harness(self.core, json.loads(task["binding_json"])).recovery_snapshot(
+            self._path(run, task, process), run_id=run_id)
         proof = self._proof(run, snapshot, None)
         if validated.agent_authored and not proof:
             raise PermissionError("an agent-authored result requires its durable boundary")

@@ -187,6 +187,30 @@ class TaskGraph:
         self.service.wakeup.set()
         return {"task_id": task_id, "public_id": child["public_id"], "state": "QUEUED"}
 
+    def input_handoff(self, conn, task):
+        context = json.loads(task["context_json"])
+        references = list(context.get("child_spec", {}).get("input_refs", ()))
+        if task["rework_of_task_id"] and task["rework_of_task_id"] not in references:
+            references.append(task["rework_of_task_id"])
+        handoff = []
+        for reference in references:
+            source = conn.execute(select(tasks).where(tasks.c.id == reference,
+                tasks.c.root_task_id == task["root_task_id"], tasks.c.owner_id == task["owner_id"],
+                tasks.c.conversation == task["conversation"], tasks.c.requester == task["requester"])).mappings().one_or_none()
+            if source is None:
+                raise PermissionError("input reference is no longer in the authorized task tree")
+            access = self.service._access_for(task)
+            self.service.permissions.require(access, "task.read", "task:" + source["id"])
+            snapshot = self.status(conn, source)
+            snapshot = {key: snapshot[key] for key in ("task_id", "public_id", "kind", "state", "goal", "goal_revision", "result")}
+            source_context = json.loads(source["context_json"])
+            validator = self.service.context_validator
+            if validator and not validator(access, source_context):
+                snapshot.update(goal=None, result=None)
+                snapshot["rework_required"] = True
+            handoff.append(snapshot)
+        return handoff
+
     def status(self, conn, task):
         root = self.root(conn, task)
         context = json.loads(root["context_json"])

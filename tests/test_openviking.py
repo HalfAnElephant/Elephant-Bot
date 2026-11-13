@@ -558,3 +558,85 @@ async def test_restore_observes_existing_extraction_without_replaying_it(memory,
             await service.reconcile_restore(scope)
         assert (await service.status(scope))["state"] == "RESTORE_REQUIRED"
     assert all(method == "GET" for method, _, _ in remote.calls[before:])
+
+
+async def test_multi_source_export_extracts_independently_and_recovers_each_slice(memory):
+    service, remote, scope, originals = memory
+    source = SourceBatch(scope=scope, session_id="two-originals", from_seq=0, to_seq=2,
+        events=(SourceEvent(id="source-a", seq=1, role="user", content="项目A的值为一"),
+                SourceEvent(id="source-b", seq=2, role="user", content="项目B的值为二")))
+    originals[source.session_id] = source
+    receipt = await service.sync(source)
+    first_sid = next(iter(remote.sessions))
+    assert len(remote.sessions[first_sid]["messages"]) == 1
+    first_uri = remote.complete(sid=first_sid, relative="entities/a.md", content="项目A的值为一")
+    replacement = OpenVikingMemory(service.db, service.clock, service.config,
+        source_loader=service.source_loader, client=service.http.client)
+    for _ in range(20):
+        receipt = await replacement.poll(receipt.operation_id)
+        for sid, session in list(remote.sessions.items()):
+            if remote.tasks["commit-" + sid]["status"] == "running":
+                assert len(session["messages"]) == 1
+                assert session["messages"][0]["source_message_ids"] == ["source-b"]
+                remote.complete(sid=sid, relative="entities/b.md", content="项目B的值为二")
+        if receipt.indexed:
+            break
+    assert receipt.indexed and receipt.indexed_seq == 2 and len(receipt.changed_uris) == 2
+    second_uri = "viking://user/owner_private/memories/entities/b.md"
+    assert (await replacement.read(scope, first_uri)).source_event_ids == ("source-a",)
+    assert (await replacement.read(scope, second_uri)).source_event_ids == ("source-b",)
+    forgotten = await replacement.forget(MemoryDeletion(scope=scope, uris=(first_uri,), idempotency_key="a-only"))
+    forgotten = await replacement.poll(forgotten.operation_id)
+    assert forgotten.completed and forgotten.changed_uris == (first_uri,)
+    assert (await replacement.read(scope, second_uri)).content == "项目B的值为二"
+
+
+@pytest.mark.parametrize("mutation", ["correct", "forget"])
+async def test_uri_mutation_preserves_sibling_with_legacy_batch_union_and_freezes_replay(memory, mutation):
+    from qqbot.storage.memory_sync_schema import memory_sources
+
+    service, remote, scope, originals = memory
+    source = batch(scope, source_event_ids=("legacy-a", "legacy-b"))
+    originals[source.session_id] = source
+    pending = await service.sync(source)
+    first_uri = remote.complete(relative="entities/a.md", content="项目A的旧值")
+    sid = next(iter(remote.sessions))
+    second_uri = "viking://user/owner_private/memories/entities/b.md"
+    remote.files[second_uri] = "项目B保持有效"
+    remote.diffs[remote.sessions[sid]["archive"] + "/memory_diff.json"]["operations"]["adds"].append({
+        "uri": second_uri, "memory_type": "entities", "after": "项目B保持有效"})
+    await indexed(service, pending)
+    if mutation == "correct":
+        correction = batch(scope, session="new-owner-statement", event_id="new-a", content="项目A的新值")
+        originals[correction.session_id] = correction
+        request = MemoryCorrection(scope=scope, uri=first_uri, session_id=correction.session_id,
+            source=correction.events[0], idempotency_key="legacy-a-correct")
+    else:
+        request = MemoryDeletion(scope=scope, uris=(first_uri,), idempotency_key="legacy-a-forget")
+    result = await getattr(service, mutation)(request)
+    assert result.changed_uris == (first_uri,)
+    assert result.affected_source_ids == ("legacy-a", "legacy-b")
+    result = await service.poll(result.operation_id)
+    assert result.completed and result.changed_uris == (first_uri,)
+    assert result.affected_source_ids == ("legacy-a", "legacy-b")
+    changes = [event for event in service.changes_since(scope) if event["operation_id"] == result.operation_id]
+    assert {event["kind"] for event in changes} == {"barrier", "corrected" if mutation == "correct" else "forgotten"}
+    assert all(event["refs"]["source_event_ids"] == ["legacy-a", "legacy-b"] for event in changes)
+    assert (await service.read(scope, second_uri)).content == "项目B保持有效"
+    assert (await service.read(scope, second_uri)).source_event_ids == ("legacy-a", "legacy-b")
+    if mutation == "correct":
+        assert (await service.read(scope, first_uri)).source_event_ids == ("new-a",)
+    else:
+        assert first_uri not in remote.files
+    with service.db.engine.connect() as conn:
+        assert set(conn.execute(select(memory_sources.c.state).where(
+            memory_sources.c.source_id.in_(["legacy-a", "legacy-b"]))).scalars()) == {"FROZEN"}
+    manifest = service.export_barriers(scope)
+    assert len(manifest["frozen_sources"]) == 2
+    replacement = OpenVikingMemory(service.db, service.clock, service.config,
+        source_loader=service.source_loader, client=service.http.client)
+    replacement.restore_barriers(scope, manifest)
+    await replacement.reconcile_restore(scope)
+    assert (await replacement.read(scope, second_uri)).content == "项目B保持有效"
+    assert (await replacement.sync(source)).state == "SKIPPED"
+    assert sum(path.endswith("/commit") for _, path, _ in remote.calls) == 1

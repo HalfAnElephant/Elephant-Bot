@@ -1,5 +1,33 @@
 # Pi harness contract
 
+## Adapter injection
+
+`create_app` and `Core` accept a Harness registry, a default Harness name and an
+execution world. New sessions freeze the selected adapter metadata in their
+binding. Scheduler selects that frozen binding and requires event streaming,
+cancellation, durable sessions, appended inputs and interactive questions. Missing
+adapters, compression modes, versions or required capabilities fail before launch.
+The default registry retains Pi so existing Pi sessions can still be inspected.
+
+`HarnessPort` owns creation, native source export, projection version, session
+location, review snapshots, recovery snapshots, boundary receipts and native
+tool-result repair. Worker recovery, Leader recovery, memory sync and skill review
+select the same frozen adapter. The runtime consumes host-contract facts from
+these methods. Each adapter parses and repairs its own log format.
+
+`ExecutionWorld` supplies workspace resolution, bounded file I/O, short-process
+and Git services, persistent Job runtime, QQ file snapshots and artifact export.
+`LocalExecution` reuses descriptor-relative file validation, bubblewrap, Git and
+systemd Jobs. Alternative worlds implement these operations with the same
+authorization, exclusive-write, file-size, snapshot, process-ownership and
+verified-stop contracts. Native Harness profiles, the host content archive and
+the durable delivery spool remain in the host control directory. Frozen execution
+world mismatches are rejected before a Worker is bound.
+
+The alternate-adapter regression uses a non-Pi JSON checkpoint and a remote test
+world. SSH transport and remote-host recovery require a concrete adapter and their
+own live acceptance.
+
 The locked pi 1.5.0 RPC executable is the model/tool loop for ordinary conversation and durable tasks. `PiRunnerAdapter` invokes an absolute argv and an exact JSONL session path. A resident process owns a session, while each active run receives a fresh host binding. The binding includes process generation, task/run identity, fencing, current authority and separate model/tool tokens. Ambient HOME, operator credentials, built-in tools, extensions, context files, skills, MCP and prompt templates are excluded. New runs load the trusted `pi_bridge.ts` extension.
 
 The stdout reader starts before prompt submission. Records split on LF bytes, preserving Unicode U+2028/U+2029. Events are limited to 32 MiB and the queue to eight records. stderr is drained with a 20 MiB ceiling. Truncated, malformed or oversized records fail the run. Prompt ACK and `agent_end` cannot complete it. A handled prompt is rejected explicitly. Completion requires `agent_settled`, an empty pi queue, drained I/O and revoked run authority. User-visible completion also depends on the goal's requested observations, effects and outputs. Artifacts and source evidence may be empty.

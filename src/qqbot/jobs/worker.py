@@ -366,7 +366,9 @@ class Worker:
                 paths = list(gateway.artifacts)
                 if result["status"] == "completed" and claim.get("role", "worker") == "worker":
                     paths.extend(claim.get("goal_spec", {}).get("requested_outputs", []))
-                result["artifacts"] = export_artifacts(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
+                execution_world = getattr(gateway, "execution", None)
+                export = execution_world.export_artifacts if execution_world else export_artifacts
+                result["artifacts"] = export(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
             if not harness.stopped_verified and not getattr(harness, "quiescent_verified", False):
                 raise RuntimeError("runner returned without verified stop or quiescence")
             payload = {**identity, "result": result, "stopped": harness.stopped_verified,
@@ -485,7 +487,7 @@ class GeneralRun(PiHarness):
             args.model_endpoint, call=self.gateway_call, upload=self.gateway_upload, capacity=capacity, github=github,
             github_host=getattr(args, "github_host", "github.com"),
             content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
-            model_window=getattr(args, "model_context_window", 32768))
+            model_window=getattr(args, "model_context_window", 32768), execution=getattr(args, "execution", None))
         super().__init__(args.pi, workspace, provider="qqbot", model=args.model, gateway=gateway, session_id=session_id)
 
     def prepare_workspace(self, workspace):
@@ -517,13 +519,13 @@ class GeneralRun(PiHarness):
         self.claim = claim
         if not claim.get("repository") and getattr(self.args, "repository", None):
             claim["repository"] = self.args.repository
+        if claim.get("binding", {}).get("execution_world", "local") != self.gateway.execution.world_id:
+            raise ValueError("persisted task requires an unavailable execution world")
         bindings = dict(value.split("=", 1) for value in getattr(self.args, "workspace_binding", []))
-        from qqbot.adapters.execution.world import execution_workspace as resolve_workspace
         data_root = Path(getattr(self.args, "spool", str(Path(self.args.archive).parent / "spool"))).parent
-        execution_workspace = resolve_workspace(data_root, claim["task_id"],
+        execution_workspace = self.gateway.execution.workspace(data_root, claim["task_id"],
             claim.get("plan", {}).get("workspace_ref"), bindings, create=True)
-        (execution_workspace / "outputs").mkdir(exist_ok=True, mode=0o700)
-        self.gateway.workspace = execution_workspace
+        self.gateway.workspace = Path(execution_workspace)
         self.gateway.bind(claim)
         self.timeout = claim.get("active_seconds_remaining", claim.get("plan", {}).get("budget", {}).get("active_seconds", 1800))
         if self.timeout is not None and self.timeout <= 0:

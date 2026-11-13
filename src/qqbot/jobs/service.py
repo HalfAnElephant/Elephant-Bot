@@ -301,6 +301,7 @@ class TaskService:
             ).scalars()}
             busy_sessions = set(c.execute(select(runs.c.session_id).where(runs.c.slot_reserved == 1)).scalars())
             row = None
+            handoff = []
             for item in candidates:
                 if getattr(self, "job_workspace_available", None) and not self.job_workspace_available(item):
                     continue
@@ -310,6 +311,12 @@ class TaskService:
                 if item["root_task_id"] and hasattr(self, "graph"):
                     root = self.graph.root(c, item)
                     if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
+                        continue
+                    try:
+                        handoff = self.graph.input_handoff(c, item)
+                    except PermissionError:
+                        self._record_host_terminal(c, item, "BLOCKED", TaskResult(status="blocked", agent_authored=False,
+                            summary="交接资料的读取授权已失效，需要重新确认任务输入。"), "handoff-revoked:" + item["id"])
                         continue
                 row = item
                 break
@@ -383,6 +390,7 @@ class TaskService:
                 "active_seconds_remaining": 30 if row["failure_notice_json"] else None if not self._time_limited(row) else max(0, budget.active_seconds
                     - json.loads(row["budget_json"]).get("active_seconds", 0)),
                 "context": {**json.loads(row["context_json"]), "key": session_id, "session_id": session_id,
+                    "input_refs": handoff,
                     "role": "worker", "purpose": "work", "source_input_ids": ["task:" + row["id"], *[r["id"] for r in continuation]]},
                 "binding": json.loads(row["binding_json"]), "role": "worker", "purpose": "work",
                 "root_task_id": row["root_task_id"], "parent_task_id": row["parent_task_id"],

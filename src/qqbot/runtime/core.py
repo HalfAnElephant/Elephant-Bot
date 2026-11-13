@@ -41,8 +41,15 @@ CONTROL_COMMANDS = {"/帮助", "/状态", "/任务", "/取消", "/补充", "/静
 
 
 class Core:
-    def __init__(self, settings, db, clock, adapters, model_client=None):
+    def __init__(self, settings, db, clock, adapters, model_client=None, *, harnesses=None,
+                 default_harness="pi", execution=None):
         self.settings, self.db, self.clock, self.adapters = settings, db, clock, adapters
+        from qqbot.adapters.execution.world import LocalExecution
+        from qqbot.adapters.pi.adapter import PiAdapter
+        from qqbot.contracts.harness import resolve_harness
+        self.harnesses = {"pi": PiAdapter(settings.orchestration.pi_executable), **(harnesses or {})}
+        self.execution = execution or LocalExecution()
+        harness = resolve_harness(self, {"harness": default_harness})
         self.permissions = PermissionService(db, clock, settings.permissions)
         for adapter in adapters.values():
             adapter.permissions = self.permissions
@@ -58,6 +65,8 @@ class Core:
         self.tasks.skills_provider = self.skills_for
         self.tasks.graph = TaskGraph(self.tasks, settings)
         self.sessions = SessionService(self.tasks, settings, allowed=self.allowed)
+        self.sessions.harnesses = self.harnesses
+        self.sessions.runtime_binding = {**harness.binding, "execution_world": self.execution.world_id}
         self.leader = LeaderRuntime(self, self.sessions)
         self.controls = HostTaskControls(self)
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
