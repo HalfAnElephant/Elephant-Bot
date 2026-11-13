@@ -29,7 +29,7 @@ from qqbot.observability.supervision import LoopSupervisor
 from qqbot.outbox.service import Outbox
 from qqbot.permissions import PermissionService, PermissionSubject
 from qqbot.storage.schema import audit_events, inbox, outbox, runtime_state
-from qqbot.storage.task_schema import notifications, runs, tasks
+from qqbot.storage.task_schema import notifications, runs, sessions, tasks
 
 from .control import HostTaskControls
 from .leader import LeaderRuntime
@@ -41,8 +41,15 @@ CONTROL_COMMANDS = {"/帮助", "/状态", "/任务", "/取消", "/补充", "/静
 
 
 class Core:
-    def __init__(self, settings, db, clock, adapters, model_client=None):
+    def __init__(self, settings, db, clock, adapters, model_client=None, *, harnesses=None,
+                 default_harness="pi", execution=None):
         self.settings, self.db, self.clock, self.adapters = settings, db, clock, adapters
+        from qqbot.adapters.execution.world import LocalExecution
+        from qqbot.adapters.pi.adapter import PiAdapter
+        from qqbot.contracts.harness import resolve_harness
+        self.harnesses = {"pi": PiAdapter(settings.orchestration.pi_executable), **(harnesses or {})}
+        self.execution = execution or LocalExecution()
+        harness = resolve_harness(self, {"harness": default_harness})
         self.permissions = PermissionService(db, clock, settings.permissions)
         for adapter in adapters.values():
             adapter.permissions = self.permissions
@@ -58,6 +65,8 @@ class Core:
         self.tasks.skills_provider = self.skills_for
         self.tasks.graph = TaskGraph(self.tasks, settings)
         self.sessions = SessionService(self.tasks, settings, allowed=self.allowed)
+        self.sessions.harnesses = self.harnesses
+        self.sessions.runtime_binding = {**harness.binding, "execution_world": self.execution.world_id}
         self.leader = LeaderRuntime(self, self.sessions)
         self.controls = HostTaskControls(self)
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
@@ -294,6 +303,21 @@ class Core:
         if not self.permissions.check(access, "history.read", "conversation:" + access.conversation.key).allowed:
             return False
         with self.db.engine.connect() as conn:
+            if context.get("session_id"):
+                history = conn.execute(select(sessions.c.manifest_json).where(
+                    sessions.c.id == context["session_id"])).scalar_one_or_none()
+                history = json.loads(history) if history else {}
+                if history.get("task_sources"):
+                    context = dict(context)
+                    self.tasks.graph.merge_source_dependencies(context, history["task_sources"],
+                        history.get("source_manifest", ()))
+            for task_id in context.get("task_sources", ()):
+                source = conn.execute(select(tasks.c.requester, tasks.c.conversation).where(
+                    tasks.c.id == task_id)).mappings().first()
+                if (not source or source["requester"] != access.principal.key
+                        or source["conversation"] != access.conversation.key
+                        or not self.permissions.check(access, "task.read", "task:" + task_id).allowed):
+                    return False
             for source in context.get("source_manifest", ()):
                 if source["kind"] != "inbox":
                     return False
@@ -470,7 +494,8 @@ class Core:
             if (mutation.get("summary") == envelope.text and result.get("summary") == envelope.text
                     and result.get("agent_authored") is False):
                 return self.sessions.owner(event) is not None and self.allowed(event)
-            if settled or not self.validate_context(self.access(event), json.loads(source["context_json"])):
+            if settled or not self.validate_context(self.access(event), {
+                    **json.loads(source["context_json"]), "session_id": session_id}):
                 return False
         if envelope.origin_kind == "task":
             with self.db.engine.connect() as conn:

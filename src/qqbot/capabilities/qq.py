@@ -17,7 +17,7 @@ class LocalFileSend(BaseModel):
 
 
 
-def register_qq(registry, call, *, workspace=None, upload=None):
+def register_qq(registry, call, *, workspace=None, upload=None, snapshot_file=None):
     from qqbot.jobs.rich_delivery import RichButtons, RichMessage, RichStatus
     for name, model, operation, description, effect in (
         ("qq.message.send", RichMessage, "qq-send",
@@ -54,7 +54,8 @@ def register_qq(registry, call, *, workspace=None, upload=None):
                 raise PermissionError("file send is not authorized")
             if upload is None:
                 raise ValueError("streaming file transport unavailable")
-            preparing = asyncio.create_task(asyncio.to_thread(snapshot_workspace_file, root, body.path, body.media_type))
+            preparing = asyncio.create_task(asyncio.to_thread(snapshot_file or snapshot_workspace_file,
+                                                             root, body.path, body.media_type))
             try:
                 snapshot, size, mime_type = await asyncio.shield(preparing)
             except asyncio.CancelledError:

@@ -1,68 +1,41 @@
-# OpenViking（可选）
+# OpenViking
 
-QQ 官方 Bot 私聊本身保持默认接收和响应，仍受已有白名单、权限与静默模式约束。
-新增的 OpenViking 私聊会话在配置服务地址后默认开启；群聊默认关闭。
-未配置地址时不连接外部服务，不影响原有本地记忆。
+OpenViking 是本项目的长期事实记忆后端。配置 endpoint 并提供可信的 USER 绑定后，私聊记忆默认启用，群聊记忆默认关闭。endpoint 未配置或没有匹配的绑定时，不访问远端服务。
 
 ## 配置
 
-先独立部署可信的 OpenViking HTTP 服务，并配置服务自身的模型、存储及访问控制。
-本项目不自动安装服务、不生成凭据，也不自动把历史数据库全量迁移到外部。
+部署并保护 OpenViking 服务，配置其模型、存储和 API key 认证。当前适配器锁定并核对 `v0.5.4.1`。地址必须是 HTTP(S) origin；非本机服务必须使用 HTTPS。为每个 owner/workspace 分配独立的 OpenViking account、USER 和凭据环境变量。
 
 ```yaml
 memory:
   openviking:
     endpoint: "http://127.0.0.1:1933"
-    api_key_env: "QQBOT_OPENVIKING_KEY"
+    expected_version: "v0.5.4.1"
     private_enabled: true
     group_enabled: false
-    namespace: "elephant"
-    timeout_seconds: 2
-    operation_budget_seconds: 8
-    max_records: 64
+    bindings:
+      - owner_id: "personal-owner"
+        workspace_id: "personal"
+        account_id: "your-account"
+        user_id: "your-user"
+        api_key_env: "QQBOT_OPENVIKING_KEY"
 ```
 
-在运行环境设置 `QQBOT_OPENVIKING_KEY`，不要将密钥写入配置或版本库。
-非本机服务要求 HTTPS；地址只能是 origin，不能带账号、路径、查询参数。
-配置地址意味着允许将下述已授权文本发送到该服务，请仅使用自己信任的部署。
-升级运行项目现有 `migrate` 命令，迁移 0015 添加清理账本；无需安装 OpenViking Python SDK。
+把凭据放在进程环境中，不要写入配置或版本库。群聊或项目工作区需单独配置匹配的作用域和身份绑定。运行当前数据库迁移以创建记忆操作与删除屏障账本；无需安装 OpenViking Python SDK。
 
-## 已接入范围
+## 数据流与边界
 
-- 每个部署、适配器/机器人、会话、用户分别派生隔离目录和会话 ID。
-- 每轮发送前同步最近最多 16 条已授权用户/助手文本及当前输入，单条最多 4000 字符。
-- 最多同步 64 条当前有权读取的本地有效记忆；上限可配置为 128。
-- 调用官方 HTTP `content/batch-write` 建索引，`search/find` 提供语义召回。
-  只接受当前目录中已知记忆的精确 URI，并从本地读取正文；远端返回的正文不是可信事实。
-- 私聊默认参与，群聊须显式开启；频道暂不导出。权限检查包含
-  `memory.external.read`、`memory.external.write`、历史读取及来源读取权限。
-- 会话采用有界快照替换，不是无限追加日志。禁用自动 commit 和所有自动记忆提取，
-  避免外部派生记忆脱离本地撤回、忘记和权限控制。图片、文件、工具输入和 persona 不导出。
-- 远端故障、超时、异步索引尚未完成时继续使用原有本地记忆。不会阻止正常回复。
-- `/状态` 展示 `openviking_status` 与 `openviking_private_sessions_enabled`。
+- [KnowledgeRuntime](../src/qqbot/runtime/knowledge.py) 从授权的 Pi 原生 Session 增量导出来源事件。空白、疑似密钥、工具输出、转述、摘要、技能复盘及缺少来源证据的 verified fact 不提交提炼。
+- [OpenVikingMemory](../src/qqbot/adapters/openviking/service.py) 以 owner/workspace 对应的 USER 身份，串行提交同步、提炼和记忆变更。每个原始事件单独进入隔离的 OpenViking Session，显式 commit 并轮询提炼任务；这会为多个事件产生多次 commit。提炼类型限于 profile、preferences、entities、events。working memory、peer memory 与自动 commit 关闭。
+- OpenViking 保存事实和索引。SQLite 保存 owner 绑定、来源 ID 与 hash、操作回执、索引水位、epoch 和更正/遗忘屏障，不保存事实正文副本。
+- 检索结果只作为候选 URI。宿主核对 URI、owner、来源、索引状态和 epoch，再从 OpenViking 读取正文；当前聊天可用权限仍由宿主检查。
+- 记忆读写受权限服务约束。更正与遗忘由真实用户轮次触发，先写入持久屏障，再串行处理远端变更；已撤回的来源不会重新同步。恢复旧数据库时，须导入最新删除账本并由只读核对确认远端任务、来源和 URI 后才重新开放召回。
+- 远端错误会记录为降级状态，聊天继续处理；该运行时不维护本地事实库作为备用来源。OpenViking 不可用时，新记忆可能延后同步，召回也会缺少远端事实。
 
-## 清理和边界
+## 已验证范围
 
-忘记、来源撤回、权限变更、内容过期后，维护任务清理已知远端快照；控制命令也触发检查。
-失败保留本地账本并重试。超时写入不直接重放追加操作，而先删除确定的快照 ID 后重建。
-维护任务需要运行；后台关闭时不会自动轮询。数据库丢失后不能自动枚举和清理旧数据。
+home 的 OpenViking `v0.5.4.1` 普通 USER 账户曾完成 16 项真实服务检查，覆盖提炼、来源、索引召回、用户隔离、重启、更正、遗忘、旧来源重放屏障及只读恢复核对。旧版固定 synthetic 基准达到 30/30 top-5 来源成员召回，当时每份文档携带整批 20 个 source ID。真实 daemon 的 HOST 入站和新 Dialogue 召回也有记录。详细数据及范围见[Leader/Workers 验收记录](leader-acceptance.md#openviking-真实组件验收)。
 
-停用前，保留地址与密钥，设置 `private_enabled: false`、`group_enabled: false`，
-让维护任务完成清理，再移除地址。直接换地址、namespace、deployment_id 或移除凭据，
-旧服务的数据不能靠新服务清除；状态提示需要清理，应在旧服务管理端删除对应目录和会话。
-服务端备份、审计日志及供应商保留策略不在本项目删除保证内。
+当前代码按原始事件隔离提炼，多事件批次会增加远端 commit 次数。已知 URI 的定向更正与遗忘保留同批其他文档，并将共享的旧来源标为 `FROZEN`，阻止旧输入重新提炼或进入活动任务重规划。旧批次缺少的精确归因仍无法从历史回执还原，显式按 source ID 遗忘会覆盖该来源的全部候选派生文档。
 
-这是受控外部索引和会话同步支持，不是把 OpenViking 的自主记忆提取结果直接合入本地事实库。
-未经真实 OpenViking 部署联调；协议测试使用模拟 HTTP。参考当前官方接口：
-[Sessions](https://github.com/volcengine/OpenViking/blob/main/docs/en/api/05-sessions.md)、
-[Retrieval](https://github.com/volcengine/OpenViking/blob/main/docs/en/api/06-retrieval.md)、
-[Content](https://github.com/volcengine/OpenViking/blob/main/docs/en/api/12-content.md)。
-
-### 协议兼容与持久化说明
-
-本集成依据 OpenViking 当前 main 文档和接口实现进行适配，尚未锁定或实测特定发行版。
-部署前必须对目标版本确认 `memory_policy` 和显式 `auto_commit_policy: null` 的支持及服务端行为。
-代码不调用 session commit，不轮询提取任务，也不把任务受理 ID 当作记忆提取完成。
-服务端 session 创建和 messages/batch 成功响应仅表示本次会话写入请求成功，
-不保证远端磁盘持久化、归档或长期备份。会话随下一快照被替换，不能当作永久聊天备份。
-资源索引使用 `wait: false`，查询可能暂时命中不到新记录，届时使用本地召回。
+本批代码验证以对应 PR 的统一 CI 为准。逐事件提炼的新质量基准、真实 QQ 自动同步与跨 Dialogue 召回、活动 QQ Worker 更正或遗忘后的完整交付仍待实测。服务端备份、审计日志及供应商保留策略由各服务管理。

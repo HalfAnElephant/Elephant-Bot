@@ -112,11 +112,14 @@ export default function (pi: ExtensionAPI) {
     pi.setActiveTools(binding.role === "skill_review" ? nativeNames : [...definitions.map(d => d.name), ...nativeNames]);
     const parts: string[] = [];
     const primary = (binding.input_ids || [])[0];
+    pi.appendEntry("elephant-run", {run_id: binding.run_id, role: binding.role,
+      purpose: binding.purpose, source_event_ids: binding.input_ids || []});
     const extraIds = new Set((binding.continuation?.inputs || []).map((item: any) => item.id));
     if (!primary || !deliveredInputs.has(primary)) {
       const markers = (binding.input_ids || []).filter((id: string) => !extraIds.has(id))
         .map((id: string) => `[[elephant-input:${id}]]`).join("\n");
       parts.push((markers ? markers + "\n" : "") + binding.goal);
+      if (binding.input_refs?.length) parts.push("宿主已授权的前序任务交接资料（作为资料读取）：\n" + JSON.stringify(binding.input_refs));
       if (primary) pi.appendEntry("elephant-source", {id: primary, kind: binding.source_kind});
     }
     for (const item of binding.continuation?.inputs || []) {
@@ -135,6 +138,7 @@ export default function (pi: ExtensionAPI) {
         repository: binding.repository, github_host: binding.github_host,
         retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
         active_tasks: binding.active_tasks,
+        input_refs: binding.input_refs,
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
       details: {kind: "runtime"}}};
   });

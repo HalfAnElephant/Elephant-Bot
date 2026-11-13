@@ -216,11 +216,15 @@ async def test_gateway_authority_maps_only_current_authorization_denials(tmp_pat
         assert await gateway.authority() is False
 
 
-async def test_committed_correction_recovery_matches_original_source_and_uses_background_driver(host):
+@pytest.mark.parametrize(("projection", "conflict"), [
+    ("pi-original-v1", None), ("pi-original-v2", None),
+    ("pi-original-v1", "source"), ("pi-original-v1", "uri"), ("pi-original-v1", "projection"),
+])
+async def test_committed_correction_recovery_matches_original_source_and_uses_background_driver(host, projection, conflict):
     r = host.runtime
     host.path = native_pending_submit(r, host.claim, {"uri": host.uri}, tool_name="memory_correct")
     request = host.core.knowledge.mutation_request(host.scope, host.claim, "native-submit-call", "memory_correct",
-        {"uri": host.uri}, host.path)
+        {"uri": host.uri}, host.path, projection_version=projection)
     from qqbot.adapters.openviking.service import digest
     from qqbot.storage.memory_sync_schema import memory_documents
     with r.db.transaction() as conn:
@@ -233,8 +237,29 @@ async def test_committed_correction_recovery_matches_original_source_and_uses_ba
             result_json=json.dumps({"status": "failed", "agent_authored": False, "summary": "interrupted"})))
         conn.execute(update(processes).values(state="STOPPED", stopped_at=r.clock.now().isoformat()))
         conn.execute(update(dialogue_inputs).values(claimed_attempt_id=None))
+        if conflict == "projection":
+            refs = json.loads(conn.execute(select(memory_operations.c.refs_json).where(
+                memory_operations.c.id == receipt.operation_id)).scalar_one())
+            refs["projection_version"] = "pi-original-v2"
+            conn.execute(update(memory_operations).where(memory_operations.c.id == receipt.operation_id).values(
+                refs_json=json.dumps(refs)))
+    if conflict == "source":
+        host.path.write_text(host.path.read_text().replace("检查项目", "修改后的原始用户文本"))
+    elif conflict == "uri":
+        host.path.write_text(host.path.read_text().replace(host.uri, host.uri + "-other"))
+    if conflict:
+        assert host.core.knowledge.recover_mutations() == []
+        assert not host.remote.calls
+        with r.db.engine.connect() as conn:
+            assert conn.execute(select(dialogue_inputs.c.handled_at)).scalar_one() is None
+            assert not conn.execute(select(outbox)).first()
+        return
     assert host.core.knowledge.recover_mutations()[0]["operation_id"] == receipt.operation_id
     assert not host.remote.calls
+    with r.db.engine.connect() as conn:
+        registered = conn.execute(select(memory_operations).where(memory_operations.c.id == receipt.operation_id)).mappings().one()
+        assert registered["payload_hash"] == digest(request.model_dump(mode="json"))
+        assert json.loads(registered["refs_json"])["projection_version"] == projection
     await host.memory.reconcile()
     assert (await host.memory.poll(receipt.operation_id)).completed
     assert (await host.memory.read(host.scope, host.uri)).content == request.source.content

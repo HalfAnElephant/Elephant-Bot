@@ -19,8 +19,6 @@ from fastapi.responses import StreamingResponse
 
 from qqbot.adapters.hermes_skills import GUIDANCE as SKILLS_GUIDANCE
 from qqbot.capabilities.gateway import ToolGateway, standard_registry
-from qqbot.capabilities.git import GitService
-from qqbot.capabilities.process import ProcessService
 from qqbot.capabilities.types import Action, Capability, ToolContext
 from qqbot.domain.execution import WaitCondition
 from qqbot.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, artifact_path
@@ -53,7 +51,9 @@ class RemoteLedger:
 class RunGateway:
     def __init__(self, workspace, model, key, endpoint, *, call, capacity=None, transport=None,
                  github=None, processes=None, model_window=32768, content_root=None, github_host="github.com",
-                 icloud=None, upload=None):
+                 icloud=None, upload=None, execution=None):
+        from qqbot.adapters.execution.world import LocalExecution
+        self.execution = execution or LocalExecution()
         self.workspace = Path(workspace)
         self.model, self.key, self.endpoint = model, key, endpoint
         self.upstream_session = str(uuid4())
@@ -61,19 +61,20 @@ class RunGateway:
         self.model_window = model_window
         self.github_host = github_host
         self.content_root = Path(content_root) if content_root else self.workspace.parent / ".tool-content"
-        self.registry = standard_registry(github=github)
+        self.registry = standard_registry(github=github, execution=self.execution)
         from qqbot.capabilities.skills import register_skills
         register_skills(self.registry, self.call)
         from qqbot.capabilities.qq import register_qq
-        register_qq(self.registry, self.call, workspace=lambda: self.workspace, upload=upload)
+        register_qq(self.registry, self.call, workspace=lambda: self.workspace, upload=upload,
+                    snapshot_file=self.execution.snapshot_file)
         self.icloud = icloud
         if self.icloud is None and os.environ.get("ICLOUD_CALENDAR_CONFIG"):
             from qqbot.capabilities.icloud import ICloudCalendarService
             self.icloud = ICloudCalendarService.from_file(os.environ["ICLOUD_CALENDAR_CONFIG"])
         if self.icloud:
             self.icloud.register(self.registry)
-        GitService(credentials=getattr(github, "credentials", None) or (lambda _host: {})).register(self.registry)
-        self.processes = processes or ProcessService()
+        self.execution.create_git_service(getattr(github, "credentials", None) or (lambda _host: {})).register(self.registry)
+        self.processes = processes or self.execution.create_process_service()
         self.processes.register(self.registry)
         from qqbot.adapters.execution.jobs import register_remote_jobs
         register_remote_jobs(self.registry, self.call)
@@ -263,10 +264,10 @@ class RunGateway:
             return "VERIFIED", {**status, "verified_effect": "durable_enqueue"}
         if action.name == "task.budget.extend" and data.get("accepted"):
             return "VERIFIED", data
-        if action.name.startswith("workspace.") and isinstance(data, dict) and data.get("path"):
-            path = self.workspace / data["path"]
-            if path.is_file() and not path.is_symlink():
-                if (data["path"].startswith("outputs/") and path.suffix.lower() in DEFAULT_ARTIFACT_MIME_TYPES
+        if action.name == "workspace.file.write" and isinstance(data, dict) and data.get("path"):
+            content = await self.execution.read_file(context, data["path"], 0, 1048577)
+            if content == arguments["text"].encode():
+                if (data["path"].startswith("outputs/") and Path(data["path"]).suffix.lower() in DEFAULT_ARTIFACT_MIME_TYPES
                         or data["path"] in self.claim.get("goal_spec", {}).get("requested_outputs", [])):
                     self.artifacts.append(data["path"])
                 return "VERIFIED", data
@@ -388,12 +389,14 @@ class RunGateway:
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
                     "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
+                    "purpose": self.claim.get("purpose", "work"),
                     "repository": self.context.repository, "github_host": self.context.host,
                     "model_window": self.model_window, "output_tokens": max(self.provider.output_tokens or self.model_window, self.provider.compaction_output),
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],
                     "input_ids": context.get("source_input_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
                     "goal": self.claim["goal"], "goal_spec": self.claim.get("goal_spec", {}),
+                    "input_refs": context.get("input_refs", []),
                     "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
                     "reply_limit": (event.get("reply_context") or {}).get("max_replies"),

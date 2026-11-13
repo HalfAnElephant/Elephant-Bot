@@ -42,7 +42,7 @@ def branch_entries(entries):
     return list(reversed(branch))
 
 
-def export_session(path, *, session_id, after=0, limit=100, role="leader", purpose="user"):
+def _export_session_v1(path, *, session_id, after=0, limit=100, role="leader", purpose="user"):
     if not 1 <= limit <= 100 or after < 0:
         raise ValueError("invalid session export cursor")
     entries = load_entries(path)
@@ -102,6 +102,93 @@ def export_session(path, *, session_id, after=0, limit=100, role="leader", purpo
             created_at=entry.get("timestamp")))
     return {"session_id": session_id, "events": tuple(events), "next_cursor": cursor,
             "branch": branch_id, "has_more": any(positions[e["id"]] > cursor for e in branch)}
+
+
+def export_session(path, *, session_id, after=0, limit=100, role="leader", purpose="user",
+                   turns=None, input_origins=None, projection_version="pi-original-v2"):
+    if projection_version == "pi-original-v1":
+        return _export_session_v1(path, session_id=session_id, after=after, limit=limit, role=role, purpose=purpose)
+    if projection_version != "pi-original-v2" or not 1 <= limit <= 100 or after < 0:
+        raise ValueError("invalid session export projection or cursor")
+    entries = load_entries(path)
+    branch = branch_entries(entries)
+    positions = {entry.get("id"): index + 1 for index, entry in enumerate(entries)}
+    turns, input_origins = turns or {}, input_origins or {}
+    origins, entry_runs = {}, {}
+    run_id = None
+    for entry in reversed(branch):
+        if entry.get("type") == "custom" and entry.get("customType") == "elephant-turn-boundary":
+            run_id = entry.get("data", {}).get("run_id")
+        if run_id:
+            entry_runs[entry["id"]] = run_id
+        if entry.get("type") == "custom" and entry.get("customType") == "elephant-run":
+            run_id = None
+    active_run, source_ids, source_kind = {}, (), "relay"
+    events, cursor, branch_id = [], after, "main"
+    for entry in branch:
+        position = positions[entry["id"]]
+        data = entry.get("data", {})
+        if entry.get("type") == "custom":
+            custom = entry.get("customType")
+            if custom == "elephant-source":
+                origins[data["id"]] = data.get("kind", "relay")
+            elif custom == "elephant-run":
+                active_run = {**data, **turns.get(data.get("run_id"), {})}
+                source_ids = tuple(dict.fromkeys(origin for source in data.get("source_event_ids", ())
+                    for origin in input_origins.get(source, [source])))
+                source_kind = "relay"
+        if entry.get("type") == "branch_summary":
+            branch_id = entry["id"]
+        if position > after and len(events) >= limit:
+            break
+        if position > after:
+            cursor = position
+        if entry.get("type") != "message":
+            continue
+        current = turns.get(entry_runs.get(entry["id"]), active_run)
+        current_role, current_purpose = current.get("role", role), current.get("purpose", purpose)
+        message = entry.get("message", {})
+        raw_role = message.get("role")
+        if raw_role not in {"user", "assistant", "toolResult"}:
+            continue
+        parts = message.get("content", [])
+        separator = "" if raw_role == "assistant" else "\n"
+        content = parts if isinstance(parts, str) else separator.join(
+            part.get("text", "") for part in parts if part.get("type") == "text")
+        evidence_refs, event_origins = (), source_ids
+        kind = "relay"
+        if raw_role == "user":
+            ids, kept = [], []
+            for line in content.splitlines():
+                if line.startswith("[[elephant-input:") and line.endswith("]]"):
+                    ids.append(line[len("[[elephant-input:"):-2])
+                else:
+                    kept.append(line)
+            if ids:
+                source_ids = tuple(dict.fromkeys(origin for source in ids
+                    for origin in input_origins.get(source, [source])))
+            source_kind = "original" if (current_role == "leader" and current_purpose == "user" and ids
+                and all(origins.get(source) == "user" for source in ids)) else "relay"
+            content, kind, event_origins = "\n".join(kept), source_kind, source_ids
+        elif raw_role == "toolResult":
+            kind = "tool_output"
+        elif (content and current_role == "worker" and current.get("summary") == content[:10000]
+                and current.get("evidence_refs")):
+            content = current["summary"]
+            kind, event_origins = "verified_fact", ("result:" + current["run_id"],)
+            evidence_refs = tuple(current["evidence_refs"])
+        if position <= after or not content:
+            continue
+        if len(content) > 64000:
+            kind, content = "relay", content[:64000]
+        events.append(SourceEvent(id=session_id + ":" + entry["id"], seq=position,
+            role="tool" if raw_role == "toolResult" else raw_role, content=content,
+            revision=hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest(),
+            source_event_ids=event_origins, evidence_refs=evidence_refs,
+            kind="skill_review" if current_role == "skill_review" else kind, created_at=entry.get("timestamp")))
+    return {"session_id": session_id, "events": tuple(events), "next_cursor": cursor,
+        "branch": branch_id, "has_more": any(positions[e["id"]] > cursor for e in branch),
+        "projection_version": projection_version}
 
 
 def boundary_receipts(path):

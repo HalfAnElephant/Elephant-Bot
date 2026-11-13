@@ -935,3 +935,69 @@ def test_verified_worker_progress_has_no_fixed_time_or_count_threshold(runtime):
         assert runtime.service.task_operation(*identity, payload)["accepted"]
     repeated = {**payload, "call_id": "duplicate-last-milestone"}
     assert runtime.service.task_operation(*identity, repeated) == {"accepted": False, "reason": "coalesced"}
+
+
+def test_rework_input_refs_reach_worker_claim_with_latest_result(runtime):
+    root = root_goal(runtime)
+    original = worker_complete(runtime)
+    with runtime.db.transaction() as conn:
+        parent = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        spawned = runtime.service.graph.spawn(conn, parent, {
+            "goal": "依据原成果补充检查", "delegation_key": "rework", "input_refs": [original["task_id"]],
+            "rework_of_task_id": original["task_id"]}, runtime.access)
+        conn.execute(update(tasks).where(tasks.c.id == original["task_id"]).values(
+            result_json=json.dumps({"status": "completed", "summary": "最新交接成果", "observation_refs": ["proof"]})))
+    claim = runtime.service.claim("rework-worker")
+    assert claim["task_id"] == spawned["task_id"]
+    assert len(claim["context"]["input_refs"]) == 1
+    handoff = claim["context"]["input_refs"][0]
+    assert handoff["task_id"] == original["task_id"]
+    assert handoff["result"]["summary"] == "最新交接成果"
+    assert handoff["result"]["observation_refs"] == ["proof"]
+
+
+def test_rework_implicitly_receives_original_result_and_filters_revoked_context(runtime):
+    root = root_goal(runtime)
+    original = worker_complete(runtime)
+    with runtime.db.transaction() as conn:
+        parent = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        runtime.service.graph.spawn(conn, parent, {"goal": "重新检查", "delegation_key": "rework",
+            "rework_of_task_id": original["task_id"]}, runtime.access)
+    runtime.service.context_validator = lambda access, context: context.get("allowed", False)
+    claim = runtime.service.claim("rework-worker")
+    handoff = claim["context"]["input_refs"][0]
+    assert handoff["task_id"] == original["task_id"]
+    assert handoff["goal"] is None and handoff["result"] is None and handoff["rework_required"]
+
+
+def test_input_refs_cannot_handoff_another_root(runtime):
+    first, second = root_goal(runtime), root_goal(runtime, key="other")
+    with runtime.db.transaction() as conn:
+        parent = conn.execute(select(tasks).where(tasks.c.id == first["task_id"])).mappings().one()
+        with pytest.raises(PermissionError, match="outside this task tree"):
+            runtime.service.graph.spawn(conn, parent, {"goal": "越界输入", "delegation_key": "forbidden",
+                "input_refs": [second["task_id"]]}, runtime.access)
+
+
+def test_revoked_handoff_blocks_its_worker_and_allows_another_task(runtime, monkeypatch):
+    root = root_goal(runtime)
+    original = worker_complete(runtime)
+    with runtime.db.transaction() as conn:
+        parent = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        rework = runtime.service.graph.spawn(conn, parent, {"goal": "根据旧成果返工", "delegation_key": "revoked",
+            "input_refs": [original["task_id"]]}, runtime.access)
+    other = root_goal(runtime, key="independent")
+    require = runtime.service.permissions.require
+
+    def require_current(access, action, resource):
+        if action == "task.read" and resource == "task:" + original["task_id"]:
+            raise PermissionError("revoked")
+        return require(access, action, resource)
+
+    monkeypatch.setattr(runtime.service.permissions, "require", require_current)
+    claim = runtime.service.claim("worker")
+    assert claim["root_task_id"] == other["task_id"]
+    assert runtime.service.claim("next-worker") is None
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.state).where(tasks.c.id == rework["task_id"])).scalar_one() == "BLOCKED"
+        assert not conn.execute(select(runs).where(runs.c.task_id == rework["task_id"])).first()

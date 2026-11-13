@@ -9,10 +9,11 @@ import httpx
 from sqlalchemy import select, update
 
 from qqbot.capabilities.gateway import standard_registry
+from qqbot.contracts.harness import resolve_harness
 from qqbot.harness.pool import SessionPool
 from qqbot.jobs.api import WorkerRequest
 from qqbot.jobs.waiters import ExternalWaiters
-from qqbot.jobs.worker import GeneralRun, Spool, Worker, configured_github
+from qqbot.jobs.worker import Spool, Worker, configured_github
 from qqbot.providers import ModelCapacity
 from qqbot.storage.task_schema import runs
 
@@ -122,8 +123,9 @@ class Scheduler:
         self.client = RuntimeClient(core, leader)
         model_limit = self.settings.orchestration.model_request_limit
         self.capacity = ModelCapacity(total=model_limit, reserved=int(model_limit > 1))
-        from qqbot.adapters.execution.runtime import JobRuntime
-        core.job_runtime = JobRuntime(core, data)
+        from qqbot.adapters.execution.world import LocalExecution
+        self.execution = getattr(core, "execution", None) or LocalExecution()
+        core.job_runtime = self.execution.create_job_runtime(core, data)
         self.job_maintenance = None
         self.jobs_recovered = False
         self.next_job_maintenance = 0.0
@@ -134,15 +136,17 @@ class Scheduler:
 
         def factory(claim, process_id, session_id):
             binding = claim.get("binding") or leader.sessions.binding()
-            if binding.get("harness") != "pi" or binding.get("compression") != "native":
-                raise ValueError("persisted session requires an unavailable Harness/compression adapter")
+            adapter = resolve_harness(core, binding)
+            if binding.get("execution_world", "local") != self.execution.world_id:
+                raise ValueError("persisted task requires an unavailable execution world")
             args = SimpleNamespace(**{**vars(self.args), "model": binding.get("model"),
                 "model_endpoint": binding.get("endpoint"), "model_key_env": binding.get("credential_env", "QQBOT_MODEL_KEY"),
                 "model_context_window": binding.get("context_window", 32768),
-                "workspace_binding": [key + "=" + value for key, value in binding.get("workspace_bindings", {}).items()]})
+                "workspace_binding": [key + "=" + value for key, value in binding.get("workspace_bindings", {}).items()],
+                "execution": self.execution})
             if not args.model or not args.model_endpoint:
                 raise ValueError("persisted session has no configured model binding")
-            runner = GeneralRun(args, claim, self.client, process_id, session_id, self.capacity)
+            runner = adapter.create(args, claim, self.client, process_id, session_id, self.capacity)
             runner.archive = Path(args.archive)
             return runner
 
@@ -152,7 +156,8 @@ class Scheduler:
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)
         async def waiter_call(operation, payload):
             return await self.worker.call(operation, payload=payload)
-        self.waiters = ExternalWaiters(waiter_call, standard_registry(github=configured_github(self.args)))
+        self.waiters = ExternalWaiters(waiter_call, standard_registry(github=configured_github(self.args),
+                                                                    execution=self.execution))
         self.active = set()
 
     async def step(self):

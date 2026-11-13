@@ -67,6 +67,10 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def affected_sources(refs):
+    return tuple(sorted(set(refs.get("source_ids", ())) | set(refs.get("frozen_source_ids", ()))))
+
+
 def put(conn, table, identifier, values):
     statement = sqlite_insert(table).values(id=identifier, **values)
     conn.execute(statement.on_conflict_do_update(index_elements=[table.c.id], set_=values))
@@ -162,6 +166,9 @@ class OpenVikingMemory:
         if conn.execute(select(barriers.c.id).where(
                 barriers.c.scope_id == scope.key, barriers.c.source_id.in_(event.origins))).first():
             return False
+        if conn.execute(select(sources.c.id).where(sources.c.scope_id == scope.key,
+                sources.c.source_id.in_(event.origins), sources.c.state.in_({"FROZEN", "REVOKED"}))).first():
+            return False
         previous = conn.execute(select(sources).where(sources.c.scope_id == scope.key,
             sources.c.source_id.in_(event.origins), sources.c.revision == event.revision)).mappings().all()
         if any(row["event_id"] == event.id and row["content_hash"] != digest(event.content) for row in previous):
@@ -175,52 +182,75 @@ class OpenVikingMemory:
         owner = self._owner(batch.scope)
         if owner["state"] == "RESTORE_REQUIRED":
             raise MemoryBackendError("restored memory requires remote journal reconciliation")
-        operation_id = stable_id("memory-sync", batch.scope.key, batch.session_id, str(batch.from_seq),
-            str(batch.to_seq), batch.branch, batch.projection_version, batch.policy_revision, str(owner["epoch"]))
-        all_refs = [self._source_ref(event) for event in batch.events]
-        payload_hash = digest(all_refs)
         if sum(len(event.content.encode()) for event in batch.events) > 512 * 1024:
             raise ValueError("memory export exceeds 512 KiB; export a smaller original-source range")
         with self.db.transaction() as conn:
+            operation_id = self._sync_id(batch, owner["epoch"])
             old = conn.execute(select(operations).where(operations.c.id == operation_id)).mappings().first()
             if old:
-                if old["payload_hash"] != payload_hash:
-                    raise ValueError("conflicting replay of a memory source batch")
+                self._register_sync(conn, batch, owner)
             else:
-                pending = conn.execute(select(operations.c.id).where(operations.c.scope_id == batch.scope.key,
-                        operations.c.state.not_in(TERMINAL))).fetchmany(128)
-                if len(pending) >= 128:
-                    raise ValueError("memory synchronization queue is full")
-                stream_id = self._stream_id(batch, owner["epoch"])
-                stream = conn.execute(select(streams).where(streams.c.id == stream_id)).mappings().first()
-                if not stream:
-                    conn.execute(insert(streams).values(id=stream_id, scope_id=batch.scope.key,
-                        session_id=batch.session_id, branch=batch.branch, projection_version=batch.projection_version,
-                        epoch=owner["epoch"], exported_seq=0, extracted_seq=0, indexed_seq=0))
-                refs = {"session_id": batch.session_id, "from_seq": batch.from_seq, "to_seq": batch.to_seq,
-                        "branch": batch.branch, "projection_version": batch.projection_version,
-                        "policy_revision": batch.policy_revision, "events": all_refs, "eligible_ids": [],
-                        "dependency_operation_ids": []}
-                for event in batch.events:
-                    dependencies = conn.execute(select(sources.c.operation_id).where(
-                        sources.c.scope_id == batch.scope.key, sources.c.source_id.in_(event.origins),
-                        sources.c.revision == event.revision, sources.c.state == "QUEUED")).scalars().all()
-                    refs["dependency_operation_ids"].extend(dependencies)
-                    if self._source_allowed(conn, batch.scope, event):
-                        refs["eligible_ids"].append(event.id)
-                        for source_id in event.origins:
-                            put(conn, sources, stable_id(batch.scope.key, source_id, event.revision), {
-                                "scope_id": batch.scope.key, "source_id": source_id, "revision": event.revision,
-                                "event_id": event.id, "operation_id": operation_id,
-                                "content_hash": digest(event.content), "state": "QUEUED"})
-                conn.execute(insert(operations).values(id=operation_id, scope_id=batch.scope.key,
-                    stream_id=stream_id, kind="SYNC", epoch=owner["epoch"], state="QUEUED",
-                    refs_json=json.dumps(refs), payload_hash=payload_hash,
-                    remote_session_id="elephant-" + operation_id[:48], result_json="{}",
-                    created_at=self._now(), updated_at=self._now()))
+                eligible = [event for event in batch.events if self._source_allowed(conn, batch.scope, event)]
+                dependencies = None
+                if len(eligible) > 1:
+                    # OpenViking's diff has no per-document source IDs, so isolate extraction inputs.
+                    dependencies, start = [], batch.from_seq
+                    for index, event in enumerate(eligible):
+                        end = eligible[index + 1].seq - 1 if index + 1 < len(eligible) else batch.to_seq
+                        part = batch.model_copy(update={"from_seq": start, "to_seq": end,
+                            "events": tuple(item for item in batch.events if start < item.seq <= end)})
+                        dependencies.append(self._register_sync(conn, part, owner))
+                        start = end
+                self._register_sync(conn, batch, owner, dependencies=dependencies)
         async with self.locks[batch.scope.owner_id]:
             await self._drive(batch.scope, batch=batch)
         return self._sync_receipt(self._row(operation_id))
+
+    def _sync_id(self, batch, epoch):
+        return stable_id("memory-sync", batch.scope.key, batch.session_id, str(batch.from_seq),
+            str(batch.to_seq), batch.branch, batch.projection_version, batch.policy_revision, str(epoch))
+
+    def _register_sync(self, conn, batch, owner, *, dependencies=None):
+        operation_id = self._sync_id(batch, owner["epoch"])
+        all_refs = [self._source_ref(event) for event in batch.events]
+        payload_hash = digest(all_refs)
+        old = conn.execute(select(operations).where(operations.c.id == operation_id)).mappings().first()
+        if old:
+            if old["payload_hash"] != payload_hash:
+                raise ValueError("conflicting replay of a memory source batch")
+        else:
+            pending = conn.execute(select(operations.c.id).where(operations.c.scope_id == batch.scope.key,
+                    operations.c.state.not_in(TERMINAL))).fetchmany(128)
+            if len(pending) >= 128:
+                raise ValueError("memory synchronization queue is full")
+            stream_id = self._stream_id(batch, owner["epoch"])
+            stream = conn.execute(select(streams).where(streams.c.id == stream_id)).mappings().first()
+            if not stream:
+                conn.execute(insert(streams).values(id=stream_id, scope_id=batch.scope.key,
+                    session_id=batch.session_id, branch=batch.branch, projection_version=batch.projection_version,
+                    epoch=owner["epoch"], exported_seq=0, extracted_seq=0, indexed_seq=0))
+            refs = {"session_id": batch.session_id, "from_seq": batch.from_seq, "to_seq": batch.to_seq,
+                    "branch": batch.branch, "projection_version": batch.projection_version,
+                    "policy_revision": batch.policy_revision, "events": all_refs, "eligible_ids": [],
+                    "dependency_operation_ids": list(dependencies or ())}
+            for event in batch.events:
+                source_dependencies = conn.execute(select(sources.c.operation_id).where(
+                    sources.c.scope_id == batch.scope.key, sources.c.source_id.in_(event.origins),
+                    sources.c.revision == event.revision, sources.c.state == "QUEUED")).scalars().all()
+                refs["dependency_operation_ids"].extend(source_dependencies)
+                if dependencies is None and self._source_allowed(conn, batch.scope, event):
+                    refs["eligible_ids"].append(event.id)
+                    for source_id in event.origins:
+                        put(conn, sources, stable_id(batch.scope.key, source_id, event.revision), {
+                            "scope_id": batch.scope.key, "source_id": source_id, "revision": event.revision,
+                            "event_id": event.id, "operation_id": operation_id,
+                            "content_hash": digest(event.content), "state": "QUEUED"})
+            conn.execute(insert(operations).values(id=operation_id, scope_id=batch.scope.key,
+                stream_id=stream_id, kind="SYNC", epoch=owner["epoch"], state="QUEUED",
+                refs_json=json.dumps(refs), payload_hash=payload_hash,
+                remote_session_id="elephant-" + operation_id[:48], result_json="{}",
+                created_at=self._now(), updated_at=self._now()))
+        return operation_id
 
     def _sync_receipt(self, row):
         with self.db.engine.connect() as conn:
@@ -236,6 +266,10 @@ class OpenVikingMemory:
             error_type=row["error_type"])
 
     async def _load_batch(self, scope, refs, batch):
+        if batch is not None and batch.session_id == refs["session_id"] and (
+                batch.from_seq <= refs["from_seq"] < refs["to_seq"] <= batch.to_seq):
+            batch = batch.model_copy(update={"from_seq": refs["from_seq"], "to_seq": refs["to_seq"],
+                "events": tuple(event for event in batch.events if refs["from_seq"] < event.seq <= refs["to_seq"])})
         if batch is None or (batch.session_id, batch.from_seq, batch.to_seq) != (
                 refs["session_id"], refs["from_seq"], refs["to_seq"]):
             if not self.source_loader:
@@ -291,7 +325,11 @@ class OpenVikingMemory:
             if any(state not in {"INDEXED", "SKIPPED"} for state in dependency_states):
                 self._update(row["id"], state="WAITING_SOURCE")
                 return
-            self._update(row["id"], state="SKIPPED", error_type=None)
+            with self.db.engine.connect() as conn:
+                results = conn.execute(select(operations.c.result_json).where(
+                    operations.c.id.in_(refs.get("dependency_operation_ids", ())))).scalars().all()
+            uris = sorted({uri for result in results for uri in json.loads(result).get("uris", ())})
+            self._update(row["id"], state="SKIPPED", result_json=json.dumps({"uris": uris}), error_type=None)
             self._watermarks(row)
             return
         sid = quote(row["remote_session_id"], safe="")
@@ -448,7 +486,8 @@ class OpenVikingMemory:
                     identifier = stable_id(scope.key, uri, source_id, row["id"])
                     conn.execute(sqlite_insert(derivations).values(id=identifier, scope_id=scope.key,
                         uri=uri, source_id=source_id, operation_id=row["id"], active=1).on_conflict_do_nothing())
-            conn.execute(update(sources).where(sources.c.operation_id == row["id"]).values(state="EXTRACTED"))
+            conn.execute(update(sources).where(sources.c.operation_id == row["id"],
+                sources.c.state.not_in({"FROZEN", "REVOKED"})).values(state="EXTRACTED"))
             conn.execute(update(operations).where(operations.c.id == row["id"]).values(
                 state="EXTRACTED", result_json=json.dumps({"uris": list(dict.fromkeys(uri for _, uri, _ in changed)),
                     "diff_hash": digest(raw), "skipped_count": len(diff.get("skipped_operations", ())) }),
@@ -505,17 +544,27 @@ class OpenVikingMemory:
             # Revoke original evidence, not just one vector hit or display summary.
             source_ids = set(refs.get("source_ids", ()))
             uris = set(refs.get("uris", ()))
-            for uri in uris:
-                source_ids.update(conn.execute(select(derivations.c.source_id).where(
-                    derivations.c.scope_id == scope.key, derivations.c.uri == uri,
-                    derivations.c.active == 1)).scalars())
+            uri_sources = set(conn.execute(select(derivations.c.source_id).where(
+                derivations.c.scope_id == scope.key, derivations.c.uri.in_(uris),
+                derivations.c.active == 1)).scalars())
+            shared_sources = set(conn.execute(select(derivations.c.source_id).where(
+                derivations.c.scope_id == scope.key, derivations.c.source_id.in_(uri_sources),
+                derivations.c.uri.not_in(uris), derivations.c.active == 1)).scalars())
+            source_ids.update(uri_sources - shared_sources)
+            frozen_sources = shared_sources - source_ids
+            if frozen_sources:
+                # Legacy batch attribution can be ambiguous. Preserve sibling facts and stop source replay.
+                conn.execute(update(sources).where(sources.c.scope_id == scope.key,
+                    sources.c.source_id.in_(frozen_sources)).values(state="FROZEN"))
             if source_ids:
                 uris.update(conn.execute(select(derivations.c.uri).where(
                     derivations.c.scope_id == scope.key, derivations.c.source_id.in_(source_ids),
                     derivations.c.active == 1)).scalars())
-            if kind == "CORRECT" and source_ids.intersection(refs["correction"]["origins"]):
+            if kind == "CORRECT" and (source_ids | frozen_sources).intersection(refs["correction"]["origins"]):
                 raise ValueError("an owner correction needs a new original source identity")
-            refs = {**refs, "source_ids": sorted(source_ids), "uris": sorted(uris)}
+            refs = {**refs, "explicit_source_ids": refs.get("source_ids", []),
+                    "requested_uris": refs.get("uris", []), "source_ids": sorted(source_ids), "uris": sorted(uris),
+                    "frozen_source_ids": sorted(frozen_sources)}
             epoch = owner["epoch"] + 1
             conn.execute(update(owners).where(owners.c.id == scope.key).values(
                 epoch=epoch, state="MUTATING", last_error=None, updated_at=self._now()))
@@ -531,7 +580,7 @@ class OpenVikingMemory:
                 epoch=epoch, state="QUEUED", refs_json=json.dumps(refs), payload_hash=payload_hash,
                 result_json="{}", created_at=self._now(), updated_at=self._now()))
             self._change(conn, scope, operation_id, epoch, "barrier", refs={
-                "uris": sorted(uris), "source_event_ids": sorted(source_ids),
+                "uris": sorted(uris), "source_event_ids": list(affected_sources(refs)),
                 "clean_session_required": True})
         return operation_id
 
@@ -569,7 +618,7 @@ class OpenVikingMemory:
         refs = json.loads(row["refs_json"])
         return MutationReceipt(operation_id=row["id"], state=row["state"],
             completed=row["state"] == "APPLIED", memory_epoch=row["epoch"],
-            changed_uris=tuple(refs.get("uris", ())), affected_source_ids=tuple(refs.get("source_ids", ())),
+            changed_uris=tuple(refs.get("uris", ())), affected_source_ids=affected_sources(refs),
             error_type=row["error_type"])
 
     async def _settle_obsolete(self, scope, row):
@@ -653,11 +702,30 @@ class OpenVikingMemory:
         refs = json.loads(row["refs_json"])
         # A batch may have produced new derived URIs after the barrier was registered.
         with self.db.transaction() as conn:
+            if "requested_uris" in refs:
+                explicit = set(refs["explicit_source_ids"])
+                candidates = set(conn.execute(select(derivations.c.source_id).where(
+                    derivations.c.scope_id == scope.key, derivations.c.uri.in_(refs["requested_uris"]),
+                    derivations.c.active == 1)).scalars())
+                shared = set(conn.execute(select(derivations.c.source_id).where(
+                    derivations.c.scope_id == scope.key, derivations.c.source_id.in_(candidates),
+                    derivations.c.uri.not_in(refs["requested_uris"]), derivations.c.active == 1)).scalars()) - explicit
+                refs["source_ids"] = sorted(explicit | (candidates - shared))
+                refs["frozen_source_ids"] = sorted(shared | set(refs.get("frozen_source_ids", ())))
+                conn.execute(barriers.delete().where(barriers.c.operation_id == row["id"],
+                    barriers.c.source_id.in_(shared)))
+                if shared:
+                    conn.execute(update(sources).where(sources.c.scope_id == scope.key,
+                        sources.c.source_id.in_(shared)).values(state="FROZEN"))
             uris = set(refs["uris"])
             if refs["source_ids"]:
                 uris.update(conn.execute(select(derivations.c.uri).where(
                     derivations.c.scope_id == scope.key, derivations.c.source_id.in_(refs["source_ids"]),
                     derivations.c.active == 1)).scalars())
+            for source_id in refs["source_ids"]:
+                put(conn, barriers, stable_id(row["id"], "source", source_id), {
+                    "scope_id": scope.key, "epoch": row["epoch"], "operation_id": row["id"],
+                    "source_id": source_id, "uri": None, "allowed_hash": None, "created_at": self._now()})
             for uri in uris:
                 put(conn, barriers, stable_id(row["id"], "uri", uri), {
                     "scope_id": scope.key, "epoch": row["epoch"], "operation_id": row["id"],
@@ -688,16 +756,20 @@ class OpenVikingMemory:
             archived = conn.execute(select(operations.c.remote_session_id).where(
                 operations.c.scope_id == scope.key, operations.c.remote_session_id.is_not(None),
                 operations.c.id.in_(select(sources.c.operation_id).where(
-                    sources.c.scope_id == scope.key, sources.c.source_id.in_(refs["source_ids"]))))) .scalars().all()
+                    sources.c.scope_id == scope.key,
+                    sources.c.source_id.in_([*refs["source_ids"], *refs.get("frozen_source_ids", ())]))))) .scalars().all()
         for session_id in dict.fromkeys(archived):
             await self._delete_remote_session(scope, session_id)
         with self.db.transaction() as conn:
-            unaffected = set(conn.execute(select(derivations.c.source_id).where(
+            protected_sources = select(sources.c.source_id).where(sources.c.scope_id == scope.key,
+                sources.c.state.in_({"FROZEN", "REVOKED"}))
+            rebuild_candidates = conn.execute(select(derivations.c.source_id).where(
                 derivations.c.scope_id == scope.key, derivations.c.uri.in_(refs["uris"]),
-                derivations.c.active == 1)).scalars()) - set(refs["source_ids"])
+                derivations.c.active == 1, derivations.c.source_id.not_in(protected_sources))).scalars()
+            unaffected = set(rebuild_candidates) - set(refs["source_ids"]) - set(refs.get("frozen_source_ids", ()))
             if unaffected:
                 conn.execute(update(sources).where(sources.c.scope_id == scope.key,
-                    sources.c.source_id.in_(unaffected)).values(state="REBUILD"))
+                    sources.c.source_id.in_(unaffected), sources.c.state.not_in({"FROZEN", "REVOKED"})).values(state="REBUILD"))
             if refs["source_ids"]:
                 conn.execute(update(sources).where(sources.c.scope_id == scope.key,
                     sources.c.source_id.in_(refs["source_ids"])).values(state="REVOKED"))
@@ -728,7 +800,7 @@ class OpenVikingMemory:
             conn.execute(update(owners).where(owners.c.id == scope.key).values(
                 state="MUTATING" if other else "READY", last_error=None, updated_at=self._now()))
             self._change(conn, scope, row["id"], row["epoch"], "corrected" if event else "forgotten", {
-                "uris": refs["uris"], "source_event_ids": refs["source_ids"],
+                "uris": refs["uris"], "source_event_ids": list(affected_sources(refs)),
                 "replacement_source_ids": list(event.origins) if event else [],
                 "rebuild_source_ids": sorted(unaffected), "delete_archives": refs.get("delete_archives", False)})
 
@@ -940,7 +1012,9 @@ class OpenVikingMemory:
         with self.db.engine.connect() as conn:
             return {"scope": scope.model_dump(), "memory_epoch": owner["epoch"],
                     "barriers": [dict(row) for row in conn.execute(select(barriers).where(
-                        barriers.c.scope_id == scope.key)).mappings()]}
+                        barriers.c.scope_id == scope.key)).mappings()],
+                    "frozen_sources": [dict(row) for row in conn.execute(select(sources).where(
+                        sources.c.scope_id == scope.key, sources.c.state == "FROZEN")).mappings()]}
 
     def restore_barriers(self, scope, manifest):
         """Apply the newest deletion journal before opening recall on an old backup."""
@@ -950,6 +1024,11 @@ class OpenVikingMemory:
         if manifest["memory_epoch"] < owner["epoch"]:
             raise ValueError("deletion journal is older than the restored database")
         with self.db.transaction() as conn:
+            for item in manifest.get("frozen_sources", []):
+                if (set(item) != set(sources.c.keys()) or item.get("scope_id") != scope.key
+                        or item.get("state") != "FROZEN"):
+                    raise ValueError("invalid frozen source receipt")
+                put(conn, sources, item["id"], {key: value for key, value in item.items() if key != "id"})
             for item in manifest.get("barriers", []):
                 if item.get("scope_id") != scope.key or item.get("epoch", -1) > manifest["memory_epoch"]:
                     raise ValueError("invalid deletion journal entry")

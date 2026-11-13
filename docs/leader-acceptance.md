@@ -13,7 +13,7 @@
 | home 真实组件 | 在 home 调用实际 systemd user-manager、bubblewrap 或 OpenViking 服务，记录组件行为。单独列出与最终 daemon 的集成范围。 |
 | 待统一 CI | 测试存在或有分批定点结果，当前提交的完整 CI 结论仍待补。失败、跳过及未执行的场景均保留待验收状态。 |
 
-home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务。官方 adapter 与已验证 QQ owner 绑定均为 0；缺少 AppID、secret 与 OpenID，当前服务没有 QQ 接入。未向旧 NapCat 恢复兼容链路，也未伪造官方身份。
+历史验收快照曾使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务，当时官方 adapter 与已验证 QQ owner 绑定均为 0，缺少 AppID、secret 与 OpenID。该状态已由后续同步记录更新：2026-11-13 只读检查观察到官方 QQ WebSocket 为 CONNECTED，详见[服务器源码同步记录](#2026-11-13-服务器源码同步)。连接状态尚未验证四种 surface 的真实收发。旧 NapCat 链路没有恢复。
 
 ## 已有验证记录
 
@@ -29,7 +29,7 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 | 升级与恢复定点 | main 0010 与实验 0010 的迁移形状有定点成功记录，保留原 revision 并使用 `backup=False`。OpenViking 删除记录恢复与 Session 旋转有定点成功记录。 | [旧库升级](../tests/test_legacy_upgrade.py)、[记忆恢复](../tests/test_memory_restore.py)、[操作集成](../tests/integration/test_operations.py)。真实部署库迁移结果待最终部署记录。 |
 | OpenViking 契约定点 | HTTP 契约 29 项通过，恢复分支最终 4 项定点复验通过。 | [OpenViking 测试](../tests/test_openviking.py)。该组使用 HTTP mock。 |
 | home Job 组件 | 实际 user-manager/bubblewrap 可用，JobService 对象重建后同一 Job 可回读，exit 0 文件写入、exit 7 失败、进程树取消及 invocation 过滤日志有实测成功记录。 | 主机脚本 `/tmp/elephant-job-live.py`。daemon 真实重启后的 Job 续存及整体恢复仍待主线程补验。 |
-| home OpenViking 组件 | 实际 v0.5.4.1 服务完成 16 项检查，使用 api_key 与普通 USER，保留原 VLM/embedding 配置。 | 提炼、来源、索引召回、用户隔离、重启、更正、遗忘、旧源重放屏障及只读恢复核对均有真实结果，详见下文。 |
+| home OpenViking 组件 | 前一版适配器对实际 v0.5.4.1 服务完成 16 项检查，使用 api_key 与普通 USER，保留原 VLM/embedding 配置。 | 这些是该次适配的历史结果；当前逐事件提炼改动尚无新的统一 CI 与服务器验收。旧批次基准和限制见下文。 |
 
 ## T01–T26 对照
 
@@ -56,7 +56,7 @@ home 已使用真实 Pi 1.5.0、deepseek-v4.1-flash 和宿主工具执行任务�
 | T17 | Pi 独占原生压缩，已删除旧 history seed。真实 Pi＋模型桩覆盖 1M window、rebind 前压缩、上下文溢出恢复及偏好刷新。恢复读取原生日志与边界回执。 | 完整工具配对、更正、待办与内容引用在最终 daemon 压缩/重启后的组合验收。 |
 | T18 | GeneralRun 与 Job 共用执行工作区解析；实际 daemon 中 Pi 创建目录/文件、systemd/bwrap Job 写入、退出/取消与同 Job 跨重启续存已有证据。无持久 Job 能力时失败关闭有契约覆盖。 | 额外执行环境实现仅保留契约替换边界。 |
 | T19 | GitHub 真实目标解析与授权覆盖 flags/URL 顺序、repo、编号、host 和未知形式。恢复复用已有 GET verifier，定点覆盖只读核对与 PARTIAL。 | [GitHub 目标回归](../tests/test_github_verification.py)及[能力回归](../tests/test_capabilities.py)的当前完整 CI，授权测试仓库的真实读写核对。 |
-| T20 | 官方四种 surface、媒体、按钮、菜单、关系、流式与 Outbox 路径保留。Pi＋模型桩与 QQ HTTP mock 覆盖部分流式、额度、UNKNOWN 和不重复交付。 | 四种 surface 的真实收发、上传、按钮、菜单、C2C 流式、回复过期和主动拒收。缺少官方凭据与身份绑定，保持待验收。 |
+| T20 | 官方四种 surface、媒体、按钮、菜单、关系、流式与 Outbox 路径保留。Pi＋模型桩与 QQ HTTP mock 覆盖部分流式、额度、UNKNOWN 和不重复交付。 | 后续只读检查观察到 WebSocket CONNECTED；四种 surface 的真实收发、上传、按钮、菜单、C2C 流式、回复过期和主动拒收仍待验收，连接状态不构成平台通过证据。 |
 | T21 | LoopSupervisor 提供有界重启与 readiness 故障状态，[监督测试](../tests/test_m0_supervision.py)覆盖异常、停滞及数据库故障。 | 当前完整 CI，最终 daemon 注入 scheduler/delivery 异常后的恢复与健康端点实测。 |
 | T22 | OneBot adapter、启动和 WebSocket 路由、旧 Worker 监听已退出运行；旧输入/任务拒绝执行，缺失 adapter 待发消息终态化。超过 50 条旧队列回归通过，home 旧 units disabled/inactive，进程/监听快照已存。 | QQ 官方队列的真实平台流量未验收。 |
 | T23 | main/实验 0010 升级定点与实际 home 库迁移均通过，发布 revision 未改写。实际库达到 0020/integrity ok，按要求 backup=False。旧 backup 恢复时屏障导入、来源回执、Session 旋转与 UNKNOWN 保留有定点。 | 生产旧备份完整灾难恢复演练未执行。 |
@@ -87,7 +87,7 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 
 ## OpenViking 真实组件验收
 
-服务使用 `v0.5.4.1`，api_key 模式下普通 USER 身份完成数据操作。个人记忆类型为 profile、preferences、entities、events，working_memory、agent_evolution 和自动 commit 关闭。宿主增量同步负责提交与水位。
+服务使用 `v0.5.4.1`，api_key 模式下普通 USER 身份完成数据操作。个人记忆类型为 profile、preferences、entities、events，working_memory、agent_evolution 和自动 commit 关闭。宿主增量同步负责提交与水位。以下 16 项和固定基准是前一版适配器的历史实测；当前逐事件提炼实现的代码验证以对应 PR 的统一 CI 为准，新路径的服务器验收仍待执行。
 
 独立 `elephant-acceptance` account 的 16 项检查均有成功记录，覆盖认证、accepted 与 indexed 分离、真实提炼、来源、索引召回、跨 USER 与伪造 header 隔离、宿主数据库只存引用/回执、服务重启召回、更正、旧源重放不撤销更正、遗忘、重放不复活、重启不复活，以及恢复屏障的只读核对与旧源阻断。
 
@@ -95,7 +95,7 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 
 服务独立并发配置已只读核对，VLM 为 2，embedding 为 1。安装版本解析出的 session_commit 队列上限为 8，reindex 为 4。最终 daemon 与供应商总配额的组合负载仍待验收。
 
-### 固定质量基准
+### 固定质量基准（旧批次归因，历史结果）
 
 基准使用 20 条稳定 synthetic 项目事实和 20 个不同原始 SourceEvent，执行 20 条直接查询与 10 条释义查询。查询并发为 2。Fixture、原始 HTTP/任务回执和逐查询文档保留在 home 的独立验收数据中。
 
@@ -117,7 +117,7 @@ T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。h
 
 计分要求同一返回文档包含精确系列标识、唯一项目名、正确值和预期原始 source ID，统一空白及代码分隔符。v1 评分器错误要求系列标识与项目名保持连续拼接，最初误计 0/30。OpenViking 将两者规范为同一文档内的系列归属和项目标题，v2 据此分别核对两部分身份，对同一批原始返回重新计分。Fixture、查询、模型/embedding 配置和后端结果均未改变，v1 评分记录继续保留。
 
-来源归因采用保守的批次并集，每份文档均携带该批全部 20 个 source ID。本轮证明了正确项目、事实与预期来源成员同时命中，逐条 source 的精确归属仍未验证。该固定 synthetic 集达到初始 top-5 90% 门槛，真实个人资料与开放式问题的质量仍需独立评估。
+该基准属于旧批次归因实现：每份文档均携带该批全部 20 个 source ID。本轮只证明正确项目、事实与预期来源成员同时命中，未证明逐条 source 精确归属。当前新提炼按原始事件分别提交，每个事件需独立 commit；这会增加远端 commit 次数。30/30 top-5 是旧实现的历史指标，不代表当前逐事件提炼的 source 精确归因或召回质量。旧批次文档无法从历史回执恢复唯一 source ID，显式按 source ID 遗忘会覆盖该来源的全部候选派生文档；对已知 URI 的定向更正/遗忘可保留同批其他来源。新提炼路径尚未补做真实基准。
 
 摘要文件为 `/tmp/elephant-memory-benchmark.json`。home volume 对应容器目录 `/app/.openviking/acceptance-package/benchmark/`，保留 `fixture.json`、`state.json`、`queries.jsonl`、`http-observations.jsonl`、`initial-scoring-v1.json` 和 `scored-results-v2.json`。此前 16 项验收状态保留在 `/app/.openviking/acceptance-package/state/run.json`。
 
@@ -198,8 +198,8 @@ home 持久证据：
 
 ## 尚未验收的边界
 
-1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。缺少应用凭据和已验证主体，不能从本地契约或 admin API 成功推断平台通过。
-2. 所有 L01–L14 故障切点的真实平台组合、全角色满额压力、真实供应商切换/429/断流与所有控制语义的质量基准。本轮 CI 覆盖对应宿主边界，并补充上述指定真实恢复场景，未执行的组合仍保持未验收。
+1. QQ 官方四 surface 的真实收发、窗口、文件、按钮/问题、流式及回执丢失。后续[同步记录](#2026-11-13-服务器源码同步)显示 WebSocket CONNECTED；仍需验证各 surface 的实际收发与授权主体，不能从连接状态、本地契约或 admin API 成功推断平台通过。
+2. 所有 L01–L14 故障切点的真实平台组合、全角色负载、真实供应商切换/429/断流与所有控制语义的质量基准。部署旧备份恢复演练和最终 daemon 压缩组合也未新增实测。本轮 CI 覆盖对应宿主边界，并补充上述指定真实恢复场景，未执行的组合仍保持未验收。
 3. 最终 daemon 经真实 QQ 用户输入自动记忆并跨新 Dialogue 召回，以及活动 QQ Worker 更正/遗忘后的完整交付。OpenViking 真实组件的提炼、更正、遗忘、隔离、重启和基准已执行；活动任务 epoch 屏障与重规划有契约测试。
 4. 模型自动技能学习与自然触发的独立条件复盘已实际发生，“无可存内容”分支已有宿主定点验证。全角色真实并发效果仍未执行。
 

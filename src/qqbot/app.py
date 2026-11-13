@@ -31,7 +31,8 @@ from qqbot.storage.db import Database
 from qqbot.storage.schema import conversations, inbox, outbox
 
 
-def create_app(settings, *, clock=None, run_background=True, official_client=None, model_client=None):
+def create_app(settings, *, clock=None, run_background=True, official_client=None, model_client=None,
+               harnesses=None, default_harness="pi", execution=None):
     configure_logging()
     config_store = ConfigurationStore(settings)
     settings = config_store.read()
@@ -43,7 +44,8 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
         cfg.instance_id: OfficialAdapter(cfg, settings.deployment_id, incoming, clock, official_client)
         for cfg in settings.adapters if cfg.enabled
     }
-    core = Core(settings, db, clock, adapters, model_client)
+    core = Core(settings, db, clock, adapters, model_client, harnesses=harnesses,
+                default_harness=default_harness, execution=execution)
     core.config_store = config_store
 
     @asynccontextmanager

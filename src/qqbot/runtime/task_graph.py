@@ -116,7 +116,7 @@ class TaskGraph:
         plan = ExecutionPlan(initial_delivery="DETACHED", foreground_wait_ms=0,
                              budget=self.settings.execution.budget)
         task_context = {key: value for key, value in context.items()
-                        if key in {"images", "limits", "timezone", "model_context_window", "source_manifest",
+                        if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
                             "memory_status", "retrieved_data"}}
         task_context.update(dispatch_spec=intent, owner_id=dialogue["owner_id"], role="worker")
@@ -187,11 +187,75 @@ class TaskGraph:
         self.service.wakeup.set()
         return {"task_id": task_id, "public_id": child["public_id"], "state": "QUEUED"}
 
-    def status(self, conn, task):
+    def input_handoff(self, conn, task):
+        context = json.loads(task["context_json"])
+        references = list(context.get("child_spec", {}).get("input_refs", ()))
+        if task["rework_of_task_id"] and task["rework_of_task_id"] not in references:
+            references.append(task["rework_of_task_id"])
+        handoff, source_ids, manifest = [], set(), []
+        for reference in references:
+            source = conn.execute(select(tasks).where(tasks.c.id == reference,
+                tasks.c.root_task_id == task["root_task_id"], tasks.c.owner_id == task["owner_id"],
+                tasks.c.conversation == task["conversation"], tasks.c.requester == task["requester"])).mappings().one_or_none()
+            if source is None:
+                raise PermissionError("input reference is no longer in the authorized task tree")
+            access = self.service._access_for(task)
+            self.service.permissions.require(access, "task.read", "task:" + source["id"])
+            snapshot = self.status(conn, source)
+            snapshot = {key: snapshot[key] for key in ("task_id", "public_id", "kind", "state", "goal", "goal_revision", "result")}
+            source_context = json.loads(source["context_json"])
+            validator = self.service.context_validator
+            if validator and not validator(access, source_context):
+                snapshot.update(goal=None, result=None)
+                snapshot["rework_required"] = True
+            elif snapshot["goal"] is not None or snapshot["result"] is not None:
+                source_ids.update((source["id"], *source_context.get("task_sources", ())))
+                manifest.extend(source_context.get("source_manifest", ()))
+            handoff.append(snapshot)
+        if source_ids:
+            for target in (task, self.root(conn, task)):
+                target_context = json.loads(target["context_json"])
+                self.merge_source_dependencies(target_context, source_ids, manifest)
+                conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
+                    context_json=json.dumps(target_context, ensure_ascii=False)))
+            from qqbot.storage.task_schema import sessions
+            session = conn.execute(select(sessions).where(
+                sessions.c.id == task["coordinator_session_id"])).mappings().first()
+            if session:
+                history = json.loads(session["manifest_json"])
+                self.merge_source_dependencies(history, source_ids, manifest)
+                conn.execute(update(sessions).where(sessions.c.id == session["id"]).values(
+                    manifest_json=json.dumps(history, ensure_ascii=False)))
+        return handoff
+
+    @staticmethod
+    def merge_source_dependencies(context, source_ids, manifest):
+        context["task_sources"] = sorted(set(context.get("task_sources", ())) | set(source_ids))
+        context["source_manifest"] = list({json.dumps(source, sort_keys=True): source for source in (
+            *context.get("source_manifest", ()), *manifest)}.values())
+
+    def merge_snapshot_dependencies(self, context, task, snapshot):
+        if snapshot.get("context_revoked") or snapshot.get("goal") is None and snapshot.get("result") is None:
+            return False
+        source = json.loads(task["context_json"])
+        self.merge_source_dependencies(context, (task["id"], *source.get("task_sources", ())),
+            source.get("source_manifest", ()))
+        return True
+
+    def handoff_valid(self, task):
+        context = json.loads(task["context_json"])
+        return (not context.get("task_sources") or not self.service.context_validator
+            or self.service.context_validator(self.service._access_for(task), context))
+
+    def status(self, conn, task, *, access=None):
         root = self.root(conn, task)
         context = json.loads(root["context_json"])
         replanning = bool(context.get("memory_replan_pending") or context.get("memory_replan"))
-        stale_task = bool(context.get("memory_replan_pending") or replanning and
+        validator = self.service.context_validator if access is not None else None
+        revoked_handoff = (not self.handoff_valid(root) or not self.handoff_valid(task)
+            or bool(validator and (not validator(access, context)
+                or not validator(access, json.loads(task["context_json"])))))
+        stale_task = bool(revoked_handoff or context.get("memory_replan_pending") or replanning and
             json.loads(task["context_json"]).get("memory_epoch") != context.get("memory_epoch"))
         children = conn.execute(select(tasks.c.id, tasks.c.public_id, tasks.c.kind, tasks.c.state,
             tasks.c.goal, tasks.c.result_json, tasks.c.context_json).where(tasks.c.parent_task_id == task["id"])
@@ -199,8 +263,9 @@ class TaskGraph:
         child_status = []
         for row in children:
             old_context = json.loads(row["context_json"])
-            stale = replanning and (context.get("memory_replan_pending") or
-                old_context.get("memory_epoch") != context.get("memory_epoch"))
+            stale = (revoked_handoff or bool(validator and not validator(access, old_context))
+                or replanning and (context.get("memory_replan_pending") or
+                    old_context.get("memory_epoch") != context.get("memory_epoch")))
             if stale:
                 operation_ids = list(conn.execute(select(operations.c.id).where(operations.c.task_id == row["id"])).scalars())
                 child_status.append({key: row[key] for key in ("id", "public_id", "kind", "state")} | {
@@ -217,7 +282,8 @@ class TaskGraph:
             "state": task["state"], "goal": None if stale_task else task["goal"],
             "goal_revision": task["goal_revision"], "children": child_status,
             "result": json.loads(task["result_json"]) if task["result_json"] and not stale_task else None,
-            "last_progress": dict(last) if last and not replanning else None, "delivery_states": delivery}
+            "last_progress": dict(last) if last and not replanning and not revoked_handoff else None,
+            "delivery_states": delivery, **({"context_revoked": True} if revoked_handoff else {})}
 
     def check_authority(self, conn, task, payload):
         if not task["root_task_id"]:
