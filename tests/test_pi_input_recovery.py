@@ -80,3 +80,65 @@ assert.deepEqual(receipts[0].input_ids, binding.input_ids);
     result = subprocess.run(["node", "--input-type=module"],
                             input=script, capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("scenario", ["deleted", "replaced", "paired", "unpaired", "restored", "deleted_result"])
+def test_settled_receipt_checks_projected_tool_pairs(tmp_path, scenario):
+    bridge = Path(__file__).resolve().parents[1] / "src/qqbot/harness/pi_bridge.ts"
+    package = bridge.parents[3] / "node_modules/@earendil-works/pi-coding-agent/dist"
+    script = r'''
+import {createJiti} from "jiti";
+import assert from "node:assert/strict";
+import {SessionManager} from SESSION_MANAGER;
+const loader = createJiti(import.meta.url, {alias: {"@earendil-works/pi-ai": EXTENSION_VIEW}});
+const bridge = (await loader.import(BRIDGE)).default;
+const manager = SessionManager.open(NATIVE);
+const hooks = {}, receipts = [];
+bridge({on: (event, handler) => {hooks[event] = handler;}, registerTool: () => {},
+  registerProvider: () => {}, setActiveTools: () => {},
+  appendEntry: (type, data) => manager.appendCustomEntry(type, data)});
+globalThis.fetch = async (url, options) => {
+  if (url.endsWith("/binding")) return {ok: true, json: async () => ({generation: 1,
+    session_id: "logical-session", run_id: "run", input_ids: [], goal: "Finish",
+    native_tools: [], model: "offline", model_window: 32768, output_tokens: 100,
+    model_token: "model", tool_token: "tool"})};
+  receipts.push(JSON.parse(options.body));
+  return {ok: true, json: async () => ({accepted: true})};
+};
+const ctx = {sessionManager: manager};
+const input = await hooks.input({text: JSON.stringify({binding_id: "binding"})}, ctx);
+manager.appendMessage({role: "user", content: input.text, timestamp: Date.now()});
+const call = manager.appendMessage({role: "assistant", content: [
+  {type: "toolCall", id: "partial-call", name: "capability_invoke", arguments: {}}],
+  stopReason: "error", errorMessage: "terminated", timestamp: Date.now()});
+const scenario = SCENARIO;
+if (["deleted", "restored"].includes(scenario)) manager.appendContextEdit(call, null);
+if (scenario === "replaced") manager.appendContextEdit(call, {content: "Partial output discarded"});
+if (scenario === "restored") manager.appendContextEdit(call, {content: [
+  {type: "toolCall", id: "partial-call", name: "capability_invoke", arguments: {}}]});
+if (["paired", "deleted_result"].includes(scenario)) {
+  const result = manager.appendMessage({role: "toolResult", toolCallId: "partial-call",
+    toolName: "capability_invoke", content: [{type: "text", text: "done"}],
+    isError: false, timestamp: Date.now()});
+  if (scenario === "deleted_result") manager.appendContextEdit(result, null);
+}
+manager.appendMessage({role: "assistant", content: [{type: "text", text: "Finished"}],
+  stopReason: "stop", timestamp: Date.now()});
+if (["unpaired", "restored", "deleted_result"].includes(scenario)) {
+  await assert.rejects(hooks.agent_settled({aborted: false}, ctx), /unpaired tools/);
+  assert.equal(receipts.length, 0);
+} else {
+  await hooks.agent_settled({aborted: false}, ctx);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].kind, "turn_finished");
+  assert.equal(receipts[0].tools_paired, true);
+}
+'''
+    for key, value in {"SESSION_MANAGER": str(package / "core/session-manager.js"),
+                       "EXTENSION_VIEW": str(package / "core/extensions/pi-ai-extension-view.js"),
+                       "BRIDGE": str(bridge), "NATIVE": str(tmp_path / "native.jsonl"),
+                       "SCENARIO": scenario}.items():
+        script = script.replace(key, json.dumps(value))
+    result = subprocess.run(["node", "--input-type=module"], input=script,
+                            capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr

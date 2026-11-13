@@ -173,9 +173,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (event, ctx) => {
     if (!binding?.session_id || (event.aborted && !waiting)) return;
     const pending = new Set<string>();
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== "message") continue;
-      const message: any = entry.message;
+    // Pi retries tombstone partial messages with context edits; validate the resolved conversation.
+    for (const message of ctx.sessionManager.buildSessionProjection().messages) {
       if (message.role === "assistant") for (const part of message.content || []) {
         if (part.type === "toolCall") pending.add(part.id);
       }

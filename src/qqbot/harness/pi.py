@@ -236,6 +236,9 @@ class PiRunnerAdapter:
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise TypeError("RPC event must be an object")
+                if record.get("type") == "extension_error":
+                    record = {"type": "host_error", "error": self.safe_diagnostic(
+                        f"pi extension {record.get('event', 'unknown')}: {record.get('error', 'unknown error')}")}
                 if self.event_sink:
                     self.event_sink(record)
                 if self.public_event_sink:

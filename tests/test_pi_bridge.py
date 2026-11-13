@@ -108,7 +108,7 @@ async def compaction_session(tmp_path, request):
             return {"allowed": True}
         if operation == "reserve-budget":
             return {"accepted": True, "remaining": 20}
-        if operation in {"usage", "observation"}:
+        if operation in {"usage", "observation", "session-receipt"}:
             return {"recorded": True}
         raise AssertionError("unexpected host operation " + operation)
     async def upstream(request):
@@ -118,6 +118,16 @@ async def compaction_session(tmp_path, request):
         state.request_started.set()
         if state.request_gate:
             await state.request_gate.wait()
+        if options.get("interrupted_tool") and len(state.requests) == 1:
+            class InterruptedToolStream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    event = {"id": "fixture", "object": "chat.completion.chunk", "model": "offline", "created": 1,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0,
+                            "id": "interrupted-call", "type": "function", "function": {
+                                "name": "capability_invoke", "arguments": "{"}}]}, "finish_reason": None}]}
+                    yield ("data: " + json.dumps(event) + "\n\n").encode()
+                    raise httpx.ReadError("fixture stream interrupted")
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=InterruptedToolStream())
         if state.reject_next and reservation["kind"] == "business":
             state.reject_next = False
             return httpx.Response(400, json={"error": {"code": "context_length_exceeded"}})
@@ -216,6 +226,24 @@ async def test_locked_pi_rebind_precedes_auto_compaction_and_post_request_passes
     assert any(run == "second-run" and event.get("type") == "compaction_end" and not event.get("aborted")
                and event.get("result") for run, event in state.events)
     assert gateway.provider.compaction_count == len(second[:-1])
+
+
+@pytest.mark.parametrize("compaction_session", [{"interrupted_tool": True}], indirect=True)
+async def test_locked_pi_retry_discards_partial_tool_before_durable_receipt(compaction_session):
+    state = compaction_session
+    state.gateway.claim["session_id"] = "retry-session"
+    result = await state.runner.run("Finish after a transient interrupted tool stream", keep_alive=True)
+    assert result.summary == "Continued after pi compaction."
+    assert len(state.requests) == 2
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    partial = next(entry for entry in entries if entry.get("type") == "message"
+        and any(part.get("id") == "interrupted-call" for part in entry["message"].get("content", [])
+                if isinstance(part, dict)))
+    assert any(entry.get("type") == "context_edit" and entry["targetId"] == partial["id"]
+               and entry["replacement"] is None for entry in entries)
+    assert state.gateway.session_receipt["kind"] == "turn_finished"
+    assert state.runner.quiescent_verified
+    assert not any(event.get("type") == "host_error" for _, event in state.events)
 
 
 async def test_locked_pi_busy_compact_rejected_and_idle_unauthorized_compact_explicit(compaction_session):
