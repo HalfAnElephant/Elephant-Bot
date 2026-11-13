@@ -221,6 +221,8 @@ class Worker:
                 await self.call("renew", **identity)
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 409:
+                    logger.warning("Lease ownership lost during runner stop or result delivery run_id=%s; preserving recovery evidence",
+                                   identity["run_id"])
                     return
                 logger.exception("Lease heartbeat failed run_id=%s", identity["run_id"])
             except httpx.TransportError:

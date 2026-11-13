@@ -169,6 +169,42 @@ async def test_unknown_stop_retains_slot_and_durable_reconciliation_evidence(env
         assert files[0].exists()
 
 
+async def test_expired_control_stops_harness_and_preserves_result(environment, tmp_path, clock):
+    service, _task, app = environment
+    pool, created = pool_for(tmp_path, service, error="wait")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
+                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
+        class ExpiredControl:
+            async def post(self, path, **kwargs):
+                if path.endswith("/control"):
+                    clock.advance(31)
+                return await client.post(path, **kwargs)
+
+        worker = Worker(ExpiredControl(), "worker", Spool(tmp_path / "spool"), None, pool=pool)
+        with pytest.raises(httpx.HTTPStatusError) as failure:
+            await worker.once()
+        assert failure.value.response.status_code == 409
+        assert created[0].stopped_verified
+        with service.db.engine.connect() as conn:
+            assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
+        evidence = json.loads(next(worker.spool.directory.glob("*.json")).read_text())
+        assert evidence["stopped"] is True
+        assert evidence["result"]["status"] == "failed"
+
+
+async def test_stop_heartbeat_logs_lost_lease_and_leaves_recovery_evidence(environment, tmp_path, clock, caplog):
+    service, _task, app = environment
+    claim = service.claim("worker")
+    clock.advance(31)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
+                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
+        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None)
+        await worker.lease_heartbeat({key: claim[key] for key in ("run_id", "fencing_token")})
+    assert "Lease ownership lost" in caplog.text
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
+
+
 async def test_cancellation_records_failure_after_verified_stop(environment, tmp_path):
     service, _task, app = environment
     pool, created = pool_for(tmp_path, service, error="wait")

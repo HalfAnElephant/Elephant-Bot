@@ -730,7 +730,16 @@ class TaskService:
 
     def uncertain(self, run_id, fencing_token, worker_id):
         with self.db.transaction() as c:
-            _run, task = self._lease(c, run_id, fencing_token, worker_id)
+            run, task = self._lease(c, run_id, fencing_token, worker_id)
+            if run["process_id"]:
+                from qqbot.storage.task_schema import processes, sessions
+                process = c.execute(select(processes).where(processes.c.id == run["process_id"])).mappings().one()
+                if (process["state"] == "STOPPED" and process["epoch"] == run["process_epoch"]
+                        and process["generation"] == run["binding_generation"]):
+                    now = self.clock.now().isoformat()
+                    c.execute(update(runs).where(runs.c.id == run_id).values(state="NEEDS_RECONCILIATION",
+                        slot_reserved=0, runner_stopped_at=now, quiescent_at=now, lease=now))
+                    c.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(state="NEEDS_RECONCILIATION"))
             return {"state": "NEEDS_RECONCILIATION"}
 
@@ -1398,6 +1407,8 @@ class TaskService:
         from qqbot.domain.agents import TaskInputSpec
         with self.db.transaction() as conn:
             _run, task = self._lease(conn, run_id, fencing_token, worker_id)
+            if not task["root_task_id"]:
+                raise PermissionError("Worker task has no root goal")
             self.graph.check_authority(conn, task, {"action": "task.execute"})
             access = self._access_for(task)
             operation, arguments = payload["operation"], payload.get("arguments", {})

@@ -486,11 +486,20 @@ class Core:
         await self.outbox.dispatch_once(self.adapters, self.settings.send_budget_per_minute, self.pre_send)
 
     async def maintenance(self):
-        self.recovery.recover_workers()
-        self.knowledge.recover_mutations()
-        self.leader.recover()
-        self.knowledge.recover_mutations()
+        for recover in (self.recovery.recover_workers, self.leader.recover):
+            pending = asyncio.create_task(asyncio.to_thread(recover))
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                # Drain recovery before shutdown closes its database and clients.
+                await pending
+                raise
+            self.knowledge.recover_mutations()
         await self.knowledge.sync()
+
+    async def cleanup_artifacts(self):
+        from qqbot.harness.artifacts import cleanup_artifacts
+        await asyncio.to_thread(cleanup_artifacts, self.db, self.tasks.archive_root, self.clock.now())
 
     def retire_adapters(self):
         """Retain unsupported transport inputs as explicit failures, never execute them."""
@@ -529,6 +538,7 @@ class Core:
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
         self.supervisor.start("memory", self.maintenance, interval=10)
+        self.supervisor.start("artifacts", self.cleanup_artifacts, interval=3600)
         while not self.stopping:
             await asyncio.sleep(0.1)
 
