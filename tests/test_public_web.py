@@ -103,7 +103,7 @@ async def test_web_redirect_rechecks_domain_policy_before_dns(monkeypatch, tmp_p
 
     looked_up, requested, checked = [], [], []
 
-    def addresses(host, port):
+    def addresses(host, port, *, timeout=None):
         looked_up.append(host)
         return []
 
@@ -177,3 +177,95 @@ def test_all_dns_answers_are_validated_before_candidate_limit(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: answers)
     with pytest.raises(ValueError, match="public unicast"):
         public_addresses("public.example", 443)
+
+
+@pytest.mark.parametrize("phase", ["headers", "chunk_header"])
+def test_absolute_deadline_interrupts_slow_http_framing(monkeypatch, phase):
+    import threading
+    import time
+
+    from qqbot.harness import public_web
+
+    client, server = socket.socketpair()
+    finished = threading.Event()
+    class Connection(public_web.PinnedHTTPS):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.deadline = time.monotonic() + 0.2
+        def connect(self):
+            self.sock = client
+
+    def drip():
+        try:
+            server.recv(65536)
+            if phase == "headers":
+                server.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nX-Slow: ")
+                ending = b"\r\n\r\nx"
+            else:
+                server.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n1;slow=")
+                ending = b"\r\nx\r\n0\r\n\r\n"
+            for _ in range(100):
+                if finished.wait(0.02):
+                    return
+                server.sendall(b"x")
+            server.sendall(ending)
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    monkeypatch.setattr(public_web, "public_addresses", lambda *args, **kwargs: [])
+    monkeypatch.setattr(public_web, "PinnedHTTPS", Connection)
+    producer = threading.Thread(target=drip, daemon=True)
+    producer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="deadline"):
+            fetch_public("https://public.example")
+        assert time.monotonic() - started < 1.5
+    finally:
+        finished.set()
+        client.close()
+        producer.join(1)
+    assert not producer.is_alive()
+
+
+def test_dns_child_is_killed_when_lookup_budget_expires(monkeypatch):
+    import subprocess
+    import sys
+    import time
+
+    from qqbot.harness import public_web
+
+    original = subprocess.run
+    timed_out = []
+    def slow_lookup(arguments, **kwargs):
+        assert arguments[:3] == [sys.executable, "-I", "-c"]
+        assert arguments[-2:] == ["public.example", "443"]
+        assert kwargs["timeout"] == 0.2
+        try:
+            return original([sys.executable, "-I", "-c", "import time; time.sleep(30)"], **kwargs)
+        except subprocess.TimeoutExpired:
+            timed_out.append(True)
+            raise
+    monkeypatch.setattr(public_web.subprocess, "run", slow_lookup)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="DNS deadline"):
+        public_addresses("public.example", 443, timeout=0.2)
+    assert timed_out and time.monotonic() - started < 2
+
+
+def test_deadline_dns_results_keep_full_ssrf_validation(monkeypatch):
+    from types import SimpleNamespace
+
+    from qqbot.harness import public_web
+
+    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 15
+    answers.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)))
+    monkeypatch.setattr(public_web.subprocess, "run", lambda *args, **kwargs:
+        SimpleNamespace(returncode=0, stdout=json.dumps(answers)))
+    with pytest.raises(ValueError, match="public unicast"):
+        public_addresses("public.example", 443, timeout=1)
+    answers.pop()
+    addresses = public_addresses("public.example", 443, timeout=1)
+    assert len(addresses) == 15 and addresses[0][4] == ("8.8.8.8", 443)

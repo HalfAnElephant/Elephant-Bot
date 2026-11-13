@@ -6,6 +6,9 @@ import ipaddress
 import json
 import socket
 import ssl
+import subprocess
+import sys
+import threading
 import time
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
@@ -15,8 +18,24 @@ from fastapi import HTTPException
 MAX_PAGE = 1024 * 1024
 
 
-def public_addresses(host, port):
-    addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+def public_addresses(host, port, *, timeout=None):
+    if timeout is None:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    else:
+        if timeout <= 0:
+            raise TimeoutError("public DNS deadline exceeded")
+        # A resolver child can be killed when libc getaddrinfo exceeds the fetch budget.
+        script = ("import json,socket,sys; print(json.dumps(socket.getaddrinfo("
+                  "sys.argv[1], int(sys.argv[2]), type=socket.SOCK_STREAM)))")
+        try:
+            result = subprocess.run([sys.executable, "-I", "-c", script, host, str(port)],
+                                    capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("public DNS deadline exceeded") from None
+        if result.returncode:
+            raise OSError("public DNS lookup failed")
+        addresses = [(family, kind, protocol, canon, tuple(address))
+                     for family, kind, protocol, canon, address in json.loads(result.stdout)]
     if not addresses or len(addresses) > 16:
         raise ValueError('public DNS response is empty or exceeds address limit')
     for item in addresses:
@@ -64,8 +83,9 @@ def fetch_public(url, *, authorize_url=None):
             raise ValueError("only HTTPS port 443 is allowed")
         if authorize_url:
             authorize_url(url)
-        connection = PinnedHTTPS(parsed.hostname, 443, public_addresses(parsed.hostname, 443), deadline=deadline)
-        response = None
+        addresses = public_addresses(parsed.hostname, 443, timeout=deadline - time.monotonic())
+        connection = PinnedHTTPS(parsed.hostname, 443, addresses, deadline=deadline)
+        response, timer = None, None
         try:
             connection.timeout = connection.remaining()
             connection.request(
@@ -74,8 +94,17 @@ def fetch_public(url, *, authorize_url=None):
                 headers={"User-Agent": "ElephantBot/0.1", "Accept-Encoding": "identity"},
             )
             sock = connection.sock
+            def interrupt():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            timer = threading.Timer(connection.remaining(), interrupt)
+            timer.daemon = True
+            timer.start()
             sock.settimeout(connection.remaining())
             response = connection.getresponse()
+            connection.remaining()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
                 if not location:
@@ -105,6 +134,7 @@ def fetch_public(url, *, authorize_url=None):
                 content.extend(chunk)
             if len(content) > MAX_PAGE:
                 raise ValueError("public source exceeds size limit")
+            connection.remaining()
             text = content.decode("utf-8", errors="replace")
             return {
                 "url": url,
@@ -112,7 +142,12 @@ def fetch_public(url, *, authorize_url=None):
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "text": text,
             }
+        except (OSError, http.client.HTTPException):
+            connection.remaining()
+            raise
         finally:
+            if timer is not None:
+                timer.cancel()
             if response is not None:
                 response.close()
             connection.close()
