@@ -8,6 +8,8 @@ QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 
 - QQ 保留四种官方 surface、媒体、按钮、Markdown、私聊流式及权限检查。实际能力取决于应用权限与平台验收。
 - 长期记忆按验证过的 owner、工作区和可见范围绑定。更正与忘记使用 epoch 和删除屏障；后端故障时聊天继续，不建立备用事实库。
 - Skills 使用锁定版本的 Hermes 工具、标准文件和条件复盘，Leader 与 Worker 共用各自 owner 的目录。
+- 定时安排持久保存触发时间或 cron、时区与原始身份，触发后提交普通任务树。重启默认只补最近一次，修改使用版本检查。
+- QQ 图片直接交给模型的多模态输入。文件原件下载到当前工作文件夹，Agent 通过正常文件和执行工具读取、转换或处理。
 
 需要 Python 3.13、uv、Node.js >= 22.19.0 和 npm。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
 
@@ -72,9 +74,16 @@ Leader 的聊天、进度、提问和最终汇报统一加载 `src/qqbot/runtime
 | `/任务 [编号]`、`/取消 <编号>` | 查询或取消任务树 |
 | `/补充 <编号> <内容>` | 追加输入或回答持久化问题 |
 | `/新对话 <名称>`、`/切换对话 <名称或编号>`、`/对话` | 管理持久 Dialogue |
+| `/项目 [项目名]` | 列出或选择已配置项目，`personal` 返回个人范围 |
 | `/静默 [30m]`、`/恢复` | 当前会话静默与恢复 |
 
 自然语言交给 Leader 判断直接答复或委派。任务完成、成果验证和 QQ 送达是独立状态；排队不表示已经启动，UNKNOWN 外部操作必须先核对。
+
+项目名来自 `orchestration.workspace_bindings` 或当前 owner 的 OpenViking workspace 绑定。每个 Dialogue 固定项目，切换项目使用独立 Session；旧任务和定时安排继续使用原项目。项目记忆使用独立 OpenViking USER，技能保存于该 owner 的 `projects/<项目名>/skills/`。群访问项目需要明确的当前群权限规则，并启用相应的群记忆或技能设置。
+
+定时请求可直接描述执行目标、时间或周期和时区，Leader 使用 `schedules.create/list/get/update/cancel` 管理。管理接口位于 `/api/v1/schedules`，创建要求 `Idempotency-Key`，修改和删除要求当前 `expected_revision`。取消安排停止未来触发，已经派发的工作使用任务控制入口管理。
+
+技能管理接口提供 `/api/v1/skills`、`/read`、`/history`、`/export` 和 `/rollback`，均使用管理员令牌与当前权限。回退需要目标 entry ID 和该技能的最新 ledger ID，历史变化时拒绝覆盖。`workspace_id` 指定已配置的项目或 `personal`。导出 ZIP 包含标准技能文件与附件。
 
 已有事项的补充进入原 Worker；相同原文、附件和上下文的活动请求复用已有工作。不同原文的需求由 Leader 结合当前目标判断。长工作委派后，Leader 简短确认并继续处理聊天，进度和结果统一经 Leader 表达，相同进度合并，新修订使待发旧进度失效。
 

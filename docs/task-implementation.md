@@ -2,17 +2,17 @@
 
 Core `TaskService` is the sole database writer. An open-ended `TaskGoal` records the user's target, constraints, requested actions, success checks and optional outputs. `ExecutionPlan` records pi, resolved budgets, workspace/config references and initial delivery. ATTACHED/DETACHED delivery is independent of task execution, tool capabilities and whether files are required. Task acceptance persists the goal and plan, without adding a fixed confirmation message.
 
-Ordinary conversation and explicit background requests use the same pi Worker path. The deterministic planner gives initial delivery and capability hints. Pi chooses tools through discovery when useful. Foreground timeout changes delivery on the existing Task/run and preserves its existing process, session and tool history. A queued Task detaches without creating a fictitious run. `interactive_execution_enabled` controls ordinary pi submissions. `tasks_enabled` enables the explicit `/研究` command. Actual execution requires a running Worker in either case.
+Ordinary conversation and explicit background requests use the same daemon-managed Pi execution pool. The deterministic planner gives initial delivery and capability hints. Pi chooses tools through discovery when useful. Foreground timeout changes delivery on the existing Task/run and preserves its existing process, session and tool history. A queued Task detaches without creating a fictitious run. `interactive_execution_enabled` controls ordinary Pi submissions. `tasks_enabled` enables the explicit `/研究` command. The daemon Scheduler owns run admission and execution; there is no separate Worker service.
 
 ## Authority, scheduling and lifecycle
 
 `TaskService` accepts injected permissions, active/sustained capacity, context validation and budget ceilings. The default application policy is `allow_all`. Conversation and identity come from trusted adapter context. Legacy role and allowlist metadata remain available, while actual operations use `PermissionService`. Current-conversation lookup and legal source selection still apply. Authentication, QQ platform restrictions, current run/fence, credentials and budgets are checked separately.
 
-Default Core capacity is four active runs with sustained work limited to two, leaving room for new interactions. Queue limits are eight per requester and twenty per conversation. Conversation fairness and submission wakeups share the existing SQLite task queue. Worker bounds concurrent supervision, shares model capacity and separately manages its resident/idle process limits. Align Core settings with Worker CLI capacity on deployment.
+Agent and task admission have no fixed count cap. The daemon Scheduler applies model request capacity separately and reserves one request slot for Leader work when total capacity exceeds one. Pi process reuse is managed inside that same Scheduler; no Worker CLI capacity needs to be synchronized with Core.
 
 Each active session has one run owner. Binding generation and credentials rotate before each run's input/compaction. A committed quiescent run can return its process to IDLE. Real termination releases resident capacity and records a stop proof. Unconfirmed stops retain ownership as UNKNOWN or NEEDS_RECONCILIATION. Expired fencing never commits a new terminal result. Reconciliation requires proved stopping and new recovery ownership before adopting a spool result. Retry creates a linked Task and shares the original durable operation lineage, so uncertain remote writes are not submitted again under a new task ID. A pi marker alone cannot release a generic run while host gateway/tool stopping is unverified.
 
-`TaskService` exposes task acceptance/query/control, claim/renew/event/result submission, notifications, durable questions/answers, continuation consumption, budget reservation/usage, process binding/stop, observations, operation ledger and external-wait observations. The authenticated internal router lives beneath `/internal/tasks/`. Worker payloads include worker identity, run ID and fencing token. The internal token is at least thirty-two characters and is available only to Core and Worker. Production exposes the router through its protected Unix socket.
+`TaskService` exposes task acceptance/query/control, claim/renew/event/result submission, notifications, durable questions/answers, continuation consumption, budget reservation/usage, process binding/stop, observations, operation ledger and external-wait observations. The daemon Scheduler uses an in-process `RuntimeClient` to call the task and Leader services. Production does not mount the old `/internal/tasks/` Worker router or expose a Worker Unix socket; external task management uses the protected admin API and CLI.
 
 ## Goals, effects and delivery
 
@@ -26,15 +26,13 @@ Agent-authored progress, questions, status explanations and final results enter 
 
 `task.wait_external` persists a registered read-only remote observation condition. Deterministic bounded polling rechecks authority and observes the external resource without invoking a model each poll. A satisfied condition is durably recorded before the Task resumes. Failures or stale observations do not satisfy the condition. Local processes cannot be detached from their run without a Task-level ProcessLease handoff, which is currently unsupported.
 
-## Worker configuration and recovery
+## Daemon execution and recovery
 
-Run `python -m qqbot.jobs.worker --socket SOCKET --token-file FILE --pi ABSOLUTE_PI --workspace ROOT --spool ROOT --archive ARCHIVE --runner-mode systemd --model MODEL --model-endpoint CHAT_COMPLETIONS_URL`. Worker model selection and endpoint are explicit CLI values. The provider key comes from its dedicated `QQBOT_RUNNER_OPENAI_KEY`. Core's model configuration and Worker values should describe the same deployed model. Pi receives rotating temporary tokens rather than the provider key or an operator profile.
+Production starts one daemon with `qqbot serve --config /etc/qqbot/core.yaml`. Its Scheduler claims durable task, Leader and Hermes review runs in-process and creates Pi runs from the persisted model binding. There is no standalone `python -m qqbot.jobs.worker` command or production Worker listener; `deploy/qqbot-worker.service` is retired. See [deployment instructions](../deploy/README.md).
 
-`--concurrency`, `--max-idle`, `--idle-ttl` and `--model-context-window` control Worker capacity/model limits. `--repository`, `--github-host`, `--gh` and `--github-token-env` configure host-bound GitHub access. Credentials first use `gh auth token --hostname` from the Worker account (respecting `GH_CONFIG_DIR`), then fall back to `--github-token-env`. The local lookup ignores GitHub token environment overrides. `--workspace-binding NAME=PATH` supplies an explicit host workspace binding. Otherwise a Task-specific workspace is created under the Worker's state directory. Only the bound workspace is exposed to business tools. The archive root must match Core `TaskService.archive_root`.
+The daemon-owned Worker, spool and Pi runner preserve fsynced result/event replay. Reconciliation must authenticate the run and prove the old process stopped before adopting a result; uncertain external writes still require readback. The spool remains recovery evidence, not another domain database.
 
-Results and bounded execution events are fsynced to a twenty MiB Worker spool before delivery to Core. Event IDs and contiguous sequences support identical replay. Lost result responses can be replayed without rerunning pi or external actions. Conflicting replay fails. Stale spool remains recovery evidence until authenticated reconciliation or confirmed discard. The spool does not become another domain database.
-
-Production uses the fixed root launcher with independent process/session identity and `pi_bridge.ts`. The launcher and root stop markers preserve UID, namespace, cgroup and filesystem boundaries. `--runner-mode local` supports protocol development and has no verified production cgroup boundary. Credentialed GitHub and workspace subprocess capabilities additionally require bubblewrap. Refer to [deployment instructions](../deploy/README.md) and [harness contracts](harness-contract.md).
+Production Pi processes use the fixed root launcher with run-scoped identity, `pi_bridge.ts` and root-owned stop evidence. This preserves UID, namespace, cgroup and filesystem boundaries. Credentialed GitHub and workspace subprocess capabilities additionally require bubblewrap. See [harness contracts](harness-contract.md) for the host boundary and [deployment instructions](../deploy/README.md) for installation.
 
 Actual verification coverage and unfinished external acceptance appear in [the A01–A62 matrix](agent-execution-acceptance.md). Real QQ windows/delivery, GitHub writes, model billing, Linux isolation and reboot recovery must be checked on their corresponding systems.
 
@@ -44,12 +42,12 @@ Core includes pool limits in each claim context. `warm_max=0` disables idle reus
 Context windows and execution limits
 -----------------------------------
 
-Set Core `model.context_window` and Worker `--model-context-window` to the actual model
-window (for the home deployment: `1000000`). `context.max_tokens` and
+Set `model.context_window` to the actual model window. A persisted run binding records
+the resolved window for its session. `context.max_tokens` and
 `context.keep_recent_tokens` default to `null`, selecting pi thresholds from that
 window; `max_request_bytes` is an independent 16 MiB transport limit. The former
 `hard_input_tokens` and `compaction_input_tokens` estimate gates have been removed.
-Warm runners must be restarted when these settings or tool catalogs change.
+Resident Pi sessions must be restarted when these settings or tool catalogs change.
 
 Interactive defaults allow 30 model requests, 80 tool calls, 600 active seconds,
 and 4,096 output tokens per call. Background defaults allow 60 model requests,

@@ -167,7 +167,7 @@ class ToolGateway:
         return result
 
 
-def workspace_file(context, relative, flags, mode=0o600):
+def workspace_parent(context, relative):
     path = PurePosixPath(relative)
     if path.is_absolute() or not path.parts or any(part in {"..", ".git"} for part in path.parts):
         raise ValueError("path must be a workspace-relative file outside .git")
@@ -177,7 +177,16 @@ def workspace_file(context, relative, flags, mode=0o600):
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
-        fd = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=directory)
+        return directory, path.name
+    except BaseException:
+        os.close(directory)
+        raise
+
+
+def workspace_file(context, relative, flags, mode=0o600):
+    directory, name = workspace_parent(context, relative)
+    try:
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=directory)
         if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
             os.close(fd)
             raise ValueError("workspace file must be a regular file without hardlinks")

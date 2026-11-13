@@ -124,7 +124,7 @@ async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_con
     core = make_core(tmp_path, official_config, clock)
     try:
         scope = MemoryScope(owner_id=core.settings.owner.id)
-        core.knowledge.scope = lambda event: scope
+        core.knowledge.scope = lambda event, **_: scope
         core.openviking.config = core.openviking.config.model_copy(update={"enabled": True})
         core.openviking.enabled = lambda scope: True
         core.openviking._owner = lambda scope: None

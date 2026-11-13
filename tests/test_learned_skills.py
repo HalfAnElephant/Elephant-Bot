@@ -54,9 +54,9 @@ def test_native_route_authenticates_and_binds_owner(setup, tmp_path, receipt):
     service, event = setup
     _, args = start(service, event, "native")
     adapter = HermesSkills(tmp_path)
-    service.skills_provider = lambda access: adapter if access.principal == event.principal else None
+    service.skills_provider = lambda access, **_: adapter if access.principal == event.principal else None
     assert skill_operation(service, args, {"operation": "skills_list", "arguments": {}, **receipt})["success"]
-    service.skills_provider = lambda access: None
+    service.skills_provider = lambda access, **_: None
     with pytest.raises(PermissionError, match="scope"):
         skill_operation(service, args, {"operation": "skills_list", "arguments": {}})
 

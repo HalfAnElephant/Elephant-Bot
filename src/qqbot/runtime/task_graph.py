@@ -63,7 +63,8 @@ class TaskGraph:
     @staticmethod
     def _request_context(context):
         return {
-            **{key: context.get(key) for key in ("scope", "principal", "preferences", "memory_scope", "memory_epoch", "retrieved_data")},
+            **{key: context.get(key) for key in ("scope", "principal", "preferences", "memory_scope", "memory_epoch", "retrieved_data",
+                    "workspace_id", "schedule_fire_id", "structured_request", "files", "task_sources")},
             "images": [{key: value for key, value in image.items() if key not in {"source", "message_id"}}
                        for image in context.get("images", ())],
             "references": [source for source in context.get("source_manifest", ()) if source.get("kind") != "inbox"],
@@ -118,7 +119,7 @@ class TaskGraph:
         task_context = {key: value for key, value in context.items()
                         if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
-                            "memory_status", "retrieved_data"}}
+                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "structured_request"}}
         task_context.update(dispatch_spec=intent, owner_id=dialogue["owner_id"], role="worker")
         root = self.service.new_task(root_id, event, access,
             TaskGoal(text=spec.goal, success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
@@ -278,7 +279,11 @@ class TaskGraph:
             .where(agent_events.c.task_id == task["id"]).order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
         delivery = conn.execute(select(notifications.c.state).where(notifications.c.task_id == task["id"],
             notifications.c.purpose == "result")).scalars().all()
+        from .progress import task_progress
+        projection = task_progress(self, conn, task, root, access=access, stale=stale_task,
+                                   delivery_states=delivery)
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
+            "progress": projection,
             "state": task["state"], "goal": None if stale_task else task["goal"],
             "goal_revision": task["goal_revision"], "children": child_status,
             "result": json.loads(task["result_json"]) if task["result_json"] and not stale_task else None,
@@ -411,19 +416,43 @@ class TaskGraph:
         self.service.wakeup.set()
 
     def progress(self, conn, task, run_id, payload, call_id):
+        from .progress import registered_artifacts
         spec = ProgressSpec.model_validate_json(json.dumps(payload))
+        root = self.root(conn, task)
+        if task["goal_revision"] != root["goal_revision"] or not self.handoff_valid(task):
+            raise PermissionError("progress source is no longer current")
         verified = set(conn.execute(select(observations.c.id).where(observations.c.task_id == task["id"],
             observations.c.id.in_(spec.evidence_refs))).scalars())
         verified |= set(conn.execute(select(operations.c.id).where(operations.c.task_id == task["id"],
             operations.c.id.in_(spec.evidence_refs), operations.c.state == "VERIFIED")).scalars())
+        artifacts = registered_artifacts(conn, [task["id"]])
+        verified |= {reference for reference in spec.evidence_refs
+                     if reference.removeprefix("artifact:") in artifacts}
         if set(spec.evidence_refs) - verified:
             raise PermissionError("milestone references unverified evidence")
         if not verified:
             return {"accepted": False, "reason": "no_verified_evidence"}
-        last = conn.execute(select(agent_events).where(agent_events.c.task_id == task["id"],
-            agent_events.c.kind == "milestone").order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
-        if last and json.loads(last["payload_json"]) == spec.model_dump(mode="json"):
+        previous = conn.execute(select(agent_events).where(agent_events.c.task_id == task["id"],
+            agent_events.c.kind == "milestone", agent_events.c.source_revision == task["goal_revision"])
+            .order_by(agent_events.c.seq.desc())).mappings().all()
+        phase_events = [event for event in previous if json.loads(event["payload_json"])["phase"] == spec.phase]
+        evidence = {reference.removeprefix("artifact:") for reference in spec.evidence_refs}
+        known = {reference.removeprefix("artifact:") for event in phase_events
+                 for reference in json.loads(event["payload_json"])["evidence_refs"]}
+        if evidence <= known:
             return {"accepted": False, "reason": "coalesced"}
+        pending = conn.execute(select(leader_inbox).where(leader_inbox.c.event_id.in_([
+            event["id"] for event in phase_events]), leader_inbox.c.handled_at.is_(None),
+            leader_inbox.c.claimed_attempt_id.is_(None))).mappings().all()
+        if pending:
+            pending_ids = {item["event_id"] for item in pending}
+            merged = set(spec.evidence_refs)
+            for event in phase_events:
+                if event["id"] in pending_ids:
+                    merged.update(json.loads(event["payload_json"])["evidence_refs"])
+            spec = spec.model_copy(update={"evidence_refs": tuple(dict.fromkeys((*spec.evidence_refs, *sorted(merged))))[:20]})
+            conn.execute(update(leader_inbox).where(leader_inbox.c.id.in_([item["id"] for item in pending]))
+                .values(handled_at=self.clock.now().isoformat(), output_ref="SUPERSEDED"))
         self.event(conn, task, "milestone", spec.model_dump(mode="json"), attempt_id=run_id,
                    event_id=call_id, wake=True)
         return {"accepted": True}

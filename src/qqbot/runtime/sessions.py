@@ -1,5 +1,7 @@
 """Persistent input routing and one writer per logical Leader session."""
 import json
+import re
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -9,6 +11,7 @@ from qqbot.domain import AccessContext, InboundEvent, Surface, stable_id
 from qqbot.domain.execution import ExecutionPlan
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_inbox
 from qqbot.storage.learning_schema import learning_events, learning_sessions
+from qqbot.storage.schedule_schema import schedules
 from qqbot.storage.stream_schema import stream_runs
 from qqbot.storage.task_schema import inputs, runs, sessions, tasks
 
@@ -47,9 +50,63 @@ class SessionService:
             "workspace_bindings": self.settings.orchestration.workspace_bindings,
             "prompt_version": "leader-workers-v1"}
 
-    def dialogue(self, conn, event, *, new_title=None, select_ref=None):
+    def configured_workspaces(self):
+        explicit = set(self.settings.orchestration.workspace_bindings)
+        candidates = explicit | {binding.workspace_id for binding in self.settings.memory.openviking.bindings
+            if binding.owner_id == self.settings.owner.id
+            and (not re.fullmatch(r"[0-9a-f]{64}", binding.workspace_id) or binding.workspace_id in explicit)}
+        return sorted(name for name in candidates if name != "personal"
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name))
+
+    def validate_workspace(self, event, workspace_id):
+        if workspace_id == "personal":
+            return workspace_id
+        if workspace_id not in self.configured_workspaces():
+            raise ValueError("workspace must be a configured project ID")
+        if self.owner(event) is None or not self.allowed(event):
+            raise PermissionError("project requires an authenticated owner")
+        if event.conversation.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE}:
+            access = AccessContext(principal=event.principal, conversation=event.conversation)
+            decision = self.service.permissions.check(access, "workspace.use", "project:" + workspace_id)
+            rule = decision.matched_rule
+            if (not decision.allowed or rule is None or rule.subject.kind not in {"group", "group_member"}
+                    or not any(resource.startswith("project:") for resource in rule.resources)):
+                raise PermissionError("group project access requires an explicit scoped grant")
+        return workspace_id
+
+    def workspace_for(self, event, conn=None):
+        with (nullcontext(conn) if conn is not None else self.db.engine.connect()) as connection:
+            stored = connection.execute(select(dialogues.c.workspace_id).join(dialogue_inputs,
+                dialogue_inputs.c.dialogue_id == dialogues.c.id).where(dialogue_inputs.c.id == event.event_id,
+                dialogues.c.conversation_id == event.conversation.key)).scalar_one_or_none()
+            if stored is not None:
+                return stored
+            root = connection.execute(select(tasks.c.context_json).where(tasks.c.kind == "goal",
+                tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
+                func.json_extract(tasks.c.event_json, "$.event_id") == event.event_id).limit(1)).scalar_one_or_none()
+            if root is not None:
+                return json.loads(root).get("workspace_id", "personal")
+            source_task = connection.execute(select(tasks.c.context_json).join(inputs, inputs.c.task_id == tasks.c.id)
+                .where(inputs.c.source_event_id == event.event_id, tasks.c.conversation == event.conversation.key,
+                    tasks.c.requester == event.principal.key).order_by(inputs.c.created_at).limit(1)).scalar_one_or_none()
+            if source_task is not None:
+                return json.loads(source_task).get("workspace_id", "personal")
+            scheduled = connection.execute(select(dialogues.c.workspace_id).join(schedules,
+                schedules.c.dialogue_id == dialogues.c.id).where(schedules.c.conversation == event.conversation.key,
+                    schedules.c.principal == event.principal.key,
+                    func.json_extract(schedules.c.event_json, "$.event_id") == event.event_id)
+                .order_by(schedules.c.created_at).limit(1)).scalar_one_or_none()
+            if scheduled is not None:
+                return scheduled
+            selected = connection.execute(select(dialogues.c.workspace_id).join(focus,
+                focus.c.dialogue_id == dialogues.c.id).where(focus.c.key == stable_id(event.conversation.key,
+                event.principal.key), dialogues.c.state == "ACTIVE")).scalar_one_or_none()
+            return selected or "personal"
+
+    def dialogue(self, conn, event, *, new_title=None, select_ref=None, workspace_id=None):
         owner = self.owner(event) or "guest-" + event.principal.key
         key = stable_id(event.conversation.key, event.principal.key)
+        row = None
         if select_ref:
             rows = conn.execute(select(dialogues).where(dialogues.c.owner_id == owner,
                 dialogues.c.conversation_id == event.conversation.key, dialogues.c.state == "ACTIVE",
@@ -57,18 +114,23 @@ class SessionService:
             if len(rows) != 1:
                 raise ValueError("dialogue selection is ambiguous or unavailable")
             row = rows[0]
+            if workspace_id is not None and workspace_id != row["workspace_id"]:
+                raise ValueError("an existing dialogue cannot change project")
+            workspace_id = row["workspace_id"]
         elif new_title is None:
             selected = conn.execute(select(focus.c.dialogue_id).where(focus.c.key == key)).scalar_one_or_none()
             row = conn.execute(select(dialogues).where(dialogues.c.id == selected,
                 dialogues.c.owner_id == owner, dialogues.c.state == "ACTIVE")).mappings().first() if selected else None
-            if row:
-                return row
-        else:
-            row = None
-        if not select_ref and (new_title is not None or row is None):
+            if row and workspace_id is not None and row["workspace_id"] != workspace_id:
+                row = conn.execute(select(dialogues).where(dialogues.c.owner_id == owner,
+                    dialogues.c.conversation_id == event.conversation.key, dialogues.c.workspace_id == workspace_id,
+                    dialogues.c.state == "ACTIVE").order_by(dialogues.c.created_at).limit(1)).mappings().first()
+        workspace_id = self.validate_workspace(event, workspace_id or (row["workspace_id"] if row else self.workspace_for(event, conn)))
+        if row is None:
             row = {"id": str(uuid4()), "owner_id": owner, "conversation_id": event.conversation.key,
-                "title": (new_title or "默认对话")[:128], "session_id": str(uuid4()),
-                "binding_json": json.dumps(self.binding()), "state": "ACTIVE", "created_at": self.clock.now().isoformat()}
+                "workspace_id": workspace_id, "title": (new_title or ("默认对话" if workspace_id == "personal" else workspace_id))[:128],
+                "session_id": str(uuid4()), "binding_json": json.dumps(self.binding()), "state": "ACTIVE",
+                "created_at": self.clock.now().isoformat()}
             conn.execute(insert(dialogues).values(**row))
         changed = conn.execute(update(focus).where(focus.c.key == key).values(dialogue_id=row["id"]))
         if not changed.rowcount:
@@ -86,8 +148,10 @@ class SessionService:
                 if old["event_json"] != event.model_dump_json():
                     raise ValueError("conflicting dialogue input replay")
                 return {"input_id": old["id"], "dialogue_id": old["dialogue_id"], "state": old["state"]}
-            dialogue = self.dialogue(conn, event, new_title=new_title, select_ref=select_ref)
             context = dict(context or {})
+            dialogue = self.dialogue(conn, event, new_title=new_title, select_ref=select_ref,
+                workspace_id=context.get("workspace_id"))
+            context["workspace_id"] = dialogue["workspace_id"]
             plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
             context["leader_turn"] = {"plan": plan.model_dump(mode="json"), "used": {},
                 "deadline": (self.clock.now() + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat()}
@@ -201,7 +265,7 @@ class SessionService:
                             context["active_tasks"].append(snapshot)
                             self.service.graph.merge_snapshot_dependencies(context, task, snapshot)
                     source_ids = [user["id"]]
-                    goal = event.text
+                    goal = self.service._input_text(event, event.text)
                 else:
                     if not incoming:
                         continue
@@ -255,7 +319,7 @@ class SessionService:
                 if history.get("task_sources"):
                     self.service.graph.merge_source_dependencies(context, history["task_sources"],
                         history.get("source_manifest", ()))
-                access = self.service._access_for({"event_json": event.model_dump_json(), "permission_json": "{}"})
+                access = AccessContext(principal=event.principal, conversation=event.conversation)
                 self.service.permissions.require(access, "model.request", "conversation:" + event.conversation.key)
                 if not self.allowed(event):
                     raise PermissionError("queued input is no longer authorized")

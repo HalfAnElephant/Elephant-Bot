@@ -44,6 +44,7 @@ class TaskRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=16000)
     success_checks: tuple[str, ...] = Field(default=(), max_length=20)
     requested_outputs: tuple[str, ...] = Field(default=(), max_length=20)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ConfigRequest(BaseModel):
@@ -270,7 +271,8 @@ def router(core, authenticate):
             raise HTTPException(409, "tasks disabled")
         try:
             return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
-                                           success_checks=body.success_checks, requested_outputs=body.requested_outputs)
+                success_checks=body.success_checks, requested_outputs=body.requested_outputs,
+                workspace_id=body.workspace_id)
         except (ValueError, PermissionError) as error:
             raise HTTPException(422, str(error)) from error
 

@@ -9,6 +9,7 @@ import json
 import math
 import re
 from collections import defaultdict
+from contextlib import nullcontext
 from urllib.parse import quote
 
 import httpx
@@ -104,24 +105,24 @@ class OpenVikingMemory:
     def _now(self):
         return self.clock.now().isoformat()
 
-    def _owner(self, scope):
+    def _owner(self, scope, *, conn=None):
         binding = self._binding(scope)
         identity = stable_id(binding.account_id, binding.user_id)
         binding_hash = digest([self.config.endpoint, self.config.namespace, self.config.expected_version,
                                binding.owner_id, binding.workspace_id, binding.account_id, binding.user_id])
-        with self.db.transaction() as conn:
-            row = conn.execute(select(owners).where(owners.c.id == scope.key)).mappings().first()
+        with (nullcontext(conn) if conn is not None else self.db.transaction()) as connection:
+            row = connection.execute(select(owners).where(owners.c.id == scope.key)).mappings().first()
             if row:
                 if row["binding_hash"] != binding_hash:
                     raise PermissionError("memory binding changed; explicit receipt and barrier migration required")
                 return dict(row)
-            duplicate = conn.execute(select(owners.c.id).where(owners.c.remote_identity == identity)).first()
+            duplicate = connection.execute(select(owners.c.id).where(owners.c.remote_identity == identity)).first()
             if duplicate:
                 raise PermissionError("private/project memory scopes cannot share a remote user namespace")
             values = {"scope_json": scope.model_dump_json(), "binding_json": binding.model_dump_json(),
                           "binding_hash": binding_hash, "remote_identity": identity, "epoch": 0,
                           "state": "READY", "last_error": None, "updated_at": self._now()}
-            conn.execute(insert(owners).values(id=scope.key, **values))
+            connection.execute(insert(owners).values(id=scope.key, **values))
             return {"id": scope.key, **values}
 
     async def _request(self, scope, method, path, **kwargs):

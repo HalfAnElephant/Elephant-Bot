@@ -9,6 +9,7 @@ dialogues = Table(
     Column("owner_id", String, nullable=False),
     Column("conversation_id", String, nullable=False),
     Column("title", String, nullable=False),
+    Column("workspace_id", String, nullable=False, server_default="personal"),
     Column("session_id", String, unique=True, nullable=False),
     Column("binding_json", Text, nullable=False),
     Column("state", String, nullable=False),

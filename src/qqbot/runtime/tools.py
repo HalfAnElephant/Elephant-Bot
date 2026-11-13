@@ -48,5 +48,24 @@ def native_tools(role, purpose):
         for name, (description, props, required) in properties.items():
             result[name] = {"name": name, "description": description, "parameters": {
                 "type": "object", "properties": props, "required": required, "additionalProperties": False}}
+        if purpose == "user":
+            from qqbot.runtime.schedules import ScheduleSpec
+            result["schedules.create"] = {"name": "schedules.create",
+                "description": "Schedule this user's authorized goal at an aware date/time or a five-field cron in an IANA timezone. Persist once and report the returned next fire time.",
+                "parameters": ScheduleSpec.model_json_schema()}
+            for operation, description, fields, required in (
+                ("list", "List this authenticated user's schedules.", {}, []),
+                ("get", "Read a schedule and its current revision before changing it.",
+                    {"schedule_id": {"type": "string"}}, ["schedule_id"]),
+                ("update", "Update or pause a schedule using its latest revision.",
+                    {"schedule_id": {"type": "string"}, "expected_revision": {"type": "integer", "minimum": 1},
+                     "changes": {"type": "object"}}, ["schedule_id", "expected_revision", "changes"]),
+                ("cancel", "Cancel future triggers of this user's schedule. Existing tasks keep their own lifecycle.",
+                    {"schedule_id": {"type": "string"}, "expected_revision": {"type": "integer", "minimum": 1}},
+                    ["schedule_id", "expected_revision"]),
+            ):
+                name = "schedules." + operation
+                result[name] = {"name": name, "description": description, "parameters": {
+                    "type": "object", "properties": fields, "required": required, "additionalProperties": False}}
     result.update({name: schema for name, schema in task_schemas().items() if name in allowed})
     return result

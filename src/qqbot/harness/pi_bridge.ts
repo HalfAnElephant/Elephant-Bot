@@ -105,10 +105,10 @@ export default function (pi: ExtensionAPI) {
     }
     for (const definition of definitions) register(definition);
     for (const schema of binding.native_tools || []) {
-      register({name: schema.name.replace("tasks.", "tasks_"), description: schema.description,
+      register({name: schema.name.replace("tasks.", "tasks_").replace("schedules.", "schedules_"), description: schema.description,
                 parameters: Type.Unsafe(schema.parameters)});
     }
-    const nativeNames = (binding.native_tools || []).map((schema: any) => schema.name.replace("tasks.", "tasks_"));
+    const nativeNames = (binding.native_tools || []).map((schema: any) => schema.name.replace("tasks.", "tasks_").replace("schedules.", "schedules_"));
     pi.setActiveTools(binding.role === "skill_review" ? nativeNames : [...definitions.map(d => d.name), ...nativeNames]);
     const parts: string[] = [];
     const primary = (binding.input_ids || [])[0];
@@ -137,7 +137,7 @@ export default function (pi: ExtensionAPI) {
       content: JSON.stringify({time: binding.current_time, timezone: binding.timezone,
         repository: binding.repository, github_host: binding.github_host,
         retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
-        active_tasks: binding.active_tasks,
+        active_tasks: binding.active_tasks, workspace_id: binding.workspace_id,
         input_refs: binding.input_refs,
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
       details: {kind: "runtime"}}};

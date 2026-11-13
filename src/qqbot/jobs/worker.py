@@ -347,13 +347,16 @@ class Worker:
                 if getattr(harness, "gateway", None) and not harness.gateway.waiting and getattr(harness, "accepting_input", True):
                     for extra in await self.call("inputs", **identity):
                         try:
-                            if extra.get("images"):
-                                context = harness.gateway.claim.setdefault("context", {})
-                                known = context.setdefault("images", [])
-                                for image in extra["images"]:
-                                    if image not in known:
-                                        known.append(image)
-                                        harness.gateway.image_content = None
+                            context = harness.gateway.claim.setdefault("context", {})
+                            for key in ("images", "files", "source_manifest"):
+                                known = context.setdefault(key, [])
+                                for source in extra.get(key, ()):
+                                    if source not in known:
+                                        known.append(source)
+                                        if key == "images":
+                                            harness.gateway.image_content = None
+                                        elif key == "files":
+                                            harness.gateway.file_content = None
                             await harness.append_input(extra["id"], extra["text"])
                         except RuntimeError:
                             if not execution.done() and getattr(harness, "accepting_input", True):

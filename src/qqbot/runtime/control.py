@@ -3,13 +3,15 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from qqbot.domain import stable_id
+from qqbot.domain import InboundEvent, stable_id
+from qqbot.outbox.presentation import chat_bubbles, plain_text, split_text
 from qqbot.storage.agent_schema import agent_events, focus, leader_inbox
-from qqbot.storage.schema import audit_events, outbox
+from qqbot.storage.schema import audit_events, inbox, outbox
 from qqbot.storage.task_schema import inputs, notifications, runs, tasks, waits
 
 from .task_graph import TERMINAL
@@ -108,16 +110,84 @@ class HostTaskControls:
             referenced[root["id"]] = (root, notice)
         return list(referenced.values())
 
-    def _selection(self, conn, candidates, action):
+    def _selection(self, conn, candidates, action, event):
         if not candidates:
             return "当前对话没有可操作的事项。可以直接告诉我需要做什么。"
         lines = []
-        for task in candidates:
-            view = self.core.tasks.graph.status(conn, task)
+        for index, task in enumerate(candidates, 1):
+            view = self.core.tasks.graph.status(conn, task, access=self.core.access(event))
             title = ((view.get("goal") or "此前的请求").splitlines() or [""])[0][:60]
-            lines.append(title + " · " + self._progress(task["state"]))
+            lines.append(f"{index}. {title} · " + self._progress(task["state"]))
         prompt = "目前这些事情的进度如下。" if action == "list" else "请说明你指的是哪个目标，或引用对应的进度消息。"
-        return prompt + "\n" + "\n".join(lines)
+        return prompt + "\n" + "\n".join(lines) + "\n回复选择序号即可，有效期为五分钟。"
+
+    def _selection_receipt(self, conn, event, candidates, action, *, text="", questions=None):
+        receipt = {"action": action, "response": self._selection(conn, candidates, action, event),
+                   "references": [row["public_id"] for row in candidates]}
+        if not candidates:
+            return receipt
+        receipt["delivery_basis"] = self._freeze_delivery(conn, event, candidates)
+        dialogue_id = conn.execute(select(focus.c.dialogue_id).where(
+            focus.c.key == stable_id(event.conversation.key, event.principal.key))).scalar_one_or_none()
+        receipt["selection"] = {"actor": event.principal.key, "conversation": event.conversation.key,
+            "dialogue_id": dialogue_id, "source_seq": event.ingest_seq,
+            "expires_at": (self.core.clock.now() + timedelta(minutes=5)).isoformat(),
+            "action": "status" if action == "list" else action, "text": text,
+            "candidates": [{"task_id": row["id"], "reference": row["public_id"],
+                "question_id": questions[index] if questions else None}
+                for index, row in enumerate(candidates)], "consumed_by": None}
+        return receipt
+
+    def _choose(self, conn, event):
+        match = re.fullmatch(r"(?:选择?|第)?\s*([1-9][0-9]?)\s*(?:个|项)?[。.!！]?", event.text.strip())
+        if not match:
+            return None
+        query = select(audit_events).where(audit_events.c.kind == "host.task.control",
+            audit_events.c.actor == event.principal.key, audit_events.c.target == event.conversation.key)
+        if event.reply_to:
+            sources = conn.execute(select(outbox.c.origin_id).where(outbox.c.conversation_id == event.conversation.key,
+                outbox.c.platform_message_id == event.reply_to, outbox.c.state == "SENT", outbox.c.origin_kind == "chat")).scalars().all()
+            query = query.where(audit_events.c.id.in_([stable_id("host-task-control", source) for source in sources]))
+        pending = []
+        for row in conn.execute(query.order_by(audit_events.c.created_at.desc(), audit_events.c.id.desc()).limit(32)).mappings():
+            detail = json.loads(row["detail"])
+            selection = detail.get("selection")
+            if selection and selection["actor"] == event.principal.key and selection["conversation"] == event.conversation.key:
+                pending.append((selection["source_seq"], row["created_at"], row["id"], detail))
+        if not pending:
+            return None
+        _, _, identifier, detail = max(pending, key=lambda item: item[:3])
+        selection = detail["selection"]
+        if selection["consumed_by"]:
+            return {"action": "status", "response": "此前的选择已处理，请重新查询需要处理的事项。"}
+        if datetime.fromisoformat(selection["expires_at"]) <= self.core.clock.now():
+            return {"action": "status", "response": "此前的选择已过期，请重新查询需要处理的事项。"}
+        dialogue_id = conn.execute(select(focus.c.dialogue_id).where(
+            focus.c.key == stable_id(event.conversation.key, event.principal.key))).scalar_one_or_none()
+        if dialogue_id != selection["dialogue_id"]:
+            return {"action": "status", "response": "当前对话已切换，请重新查询需要处理的事项。"}
+        index = int(match[1]) - 1
+        if index >= len(selection["candidates"]):
+            return {"action": "status", "response": "请选择此前列表中的有效序号。"}
+        candidate = selection["candidates"][index]
+        target = self._visible(conn, candidate["reference"], event)
+        if target["id"] != candidate["task_id"]:
+            raise PermissionError("selection target identity changed")
+        question_id = candidate["question_id"]
+        if question_id:
+            question = conn.execute(select(waits).where(waits.c.id == question_id,
+                waits.c.task_id == target["id"], waits.c.state.in_({"INTENT", "WAITING"}))).mappings().first()
+            if not question or question["expires_at"] and question["expires_at"] <= self.core.clock.now().isoformat():
+                return {"action": "input", "response": "此前的问题已结束，请重新查询需要处理的事项。"}
+        elif selection["action"] == "input":
+            target, question_id, next_selection = self._question_target(conn, target, None, event,
+                                                                        text=selection["text"])
+            if next_selection:
+                return next_selection
+        selection["consumed_by"] = event.event_id
+        conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(detail=json.dumps(detail, ensure_ascii=False)))
+        return {"action": selection["action"], "reference": target["public_id"], "task_id": target["id"],
+                "text": selection["text"], "question_id": question_id}
 
     @staticmethod
     def _progress(state):
@@ -137,7 +207,7 @@ class HostTaskControls:
             "NEEDS_RECONCILIATION": "正在核实处理结果",
         }.get(state, "正在核实进度")
 
-    def _question_target(self, conn, target, notice, event):
+    def _question_target(self, conn, target, notice, event, *, text=None):
         if notice and notice["purpose"] != "question":
             return target, None, None
         root = self.core.tasks.graph.root(conn, target)
@@ -165,8 +235,9 @@ class HostTaskControls:
             candidates = [conn.execute(select(tasks).where(tasks.c.id == item["task_id"])).mappings().one() for item in questions]
             for candidate in candidates:
                 self._visible(conn, candidate["public_id"], event)
-            return None, None, {"response": self._selection(conn, candidates, "input"),
-                                "references": [row["public_id"] for row in candidates]}
+            return None, None, self._selection_receipt(conn, event, candidates, "input",
+                text=event.text if text is None else text,
+                questions=[row["id"] for row in questions])
         if questions:
             row = conn.execute(select(tasks).where(tasks.c.id == questions[0]["task_id"])).mappings().one()
             return row, questions[0]["id"], None
@@ -174,10 +245,12 @@ class HostTaskControls:
 
     def _bind(self, conn, event, intent):
         notice = None
+        chosen = self._choose(conn, event)
+        if chosen:
+            return chosen
         if intent and intent.action == "list":
             candidates = self._roots(conn, event, current_only=False)
-            return {"action": "list", "response": self._selection(conn, candidates, "list"),
-                    "references": [row["public_id"] for row in candidates]}
+            return self._selection_receipt(conn, event, candidates, "list")
         if intent and intent.reference:
             target = self._visible(conn, intent.reference, event)
         else:
@@ -188,13 +261,12 @@ class HostTaskControls:
                 intent = TaskIntent("input", text=event.text)
             candidates = [row[0] for row in referenced] if referenced else self._roots(conn, event)
             if len(candidates) != 1:
-                return {"action": intent.action, "response": self._selection(conn, candidates, intent.action),
-                        "references": [row["public_id"] for row in candidates]}
+                return self._selection_receipt(conn, event, candidates, intent.action, text=intent.text)
             target = candidates[0]
             notice = referenced[0][1] if referenced else None
         question_id = None
         if intent.action == "input":
-            target, question_id, selection = self._question_target(conn, target, notice, event)
+            target, question_id, selection = self._question_target(conn, target, notice, event, text=intent.text)
             if selection:
                 return {"action": "input", **selection}
         return {"action": intent.action, "reference": target["public_id"], "task_id": target["id"],
@@ -210,6 +282,99 @@ class HostTaskControls:
         self.core.permissions.require(self.core.access(event), action, "task:" + row["id"])
         return row
 
+    def _status_response(self, view):
+        response = self._progress(view["state"]) + "。"
+        progress = view["progress"]
+        if progress["current_action"] and progress["current_action"] != self._progress(view["state"]):
+            response += "\n" + progress["current_action"] + "。"
+        counts = progress.get("verified_counts", {})
+        facts = []
+        for kind, unit in (("task", "项执行工作"), ("observation", "份资料核对记录"),
+                           ("operation", "条已核实操作回执"), ("artifact", "份已登记文件")):
+            if counts.get(kind):
+                facts.append(str(counts[kind]) + unit)
+        if facts:
+            response += "\n已有" + "、".join(facts) + "。"
+        if progress["last_effective_progress_at"]:
+            age = max(0, int((self.core.clock.now() - datetime.fromisoformat(progress["last_effective_progress_at"])).total_seconds()))
+            response += f"\n最近有效进展在 {age} 秒前。"
+        if view.get("goal"):
+            response += "\n" + view["goal"][:300]
+        if (view.get("result") or {}).get("summary"):
+            response += "\n" + view["result"]["summary"][:600]
+        return response
+
+    def _freeze_delivery(self, conn, event, referenced, *, views=None):
+        access = self.core.access(event)
+        facts, contexts, references = [], {}, []
+        for task in referenced:
+            task = self._visible(conn, task["public_id"], event)
+            root = self.core.tasks.graph.root(conn, task)
+            self._visible(conn, root["public_id"], event)
+            view = (views or {}).get(task["id"]) or self.core.tasks.graph.status(conn, task, access=access)
+            projection = {key: value for key, value in view["progress"].items() if key != "budget"}
+            facts.append({"view": {key: value for key, value in view.items() if key not in {"progress", "last_progress"}},
+                          "progress": projection})
+            for row in {task["id"]: task, root["id"]: root}.values():
+                context = json.loads(row["context_json"])
+                facts.append({key: row[key] for key in ("id", "owner_id", "conversation", "requester", "kind",
+                    "root_task_id", "parent_task_id", "goal_revision", "goal", "goal_json", "result_json", "state")} | {
+                    "context": context})
+                if view.get("goal") is not None or view.get("result") is not None or projection["verified_completed"]:
+                    contexts[row["id"]] = context
+            references.append(task["public_id"])
+        encoded = json.dumps(facts, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return {"references": references, "fingerprint": hashlib.sha256(encoded.encode()).hexdigest(),
+                "contexts": list(contexts.values())}
+
+    def delivery_valid(self, envelope):
+        if envelope.origin_kind != "chat":
+            return None
+        identifier = stable_id("host-task-control", envelope.origin_id)
+        with self.db.engine.connect() as conn:
+            raw = conn.execute(select(audit_events.c.detail).where(audit_events.c.id == identifier,
+                audit_events.c.kind == "host.task.control")).scalar_one_or_none()
+            if raw is None:
+                return None
+            receipt = json.loads(raw)
+            source = conn.execute(select(inbox.c.event_json).where(inbox.c.id == envelope.origin_id)).scalar_one_or_none()
+            if not source or hashlib.sha256(source.encode()).hexdigest() != receipt.get("event_sha256"):
+                return False
+            event = InboundEvent.model_validate_json(source)
+            if (event.conversation != envelope.target or event.principal != envelope.requester
+                    or receipt.get("actor") != event.principal.key or receipt.get("conversation") != event.conversation.key
+                    or not self.core.allowed(event) or envelope.official_content is not None):
+                return False
+            response = receipt.get("response")
+            if not isinstance(response, str):
+                return False
+            if envelope.content_format == "markdown":
+                if envelope.part_no != 0 or envelope.text != response:
+                    return False
+            else:
+                parts = [part for bubble in chat_bubbles(response) for part in split_text(plain_text(bubble))]
+                if envelope.part_no < 0 or envelope.part_no >= len(parts) or envelope.text != parts[envelope.part_no]:
+                    return False
+            try:
+                self._authorize(conn, event, receipt)
+                access = self.core.access(event)
+                source_context = {"scope": event.conversation.key, "principal": event.principal.key,
+                    "workspace_id": receipt.get("source_workspace_id", "personal"),
+                    "source_manifest": [{"kind": "inbox", "id": event.event_id, "digest": receipt["event_sha256"]}]}
+                if not self.core.validate_context(access, source_context):
+                    return False
+                basis = receipt.get("delivery_basis")
+                if basis:
+                    referenced = [self._visible(conn, reference, event) for reference in basis["references"]]
+                    current = self._freeze_delivery(conn, event, referenced)
+                    if current["fingerprint"] != basis["fingerprint"]:
+                        return False
+                    return all(self.core.validate_context(access, context) for context in basis["contexts"])
+                return not receipt.get("references") and not (
+                    receipt["action"] in {"status", "list"} and receipt.get("reference"))
+            except (PermissionError, LookupError, ValueError):
+                return False
+
     def _route(self, event, intent):
         identifier = stable_id("host-task-control", event.event_id)
         identity = {"actor": event.principal.key, "conversation": event.conversation.key,
@@ -222,6 +387,7 @@ class HostTaskControls:
             if old and any(receipt.get(key) != value for key, value in identity.items()):
                 raise ValueError("conflicting task-control event replay")
             receipt.update(identity)
+            receipt.setdefault("source_workspace_id", self.core.sessions.workspace_for(event, conn))
             if not old:
                 conn.execute(sqlite_insert(audit_events).values(id=identifier, kind="host.task.control",
                     target=receipt.get("task_id", event.conversation.key), actor=event.principal.key,
@@ -231,6 +397,12 @@ class HostTaskControls:
                 if any(receipt.get(key) != value for key, value in identity.items()):
                     raise ValueError("conflicting task-control event replay")
             target = self._authorize(conn, event, receipt)
+            if receipt.get("response") is None and receipt["action"] == "status":
+                view = self.core.tasks.graph.status(conn, target, access=self.core.access(event))
+                receipt["response"] = self._status_response(view)
+                receipt["delivery_basis"] = self._freeze_delivery(conn, event, [target], views={target["id"]: view})
+                conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(
+                    detail=json.dumps(receipt, ensure_ascii=False)))
         if receipt.get("response") is not None:
             return receipt["response"]
         access = self.core.access(event)
@@ -249,14 +421,7 @@ class HostTaskControls:
                 self.core.tasks.add_input(receipt["reference"], event, access, receipt["text"], question_id=receipt["question_id"])
             response = "已收到补充内容。"
         else:
-            with self.db.engine.connect() as conn:
-                target = self._visible(conn, receipt["reference"], event)
-                view = self.core.tasks.graph.status(conn, target)
-            response = self._progress(view["state"]) + "。"
-            if view.get("goal"):
-                response += "\n" + view["goal"][:300]
-            if (view.get("result") or {}).get("summary"):
-                response += "\n" + view["result"]["summary"][:600]
+            raise ValueError("unsupported host task control action")
         receipt["response"] = response
         with self.db.transaction() as conn:
             conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(detail=json.dumps(receipt, ensure_ascii=False)))

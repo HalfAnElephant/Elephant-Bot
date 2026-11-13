@@ -17,9 +17,14 @@ def download(monkeypatch):
     state = SimpleNamespace(urls=[], addresses=[], data=PNG, status=200, location=None, encoding="identity")
 
     class Connection:
-        def __init__(self, host, port, addresses):
+        def __init__(self, host, port, addresses, *, deadline=None):
             self.host = host
+            self.deadline = deadline
             self.sock = SimpleNamespace(settimeout=lambda value: None)
+
+        def remaining(self):
+            import time
+            return self.deadline - time.monotonic()
 
         def request(self, method, path, headers):
             state.urls.append((self.host, path))
@@ -39,7 +44,7 @@ def download(monkeypatch):
         def close(self):
             pass
 
-    def addresses(host, port):
+    def addresses(host, port, *, timeout=None):
         state.addresses.append(host)
         if host in {"localhost", "127.0.0.1"}:
             raise ValueError("private address")
@@ -172,3 +177,50 @@ async def test_invalid_image_request_rejected_before_download(gateway, monkeypat
                                      headers={"Authorization": "Bearer " + g.model_token})
     assert response.status_code == 422
     assert not gateway.requests
+
+
+async def test_original_files_reach_workspaces_cached_across_worker_handoff(gateway, monkeypatch, tmp_path):
+    loads = []
+    def load(url, limit):
+        loads.append(url)
+        return b'ORIGINAL_FILE_BYTES'
+    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', load)
+    claim = {**gateway.claim, 'context': {'scope': 'conversation', 'workspace_id': 'alpha', 'files': [
+        {'source': 'original-event', 'message_id': '43', 'attachment_ref': 'file-ref',
+         'filename': 'slides.pptx', 'url': 'https://cdn.example/file'}]}}
+    gateway.gateway.bind(claim)
+    body = {'messages': [{'role': 'system', 'content': 'trusted'}, {'role': 'user', 'content': 'Read file'}]}
+    first = await gateway.gateway.with_attachments(body)
+    second = await gateway.gateway.with_attachments(body)
+    assert loads == ['https://cdn.example/file']
+    assert first == second and first['messages'][0] == body['messages'][0]
+    assert 'original-event' in str(first) and 'slides.pptx' in str(first)
+    assert 'ORIGINAL_FILE_BYTES' not in str(first)
+    assert 'https://cdn.example/file' not in str(first)
+    original = list(tmp_path.glob('attachment-*'))
+    assert len(original) == 1 and original[0].read_bytes() == b'ORIGINAL_FILE_BYTES'
+    # A new Worker workspace reuses the authorized original after its URL expires.
+    work = tmp_path / 'worker'
+    work.mkdir()
+    gateway.gateway.revoke()
+    gateway.gateway.workspace = work
+    gateway.gateway.bind({**claim, 'task_id': 'worker', 'run_id': 'worker-run'})
+    def expired(*args):
+        raise AssertionError('cached original must survive an expired URL')
+    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', expired)
+    await gateway.gateway.with_attachments(body)
+    assert len(list(work.glob('attachment-*'))) == 1
+    gateway.allowed = False
+    with pytest.raises(PermissionError):
+        await gateway.gateway.with_attachments(body)
+
+
+async def test_document_download_failure_is_explicit(gateway, monkeypatch):
+    def failed(*args):
+        raise ValueError('expired')
+    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', failed)
+    gateway.gateway.bind({**gateway.claim, 'context': {'files': [
+        {'source': 'e', 'message_id': '1', 'filename': 'original.pdf', 'url': 'https://cdn.example/file'}]}})
+    body = {'messages': [{'role': 'user', 'content': 'Read'}]}
+    result = await gateway.gateway.with_attachments(body)
+    assert '未能保存' in str(result) and '不得猜测' in str(result)

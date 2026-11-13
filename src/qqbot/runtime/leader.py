@@ -622,6 +622,24 @@ class LeaderRuntime:
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))
+        if operation == "schedules":
+            with self.db.engine.connect() as conn:
+                run, claim = self.lease(conn, *identity)
+                if run["role"] != "leader" or claim["purpose"] != "user":
+                    raise PermissionError("schedule controls require a real Leader user turn")
+                operation_name = payload.get("operation")
+                action = ("task.read" if operation_name in {"get", "list"}
+                          else "task.cancel" if operation_name in {"cancel", "delete"} else "task.create")
+                self.authorize(conn, run, claim, {"action": action})
+                event = InboundEvent.model_validate_json(claim["event_json"])
+                workspace_id = claim["context"].get("workspace_id", "personal")
+            arguments = dict(payload.get("arguments", {}))
+            if operation_name == "create":
+                if arguments.get("workspace_id") not in {None, workspace_id}:
+                    raise PermissionError("schedule project is bound to this Leader input")
+                arguments["workspace_id"] = workspace_id
+            return self.core.schedules.invoke(event, operation_name, arguments,
+                idempotency_key=stable_id("schedule", claim["source_ids"][0], payload["call_id"]))
         if operation in {"ledger", "ask"}:
             readback_target = None
             with self.db.transaction() as conn:
@@ -660,7 +678,8 @@ class LeaderRuntime:
                 run, claim = self.lease(conn, *identity)
                 name = payload.get("operation")
                 self.authorize(conn, run, claim, {"action": "skills.write" if name == "skill_manage" else "skills.read"})
-            adapter = self.service.skills_provider(self.sessions.access_for_claim(claim))
+            adapter = self.service.skills_provider(self.sessions.access_for_claim(claim),
+                workspace_id=claim["context"].get("workspace_id", "personal"))
             if adapter is None:
                 raise PermissionError("owner skill scope unavailable")
             if run["role"] == "skill_review":
@@ -672,9 +691,14 @@ class LeaderRuntime:
                     with adapter.review_context(marks):
                         return adapter.call(name, payload.get("arguments", {}),
                             task_id=claim["task_id"], session_id=claim["session_id"])
-                return await asyncio.to_thread(call_review_tool)
-            return await asyncio.to_thread(adapter.call, name, payload.get("arguments", {}),
-                task_id=claim["task_id"], session_id=claim["session_id"])
+                result = await asyncio.to_thread(call_review_tool)
+            else:
+                result = await asyncio.to_thread(adapter.call, name, payload.get("arguments", {}),
+                    task_id=claim["task_id"], session_id=claim["session_id"])
+            if name == "skill_manage":
+                from qqbot.skills import record_skill_result
+                record_skill_result(self.service, run_id, payload.get("call_id", run_id), result)
+            return result
         with self.db.transaction() as conn:
             run, claim = self.lease(conn, *identity)
             if operation == "authorize":

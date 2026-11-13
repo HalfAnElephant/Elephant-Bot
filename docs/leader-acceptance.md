@@ -64,7 +64,7 @@
 | T25 | Leader 短轮次与 Goal 独立，原用户输入才能 submit/revise，分派幂等。双 Worker finalize 与非用户 question 伪造修订有定点成功记录。 | 同 Dialogue 多根 Goal、Worker/progress/question/finalize 禁止 submit 的完整 CI，以及真实模型委派后 Leader 继续对话。 |
 | T26 | 结果和 Inbox 同事务，persisted/handled 分离，恢复原生边界后结算原 run，稳定通知 ID 避免重复。离线 Leader/Worker 恢复与 UNKNOWN 流式用例已有证据。 | 最终 daemon 在正文持久化前后、Inbox handled 前后崩溃的整组故障注入，以及真实 QQ 最终逻辑通知核对。 |
 
-T10 的明确契约修复覆盖原始用户文本和已认证的后续输入。host API 的独立结构化 requested_outputs/success_checks 当前落在 GoalSpec 与 dispatch_spec，入口传入的空 context 使这类根目标保持在记忆重规划范围之外。扩展该范围时，需要补齐可核对的原始结构化请求来源。
+T10 的重规划同时处理原始用户文本、已认证的后续输入和 HOST 结构化请求。HOST 与定时 fire 在同一事务保存真实原输入、结构化要求及 hash、项目和记忆 epoch，再创建任务树。返工核对原来源，保留独立 requested_outputs/success_checks；原来源撤销后停止自动重规划。具体回归见 `tests/test_project_scopes.py` 与 `tests/test_schedules.py`。
 
 ## L01–L14 竞态与恢复对照
 
@@ -215,3 +215,13 @@ PR#6 承接 Leader/Workers 主线。PR#4 的 GitHub 授权与效果回读、安�
 制品每小时按既有 30 天下载契约清理，保留活动任务树、占槽 run 与未到期引用。持续存在活动任务时，未入库的孤儿导出延后清理，以保全 spool 恢复证据。
 
 本批统一验证以 PR#6 当前提交的 CI 和 CodeQL 为准。本批未执行生产故障注入和 QQ 客户端验收。
+
+## 2026-11-13 功能补全
+
+- `0022` 保存定时安排、版本和触发回执。cron 或指定时刻使用明确时区，默认只补最近一次；原始来源、fire、任务树和下次时间同事务提交。项目与 Dialogue 固定为原输入，后续焦点切换保持该归属。定时结果带预约通知意图，投递继续校验官方主动权限与拒收状态。
+- `0023` 为旧 Dialogue 补个人默认项目，并保存任务补充的真实 source_event_id。项目记忆绑定独立 USER，项目技能使用独立标准目录。HOST 更正返工保留结构化产物要求，真实补充及附件保留原来源。
+- TaskProgress 根据实际观察、已核实操作和已登记制品投影完成项、等待、有效进展时间、预算和交付。同版本同阶段相同证据只登记一次，未领取的同阶段进度合并；普通 Worker 文字更新留在记录中。序号选择绑定原候选、主体、Dialogue、时效与单次消费，真实问题引用优先按所引用通知处理。
+- 图片直接作为模型多模态输入。文件原件保存在当前执行工作区，Agent 使用正常文件与进程工具处理。下载和缓存保持来源、hash、大小、项目与主体范围；更正或遗忘屏障阻止旧附件进入新上下文。原件缓存按既有维护循环清理，活跃来源保留。落盘通过实际 ExecutionWorld，独占发布及取消等待均保留停止证明语义。
+- 技能管理增加目录、读取、变更记录、ZIP 导出及带最新 ledger 检查的回退入口。管理状态汇总任务、Session、Inbox、调用量、未知操作、记忆水位和技能写入失败。旧 social/Judge/主动搭话、表达学习及独立 Worker 部署模板已清理，旧库迁移与删除审计保留。
+
+本批回归入口包括 `test_schedules.py`、`test_schedule_tools.py`、`test_project_scopes.py`、`test_project_migration.py`、`test_task_progress.py`、`test_task_input_media.py`、`test_attachments.py`、`test_skills_admin.py` 和 `test_runtime_metrics.py`。统一验证以本批提交的 CI 为准。真实 QQ 四种 surface、供应商视觉兼容、旧备份完整恢复及当前逐事件记忆质量集继续按各自环境记录。

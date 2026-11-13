@@ -4,6 +4,7 @@ Projections are untrusted message content, not executable commands. Unknown
 versions remain in a bounded raw segment alongside understood semantic fields.
 """
 import json
+from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 from qqbot.domain import (
@@ -38,15 +39,18 @@ def _items(value):
 
 def _media(data, kind=None):
     mime = str(data.get("content_type") or data.get("mime_type") or "")[:255]
+    filename = data.get("filename") or data.get("file_name") or data.get("name")
     kind = kind or next((p for p in ("image", "audio", "video") if mime.startswith(p + "/")), "file")
+    if kind == "file" and not mime and isinstance(filename, str) and PurePosixPath(filename.lower()).suffix in {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        kind = "image"
     url = attachment_url(data.get("url") or data.get("file_url"))
-    size = data.get("size")
+    size = data.get("size", data.get("file_size"))
     transcript = data.get("transcript") or data.get("text") if kind == "audio" else None
     return MediaSegment(
         type=kind, attachment_ref="unresolved:" + stable_id(json.dumps(data, sort_keys=True)),
         image_url=url if kind == "image" else None, source_url=url, mime_type=mime or None,
-        filename=str(data.get("filename") or data.get("file_name"))[:255]
-        if data.get("filename") or data.get("file_name") else None,
+        filename=str(filename)[:255] if filename else None,
         transcript=transcript[:10000] if isinstance(transcript, str) else None,
         size=size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
     )

@@ -82,6 +82,8 @@ class RuntimeClient:
             body.payload["identity"] = {**body.payload.get("identity", {}), "host_epoch": self.core.recovery.epoch}
         if operation == "memory":
             return await self.core.knowledge.invoke(identity, body.payload)
+        if operation == "schedules":
+            return await self.leader.invoke(operation, identity, body.payload)
         if operation == "jobs":
             return await self.core.job_runtime.invoke(identity, body.payload)
         with self.service.db.engine.connect() as conn:

@@ -1,5 +1,9 @@
 """Owner-bound Hermes tools. Standard SKILL.md files are the only writable body store."""
+import io
 import json
+import os
+import stat
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,10 +126,42 @@ class HermesSkills:
         with self.context():
             return skill_ledger.list_entries(**kwargs)
 
-    def rollback(self, entry_id):
+    def rollback(self, entry_id, *, expected_latest_id=None):
         with self.context():
             entry = skill_ledger.get_entry(entry_id)
             if entry is None:
                 return False, 'Unknown skill ledger entry.'
             with skill_manager_tool._skill_mutation_lock(entry['skill']):
+                if expected_latest_id is not None:
+                    latest = skill_ledger.list_entries(skill=entry['skill'], limit=1)
+                    if not latest or latest[0].get('id') != expected_latest_id:
+                        return False, 'Skill history changed. Read its latest history before rolling back.'
                 return skill_ledger.rollback_entry(entry_id)
+
+    def export(self):
+        """Export standard skill files while holding the same locks as native writes."""
+        with self.context():
+            directory = self.root / 'skills'
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            output = io.BytesIO()
+            names = [path.parent.name for path in directory.rglob('SKILL.md')]
+            total, count = 0, 0
+            with skill_manager_tool._skill_mutation_locks(names), zipfile.ZipFile(
+                    output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                for parent, directories, files, parent_fd in os.fwalk(directory, follow_symlinks=False):
+                    directories[:] = sorted(name for name in directories if not name.startswith('.'))
+                    relative = Path(parent).relative_to(directory)
+                    for name in sorted(files):
+                        if name.startswith('.'):
+                            continue
+                        with os.fdopen(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd), 'rb') as source:
+                            info = os.fstat(source.fileno())
+                            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                                raise PermissionError('skill exports require regular, unlinked files')
+                            data = source.read(1048577)
+                        total += len(data)
+                        count += 1
+                        if len(data) > 1048576 or total > 20 * 1024 * 1024 or count > 1024:
+                            raise ValueError('skill export exceeds file or archive size limits')
+                        archive.writestr(str(Path('skills') / relative / name), data)
+            return output.getvalue()
