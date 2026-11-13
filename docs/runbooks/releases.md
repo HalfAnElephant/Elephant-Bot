@@ -7,6 +7,7 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 以及 Python/npm 锁文件。检查包含以下范围。
 
 - Python 全量回归，包含锁定 Pi 与本地模拟模型的协议测试。缺少 Pi 或出现跳过用例时检查失败。
+- `DeepSeek dialogue` 使用官方 `deepseek-flash` API 检查真实模型的对话决策、主动确认、持久会话复用与任务派发。
 - 控制台 Node 测试、Ruff 和配置 schema 一致性。
 - wheel、sdist 与完整源码归档构建。
 - 在归档解压目录中安装生产依赖和 wheel，执行配置校验、数据库迁移/FTS5 检查、人格加载及 HTTP/静态资源冒烟检查。
@@ -17,6 +18,24 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 CodeQL 在 PR、`main` 推送和每周一扫描 Python 与 JavaScript/TypeScript。
 Dependabot 每周分别检查 uv、npm 和 Actions 更新，更新通过 PR 接受同一套检查。
 第三方 Actions 使用完整提交 SHA 固定，普通检查令牌仅授予源码读取权限。
+
+### 真实模型对话回归
+
+仓库 Actions Secret `DEEPSEEK_API_KEY` 提供测试凭据，调用地址为
+`https://api.deepseek.com/chat/completions`。同仓 PR、`main` 推送、合并队列、
+手动 CI 和发布验收会运行该检查并使用 API 额度。外部 fork PR 与 Dependabot
+缺少此凭据，继续执行其余检查。
+
+`uv run python evals/dialogue_live.py` 通过真实 Core、Pi 和 QQ 协议链路运行合成对话。
+测试请求使用 `reasoning_effort=none` 关闭思考模式。
+天气与 Issue 数据使用固定业务夹具，QQ 输出由本地 HTTP 接收器记录。
+检查问候直接回答、查询主动确认后给出最终答复、含旧工具调用历史的会话继续处理，
+以及网页请求的后台派发和接收确认。网页样本验收到派发与确认边界。
+
+`dialogue-live-results` 保存 `test-results/dialogue-live.json`，保留 14 天，包含
+首条消息、进度、最终回执的时序和耗时。消息措辞由模型生成，耗时作为观测指标。
+缺少凭据、API 错误、超时或验收断言失败均使检查失败。真实 QQ 客户端收件和
+后台网页成果仍需分别验收。
 
 仓库分支保护建议要求 `Correctness` 和 `Build and smoke test` 成功后合并。
 仓库管理员可在 GitHub Settings 的 Rules 中设置必过检查及禁止强推。
