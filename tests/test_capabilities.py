@@ -435,7 +435,8 @@ async def test_cancelled_cli_waits_for_parent_and_kills_descendants(context, tmp
     executable = tmp_path / "fake-cli"
     executable.write_text('#!' + sys.executable + '\nimport os,sys,json,time,subprocess\n'
         'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
-        + 'open(' + repr(str(marker)) + ',"w").write(json.dumps([os.getpid(),child.pid]))\n'
+        + 'with open(' + repr(str(marker) + '.tmp') + ',"w") as output: json.dump([os.getpid(),child.pid],output)\n'
+        + 'os.replace(' + repr(str(marker) + '.tmp') + ',' + repr(str(marker)) + ')\n'
         + 'sys.stdout.write("x"*300000);sys.stdout.flush();' + ('sys.exit(0)' if leader_exits else 'time.sleep(60)') + '\n')
     executable.chmod(0o700)
     if adapter == "gh":
