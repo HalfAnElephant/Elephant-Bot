@@ -188,7 +188,8 @@ class SessionService:
                     if not selected:
                         continue
                     attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"} for item in selected)
-                    ready = not attention and self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True)
+                    ready = not attention and self.service.graph.finalize_ready(conn, root,
+                        allow_pending_inputs=True, allow_running_jobs=True)
                     if ready or attention:
                         task_inputs = conn.execute(select(inputs).where(inputs.c.task_id == root["id"],
                             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))
