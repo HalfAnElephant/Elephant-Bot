@@ -407,7 +407,8 @@ class Core:
             from qqbot.storage.stream_schema import stream_messages
             with self.db.engine.connect() as conn:
                 persisted = conn.execute(select(stream_messages.c.envelope_json).where(
-                    stream_messages.c.id == envelope.origin_id, stream_messages.c.kind == "answer",
+                    stream_messages.c.id == envelope.origin_id.removeprefix("qq-stream:"),
+                    stream_messages.c.kind == "answer",
                     stream_messages.c.stream_id.is_not(None), stream_messages.c.state == "SENDING",
                 )).scalar_one_or_none()
             if persisted != envelope.model_dump_json():
@@ -415,6 +416,33 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
+        if envelope.origin_kind == "chat" and envelope.origin_id.startswith("qq-stream:"):
+            from qqbot.storage.agent_schema import dialogue_inputs
+            from qqbot.storage.stream_schema import stream_messages, stream_runs
+
+            with self.db.engine.connect() as conn:
+                stream = conn.execute(select(stream_messages.c.envelope_json, runs)
+                    .join(runs, runs.c.id == stream_messages.c.run_id)
+                    .join(stream_runs, stream_runs.c.run_id == runs.c.id).where(
+                        stream_messages.c.id == envelope.origin_id.removeprefix("qq-stream:"),
+                        runs.c.role == "leader")).mappings().first()
+                if not stream or stream["envelope_json"] != envelope.model_dump_json():
+                    return False
+                claim = json.loads(stream["request_json"])
+                if claim["purpose"] != "user" or not claim.get("public_answer_events"):
+                    return False
+                source = conn.execute(select(dialogue_inputs).where(
+                    dialogue_inputs.c.id == claim["source_ids"][0],
+                    dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"])).mappings().first()
+            if not source or (not stream_cleanup and source["claimed_attempt_id"] != stream["id"]):
+                return False
+            if not stream_cleanup and (stream["state"] not in {"RUNNING", "FINISHED"} or (
+                    not stream["result_json"] and (stream["lease"] <= self.clock.now().isoformat()
+                        or claim["deadline"] <= self.clock.now().isoformat()))):
+                return False
+            event = InboundEvent.model_validate_json(claim["event_json"])
+            return (event.conversation == envelope.target and event.principal == envelope.requester
+                    and self.allowed(event) and self.validate_context(self.access(event), claim["context"]))
         origin_id = envelope.origin_id
         if envelope.origin_kind == "chat" and origin_id.startswith("progress:"):
             origin_id = origin_id.split(":", 2)[-1]

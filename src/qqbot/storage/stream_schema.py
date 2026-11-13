@@ -6,10 +6,12 @@ from qqbot.storage.schema import metadata
 stream_runs = Table(
     "qq_stream_runs", metadata,
     Column("run_id", String, primary_key=True),
-    Column("task_id", String, nullable=False),
+    Column("task_id", String),
     Column("state", String, nullable=False),
     Column("cursor_seq", Integer, nullable=False, server_default="0"),
     Column("error", String),
+    Column("result_origin_kind", String),
+    Column("result_origin_id", String),
 )
 stream_messages = Table(
     "qq_stream_messages", metadata,

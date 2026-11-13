@@ -9,6 +9,7 @@ from qqbot.domain import AccessContext, InboundEvent, Surface, stable_id
 from qqbot.domain.execution import ExecutionPlan
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_inbox
 from qqbot.storage.learning_schema import learning_events, learning_sessions
+from qqbot.storage.stream_schema import stream_runs
 from qqbot.storage.task_schema import inputs, runs, tasks
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
@@ -120,6 +121,11 @@ class SessionService:
     def claim(self, worker_id):
         now = self.clock.now()
         with self.db.transaction() as conn:
+            pending_sources = set(self.reconciling_inputs)
+            for raw in conn.execute(select(runs.c.request_json).join(
+                    stream_runs, stream_runs.c.run_id == runs.c.id).where(
+                        runs.c.role == "leader", stream_runs.c.state != "DONE")).scalars():
+                pending_sources.update(json.loads(raw).get("source_ids", ()))
             busy = select(runs.c.session_id).where(runs.c.slot_reserved == 1, runs.c.session_id.is_not(None))
             candidates = conn.execute(select(dialogues).where(dialogues.c.state == "ACTIVE",
                 dialogues.c.session_id.not_in(busy)).order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
@@ -133,11 +139,13 @@ class SessionService:
                 if dialogue["id"] in retired_mutations:
                     continue
                 user = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == dialogue["id"],
-                    dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None))
+                    dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
+                    dialogue_inputs.c.id.not_in(pending_sources))
                     .order_by(dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(1)).mappings().first()
                 incoming = conn.execute(select(leader_inbox).where(
                     leader_inbox.c.target_session_id == dialogue["session_id"], leader_inbox.c.handled_at.is_(None),
-                    leader_inbox.c.claimed_attempt_id.is_(None)).order_by(leader_inbox.c.created_at, leader_inbox.c.id)
+                    leader_inbox.c.claimed_attempt_id.is_(None), leader_inbox.c.id.not_in(pending_sources))
+                    .order_by(leader_inbox.c.created_at, leader_inbox.c.id)
                     .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
                 selected, root, purpose, task_inputs, turn = [], None, "user", [], None
                 if user:
@@ -248,13 +256,19 @@ class SessionService:
                     "continuation": {"inputs": [dict(item) for item in task_inputs]},
                     "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),
                     "active_seconds_remaining": max(0, plan.budget.active_seconds - (turn.get("used", {}).get("active_seconds", 0) if turn else 0))}
-                conn.execute(insert(runs).values(id=run_id, task_id=root["id"] if purpose in {"finalize", "attention"} else None,
+                task_id = root["id"] if purpose in {"finalize", "attention"} else None
+                claim["public_answer_events"] = bool(self.service.stream_eligibility
+                    and self.service.stream_eligibility(event))
+                conn.execute(insert(runs).values(id=run_id, task_id=task_id,
                     worker=worker_id, fencing=fencing, lease=(now + timedelta(seconds=30)).isoformat(), slot_reserved=1,
                     session=dialogue["session_id"] + ".jsonl", session_id=dialogue["session_id"], last_seq=0,
                     role="leader", purpose=purpose, session_generation=generation,
                     basis_goal_revision=claim["basis_goal_revision"], request_json=json.dumps(claim, ensure_ascii=False),
                     budget_json=json.dumps(turn.get("used", {})) if turn else "{}", state="RUNNING",
                     started_at=now.isoformat(), accounted_at=now.isoformat()))
+                if claim["public_answer_events"]:
+                    conn.execute(insert(stream_runs).values(run_id=run_id, task_id=claim["target_root_task_id"],
+                        state="ACTIVE", cursor_seq=0))
                 table = dialogue_inputs if user else leader_inbox
                 conn.execute(update(table).where(table.c.id.in_(source_ids)).values(claimed_attempt_id=run_id))
                 conn.execute(update(dialogues).where(dialogues.c.id == dialogue["id"]).values(last_admitted_at=now.isoformat()))
