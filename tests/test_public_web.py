@@ -171,8 +171,21 @@ def test_connect_attempts_are_bounded_and_share_deadline(monkeypatch):
     assert len(attempts) == 7
 
 
+@pytest.mark.parametrize("timeout", [None, 1])
+def test_large_public_dns_response_is_accepted(monkeypatch, timeout):
+    from types import SimpleNamespace
+
+    from qqbot.harness import public_web
+
+    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"8.8.8.{i}", 443)) for i in range(1, 26)]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: answers)
+    monkeypatch.setattr(public_web.subprocess, "run", lambda *args, **kwargs:
+        SimpleNamespace(returncode=0, stdout=json.dumps(answers)))
+    assert public_addresses("public.example", 443, timeout=timeout) == answers
+
+
 def test_all_dns_answers_are_validated_before_candidate_limit(monkeypatch):
-    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 15
+    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 24
     answers.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)))
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: answers)
     with pytest.raises(ValueError, match="public unicast"):
@@ -260,7 +273,7 @@ def test_deadline_dns_results_keep_full_ssrf_validation(monkeypatch):
 
     from qqbot.harness import public_web
 
-    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 15
+    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 24
     answers.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)))
     monkeypatch.setattr(public_web.subprocess, "run", lambda *args, **kwargs:
         SimpleNamespace(returncode=0, stdout=json.dumps(answers)))
@@ -268,4 +281,4 @@ def test_deadline_dns_results_keep_full_ssrf_validation(monkeypatch):
         public_addresses("public.example", 443, timeout=1)
     answers.pop()
     addresses = public_addresses("public.example", 443, timeout=1)
-    assert len(addresses) == 15 and addresses[0][4] == ("8.8.8.8", 443)
+    assert len(addresses) == 24 and addresses[0][4] == ("8.8.8.8", 443)
