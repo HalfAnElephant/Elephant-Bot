@@ -4,13 +4,17 @@ import os
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from test_provider_gateway import FakeCore
 
 from qqbot.adapters.deepseek import DeepSeekError
 from qqbot.adapters.execution.world import LocalExecution
 from qqbot.capabilities import CapabilityRegistry, ToolContext
 from qqbot.harness import documents
-from qqbot.harness.documents import DeepSeekDocuments, REFERENCE
+from qqbot.harness.documents import REFERENCE, DeepSeekDocuments
+from qqbot.harness.gateway import RunGateway
+from qqbot.permissions import PermissionPolicy, PermissionRule, PermissionService
 from qqbot.providers import validate_transactions
 
 
@@ -46,10 +50,11 @@ def fixture(tmp_path):
     context = ToolContext("task", "run", 1, {}, str(workspace))
     state = SimpleNamespace(api=DeepSeekFixture(), context=context, workspace=workspace, authorized=True,
         scope={"principal": {"user_id": "owner"}, "conversation": "private:owner", "workspace_id": "personal"},
-        checked=[], content_root=tmp_path / "content")
+        checked=[], resource_checks=[], content_root=tmp_path / "content")
 
-    async def authorize(action):
+    async def authorize(action, *, resources=None):
         state.checked.append(action)
+        state.resource_checks.append((action, resources))
         if not state.authorized:
             raise PermissionError("fixture authorization revoked")
 
@@ -94,6 +99,8 @@ async def test_parse_registers_a_read_capability_and_attaches_verified_file(fixt
     validate_transactions(attached["messages"])
     assert json.dumps(body) == before
     assert fixture.checked.count("document.parse") >= 2 and fixture.checked.count("model.request") == 2
+    assert all(resources == action.resources for checked, resources in fixture.resource_checks if checked == "document.parse")
+    assert all(resources is None for checked, resources in fixture.resource_checks if checked == "model.request")
 
 
 async def test_same_content_reuses_receipt_after_rename_and_restart(fixture):
@@ -138,8 +145,10 @@ async def test_other_scope_or_account_cannot_reuse_document(fixture, changed):
     else:
         fixture.api.account = "different-account"
     body = {"messages": [{"role": "user", "content": result["document_ref"]}]}
-    with pytest.raises(PermissionError, match="identity and scope"):
-        await fixture.service.with_documents(body, fixture.context)
+    attached = await fixture.service.with_documents(body, fixture.context)
+    assert not references(attached)
+    assert "已过期或不可用" in attached["messages"][0]["content"][1]["text"]
+    assert result["file_id"] not in json.dumps(attached)
     distinct = await fixture.service.parse({"path": "report.pdf"}, fixture.context)
     assert distinct["document_ref"] != result["document_ref"] and len(fixture.api.uploads) == 2
 
@@ -156,6 +165,8 @@ async def test_uncertain_upload_recovers_from_remote_list_without_reupload(fixtu
     assert result["file_id"] == "file-api-1" and len(fixture.api.uploads) == 1
     assert fixture.api.listings == [("text_recognition", None)]
     assert json.loads(receipt_path(fixture, result).read_text())["state"] == "ready"
+    resources = ("workspace:" + str(fixture.workspace), "file:report.pdf", "domain:api.deepseek.com")
+    assert all(actual == resources for action, actual in fixture.resource_checks if action == "document.parse")
 
 
 async def test_pending_upload_releases_lock_and_prevents_concurrent_reupload(fixture):
@@ -289,10 +300,48 @@ async def test_raw_file_ids_are_not_trusted_document_inputs(fixture):
     assert not fixture.api.uploads
 
 
-async def test_document_count_limit_precedes_reference_injection(fixture):
+async def test_missing_historical_references_do_not_block_the_model(fixture):
     body = {"messages": [{"role": "user", "content": " ".join(REFERENCE + f"{number:064x}" for number in range(21))}]}
-    with pytest.raises(ValueError, match="at most 20"):
-        await fixture.service.with_documents(body, fixture.context)
+    attached = await fixture.service.with_documents(body, fixture.context)
+    assert not references(attached)
+    assert json.dumps(attached, ensure_ascii=False).count("已过期或不可用") == 21
+
+
+@pytest.mark.parametrize("user_input", ["继续普通聊天", "压缩并总结上面的对话"])
+async def test_recent_twenty_valid_documents_survive_unavailable_history(fixture, user_input):
+    valid = []
+    for number in range(21):
+        (fixture.workspace / "report.pdf").write_bytes(("document " + str(number)).encode())
+        valid.append(await fixture.service.parse({"path": "report.pdf"}, fixture.context))
+    (fixture.workspace / "report.pdf").write_bytes(b"expired document")
+    expired = await fixture.service.parse({"path": "report.pdf"}, fixture.context)
+    path = receipt_path(fixture, expired)
+    receipt = json.loads(path.read_text())
+    receipt["expires_at"] = time.time() - 1
+    path.write_text(json.dumps(receipt))
+    original_scope = fixture.scope
+    fixture.scope = {**original_scope, "conversation": "foreign-private"}
+    (fixture.workspace / "report.pdf").write_bytes(b"private foreign document")
+    foreign = await fixture.service.parse({"path": "report.pdf"}, fixture.context)
+    fixture.scope = original_scope
+    missing = REFERENCE + "0" * 64
+    body = {"messages": [
+        {"role": "system", "content": "trusted system"},
+        {"role": "user", "content": "\n".join([result["document_ref"] for result in valid] +
+            [expired["document_ref"], foreign["document_ref"], missing])},
+        {"role": "assistant", "content": "这些文档已记录。"},
+        {"role": "user", "content": user_input},
+    ]}
+    attached = await fixture.service.with_documents(body, fixture.context)
+    assert references(attached) == [result["file_id"] for result in reversed(valid[1:])]
+    injected = attached["messages"][1]["content"]
+    assert any(valid[0]["document_ref"] in part.get("text", "") and "本次省略" in part["text"] for part in injected)
+    assert sum("已过期或不可用" in part.get("text", "") for part in injected) == 3
+    assert foreign["file_id"] not in json.dumps(attached)
+    validate_transactions(attached["messages"])
+    followup = {"messages": [*body["messages"], {"role": "user", "content": "重新使用 " + valid[0]["document_ref"]}]}
+    selected = references(await fixture.service.with_documents(followup, fixture.context))
+    assert selected == [valid[0]["file_id"], *[result["file_id"] for result in reversed(valid[2:])]]
 
 
 async def test_empty_oversized_and_invalid_purpose_are_rejected_before_upload(fixture, monkeypatch):
@@ -359,3 +408,55 @@ async def test_cache_receipt_cannot_be_replaced_by_a_symlink(fixture):
     body = {"messages": [{"role": "user", "content": result["document_ref"]}]}
     with pytest.raises(OSError):
         await fixture.service.with_documents(body, fixture.context)
+
+
+@pytest.mark.parametrize("request_kind", ["business", "compaction"])
+async def test_gateway_document_resource_grants_and_long_history_allow_model_requests(fixture, request_kind):
+    resources = ("workspace:" + str(fixture.workspace), "file:report.pdf", "domain:api.deepseek.com")
+    conversation = "conversation:" + fixture.scope["conversation"]
+    permissions = PermissionService(policy=PermissionPolicy(preset="custom", default_effect="deny", rules=(
+        PermissionRule(id="runtime", effect="allow", actions=("task.execute", "model.request"), resources=(conversation,)),
+        PermissionRule(id="document", effect="allow", actions=("document.parse",), resources=resources),
+    )))
+    core, model_requests = FakeCore(), []
+
+    async def call(operation, payload):
+        if operation == "authorize":
+            for resource in payload.get("resources") or (conversation,):
+                permissions.require({}, payload["action"], resource)
+        return await core(operation, payload)
+
+    def upstream(request):
+        assert request.url.path == "/chat/completions"
+        model_requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "done"}}]})
+
+    gateway = RunGateway(fixture.workspace, "deepseek-flash", "fixture-key", "https://api.deepseek.com/chat/completions",
+        call=call, content_root=fixture.content_root, transport=httpx.MockTransport(upstream))
+    gateway.bind({"task_id": "document-task", "run_id": "document-run", "fencing_token": 1, "goal": "read documents",
+        "role": "leader", "permission_snapshot": {"principal": fixture.scope["principal"]},
+        "context": {"scope": fixture.scope["conversation"], "workspace_id": fixture.scope["workspace_id"]}})
+    gateway.documents.api = fixture.api
+    assert not permissions.check({}, "document.parse", conversation).allowed
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        result = await client.post("/tools/capability_invoke", headers={"Authorization": "Bearer " + gateway.tool_token},
+            json={"call_id": "parse", "arguments": {"name": "document.parse", "arguments": {"path": "report.pdf"}}})
+        assert result.status_code == 200, result.text
+        parsed = [result.json()["data"]]
+        for number in range(20):
+            (fixture.workspace / "report.pdf").write_bytes(("next document " + str(number)).encode())
+            parsed.append(await gateway.documents.parse({"path": "report.pdf"}, gateway.context))
+        gateway.provider.request_kind = request_kind
+        response = await client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + gateway.model_token},
+            json={"model": gateway.model, "messages": [
+                {"role": "user", "content": "\n".join(result["document_ref"] for result in parsed)},
+                {"role": "user", "content": "summarize" if request_kind == "compaction" else "continue chatting"},
+            ]})
+        assert response.status_code == 200, response.text
+    assert references(model_requests[0]) == [result["file_id"] for result in reversed(parsed[1:])]
+    document_checks = [payload for operation, payload in core.calls
+                       if operation == "authorize" and payload["action"] == "document.parse"]
+    assert len(document_checks) >= 4 and all(tuple(payload["resources"]) == resources for payload in document_checks)
+    model_checks = [payload for operation, payload in core.calls
+                    if operation == "authorize" and payload["action"] == "model.request"]
+    assert model_checks and all(payload.get("resources") is None for payload in model_checks)

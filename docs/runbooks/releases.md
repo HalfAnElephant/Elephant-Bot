@@ -37,6 +37,11 @@ Dependabot 每周分别检查 uv、npm 和 Actions 更新，更新通过 PR 接�
 缺少凭据、API 错误、超时或验收断言失败均使检查失败。真实 QQ 客户端收件和
 后台网页成果仍需分别验收。
 
+`uv run python evals/deepseek_tools_live.py` 使用同一凭据调用真实 Search、Fetch、Files 和 ASR API，
+检查合成 PDF 的解析与模型阅读、重复上传复用，以及合成口述 SILK 的转写。临时远端文档在检查后删除。
+结果保存为 `test-results/deepseek-tools-live.json`。QQ 私有 CDN 来源与凭据隔离使用确定性回归，
+真实 QQ 语音接收和客户端回复仍需单独验收。
+
 仓库分支保护建议要求 `Correctness` 和 `Build and smoke test` 成功后合并。
 仓库管理员可在 GitHub Settings 的 Rules 中设置必过检查及禁止强推。
 

@@ -13,7 +13,7 @@ MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
-def fetch_public_bytes(url, max_bytes):
+def fetch_public_bytes(url, max_bytes, *, headers_for_url=None):
     if not 0 < max_bytes <= 20 * 1024 * 1024:
         raise ValueError("invalid attachment byte limit")
     deadline = time.monotonic() + 15
@@ -35,8 +35,11 @@ def fetch_public_bytes(url, max_bytes):
         response, timer = None, None
         try:
             connection.timeout = connection.remaining()
+            headers = {"Accept-Encoding": "identity", "User-Agent": "ElephantBot/0.1"}
+            if headers_for_url is not None:
+                headers.update(headers_for_url(url))
             connection.request("GET", (parsed.path or "/") + ("?" + parsed.query if parsed.query else ""),
-                               headers={"Accept-Encoding": "identity", "User-Agent": "ElephantBot/0.1"})
+                               headers=headers)
             sock = connection.sock
             def interrupt(sock=sock):
                 try:

@@ -11,7 +11,7 @@ QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 
 - 定时安排持久保存触发时间或 cron、时区与原始身份，触发后提交普通任务树。重启默认只补最近一次，修改使用版本检查。
 - QQ 图片直接交给模型的多模态输入。文件原件下载到当前工作文件夹，Agent 通过正常文件和执行工具读取、转换或处理。
 - 使用官方 DeepSeek 模型地址及已配置的模型密钥时，联网工具调用 DeepSeek Search／Fetch。`deepseek-flash` 还可按需调用 `document.parse`，以文字或图文方式解析工作区文档，并将文件引用交给当前对话。上传回执按用户、会话和项目隔离，供重试及重启复用，远端文件设置 30 天有效期。
-- QQ 语音优先使用平台转写，否则通过 DeepSeek ASR 自动转写为本轮口述请求。支持 SILK 及 FFmpeg 可解码的常见音频，单条上限 8 MiB、120 秒。历史和转发语音保留资料来源，识别失败时要求重发或改用文字。
+- QQ 语音优先使用平台转写，否则通过 DeepSeek ASR 自动转写为本轮口述请求，转写随 Pi 输入持久保存。支持 SILK 及 FFmpeg 可解码的常见音频，单条上限 8 MiB、120 秒。历史和转发语音保留资料来源，识别失败时要求重发或改用文字。
 
 需要 Python 3.13、uv、Node.js >= 22.19.0、npm 和 FFmpeg >= 6。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
 

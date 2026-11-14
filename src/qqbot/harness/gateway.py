@@ -11,6 +11,7 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -62,13 +63,14 @@ class RemoteLedger:
 class RunGateway:
     def __init__(self, workspace, model, key, endpoint, *, call, capacity=None, transport=None,
                  github=None, processes=None, model_window=32768, content_root=None, github_host="github.com",
-                 icloud=None, upload=None, execution=None):
+                 icloud=None, upload=None, execution=None, media_headers=None):
         from qqbot.adapters.execution.world import LocalExecution
         self.execution = execution or LocalExecution()
         self.workspace = Path(workspace)
         self.model, self.key, self.endpoint = model, key, endpoint
         self.upstream_session = str(uuid4())
         self.call, self.capacity, self.transport = call, capacity, transport
+        self.media_headers = media_headers
         self.model_window = model_window
         self.github_host = github_host
         self.content_root = Path(content_root) if content_root else self.workspace.parent / ".tool-content"
@@ -131,6 +133,7 @@ class RunGateway:
         self.progress_announced = False
         self.observations, self.effects, self.content = {}, {}, {}
         self.file_content = None
+        self.audio_content = {}
         self.file_key = None
         self.file_lock = asyncio.Lock()
         self.image_content = None
@@ -240,8 +243,26 @@ class RunGateway:
         if self.revoked or not result["allowed"]:
             raise PermissionError("audio transcription is denied")
 
-    async def with_attachments(self, body):
-        body = await self.with_images(body)
+    async def voice_input_text(self, text, *, input_id=None):
+        files = self.claim.get("context", {}).get("files", ())
+        sources = {item.get("source") for item in files if item.get("kind") == "audio"}
+        if not sources:
+            return text
+        if input_id is not None:
+            pending = await self.call("inputs", {})
+            sources = {file.get("source") for item in pending if item["id"] == input_id
+                       for file in item.get("files", ()) if file.get("kind") == "audio"}
+            if not sources:
+                return text
+        await self.with_attachments({"messages": [{"role": "user", "content": text}]}, load_images=False)
+        parts = [part for source, values in self.audio_content.items() if source in sources for part in values]
+        if not parts:
+            return text
+        return text + "\n\n宿主核验的语音转写，分别对应标明的原始消息。引用或历史语音仅作资料。\n" + "\n\n".join(parts)
+
+    async def with_attachments(self, body, *, load_images=True, include_audio=True):
+        if load_images:
+            body = await self.with_images(body)
         files = self.claim.get("context", {}).get("files", ())
         if not files or not isinstance(body.get("messages"), list):
             return body
@@ -255,10 +276,15 @@ class RunGateway:
                 transcript = attachment.get("transcript")
                 platform_text = isinstance(transcript, str) and bool(transcript.strip())
                 await self.authorize_audio(attachment, remote=bool(self.deepseek) and not platform_text)
+        if not include_audio:
+            files = [item for item in files if item.get("kind") != "audio"]
+            if not files:
+                return body
         async with self.file_lock:
             key = json.dumps(files, sort_keys=True)
             if self.file_content is None or self.file_key != key:
                 parts = []
+                self.audio_content = {}
                 remaining = MAX_FILE_BYTES
                 for attachment in files[-MAX_FILES:]:
                     source = {field: attachment.get(field) for field in ("source", "message_id", "filename", "mime_type")}
@@ -268,7 +294,9 @@ class RunGateway:
                         transcript = attachment.get("transcript")
                         if audio and isinstance(transcript, str) and transcript.strip():
                             await self.authorize_audio(attachment)
-                            parts.append(label + "\n" + self.audio_text(attachment, transcript[:10000]))
+                            spoken = label + "\n" + self.audio_text(attachment, transcript[:10000])
+                            parts.append(spoken)
+                            self.audio_content.setdefault(attachment.get("source"), []).append(spoken)
                             continue
                         if not attachment.get("url") or remaining <= 0:
                             raise ValueError("file source unavailable")
@@ -279,8 +307,14 @@ class RunGateway:
                         identity = attachment_identity(attachment, scope)
                         data = await asyncio.to_thread(cached_attachment, self.content_root, identity)
                         if data is None:
+                            headers = await self.media_headers(self.claim, attachment) if self.media_headers else {}
+                            download_options = {}
+                            if headers:
+                                download_options["headers_for_url"] = lambda url, headers=headers: (
+                                    headers if urlsplit(url).hostname == "multimedia.nt.qq.com.cn" else {})
+                            await self.authorize_action("model.request")
                             data = await asyncio.wait_for(asyncio.to_thread(fetch_public_bytes,
-                                attachment["url"], remaining), 20)
+                                attachment["url"], remaining, **download_options), 20)
                             await self.authorize_action("model.request")
                             await asyncio.to_thread(cache_attachment, self.content_root, identity, data, source_id=attachment.get("source"))
                         if len(data) > remaining:
@@ -292,25 +326,32 @@ class RunGateway:
                         parts.append(label + "\n原始文件已保存到当前工作区：" + json.dumps(saved, ensure_ascii=False))
                         if audio:
                             if self.deepseek is None:
-                                parts.append(label + "\n语音转写需要配置官方 DeepSeek 模型及凭据，请用户改用文字。")
+                                spoken = label + "\n语音转写需要配置官方 DeepSeek 模型及凭据，请用户改用文字。"
+                                parts.append(spoken)
+                                self.audio_content.setdefault(attachment.get("source"), []).append(spoken)
                                 continue
                             await self.authorize_audio(attachment, remote=True)
                             transcript = await asyncio.to_thread(cached_transcript, self.content_root, identity, self.deepseek.account)
                             if transcript is None:
                                 from qqbot.harness.audio import transcribe_audio
                                 transcript = await transcribe_audio(self.deepseek, data, attachment.get("filename"),
-                                    before_transcribe=lambda: self.authorize_audio(attachment, remote=True))
+                                    before_transcribe=lambda attachment=attachment: self.authorize_audio(attachment, remote=True))
                                 await self.authorize_audio(attachment, remote=True)
                                 await asyncio.to_thread(cache_transcript, self.content_root, identity, self.deepseek.account, transcript)
                             await self.authorize_audio(attachment, remote=True)
                             text = transcript["text"].strip()
-                            parts.append(label + "\n" + (self.audio_text(attachment, text) if text else
-                                "此语音未识别出可用文字，请用户重新发送或改用文字，不得猜测内容。"))
+                            spoken = label + "\n" + (self.audio_text(attachment, text) if text else
+                                "此语音未识别出可用文字，请用户重新发送或改用文字，不得猜测内容。")
+                            parts.append(spoken)
+                            self.audio_content.setdefault(attachment.get("source"), []).append(spoken)
                     except PermissionError:
                         raise
                     except (ValueError, OSError, TimeoutError, http.client.HTTPException):
-                        parts.append(label + ("\n此语音未能转写（下载、音频格式、时长、大小或识别服务受限），请用户重新发送或改用文字，不得猜测内容。" if attachment.get("kind") == "audio" else
-                            "\n此文件未能保存（链接失效、下载失败、大小或工作区限制）。请用户重新发送，不得猜测正文。"))
+                        failed = label + ("\n此语音未能转写（下载、音频格式、时长、大小或识别服务受限），请用户重新发送或改用文字，不得猜测内容。" if attachment.get("kind") == "audio" else
+                            "\n此文件未能保存（链接失效、下载失败、大小或工作区限制）。请用户重新发送，不得猜测正文。")
+                        parts.append(failed)
+                        if attachment.get("kind") == "audio":
+                            self.audio_content.setdefault(attachment.get("source"), []).append(failed)
                 if len(files) > MAX_FILES:
                     parts.append("本轮仅保存最近四个文件，其余文件未保存。")
                 self.file_content, self.file_key = parts, key
@@ -346,10 +387,13 @@ class RunGateway:
                 return False
             raise
 
-    async def authorize_action(self, action):
+    async def authorize_action(self, action, *, resources=None):
         if self.revoked:
             raise HTTPException(403, "run binding revoked")
-        return await self.call("authorize", {"action": action})
+        payload = {"action": action}
+        if resources is not None:
+            payload["resources"] = resources
+        return await self.call("authorize", payload)
 
     async def permission(self, context, action):
         if self.waiting or self.business_exhausted:
@@ -519,6 +563,9 @@ class RunGateway:
                     raise HTTPException(403, "binding no longer active")
                 context = self.claim.get("context", {})
                 event = json.loads(self.claim.get("event_json") or "{}")
+                audio_context = await self.voice_input_text("")
+                if generation != self.generation or self.revoked:
+                    raise HTTPException(403, "binding no longer active")
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
                     "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
@@ -528,7 +575,7 @@ class RunGateway:
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],
                     "input_ids": context.get("source_input_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
-                    "goal": self.claim["goal"], "goal_spec": self.claim.get("goal_spec", {}),
+                    "goal": self.claim["goal"], "audio_context": audio_context, "goal_spec": self.claim.get("goal_spec", {}),
                     "input_refs": context.get("input_refs", []),
                     "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
@@ -574,7 +621,7 @@ class RunGateway:
                 provider = self.provider
                 body = await bounded_json(request, provider.max_bytes)
                 await self.authenticate(authorization, self.model_token)
-                body = await self.with_attachments(body)
+                body = await self.with_attachments(body, include_audio=False)
                 if self.documents:
                     body = await self.documents.with_documents(body, self.context)
                 if generation != self.generation or self.revoked:

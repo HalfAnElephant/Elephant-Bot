@@ -6,11 +6,10 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from test_provider_gateway import FakeCore
 
 from qqbot.harness import audio
 from qqbot.harness.gateway import RunGateway
-
-from test_provider_gateway import FakeCore
 
 VOICE = b"fixture original QQ audio"
 TRANSCRIPT = "帮我查询今天上海的天气"
@@ -83,8 +82,13 @@ def voice_host(tmp_path, monkeypatch):
 async def send_voice(gateway):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app, raise_app_exceptions=False),
             base_url="http://gateway") as client:
+        binding = await client.post("/binding", headers={"Authorization": "Bearer " + gateway.process_token},
+            json={"binding_id": gateway.binding})
+        if binding.status_code != 200:
+            return binding
+        text = "[用户发送了语音]" + binding.json()["audio_context"]
         return await client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + gateway.model_token},
-            json={"model": gateway.model, "messages": [{"role": "user", "content": "[用户发送了语音]"}]})
+            json={"model": gateway.model, "messages": [{"role": "user", "content": text}]})
 
 
 def prompt(state):
@@ -111,6 +115,32 @@ async def test_transcript_cache_is_reused_across_model_calls_and_restart(voice_h
     assert (await send_voice(restarted)).status_code == 200
     assert len(voice_host.asr_requests) == len(voice_host.conversions) == len(voice_host.downloads) == 1
     assert len(voice_host.model_requests) == 3 and TRANSCRIPT in prompt(voice_host)
+
+
+async def test_private_cdn_download_uses_current_binding_and_keeps_tokens_out_of_model(voice_host, monkeypatch):
+    gateway = voice_host.make(attachment={"url": "https://multimedia.nt.qq.com.cn/voice"})
+    bindings = []
+
+    async def media_headers(claim, attachment):
+        bindings.append((claim["run_id"], attachment["source"]))
+        return {"Authorization": "QQBot host-media-token"}
+
+    def download(url, limit, *, headers_for_url):
+        assert headers_for_url(url) == {"Authorization": "QQBot host-media-token"}
+        assert headers_for_url("https://other.example/voice") == {}
+        return VOICE
+
+    gateway.media_headers = media_headers
+    monkeypatch.setattr("qqbot.harness.gateway.fetch_public_bytes", download)
+    assert (await send_voice(gateway)).status_code == 200
+    next_file = {**gateway.claim["context"]["files"][0], "source": "new-source"}
+    claim = {**gateway.claim, "run_id": "next-run",
+        "context": {**gateway.claim["context"], "files": [next_file]}}
+    gateway.revoke()
+    gateway.bind(claim)
+    assert (await send_voice(gateway)).status_code == 200
+    assert bindings == [("voice-run", "voice-source"), ("next-run", "new-source")]
+    assert "host-media-token" not in json.dumps(voice_host.model_requests)
 
 
 @pytest.mark.parametrize("changed", [{"principal": "bob"}, {"conversation": "other-private"},

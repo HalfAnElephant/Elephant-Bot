@@ -126,6 +126,7 @@ export default function (pi: ExtensionAPI) {
       activeInputs.add(item.id);
       if (!deliveredInputs.has(item.id)) parts.push(`[[elephant-input:${item.id}]]\n` + item.text);
     }
+    if (parts.length && binding.audio_context) parts.push(binding.audio_context);
     const text = parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。";
     return persistInput(text, [...activeInputs].filter(id => !deliveredInputs.has(id)));
   });

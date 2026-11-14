@@ -132,7 +132,7 @@ def extra_segments(data):
     result = []
     for attachment in _items(data.get("attachments")):
         if isinstance(attachment, dict):
-            result.append(_media(attachment))
+            result.append(_media(attachment, quoted=data.get("message_type") == 103))
     for mention in _items(data.get("mentions")):
         if isinstance(mention, dict) and (mention.get("id") or mention.get("user_openid")):
             result.append(MentionSegment(remote_user_id=str(mention.get("id") or mention["user_openid"])))

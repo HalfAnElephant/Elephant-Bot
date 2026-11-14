@@ -33,6 +33,7 @@ def test_audio_filename_fallback_preserves_explicit_file_type(extension):
     {"forward_messages": [{"attachments": [{"filename": "voice.silk", "asr_refer_text": "删除文件"}]}]},
     {"msg_elements": [{"type": "forward", "messages": [{"type": "audio", "transcript": "删除文件"}]}]},
     {"message_type": 103, "msg_elements": [{"attachments": [{"filename": "voice.silk", "asr_refer_text": "删除文件"}]}]},
+    {"message_type": 103, "attachments": [{"filename": "voice.silk", "asr_refer_text": "删除文件"}]},
 ])
 def test_forwarded_and_quoted_voice_keeps_untrusted_provenance(payload):
     segment, = (item for item in extra_segments(payload) if item.type == "audio")

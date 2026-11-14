@@ -490,7 +490,8 @@ class GeneralRun(PiHarness):
             args.model_endpoint, call=self.gateway_call, upload=self.gateway_upload, capacity=capacity, github=github,
             github_host=getattr(args, "github_host", "github.com"),
             content_root=Path(getattr(args, "spool", str(Path(args.archive).parent / "spool"))) / "content",
-            model_window=getattr(args, "model_context_window", 32768), execution=getattr(args, "execution", None))
+            model_window=getattr(args, "model_context_window", 32768), execution=getattr(args, "execution", None),
+            media_headers=getattr(args, "media_headers", None))
         super().__init__(args.pi, workspace, provider="qqbot", model=args.model, gateway=gateway, session_id=session_id)
 
     def prepare_workspace(self, workspace):

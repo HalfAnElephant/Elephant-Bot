@@ -33,17 +33,19 @@ class DeepSeekAPI:
 
     async def _request(self, method, path, *, timeout=25, **kwargs):
         try:
-            async with httpx.AsyncClient(transport=self.transport, trust_env=False,
-                    follow_redirects=False, timeout=httpx.Timeout(timeout, connect=10)) as client:
-                async with client.stream(method, self.base_url + path,
-                        headers={"Authorization": "Bearer " + self.key}, **kwargs) as response:
-                    if response.status_code != 200:
-                        raise DeepSeekError(f"DeepSeek tool returned HTTP {response.status_code}", response.status_code)
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content) > 2 * 1024 * 1024:
-                            raise DeepSeekError("DeepSeek tool response exceeds 2 MiB")
+            async with (
+                httpx.AsyncClient(transport=self.transport, trust_env=False,
+                    follow_redirects=False, timeout=httpx.Timeout(timeout, connect=10)) as client,
+                client.stream(method, self.base_url + path,
+                    headers={"Authorization": "Bearer " + self.key}, **kwargs) as response,
+            ):
+                if response.status_code != 200:
+                    raise DeepSeekError(f"DeepSeek tool returned HTTP {response.status_code}", response.status_code)
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > 2 * 1024 * 1024:
+                        raise DeepSeekError("DeepSeek tool response exceeds 2 MiB")
         except httpx.HTTPError:
             raise DeepSeekError("DeepSeek tool connection failed or timed out") from None
         try:

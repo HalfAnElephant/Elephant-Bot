@@ -137,6 +137,10 @@ class Scheduler:
             worker_id="daemon", github_host=self.settings.orchestration.github_host,
             gh="gh", github_token_env="QQBOT_GITHUB_TOKEN", workspace_binding=[])
 
+        async def media_headers(claim, attachment):
+            from qqbot.adapters.qq_official.media_download import inbound_media_headers
+            return await inbound_media_headers(core, claim, attachment)
+
         def factory(claim, process_id, session_id):
             binding = claim.get("binding") or leader.sessions.binding()
             adapter = resolve_harness(core, binding)
@@ -146,7 +150,7 @@ class Scheduler:
                 "model_endpoint": binding.get("endpoint"), "model_key_env": binding.get("credential_env", "QQBOT_MODEL_KEY"),
                 "model_context_window": binding.get("context_window", 32768),
                 "workspace_binding": [key + "=" + value for key, value in binding.get("workspace_bindings", {}).items()],
-                "execution": self.execution})
+                "execution": self.execution, "media_headers": media_headers})
             if not args.model or not args.model_endpoint:
                 raise ValueError("persisted session has no configured model binding")
             runner = adapter.create(args, claim, self.client, process_id, session_id, self.capacity)

@@ -25,8 +25,8 @@ def document_pdf(code):
     text = f"BT /F1 18 Tf 40 160 Td (Verification code {code}) Tj ET".encode()
     objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 240] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 240] "
+         b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         b"<< /Length " + str(len(text)).encode() + b" >>\nstream\n" + text + b"\nendstream"]
     result, offsets = bytearray(b"%PDF-1.4\n"), [0]
@@ -88,9 +88,12 @@ async def exercise(report):
                     "kind": "audio", "filename": "voice.silk", "url": "https://fixture.example/voice.silk",
                     "is_current_input": True, "quoted": False}]
                 with patch("qqbot.harness.gateway.fetch_public_bytes", return_value=speech):
+                    binding = await client.post("/binding", headers={
+                        "Authorization": "Bearer " + gateway.process_token}, json={"binding_id": gateway.binding})
+                    require(binding.status_code == 200, "voice input preparation failed")
                     response = await client.post("/v1/chat/completions", headers={
                         "Authorization": "Bearer " + gateway.model_token}, json={"model": MODEL,
-                        "messages": [{"role": "user", "content": "Repeat the user's spoken sentence."}]})
+                        "messages": [{"role": "user", "content": "Repeat the user's spoken sentence.\n" + binding.json()["audio_context"]}]})
                 require(response.status_code == 200, "voice model request failed")
                 transcript = "\n".join(gateway.file_content).casefold()
                 require("voice" in transcript and "test" in transcript, "ASR did not recognize the spoken SILK fixture")
