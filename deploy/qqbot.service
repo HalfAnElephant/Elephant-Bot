@@ -14,6 +14,7 @@ EnvironmentFile=/etc/qqbot/jobs.env
 ExecStart=/opt/qqbot/.venv/bin/qqbot serve --config /etc/qqbot/core.yaml
 ExecStopPost=+/usr/local/libexec/elephant-daemon-stopped
 KillMode=control-group
+Delegate=yes
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=3
@@ -22,10 +23,9 @@ RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=restart
 UMask=0077
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=tmpfs
-PrivateTmp=true
-ReadWritePaths=/var/lib/qqbot /run/qqbot /var/lib/qqbot-daemon-stops
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target

@@ -843,18 +843,12 @@ class TaskService:
             origin_kind="task", origin_id=notification_id, reply_context=event.reply_context,
             ttl_seconds=86400, requester=event.principal, anchor_message_id=event.platform_message_id,
             parent_task_id=task["id"], notification_sequence=seq, purpose=purpose,
-            defer_reply=defer_reply or streaming)
+            defer_reply=defer_reply or streaming,
+            allow_proactive=bool(json.loads(task["context_json"]).get("schedule_fire_id")))
         if streaming:
             c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
                 result_origin_kind="task", result_origin_id=notification_id))
             c.execute(update(outbox_table).where(outbox_table.c.id.in_(deliveries)).values(state="STREAM_PENDING"))
-        if purpose == "progress" and importance == "normal":
-            last_sent = c.execute(select(func.max(outbox_table.c.sent_at)).where(
-                outbox_table.c.origin_id.in_(select(notifications.c.id).where(notifications.c.task_id == task["id"])))) .scalar_one()
-            if last_sent:
-                from datetime import datetime
-                next_at = (datetime.fromisoformat(last_sent) + timedelta(seconds=15)).isoformat()
-                c.execute(update(outbox_table).where(outbox_table.c.id.in_(deliveries)).values(next_attempt_at=next_at))
         return {"accepted": True, "notification_id": notification_id}
 
     def notify(self, run_id, fencing_token, worker_id, payload):
@@ -868,7 +862,7 @@ class TaskService:
                 validate_user_facing_text(payload["text"])
                 self.permissions.require(self._access_for(task), "notification.send", "conversation:" + task["conversation"])
                 self.graph.event(c, task, "worker_update", {"public_text": payload["text"]},
-                    attempt_id=run_id, event_id=payload["notification_id"], wake=True)
+                    attempt_id=run_id, event_id=payload["notification_id"], wake=False)
                 self.wakeup.set()
                 return {"accepted": True, "notification_id": payload["notification_id"]}
             return self._notification(c, task, run_id, payload["text"], "progress",
@@ -913,9 +907,64 @@ class TaskService:
                 inputs.c.state == "PENDING").values(question_id=question_id))
             return {"accepted": True, "question_id": question_id, "waiting": True}
 
+    def _input_sources(self, conn, event, access):
+        from qqbot.storage.schema import inbox as inbox_table
+        raw = conn.execute(select(inbox_table.c.event_json).where(inbox_table.c.id == event.event_id,
+            inbox_table.c.conversation_id == access.conversation.key,
+            inbox_table.c.principal_id == access.principal.key)).scalar_one_or_none()
+        if raw is None:
+            if any(segment.type in {"image", "file", "audio"} for segment in event.segments):
+                raise PermissionError("media input requires a durably accepted source")
+            return {}
+        self.permissions.require(access, "history.source.read", "event:" + event.event_id)
+        source = InboundEvent.model_validate_json(raw)
+        if source.conversation != event.conversation or source.principal != event.principal:
+            raise PermissionError("input source identity mismatch")
+        if conn.execute(select(inbox_table.c.id).where(inbox_table.c.conversation_id == access.conversation.key,
+                inbox_table.c.event_type == "message.recalled", inbox_table.c.message_id == source.platform_message_id)).first():
+            raise PermissionError("input source has been recalled")
+        def metadata(segment):
+            return {"source": source.event_id, "message_id": source.platform_message_id,
+                "url": segment.image_url or segment.source_url, "filename": segment.filename,
+                "mime_type": segment.mime_type, "size": segment.size, "attachment_ref": segment.attachment_ref,
+                **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
+                    "is_current_input": True} if segment.type == "audio" else {})}
+        return {"source_manifest": [{"kind": "inbox", "id": source.event_id,
+                    "digest": hashlib.sha256(raw.encode()).hexdigest()}],
+            "images": [metadata(segment) for segment in source.segments if segment.type == "image"][-16:],
+            "files": [metadata(segment) for segment in source.segments if segment.type in {"file", "audio"}][-16:]}
+
+    def _merge_input_sources(self, conn, task_ids, sources):
+        if not sources:
+            return
+        for task_id in task_ids:
+            raw = conn.execute(select(tasks.c.context_json).where(tasks.c.id == task_id)).scalar_one()
+            context = json.loads(raw)
+            for key in ("source_manifest", "images", "files"):
+                if not sources.get(key):
+                    continue
+                known = context.setdefault(key, [])
+                for source in sources.get(key, ()):
+                    if source not in known:
+                        known.append(source)
+                if key != "source_manifest":
+                    context[key] = known[-16:]
+            conn.execute(update(tasks).where(tasks.c.id == task_id).values(context_json=json.dumps(context, ensure_ascii=False)))
+
+    @staticmethod
+    def _input_text(event, text):
+        if isinstance(text, str) and not text.strip():
+            kinds = {segment.type for segment in event.segments}
+            if "file" in kinds:
+                return "[用户发送了文件，请读取工作区中的原始附件]"
+            if "image" in kinds:
+                return "[图片]"
+            if "audio" in kinds:
+                return "[用户发送了语音，请根据带来源的语音转写理解本次输入]"
+        return text
+
     def add_input(self, public_id, event, access, text, question_id=None):
-        if isinstance(text, str) and not text.strip() and any(s.type == "image" for s in event.segments):
-            text = "[图片]"
+        text = self._input_text(event, text)
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
             raise ValueError("input must contain 1..16000 characters")
         if access.principal != event.principal or access.conversation != event.conversation:
@@ -942,23 +991,10 @@ class TaskService:
             input_id = str(uuid4())
             c.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=wait["id"] if wait else None,
                 source_id=event.event_id, text=text, state="PENDING", created_at=self.clock.now().isoformat()))
-            from qqbot.storage.schema import inbox as inbox_table
-            raw = c.execute(select(inbox_table.c.event_json).where(
-                inbox_table.c.id == event.event_id,
-                inbox_table.c.conversation_id == access.conversation.key,
-                inbox_table.c.principal_id == access.principal.key,
-            )).scalar_one_or_none()
-            if raw:
-                context = json.loads(task["context_json"])
-                if context:
-                    context.setdefault("source_manifest", []).append({"kind": "inbox", "id": event.event_id,
-                        "digest": hashlib.sha256(raw.encode()).hexdigest()})
-                    source = InboundEvent.model_validate_json(raw)
-                    images = [{"source": source.event_id, "message_id": source.platform_message_id,
-                               "url": segment.image_url} for segment in source.segments if segment.type == "image"]
-                    if images:
-                        context.setdefault("images", []).extend(images)
-                    c.execute(update(tasks).where(tasks.c.id == task["id"]).values(context_json=json.dumps(context, ensure_ascii=False)))
+            sources = self._input_sources(c, event, access)
+            self._merge_input_sources(c, {task["id"]}, sources)
+            if sources:
+                c.execute(update(inputs).where(inputs.c.id == input_id).values(source_event_id=event.event_id))
             if wait:
                 self._wake(c, task["id"], wait["id"])
             return {"accepted": True, "input_id": input_id}
@@ -1029,13 +1065,18 @@ class TaskService:
                 return []
             rows = c.execute(select(inputs).where(inputs.c.task_id == task["id"],
                 inputs.c.state == "PENDING", inputs.c.question_id.is_(None))).mappings().all()
-            images = json.loads(task["context_json"]).get("images", ())
+            context = json.loads(task["context_json"])
             result = []
             for row in rows:
                 item = {"id": row["id"], "text": row["text"]}
-                source_images = [image for image in images if image["source"] == row["source_id"]]
-                if source_images:
-                    item["images"] = source_images
+                original_id = row["source_event_id"] or row["source_id"].removesuffix(":" + task["id"])
+                for key in ("images", "files"):
+                    sources = [source for source in context.get(key, ()) if source["source"] == original_id]
+                    if sources:
+                        item[key] = sources
+                manifest = [source for source in context.get("source_manifest", ()) if source.get("id") == original_id]
+                if manifest and ("images" in item or "files" in item):
+                    item["source_manifest"] = manifest
                 result.append(item)
             return result
 
@@ -1160,9 +1201,7 @@ class TaskService:
         return task["id"]
 
     async def ledger(self, run_id, fencing_token, worker_id, payload):
-        from qqbot.capabilities.ledger import SQLiteActionLedger
-        from qqbot.capabilities.types import Action, ToolContext
-        from qqbot.storage.action_schema import operations
+        from qqbot.capabilities.types import ToolContext
         with self.db.engine.connect() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
             decision = _run["role"] == "leader" and task["kind"] == "goal"
@@ -1175,6 +1214,15 @@ class TaskService:
                 tasks.c.root_task_id == task["id"])).scalars()) if decision else [operation_task_id]
             context = ToolContext(task_id=operation_task_id, run_id=run_id, fence=fencing_token,
                 principal=self._access_for(task), workspace="")
+        return await self.ledger_operation(context, payload, scope_task_ids,
+            lambda action: self.authorize(run_id, fencing_token, worker_id, action))
+
+    async def ledger_operation(self, context, payload, scope_task_ids, authorize, *, deduplicate=False):
+        from qqbot.capabilities.ledger import SQLiteActionLedger
+        from qqbot.capabilities.types import Action
+        from qqbot.storage.action_schema import operations
+
+        with self.db.engine.connect() as c:
             if payload["operation"] in {"read", "list"}:
                 query = select(operations).where(operations.c.task_id.in_(scope_task_ids))
                 if payload["operation"] == "read":
@@ -1185,16 +1233,15 @@ class TaskService:
             if payload["operation"] == "transition":
                 old = c.execute(select(operations).where(operations.c.id == payload["operation_id"])).mappings().first()
                 if not old or old["task_id"] not in scope_task_ids or (
-                    (old["run_id"] != run_id or old["fence"] != fencing_token) and payload["expected"] != "UNKNOWN"
+                    (old["run_id"] != context.run_id or old["fence"] != context.fence) and payload["expected"] != "UNKNOWN"
                 ):
                     raise PermissionError("operation belongs to another binding")
         ledger = SQLiteActionLedger(self.db)
         if payload["operation"] == "prepare":
             action = Action(**{**payload["action"], "resources": tuple(payload["action"]["resources"])})
-            self.authorize(run_id, fencing_token, worker_id, {"action": action.name,
-                "resources": action.resources, "effect": action.effect})
+            authorize({"action": action.name, "resources": action.resources, "effect": action.effect})
             return await ledger.prepare(payload["operation_id"], context, action,
-                payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids)
+                payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids, deduplicate=deduplicate)
         if payload["operation"] == "transition":
             return {"changed": await ledger.transition(payload["operation_id"], payload["expected"], payload["state"], payload["result"])}
         raise ValueError("unknown ledger operation")
@@ -1349,6 +1396,9 @@ class TaskService:
         from qqbot.storage.agent_schema import leader_inbox
         if kind not in {"followup", "answer", "notify"}:
             raise ValueError("invalid task input kind")
+        text = self._input_text(event, text)
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
+            raise ValueError("input must contain 1..16000 characters")
         if (task["requester"] != event.principal.key or access.principal != event.principal
                 or task["conversation"] != event.conversation.key or access.conversation != event.conversation):
             raise PermissionError("task input requires its authenticated subject")
@@ -1369,12 +1419,14 @@ class TaskService:
                 waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
             if not wait:
                 raise PermissionError("question is no longer open for this task")
+        sources = self._input_sources(conn, event, access) if kind != "notify" else {}
         root = self.graph.root(conn, task)
         revision = root["goal_revision"] + (kind != "notify")
         now = self.clock.now().isoformat()
         input_id = str(uuid4())
         conn.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=question_id,
-            source_id=source_id, text=text, state="READY" if task["state"] == "QUEUED" else "PENDING", created_at=now,
+            source_id=source_id, source_event_id=event.event_id if sources else None,
+            text=text, state="READY" if task["state"] == "QUEUED" else "PENDING", created_at=now,
             kind=kind, actor=event.principal.key, goal_revision=revision))
         affected = {task["id"]}
         if kind != "notify":
@@ -1385,12 +1437,14 @@ class TaskService:
             for child in children:
                 affected.add(child["id"])
                 conn.execute(insert(inputs).values(id=str(uuid4()), task_id=child["id"], question_id=None,
-                    source_id=source_id + ":" + child["id"], text=text, state="READY" if child["state"] == "QUEUED" else "PENDING",
+                    source_id=source_id + ":" + child["id"], source_event_id=event.event_id if sources else None,
+                    text=text, state="READY" if child["state"] == "QUEUED" else "PENDING",
                     created_at=now, kind=kind, actor=event.principal.key, goal_revision=revision))
             if not children:
                 event_id = self.graph.event(conn, root, "followup", {"input_id": input_id, "text": text})
                 conn.execute(insert(leader_inbox).values(id=str(uuid4()), target_session_id=root["coordinator_session_id"],
                     root_task_id=root["id"], event_id=event_id, resume_reason="followup", source_revision=revision, created_at=now))
+        self._merge_input_sources(conn, affected | {root["id"]}, sources)
         if kind != "notify":
             from qqbot.storage.job_schema import jobs
             conn.execute(update(jobs).where(jobs.c.task_id.in_(affected),

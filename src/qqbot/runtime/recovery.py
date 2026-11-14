@@ -492,7 +492,8 @@ class RuntimeRecovery:
             raise PermissionError("readback credential host differs from the task binding")
         context = ToolContext(task_id=record["task_id"], run_id=record["run_id"], fence=run["fencing"],
             principal=access.principal.model_dump(mode="json"), workspace=str(self._workspace(execution_task, strict=False)),
-            repository=claim.get("repository"), host=host)
+            repository=claim.get("repository"), host=host,
+            environment=(claim.get("plan") or json.loads(execution_task["plan_json"])).get("environment", "sandbox"))
         verification = await self._verify(context, action, record["arguments"], record["result"])
         state, result = verification or ("UNKNOWN", record["result"])
         if state not in {"VERIFIED", "FAILED", "PARTIAL", "UNKNOWN"}:

@@ -12,10 +12,11 @@ Interrupted or blocked Workers preserve results for a Leader decision. A Leader
 takeover requires stopped related execution and reconciled external operations.
 
 Install the locked Python and npm packages under root-owned `/opt/qqbot`, with
-Python 3.13, Node and the pinned Pi executable accessible to `qqbot`. Install
+Python 3.13, Node, FFmpeg 6 or newer and the pinned Pi executable accessible to `qqbot`. The locked
+Python dependency `pilk-nogil` decodes QQ SILK voice messages in a bounded child process. Install
 `deploy/qqbot.service`, root-owned `scripts/elephant-daemon-stopped` at
 `/usr/local/libexec/elephant-daemon-stopped`, and create root-owned mode 0755
-`/var/lib/qqbot-daemon-stops`. The service grants the stop helper write access to this directory in its mount namespace. Keep `/var/lib/qqbot` owned by the daemon, mode 0700.
+`/var/lib/qqbot-daemon-stops`. The privileged stop helper writes to this root-owned directory. Keep `/var/lib/qqbot` owned by the daemon, mode 0700.
 
 Configure `/etc/qqbot/core.yaml` and private `/etc/qqbot/core.env`. Enable the
 model endpoint and its key, official QQ AppID/secret and verified owner OpenID,
@@ -48,11 +49,25 @@ Provision the daemon account with root-only
 `deploy/elephant-job-user-setup.sh qqbot`. This enables its systemd user manager
 and linger, so Jobs survive daemon restarts. See
 [Job operations](../docs/operations/persistent-jobs.md) for receipts and acceptance.
-The setup script writes `/etc/qqbot/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes only its `/run/user/UID` directory through the `ProtectHome=tmpfs` sandbox. Keep the remaining home directories hidden. Do not grant the daemon sudo.
+The setup script writes `/etc/qqbot/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes its `/run/user/UID` directory. Host execution uses the service account's existing filesystem permissions and does not grant sudo or root.
 
 Install `bubblewrap` and validate user namespaces under the actual service account.
-Workspace processes and Jobs have a cleared environment, isolated mount/PID/network
-namespaces, system binaries, and their single authorized workspace. Generic process
+`execution.leader_environment` defaults to `host`, and `execution.worker_environment`
+defaults to `sandbox`. Leader delegation can select `environment: host` or
+`environment: sandbox` for each child. The accepted mode is stored with the task and
+kept across continuation and recovery. A sandbox Worker cannot delegate a host child.
+Sandbox processes and Jobs have a cleared environment, isolated mount/PID/network
+namespaces, system binaries, and their single authorized workspace. Host processes
+and Jobs run directly under the service account, with an explicit environment and
+an optional host working directory. Host file tools also accept absolute paths.
+Foreground host processes require Linux cgroup v2 with `cgroup.kill` and the service
+unit's `Delegate=yes`. Each command enters a child cgroup before exec; cleanup
+kills and verifies the entire group, including detached descendants. These groups
+remain inside the daemon service for the existing stop receipt. Explicitly starting
+an external service is a host side effect, whose lifetime is independent of the run.
+The service unit allows host filesystem access for this mode; remove conflicting
+`ProtectSystem`, `ProtectHome` or path restrictions from existing drop-ins when upgrading.
+Generic process
 execution receives no GitHub or calendar credentials. GitHub CLI and Git transport
 use their existing controlled credential providers. Pi has no built-in tools,
 automatic skill scan, context-file injection or plugin mirror; its trusted extension

@@ -53,7 +53,8 @@ async def submit_tool(runtime, claim, arguments):
         "payload": {"operation": "tasks.submit", "call_id": "native-submit-call", "arguments": arguments}})
 
 
-async def test_committed_submit_lost_response_restores_native_receipt_before_releasing_writer(runtime):
+@pytest.mark.parametrize("legacy_intent", [False, True])
+async def test_committed_submit_lost_response_restores_native_receipt_before_releasing_writer(runtime, legacy_intent):
     runtime.sessions.enqueue(runtime.event, runtime.access)
     old = runtime.sessions.claim("leader")
     arguments = {"goal": "检查项目", "children": [{"goal": "独立检查", "delegation_key": "primary"}]}
@@ -62,6 +63,13 @@ async def test_committed_submit_lost_response_restores_native_receipt_before_rel
         assert response.status_code == 200
         original = response.json()
         raise httpx.ReadTimeout("Host committed before the response reached Pi")
+    if legacy_intent:
+        with runtime.db.transaction() as conn:
+            context = json.loads(conn.execute(select(tasks.c.context_json).where(
+                tasks.c.id == original["task_id"])).scalar_one())
+            for child in context["dispatch_spec"]["children"]:
+                child.pop("environment", None)
+            conn.execute(update(tasks).where(tasks.c.id == original["task_id"]).values(context_json=json.dumps(context)))
     path = native_pending_submit(runtime, old, arguments)
     before = path.read_bytes()
     runtime.clock.advance(31)
@@ -141,16 +149,16 @@ async def test_uncommitted_or_changed_submit_intent_retains_writer_without_nativ
         assert conn.execute(select(func.count()).select_from(tasks).where(tasks.c.kind == "goal")).scalar_one() == int(committed)
 
 
-def test_unsupported_pending_native_tool_retains_writer_for_readback(runtime):
+def test_interrupted_direct_tool_releases_writer_with_recovery_receipt(runtime):
     runtime.sessions.enqueue(runtime.event, runtime.access)
     old = runtime.sessions.claim("leader")
     path = native_pending_submit(runtime, old, {"name": "github.issue.create", "arguments": {}},
                                  tool_name="capability_invoke")
-    before = path.read_bytes()
     runtime.clock.advance(31)
-    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "NEEDS_RECONCILIATION"
-    assert path.read_bytes() == before and len(unfinished_tools(path)) == 1
-    assert runtime.sessions.claim("replacement-leader") is None
+    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "RECOVERED"
+    assert unfinished_tools(path) == ()
+    replacement = runtime.sessions.claim("replacement-leader")
+    assert replacement["task_id"] == old["task_id"]
     with runtime.db.engine.connect() as conn:
-        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 1
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 0
         assert conn.execute(select(func.count()).select_from(tasks)).scalar_one() == 0

@@ -1,6 +1,6 @@
 """Host-owned capability contracts. Model input never supplies execution identity."""
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,7 @@ class ToolContext:
     repository: str | None = None
     host: str = "github.com"
     requested_actions: tuple[str, ...] = ()
+    environment: Literal["sandbox", "host"] = "sandbox"
 
 
 @dataclass(frozen=True)

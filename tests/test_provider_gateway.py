@@ -450,6 +450,107 @@ async def test_binding_authorization_pins_generation(gateway):
         assert instance.inflight == 0
 
 
+@pytest.mark.parametrize("stage,action", [
+    ("eof", "finish"), ("usage", "finish"), ("eof", "tool"),
+    ("eof", "unpaired"), ("eof", "revoke"), ("eof", "deny"), ("eof", "stop"),
+])
+async def test_final_receipt_waits_for_model_cleanup(gateway, body, stage, action):
+    instance, core, _claim = gateway
+    blocked, release, receipt_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    tool_started, tool_release = asyncio.Event(), asyncio.Event()
+    receipts, pending = [], []
+    receipt_task = None
+
+    class DelayedEOF(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[],"usage":{"prompt_tokens":1}}\n\ndata: [DONE]\n\n'
+            if stage == "eof":
+                blocked.set()
+                await release.wait()
+
+    async def host(operation, payload):
+        if operation == "authorize" and asyncio.current_task() is receipt_task:
+            receipt_started.set()
+        if operation == "usage" and stage == "usage":
+            blocked.set()
+            await release.wait()
+        if operation == "session-receipt":
+            receipts.append(payload.copy())
+            if payload["inflight"] or payload["tools_paired"] is not True:
+                httpx.Response(409, json={"detail": "Harness still has activity"},
+                    request=httpx.Request("POST", "http://runtime.local/session-receipt")).raise_for_status()
+            return {"accepted": True}
+        return await core(operation, payload)
+
+    async def tool(arguments, context):
+        tool_started.set()
+        await tool_release.wait()
+        return {}
+
+    instance.call = host
+    instance.provider.transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, stream=DelayedEOF()))
+    instance.registry.register(Capability("fixture.block", "blocked"), tool,
+        lambda a, c: Action("fixture.read", ("fixture:x",)))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://host") as client:
+        try:
+            if action == "tool":
+                pending.append(asyncio.create_task(client.post("/tools/capability_invoke", headers=auth(instance.tool_token),
+                    json={"call_id": "block", "arguments": {"name": "fixture.block", "arguments": {}}})))
+                await asyncio.wait_for(tool_started.wait(), 1)
+            pending.append(asyncio.create_task(client.post("/v1/chat/completions", headers=auth(instance.model_token),
+                json={**body, "stream": True})))
+            await asyncio.wait_for(blocked.wait(), 1)
+            receipt_task = asyncio.create_task(client.post("/session-receipt", headers=auth(instance.tool_token),
+                json={"kind": "turn_finished", "tools_paired": action != "unpaired", "inflight": 0}))
+            pending.append(receipt_task)
+            await asyncio.wait_for(receipt_started.wait(), 1)
+            assert not receipt_task.done() and not receipts
+            if action == "stop":
+                assert await asyncio.wait_for(instance.stop_requests(), 2)
+                assert not receipts and instance.inflight == 0 and not instance.model_requests
+                return
+            if action == "revoke":
+                instance.revoke()
+            elif action == "deny":
+                core.allowed = False
+            release.set()
+            response = await asyncio.wait_for(receipt_task, 1)
+            if action in {"revoke", "deny"}:
+                assert response.status_code == 403 and not receipts
+            elif action in {"tool", "unpaired"}:
+                assert response.status_code == 409
+                assert receipts[0]["inflight"] == (1 if action == "tool" else 0)
+                assert receipts[0]["tools_paired"] is (action != "unpaired")
+                assert instance.session_receipt is None
+            else:
+                assert response.status_code == 200 and response.json() == {"accepted": True}
+                assert receipts[0]["inflight"] == 0 and instance.provider.active == 0
+                assert instance.session_receipt == receipts[0]
+            assert not instance.model_requests
+        finally:
+            release.set()
+            tool_release.set()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("status", [409, 422])
+async def test_receipt_preserves_host_error_status_and_redacts_tokens(gateway, status):
+    instance, core, _claim = gateway
+    async def host(operation, payload):
+        if operation == "session-receipt":
+            httpx.Response(status, json={"detail": "rejected " + instance.tool_token},
+                request=httpx.Request("POST", "http://runtime.local/session-receipt")).raise_for_status()
+        return await core(operation, payload)
+    instance.call = host
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://host") as client:
+        response = await client.post("/session-receipt", headers=auth(instance.tool_token),
+            json={"kind": "turn_finished", "tools_paired": True})
+    assert response.status_code == status
+    assert response.json() == {"detail": "rejected [REDACTED]"}
+    assert instance.session_receipt is None and instance.inflight == 0
+
+
 async def test_stop_waits_for_active_tool_cleanup(gateway):
     instance, _core, _claim = gateway
     entered, cleaned = asyncio.Event(), asyncio.Event()

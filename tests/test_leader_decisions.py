@@ -126,8 +126,7 @@ async def test_native_decision_tools_and_ordinary_user_authority(runtime):
     user = runtime.sessions.claim("leader")
     with pytest.raises(PermissionError, match="bound result"):
         await tool(runtime, user, "tasks.take_over")
-    with pytest.raises(PermissionError, match="takeover"):
-        await authorize_write(runtime, user)
+    assert (await authorize_write(runtime, user))["allowed"]
 
 
 async def test_worker_unlimited_time_does_not_extend_leader_decision_deadline(runtime):

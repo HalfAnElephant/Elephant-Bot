@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from qqbot.cli import migrate
 
@@ -22,7 +23,8 @@ def test_upgrade_0010_preserves_history(tmp_path, experimental):
             conn.execute("ALTER TABLE tasks ADD COLUMN execution_priority INTEGER NOT NULL DEFAULT 0")
     migrate(str(path), backup=False)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("0021",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            ScriptDirectory.from_config(cfg).get_current_head(),)
         assert conn.execute("SELECT detail FROM audit_events WHERE id='existing'").fetchone() == ("preserve",)
         assert conn.execute("SELECT count(*) FROM qq_interaction_tokens").fetchone() == (0,)
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)

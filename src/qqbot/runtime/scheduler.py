@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 from sqlalchemy import select, update
 
+from qqbot.adapters.deepseek import DeepSeekAPI
 from qqbot.capabilities.gateway import standard_registry
 from qqbot.contracts.harness import resolve_harness
 from qqbot.harness.pool import SessionPool
@@ -42,6 +43,10 @@ class RuntimeClient:
                 return httpx.Response(200, content=b"null", headers={"content-type": "application/json"}, request=request)
             return httpx.Response(200, json=result, request=request)
         except PermissionError as error:
+            if path.endswith("/session-receipt"):
+                payload = body.payload or {}
+                logger.warning("Session receipt rejected run_id=%s kind=%s inflight=%s tools_paired=%s detail=%s",
+                    body.run_id, payload.get("kind"), payload.get("inflight"), payload.get("tools_paired"), error)
             return httpx.Response(409, json={"detail": str(error)}, request=request)
         except (ValueError, LookupError, TypeError) as error:
             return httpx.Response(422, json={"detail": str(error)}, request=request)
@@ -82,6 +87,8 @@ class RuntimeClient:
             body.payload["identity"] = {**body.payload.get("identity", {}), "host_epoch": self.core.recovery.epoch}
         if operation == "memory":
             return await self.core.knowledge.invoke(identity, body.payload)
+        if operation == "schedules":
+            return await self.leader.invoke(operation, identity, body.payload)
         if operation == "jobs":
             return await self.core.job_runtime.invoke(identity, body.payload)
         with self.service.db.engine.connect() as conn:
@@ -134,6 +141,10 @@ class Scheduler:
             worker_id="daemon", github_host=self.settings.orchestration.github_host,
             gh="gh", github_token_env="QQBOT_GITHUB_TOKEN", workspace_binding=[])
 
+        async def media_headers(claim, attachment):
+            from qqbot.adapters.qq_official.media_download import inbound_media_headers
+            return await inbound_media_headers(core, claim, attachment)
+
         def factory(claim, process_id, session_id):
             binding = claim.get("binding") or leader.sessions.binding()
             adapter = resolve_harness(core, binding)
@@ -143,7 +154,7 @@ class Scheduler:
                 "model_endpoint": binding.get("endpoint"), "model_key_env": binding.get("credential_env", "QQBOT_MODEL_KEY"),
                 "model_context_window": binding.get("context_window", 32768),
                 "workspace_binding": [key + "=" + value for key, value in binding.get("workspace_bindings", {}).items()],
-                "execution": self.execution})
+                "execution": self.execution, "media_headers": media_headers})
             if not args.model or not args.model_endpoint:
                 raise ValueError("persisted session has no configured model binding")
             runner = adapter.create(args, claim, self.client, process_id, session_id, self.capacity)
@@ -156,8 +167,11 @@ class Scheduler:
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)
         async def waiter_call(operation, payload):
             return await self.worker.call(operation, payload=payload)
+        import os
+        deepseek = DeepSeekAPI.from_model(self.settings.model.endpoint,
+            os.environ.get(self.settings.model.api_key_env, ""))
         self.waiters = ExternalWaiters(waiter_call, standard_registry(github=configured_github(self.args),
-                                                                    execution=self.execution))
+                                                                    execution=self.execution, deepseek=deepseek))
         self.active = set()
 
     async def step(self):

@@ -4,9 +4,9 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run as root' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Linux is required' >&2; exit 1; }
 # Bubblewrap is also required by credentialed gh and isolated workspace processes.
-if ! command -v bwrap >/dev/null 2>&1; then
+if ! command -v bwrap >/dev/null 2>&1 || ! command -v ffmpeg >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y bubblewrap
+  apt-get install -y bubblewrap ffmpeg
 fi
 cd /opt/qqbot
 [ -x .venv/bin/python ] && [ -x /usr/bin/node ]

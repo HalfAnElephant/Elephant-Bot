@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -37,7 +38,7 @@ from .sessions import SessionService
 from .task_graph import TaskGraph
 
 logger = logging.getLogger(__name__)
-CONTROL_COMMANDS = {"/帮助", "/状态", "/任务", "/取消", "/补充", "/静默", "/恢复", "/模式", "/新对话", "/切换对话", "/对话"}
+CONTROL_COMMANDS = {"/项目", "/帮助", "/状态", "/任务", "/取消", "/补充", "/静默", "/恢复", "/模式", "/新对话", "/切换对话", "/对话"}
 
 
 class Core:
@@ -73,6 +74,8 @@ class Core:
         self.openviking = OpenVikingMemory(db, clock, settings.memory.openviking)
         from .knowledge import KnowledgeRuntime
         self.knowledge = KnowledgeRuntime(self)
+        from .schedules import ScheduleService
+        self.schedules = ScheduleService(self)
         self.stopping = False
         self.supervisor = LoopSupervisor(lambda: self.stopping)
         from .recovery import RuntimeRecovery
@@ -81,14 +84,20 @@ class Core:
         self.scheduler = None
         self.active, self.active_ids, self.windows = {}, set(), {}
 
-    def skills_for(self, access):
+    def skills_for(self, access, *, workspace_id="personal"):
         event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
         if not self.settings.skills.enabled or self.sessions.owner(event) is None:
             return None
         if access.conversation.surface != Surface.PRIVATE and not self.settings.skills.group_enabled:
             return None
         root = self.settings.skills.owner_storage_root or str(Path(self.db.path).resolve().parent / "hermes")
-        return HermesSkills(Path(root) / self.settings.owner.id, hermes=self.settings.skills.hermes)
+        self.sessions.validate_workspace(event, workspace_id)
+        storage = Path(root) / self.settings.owner.id
+        options = self.settings.skills.hermes
+        if workspace_id != "personal":
+            storage = storage / "projects" / workspace_id
+            options = options.model_copy(update={"create_dir": None})
+        return HermesSkills(storage, hermes=options)
 
     def access(self, event):
         if event.conversation.adapter_instance_id == "admin_api" and event.principal.identity_namespace == "admin_api":
@@ -227,7 +236,36 @@ class Core:
                 )
             )
 
-    def enqueue_admin_task(self, goal, *, idempotency_key, success_checks=(), requested_outputs=()):
+    def structured_goal_context(self, event, spec, workspace_id, conn):
+        """Persist the authenticated structured source before its task graph in one transaction."""
+        from qqbot.domain.agents import GoalSpec
+        from qqbot.domain.messages import StructuredSegment
+        goal_spec = GoalSpec.model_validate(spec).model_dump(mode="json")
+        workspace_id = self.sessions.validate_workspace(event, workspace_id or self.sessions.workspace_for(event, conn))
+        request = {"workspace_id": workspace_id, "goal": goal_spec["goal"],
+            "success_checks": goal_spec["success_checks"], "requested_outputs": goal_spec["requested_outputs"]}
+        source_payload = {key: value for key, value in request.items() if key != "goal"}
+        source_payload["goal_sha256"] = hashlib.sha256(request["goal"].encode()).hexdigest()
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        event = event.model_copy(update={"segments": (TextSegment(text=goal_spec["goal"]),
+            StructuredSegment(original_type="host_goal_request", payload=source_payload))})
+        event, _ = self.inbox.accept(event, conn=conn)
+        original = next((segment.payload for segment in event.segments if segment.type == "structured"
+            and segment.original_type == "host_goal_request"), None)
+        if original != source_payload or event.text != request["goal"]:
+            raise ValueError("structured request key reused with different content")
+        conn.execute(update(inbox).where(inbox.c.id == event.event_id).values(state="DONE"))
+        context = self.context_for(event, workspace_id=workspace_id, conn=conn)
+        context["structured_request"] = {"source_event_id": event.event_id, "request": request,
+            "sha256": hashlib.sha256(encoded.encode()).hexdigest()}
+        scope = self.knowledge.scope(event, workspace_id=workspace_id)
+        if scope is not None and self.openviking.enabled(scope):
+            owner = self.openviking._owner(scope, conn=conn)
+            context.update(memory_scope=scope.model_dump(), memory_epoch=owner["epoch"] if owner else 0,
+                memory_status="ready" if owner is None or owner["state"] == "READY" else "blocked", retrieved_data=[])
+        return event, context
+
+    def enqueue_admin_task(self, goal, *, idempotency_key, success_checks=(), requested_outputs=(), workspace_id=None):
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("an Idempotency-Key of at most 200 characters is required")
         now = self.clock.now()
@@ -240,32 +278,39 @@ class Core:
         access = self.access(event)
         self.permissions.require(access, "task.create", "conversation:" + conversation.key)
         with self.db.transaction() as conn:
-            from qqbot.storage.schema import conversations
-            if not conn.execute(select(conversations.c.id).where(conversations.c.id == conversation.key)).first():
-                conn.execute(insert(conversations).values(id=conversation.key, ref_json=conversation.model_dump_json(), seq=0, revocation=0))
-            dialogue = self.sessions.dialogue(conn, event)
-            return self.tasks.graph.submit(conn, dialogue, event, access,
-                {"goal": goal, "success_checks": list(success_checks), "requested_outputs": list(requested_outputs),
-                 "children": [{"mode": "work", "goal": goal, "delegation_key": "primary",
-                               "success_checks": list(success_checks), "requested_outputs": list(requested_outputs)}]},
-                stable_id("admin-task", idempotency_key), self.sessions.binding(), {})
+            workspace_id = workspace_id or self.sessions.workspace_for(event, conn)
+            dialogue = self.sessions.dialogue(conn, event, workspace_id=workspace_id)
+            spec = {"goal": goal, "success_checks": list(success_checks), "requested_outputs": list(requested_outputs),
+                "children": [{"mode": "work", "goal": goal, "delegation_key": "primary",
+                    "success_checks": list(success_checks), "requested_outputs": list(requested_outputs)}]}
+            event, context = self.structured_goal_context(event, spec, workspace_id, conn)
+            return self.tasks.graph.submit(conn, dialogue, event, access, spec,
+                stable_id("admin-task", idempotency_key), self.sessions.binding(), context)
 
-    def context_for(self, event, access=None, **_):
+    def context_for(self, event, access=None, workspace_id=None, *, conn=None, **_):
         access = access or self.access(event)
         self.permissions.require(access, "history.source.read", "event:" + event.event_id)
         raw = event.model_dump_json()
-        with self.db.engine.connect() as conn:
-            stored = conn.execute(select(inbox.c.event_json).where(inbox.c.id == event.event_id)).scalar_one_or_none()
+        workspace_id = self.sessions.validate_workspace(event, workspace_id or self.sessions.workspace_for(event, conn))
+        with (nullcontext(conn) if conn is not None else self.db.engine.connect()) as connection:
+            stored = connection.execute(select(inbox.c.event_json).where(inbox.c.id == event.event_id)).scalar_one_or_none()
         sources = [(event, stored or raw)]
-        from qqbot.storage.agent_schema import dialogue_inputs, focus
-        with self.db.engine.connect() as conn:
-            dialogue_id = conn.execute(select(focus.c.dialogue_id).where(
-                focus.c.key == stable_id(event.conversation.key, event.principal.key))).scalar_one_or_none()
-            previous = conn.execute(select(dialogue_inputs.c.event_json).where(
+        from qqbot.storage.agent_schema import dialogue_inputs, dialogues, focus
+        owner = self.sessions.owner(event) or "guest-" + event.principal.key
+        with (nullcontext(conn) if conn is not None else self.db.engine.connect()) as connection:
+            dialogue_id = connection.execute(select(dialogue_inputs.c.dialogue_id).join(dialogues,
+                dialogues.c.id == dialogue_inputs.c.dialogue_id).where(dialogue_inputs.c.id == event.event_id,
+                dialogues.c.workspace_id == workspace_id, dialogues.c.owner_id == owner)).scalar_one_or_none()
+            if dialogue_id is None:
+                dialogue_id = connection.execute(select(focus.c.dialogue_id).join(dialogues,
+                    dialogues.c.id == focus.c.dialogue_id).where(focus.c.key == stable_id(event.conversation.key,
+                    event.principal.key), dialogues.c.workspace_id == workspace_id,
+                    dialogues.c.owner_id == owner)).scalar_one_or_none()
+            previous = connection.execute(select(dialogue_inputs.c.event_json).where(
                 dialogue_inputs.c.dialogue_id == dialogue_id, dialogue_inputs.c.id != event.event_id)
                 .order_by(dialogue_inputs.c.created_at.desc()).limit(8)).scalars().all() if dialogue_id else []
             if dialogue_id and event.reply_to:
-                replied = conn.execute(select(dialogue_inputs.c.event_json).join(inbox,
+                replied = connection.execute(select(dialogue_inputs.c.event_json).join(inbox,
                     inbox.c.id == dialogue_inputs.c.id).where(
                     dialogue_inputs.c.dialogue_id == dialogue_id,
                     inbox.c.message_id == event.reply_to, inbox.c.conversation_id == event.conversation.key,
@@ -277,16 +322,24 @@ class Core:
             age = (event.received_at - prior.received_at).total_seconds()
             if (prior.conversation != event.conversation or prior.principal != event.principal
                     or age < 0 or (age > 600 and prior.platform_message_id != event.reply_to)
-                    or not any(s.type == "image" for s in prior.segments)):
+                    or not any(s.type in {"image", "file", "audio"} for s in prior.segments)):
                 continue
             manifest = {"kind": "inbox", "id": prior.event_id, "digest": hashlib.sha256(candidate.encode()).hexdigest()}
-            if self.validate_context(access, {"source_manifest": [manifest]}):
+            if self.validate_context(access, {"source_manifest": [manifest], "workspace_id": workspace_id}):
                 sources.append((prior, candidate))
-        return {"scope": event.conversation.key, "principal": event.principal.key,
+        return {"scope": event.conversation.key, "principal": event.principal.key, "workspace_id": workspace_id,
             "source_manifest": [{"kind": "inbox", "id": source.event_id,
                                  "digest": hashlib.sha256(body.encode()).hexdigest()} for source, body in sources],
-            "images": [{"source": source.event_id, "message_id": source.platform_message_id, "url": segment.image_url}
-                       for source, _body in sources for segment in source.segments if segment.type == "image"][:4],
+            "images": [{"source": source.event_id, "message_id": source.platform_message_id, "url": segment.image_url or segment.source_url,
+                        "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
+                        "attachment_ref": segment.attachment_ref}
+                       for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"][-16:],
+            "files": [{"source": source.event_id, "message_id": source.platform_message_id,
+                "url": segment.source_url, "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
+                "attachment_ref": segment.attachment_ref,
+                **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
+                    "is_current_input": source.event_id == event.event_id} if segment.type == "audio" else {})}
+                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}][-16:],
             "now": self.clock.now().isoformat(), "timezone": self.settings.timezone,
             "limits": self.settings.context.limits(self.settings.model.context_window,
                 self.settings.execution.interactive_budget.output_tokens_per_call),
@@ -294,6 +347,13 @@ class Core:
             "preferences": getattr(self.settings.owner, "preferences", "")}
 
     def validate_context(self, access, context):
+        try:
+            event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
+            self.sessions.validate_workspace(event, context.get("workspace_id", "personal"))
+            if context.get("owner_id") == self.settings.owner.id and self.sessions.owner(event) != self.settings.owner.id:
+                return False
+        except (PermissionError, ValueError):
+            return False
         if not self.knowledge.valid(context):
             return False
         if context.get("scope", access.conversation.key) != access.conversation.key:
@@ -327,9 +387,16 @@ class Core:
                     return False
                 if not self.permissions.check(access, "history.source.read", "event:" + source["id"]).allowed:
                     return False
-                event = InboundEvent.model_validate_json(raw)
+                source_event = InboundEvent.model_validate_json(raw)
+                workspace_id = context.get("workspace_id", "personal")
+                if not self.knowledge.sources_valid(event, [source["id"]], workspace_id=workspace_id, conn=conn):
+                    return False
+                original_workspace = self.sessions.workspace_for(source_event, conn)
+                if original_workspace != workspace_id and not self.knowledge.sources_valid(
+                        event, [source["id"]], workspace_id=original_workspace, conn=conn):
+                    return False
                 if conn.execute(select(inbox.c.id).where(inbox.c.conversation_id == access.conversation.key,
-                    inbox.c.event_type == "message.recalled", inbox.c.message_id == event.platform_message_id)).first():
+                    inbox.c.event_type == "message.recalled", inbox.c.message_id == source_event.platform_message_id)).first():
                     return False
         return True
 
@@ -354,7 +421,15 @@ class Core:
         command, _, argument = event.text.strip().partition(" ")
         access = self.access(event)
         if command == "/帮助":
-            return "直接告诉我需要做什么，或问“进度怎么样”、说“取消刚才那个”。补充内容时可以引用对应的进度消息。\n/状态 /新对话 <名称> /切换对话 <名称> /对话 /静默 [30m] /恢复"
+            return "直接告诉我需要做什么，或问“进度怎么样”、说“取消刚才那个”。补充内容时可以引用对应的进度消息。\n/状态 /新对话 <名称> /切换对话 <名称> /对话 /项目 [名称或personal] /静默 [30m] /恢复"
+        if command == "/项目":
+            if self.sessions.owner(event) is None:
+                raise PermissionError("project selection requires the owner")
+            if not argument.strip():
+                return "当前项目 " + self.sessions.workspace_for(event) + "\n可用项目\n" + "\n".join(["personal", *self.sessions.configured_workspaces()])
+            with self.db.transaction() as conn:
+                selected = self.sessions.dialogue(conn, event, workspace_id=argument.strip())
+            return "当前项目 " + selected["workspace_id"] + "，对话 " + selected["title"]
         if command == "/状态":
             return "我在，可以正常接收消息。想了解正在处理的事情，可以问“进度怎么样”。"
         if command in {"/静默", "/恢复", "/模式"}:
@@ -440,6 +515,10 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
+        if envelope.origin_kind == "chat" and not envelope.origin_id.startswith(("turn:", "progress:", "qq-stream:")):
+            controlled = self.controls.delivery_valid(envelope)
+            if controlled is not None:
+                return controlled
         if envelope.origin_kind == "chat" and envelope.origin_id.startswith("qq-stream:"):
             from qqbot.storage.agent_schema import dialogue_inputs
             from qqbot.storage.stream_schema import stream_messages, stream_runs
@@ -552,7 +631,12 @@ class Core:
 
     async def cleanup_artifacts(self):
         from qqbot.harness.artifacts import cleanup_artifacts
-        pending = asyncio.create_task(asyncio.to_thread(cleanup_artifacts, self.db, self.tasks.archive_root, self.clock.now()))
+        from qqbot.harness.attachments import cleanup_attachment_cache
+        def cleanup():
+            now = self.clock.now()
+            cleanup_artifacts(self.db, self.tasks.archive_root, now)
+            cleanup_attachment_cache(Path(self.db.path).resolve().parent / "spool" / "content", self.db, now)
+        pending = asyncio.create_task(asyncio.to_thread(cleanup))
         try:
             await asyncio.shield(pending)
         except asyncio.CancelledError:
@@ -595,6 +679,7 @@ class Core:
         self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
+        self.supervisor.start("schedules", self.schedules.step, interval=1, critical=True)
         self.supervisor.start("memory", self.maintenance, interval=10)
         self.supervisor.start("artifacts", self.cleanup_artifacts, interval=3600)
         while not self.stopping:

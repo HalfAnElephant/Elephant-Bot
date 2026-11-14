@@ -8,7 +8,7 @@ import re
 import stat
 from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -167,17 +167,30 @@ class ToolGateway:
         return result
 
 
-def workspace_file(context, relative, flags, mode=0o600):
+def workspace_parent(context, relative):
     path = PurePosixPath(relative)
-    if path.is_absolute() or not path.parts or any(part in {"..", ".git"} for part in path.parts):
+    host_path = getattr(context, "environment", "sandbox") == "host" and path.is_absolute()
+    if host_path:
+        path = PurePosixPath(Path(relative).resolve())
+    if (path.is_absolute() and not host_path or not path.parts
+            or any(part in {"..", ".git"} for part in path.parts) and not host_path):
         raise ValueError("path must be a workspace-relative file outside .git")
-    directory = os.open(context.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = os.open("/" if host_path else context.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in path.parts[:-1]:
+        for part in path.parts[1:-1] if host_path else path.parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
-        fd = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=directory)
+        return directory, path.name
+    except BaseException:
+        os.close(directory)
+        raise
+
+
+def workspace_file(context, relative, flags, mode=0o600):
+    directory, name = workspace_parent(context, relative)
+    try:
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=directory)
         if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
             os.close(fd)
             raise ValueError("workspace file must be a regular file without hardlinks")
@@ -186,7 +199,7 @@ def workspace_file(context, relative, flags, mode=0o600):
         os.close(directory)
 
 
-def standard_registry(*, github=None, execution=None):
+def standard_registry(*, github=None, execution=None, deepseek=None):
     from qqbot.adapters.execution.world import LocalExecution
     execution = execution or LocalExecution()
     registry = CapabilityRegistry()
@@ -199,16 +212,42 @@ def standard_registry(*, github=None, execution=None):
             url = arguments["url"]
             if not isinstance(url, str) or len(url) > 4096:
                 raise ValueError("invalid public URL")
+            page = await asyncio.to_thread(fetch_public, url, authorize_url=arguments.get("_authorize_url"))
+            if deepseek is None:
+                return page
+            # shortcut: preflight checks local redirects, recheck remote hops when DeepSeek exposes its redirect chain.
+            if arguments.get("_authorize_url"):
+                await asyncio.to_thread(arguments["_authorize_url"], page["url"])
+            parsed = await deepseek.fetch(page["url"])
+            if not isinstance(parsed, dict) or not all(isinstance(parsed.get(key), str) for key in ("title", "content")):
+                raise ValueError("DeepSeek returned an invalid fetched page")
+            text = parsed["content"]
+            return {**page, "text": text, "title": parsed["title"], "retrieved_at": datetime.now(UTC).isoformat(),
+                    "sha256": hashlib.sha256(text.encode()).hexdigest()}
         else:
             query = arguments["query"]
             if not isinstance(query, str) or not 1 <= len(query) <= 500:
                 raise ValueError("search query must be 1..500 characters")
             url = "https://cn.bing.com/search?format=rss&q=" + quote(query)
-        return await asyncio.to_thread(fetch_public, url, authorize_url=arguments.get("_authorize_url"))
-    registry.register(Capability("web.fetch", "Fetch public HTTPS source", {"url": {"type": "string"}}), web,
+            if deepseek is None:
+                return await asyncio.to_thread(fetch_public, url, authorize_url=arguments.get("_authorize_url"))
+            if not query.strip() or len(query) > 128:
+                raise ValueError("DeepSeek search requires a nonblank query of at most 128 characters; shorten the query")
+            parsed = await deepseek.search(query)
+            if (not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list)
+                    or any(not isinstance(item, dict) for item in parsed["results"])):
+                raise ValueError("DeepSeek returned invalid search results")
+            text = json.dumps(parsed["results"], ensure_ascii=False)
+            return {"url": "https://api.deepseek.com/v1/tools/search", "query": query,
+                    "retrieved_at": datetime.now(UTC).isoformat(), "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                    "text": text, "results": parsed["results"]}
+    registry.register(Capability("web.fetch", "Fetch public HTTPS source", {"url": {"type": "string"}},
+                                timeout_seconds=60 if deepseek else 30), web,
                       lambda a, c: Action("web.fetch", ("domain:" + (urlsplit(a["url"]).hostname or ""),)))
-    registry.register(Capability("web.search", "Search fresh public web sources", {"query": {"type": "string"}}),
-                      web, lambda a, c: Action("web.search", ("domain:cn.bing.com",)))
+    registry.register(Capability("web.search", "Search fresh public web sources" +
+                                ("; DeepSeek queries must contain at most 128 characters" if deepseek else ""),
+                                {"query": {"type": "string"}}),
+                      web, lambda a, c: Action("web.search", ("domain:api.deepseek.com" if deepseek else "domain:cn.bing.com",)))
     async def read(arguments, context):
         offset, limit = arguments.get("offset", 0), arguments.get("limit", 8192)
         if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 65536:
@@ -223,7 +262,8 @@ def standard_registry(*, github=None, execution=None):
         await execution.write_file(context, arguments["path"], content)
         return {"path": arguments["path"], "bytes": len(content)}
     for name, handler, effect in (("read", read, "read"), ("write", write, "write")):
-        registry.register(Capability("workspace." + name, "Bounded workspace file " + name), handler,
+        registry.register(Capability("workspace." + name,
+            "File " + name + "; workspace-relative paths, or absolute host paths in host environment"), handler,
             lambda a, c, n=name, e=effect: Action("workspace.file." + n,
                                                 ("workspace:" + c.workspace, "file:" + a["path"]), e))
     registry.register(Capability("gh.exec", "Execute installed GitHub CLI with literal argv/stdin",

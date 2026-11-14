@@ -434,6 +434,8 @@ class PiRunnerAdapter:
                 raise RuntimeError("run is not accepting steering input")
             if input_id in self.steered_inputs:
                 return
+            if not host_notice:
+                text = await self.gateway.voice_input_text(text, input_id=input_id)
             result = await self.command("steer", wait=True, message=json.dumps({"binding_id": self.gateway.binding,
                                "input_id": input_id, "text": text, "host_notice": host_notice}, ensure_ascii=False))
             if not host_notice:

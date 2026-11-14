@@ -8,6 +8,8 @@ from qqbot.domain.messages import DTO
 
 class ChildSpec(DTO):
     mode: Literal["work", "consult"] = "work"
+    environment: Literal["sandbox", "host"] | None = Field(default=None,
+        description="Execution environment. Omit to use the configured Worker default; sandbox Workers cannot delegate host execution.")
     goal: str = Field(min_length=1, max_length=16000)
     delegation_key: str = Field(min_length=1, max_length=128)
     input_refs: tuple[str, ...] = Field(default=(), strict=False)

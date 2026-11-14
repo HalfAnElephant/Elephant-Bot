@@ -1,6 +1,7 @@
 """Bind memory operations to verified owners and export only native Pi sources."""
 import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,23 +34,47 @@ class KnowledgeRuntime:
         self.core, self.memory = core, core.openviking
         self.memory.source_loader = self.load_source
 
-    def scope(self, event):
+    def scope(self, event, *, workspace_id=None):
         owner = self.core.sessions.owner(event)
         if owner is None:
             return None
+        workspace_id = self.core.sessions.validate_workspace(event,
+            workspace_id or self.core.sessions.workspace_for(event))
         private = event.conversation.surface in {Surface.PRIVATE, Surface.GUILD_PRIVATE}
-        scope = MemoryScope(owner_id=owner, workspace_id="personal" if private else event.conversation.key,
-                            audience="private" if private else "group")
+        project = workspace_id != "personal"
+        scope = MemoryScope(owner_id=owner, workspace_id=workspace_id if project or private else event.conversation.key,
+                            audience="project" if project else "private" if private else "group")
+        if not private and project and not self.memory.config.group_enabled:
+            return None
         if not any((b.owner_id, b.workspace_id) == (scope.owner_id, scope.workspace_id)
                    for b in self.memory.config.bindings):
             return None
         return scope
 
+    def sources_valid(self, event, source_ids, *, workspace_id="personal", conn=None):
+        """Deletion barriers revoke raw attachment replay even in a fresh memory epoch."""
+        owner = self.core.sessions.owner(event)
+        if owner is None or not source_ids:
+            return True
+        private = event.conversation.surface in {Surface.PRIVATE, Surface.GUILD_PRIVATE}
+        scope = MemoryScope(owner_id=owner,
+            workspace_id=workspace_id if workspace_id != "personal" or private else event.conversation.key,
+            audience="project" if workspace_id != "personal" else "private" if private else "group")
+        ids = set(source_ids)
+        with (nullcontext(conn) if conn is not None else self.core.db.engine.connect()) as connection:
+            rows = connection.execute(select(memory_sources).where(memory_sources.c.scope_id == scope.key,
+                or_(memory_sources.c.source_id.in_(ids), memory_sources.c.event_id.in_(ids)))).mappings().all()
+            if any(row["state"] in {"FROZEN", "REVOKED"} for row in rows):
+                return False
+            ids.update(row[key] for row in rows for key in ("source_id", "event_id"))
+            return connection.execute(select(memory_barriers.c.id).where(memory_barriers.c.scope_id == scope.key,
+                memory_barriers.c.source_id.in_(ids)).limit(1)).first() is None
+
     def load_source(self, scope, session_id, after, to_seq, branch, projection_version):
         with self.core.db.engine.connect() as conn:
             record = conn.execute(select(sessions).where(sessions.c.id == session_id)).mappings().first()
         event, binding, turns = self._session_context(session_id)
-        if not record or event is None or not self.core.allowed(event) or self.scope(event) != scope:
+        if not record or event is None or not self.core.allowed(event) or self.scope(event, workspace_id=binding.get("workspace_id", "personal")) != scope:
             raise PermissionError("memory export session is not bound to this owner")
         exported = self._export(record, binding, turns, after=after, projection_version=projection_version)
         events = tuple(e for e in exported["events"] if e.seq <= to_seq)
@@ -70,10 +95,12 @@ class KnowledgeRuntime:
                 binding = claim.get("binding") or (json.loads(task["binding_json"]) if task else binding)
                 result = json.loads(run["result_json"]) if run["result_json"] else {}
                 evidence = []
-                scope = self.scope(event) if event else None
+                context = json.loads(task["context_json"]) if task else claim.get("context", {})
+                workspace_id = claim.get("context", {}).get("workspace_id", context.get("workspace_id", "personal"))
+                binding = {**binding, "workspace_id": workspace_id}
+                scope = self.scope(event, workspace_id=workspace_id) if event else None
                 epoch = conn.execute(select(memory_owners.c.epoch).where(
                     memory_owners.c.id == scope.key)).scalar_one_or_none() if scope else None
-                context = json.loads(task["context_json"]) if task else {}
                 if (event is not None and run["role"] == "worker" and run["state"] == "FINISHED"
                         and result.get("status") == "completed"
                         and self.core.allowed(event) and context.get("memory_epoch", 0) == (epoch or 0)):
@@ -101,7 +128,7 @@ class KnowledgeRuntime:
             turns=turns, input_origins=input_origins, **options)
 
     async def prepare(self, event, context):
-        scope = self.scope(event)
+        scope = self.scope(event, workspace_id=context.get("workspace_id"))
         if scope is None or not self.memory.enabled(scope):
             return context
         query = event.text.strip()[:self.memory.config.max_query_chars]
@@ -144,7 +171,7 @@ class KnowledgeRuntime:
             if (event is None or not self.core.allowed(event) or not turns
                     or all(turn["role"] == "skill_review" for turn in turns.values())):
                 continue
-            scope = self.scope(event)
+            scope = self.scope(event, workspace_id=binding.get("workspace_id", "personal"))
             if scope is None or not self.memory.enabled(scope):
                 continue
             with self.core.db.engine.connect() as conn:
@@ -165,6 +192,9 @@ class KnowledgeRuntime:
                 projection_version=exported.get("projection_version", "pi-original-v2")))
 
     def invalidate_root(self, conn, root, scope, operation_id, source_ids, session_ids=()):
+        root = conn.execute(select(tasks).where(tasks.c.id == root["id"])).mappings().one()
+        if root["state"] in TERMINAL | {"CANCEL_REQUESTED"}:
+            return
         context = json.loads(root["context_json"])
         previous = context.get("memory_replan_pending") or context.get("memory_replan") or {}
         operation_ids = list(dict.fromkeys([*previous.get("operation_ids", []), operation_id]))
@@ -285,22 +315,52 @@ class KnowledgeRuntime:
                     inputs.c.actor == root["requester"]).order_by(inputs.c.created_at, inputs.c.id)).mappings()]
                 revoked_hashes = set(conn.execute(select(memory_sources.c.content_hash).where(
                     memory_sources.c.scope_id == scope.key, memory_sources.c.source_id.in_(affected))).scalars())
-            blocked = bool(source_ids.intersection(affected)) or any(item["source_id"] in affected or
+                retained_sources = {event.event_id, *((item.get("source_event_id") or item["source_id"]) for item in business_inputs)}
+                sources_valid = self.sources_valid(event, source_ids | retained_sources,
+                    workspace_id=context.get("workspace_id", "personal"), conn=conn)
+            blocked = not sources_valid or bool(source_ids.intersection(affected)) or any((item.get("source_event_id") or item["source_id"]) in affected or
                 hashlib.sha256(item["text"].encode()).hexdigest() in revoked_hashes for item in business_inputs)
             goal = "\n".join([event.text, *(item["text"] for item in business_inputs)])
             fresh = {key: value for key, value in context.items() if key in {
-                "limits", "timezone", "model_context_window", "scope", "principal", "preferences", "owner_id"}}
-            fresh["source_manifest"] = [item for item in context.get("source_manifest", []) if item["id"] == event.event_id]
-            fresh["images"] = [item for item in context.get("images", []) if item.get("source") == event.event_id]
+                "limits", "timezone", "model_context_window", "scope", "principal", "preferences", "owner_id",
+                "workspace_id", "structured_request"}}
+            fresh["source_manifest"] = [item for item in context.get("source_manifest", []) if item["id"] in retained_sources]
+            fresh["images"] = [item for item in context.get("images", []) if item.get("source") in retained_sources]
+            fresh["files"] = [item for item in context.get("files", []) if item.get("source") in retained_sources]
             if blocked:
+                fresh.pop("structured_request", None)
                 goal = "原始任务输入已被撤销，无法自动重规划。"
                 goal_spec = TaskGoal(text=goal)
-                fresh.update(source_manifest=[], images=[], memory_scope=scope.model_dump(),
+                fresh.update(source_manifest=[], images=[], files=[], memory_scope=scope.model_dump(),
                     memory_epoch=memory_status["memory_epoch"], memory_status="blocked", retrieved_data=[])
             else:
                 goal_spec, _ = plan_turn(TurnInput(conversation=event.conversation, principal=event.principal,
-                    text=goal, source_event_ids=(event.event_id, *(item["source_id"] for item in business_inputs)),
+                    text=goal, source_event_ids=(event.event_id, *((item.get("source_event_id") or item["source_id"]) for item in business_inputs)),
                     anchor_event_id=event.event_id), self.core.sessions.settings, background=True)
+                structured = context.get("structured_request")
+                if structured:
+                    from qqbot.storage.schema import inbox
+                    with self.core.db.engine.connect() as conn:
+                        raw = conn.execute(select(inbox.c.event_json).where(
+                            inbox.c.id == structured["source_event_id"])).scalar_one_or_none()
+                    original = InboundEvent.model_validate_json(raw) if raw else None
+                    request = structured["request"]
+                    encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                    payload = next((segment.payload for segment in original.segments if segment.type == "structured"
+                        and segment.original_type == "host_goal_request"), None) if original else None
+                    expected_payload = {key: value for key, value in request.items() if key != "goal"}
+                    expected_payload["goal_sha256"] = hashlib.sha256(request["goal"].encode()).hexdigest()
+                    if (original is None or original.event_id != event.event_id or original.principal != event.principal
+                            or original.conversation != event.conversation or payload != expected_payload
+                            or original.text != request["goal"]
+                            or hashlib.sha256(encoded.encode()).hexdigest() != structured["sha256"]
+                            or request["workspace_id"] != fresh.get("workspace_id", "personal")):
+                        raise PermissionError("structured replan source cannot be verified")
+                    accepted = TaskGoal(text=request["goal"], success_checks=tuple(request["success_checks"]),
+                        requested_outputs=tuple(request["requested_outputs"]))
+                    goal_spec = goal_spec.model_copy(update={
+                        "success_checks": tuple(dict.fromkeys([*accepted.success_checks, *goal_spec.success_checks])),
+                        "requested_outputs": tuple(dict.fromkeys([*accepted.requested_outputs, *goal_spec.requested_outputs]))})
                 fresh = await self.prepare(event, fresh)
             if not blocked and (fresh.get("memory_status") != "ready" or not self.valid(fresh)):
                 continue
@@ -310,7 +370,11 @@ class KnowledgeRuntime:
             now = self.core.clock.now().isoformat()
             with self.core.db.transaction() as conn:
                 current = conn.execute(select(tasks).where(tasks.c.id == root["id"])).mappings().one()
-                if json.loads(current["context_json"]).get("memory_replan_pending") != marker:
+                # Recall may yield while a real followup changes the accepted source snapshot.
+                if (current["goal_revision"] != root["goal_revision"]
+                        or current["context_json"] != root["context_json"]
+                        or current["fencing"] != root["fencing"]
+                        or current["state"] in TERMINAL | {"CANCEL_REQUESTED"}):
                     continue
                 revision = current["goal_revision"] + 1
                 conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
@@ -339,7 +403,10 @@ class KnowledgeRuntime:
                                         **receipt.model_dump(mode="json")}
             conn.execute(update(runs).where(runs.c.id == identity[0]).values(request_json=json.dumps(claim)))
             old_session_ids = []
-            for row in conn.execute(select(dialogues).where(dialogues.c.owner_id == scope.owner_id)).mappings():
+            dialogue_scope = dialogues.c.workspace_id == (scope.workspace_id if scope.audience == "project" else "personal")
+            if scope.audience == "group":
+                dialogue_scope = dialogue_scope & (dialogues.c.conversation_id == scope.workspace_id)
+            for row in conn.execute(select(dialogues).where(dialogues.c.owner_id == scope.owner_id, dialogue_scope)).mappings():
                 old_session_ids.append(row["session_id"])
                 replacement = str(uuid4())
                 conn.execute(update(dialogues).where(dialogues.c.id == row["id"]).values(session_id=replacement))
@@ -383,10 +450,10 @@ class KnowledgeRuntime:
                 dialogue_inputs.c.handled_at.is_(None))).mappings()]
         for source in pending:
             event = InboundEvent.model_validate_json(source["event_json"])
-            scope = self.scope(event)
+            context = json.loads(source["context_json"])
+            scope = self.scope(event, workspace_id=context.get("workspace_id", "personal"))
             if scope is None or source["owner_id"] != scope.owner_id or not self.core.allowed(event):
                 continue
-            context = json.loads(source["context_json"])
             if context.get("memory_scope") and self.valid(context):
                 continue
             with self.core.db.engine.connect() as conn:
@@ -467,7 +534,7 @@ class KnowledgeRuntime:
         with self.core.db.transaction() as conn:
             run, claim = self.core.leader.lease(conn, *identity)
             event = InboundEvent.model_validate_json(claim["event_json"])
-            scope = self.scope(event)
+            scope = self.scope(event, workspace_id=claim["context"].get("workspace_id", "personal"))
             if scope is None:
                 raise PermissionError("memory has no verified owner scope")
             operation, args = payload["operation"], payload.get("arguments", {})

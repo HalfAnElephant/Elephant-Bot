@@ -43,6 +43,7 @@ class RunBudget(DTO):
 
 
 class ExecutionPlan(DTO):
+    environment: Literal["sandbox", "host"] = "sandbox"
     runner: Literal["pi"] = "pi"
     initial_delivery: Literal["ATTACHED", "DETACHED"] = "ATTACHED"
     foreground_wait_ms: int = Field(default=5000, ge=0, le=60000)
