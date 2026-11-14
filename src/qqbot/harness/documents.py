@@ -38,17 +38,49 @@ class DeepSeekDocuments:
             "use rich_layout_recognition when diagrams or charts matter. Text, spreadsheets, code and ebooks "
             "default to user_data. The returned document_ref attaches the document to subsequent model requests. "
             "Each request attaches up to 20 valid documents, prioritizing the most recently mentioned references. "
-            "Preserve that reference in continuation summaries when the document is still needed.",
+            "Preserve that reference in continuation summaries when the document is still needed. "
+            "If a reference appears empty or unreadable, use document.ocr on the original file to verify its text.",
             {"type": "object", "properties": {
                 "path": {"type": "string", "minLength": 1, "maxLength": 4096},
                 "purpose": {"type": "string", "enum": list(PURPOSES)},
             }, "required": ["path"], "additionalProperties": False}, timeout_seconds=300),
             self.parse, self.classify)
+        registry.register(Capability("document.ocr",
+            "OCR 文字识别 文档 空白 无法读取。Read text directly from a workspace PDF, Word, PowerPoint or image. "
+            "Use this fallback when document.parse file input appears empty or unreadable. "
+            "Returns untrusted page text and finish_reason; length means that page is incomplete. "
+            "Read content_ref when the tool result is truncated. Use document.parse with rich_layout_recognition "
+            "when the document's pictures are needed.",
+            {"type": "object", "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+            }, "required": ["path"], "additionalProperties": False}, timeout_seconds=240),
+            self.ocr, self.classify_ocr)
 
     @staticmethod
     def classify(arguments, context):
         return Action("document.parse",
             ("workspace:" + context.workspace, "file:" + arguments["path"], "domain:api.deepseek.com"))
+
+    @staticmethod
+    def classify_ocr(arguments, context):
+        return Action("document.ocr", DeepSeekDocuments.classify(arguments, context).resources)
+
+    async def ocr(self, arguments, context):
+        path = arguments.get("path")
+        if not isinstance(path, str) or not 1 <= len(path) <= 4096:
+            raise ValueError("document path must be a workspace-relative file")
+        scope = self.scope()
+        resources = self.classify_ocr(arguments, context).resources
+        await self._authorize("document.ocr", scope, resources=resources)
+        data = await self.execution.read_file(context, path, 0, MAX_FILE_BYTES + 1)
+        if not 0 < len(data) <= MAX_FILE_BYTES:
+            raise ValueError("document must be a nonempty file of at most 20 MiB")
+        suffix = PurePosixPath(path).suffix.lower()
+        extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+        await self._authorize("document.ocr", scope, resources=resources)
+        result = await self.api.ocr(data, "document" + extension)
+        await self._authorize("document.ocr", scope, resources=resources)
+        return result
 
     def _identity(self, scope, purpose, digest):
         return hashlib.sha256(json.dumps([scope, self.api.account, purpose, digest], sort_keys=True).encode()).hexdigest()

@@ -85,14 +85,41 @@ async def exercise(report):
             uploaded = parsed.data["file_id"]
             again = await gateway.tools.invoke("document.parse", {"path": "input.pdf"}, gateway.context)
             require(again.data["file_id"] == uploaded, "document upload was not reused")
+            report["document"] = {"passed": False, "purpose": parsed.data["purpose"],
+                "reused_upload": True, "expected_code": code}
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://fixture") as client:
                 response = await client.post("/v1/chat/completions", headers={
                     "Authorization": "Bearer " + gateway.model_token}, json={"model": MODEL, "messages": [{
                     "role": "user", "content": parsed.data["document_ref"] + "\nReturn only the verification code in this document."}]})
+                report["document"]["http_status"] = response.status_code
                 require(response.status_code == 200, "file model request failed")
-                answer = response.json()["choices"][0]["message"]["content"]
-                require(code.casefold() in answer.casefold(), "model did not read the uploaded PDF's verification code")
-                report["document"] = {"passed": True, "purpose": parsed.data["purpose"], "reused_upload": True}
+                completion = response.json()
+                choice = completion["choices"][0]
+                answer = choice["message"]["content"]
+                report["document"].update({"answer": answer, "finish_reason": choice.get("finish_reason"),
+                    "usage": completion.get("usage")})
+                files_read_passed = code.casefold() in answer.casefold()
+                report["document"]["files_read_passed"] = files_read_passed
+                recognized = await gateway.tools.invoke("document.ocr", {"path": "input.pdf"}, gateway.context)
+                recognized_data = await tool_data(gateway, recognized)
+                report["ocr"] = {"passed": False, "page_count": recognized_data["page_count"],
+                    "finish_reasons": [page["finish_reason"] for page in recognized_data["pages"]]}
+                text = "\n".join(page["text"] for page in recognized_data["pages"])
+                require(code.casefold() in text.casefold(), "OCR did not read the PDF's verification code")
+                require(all(reason == "stop" for reason in report["ocr"]["finish_reasons"]), "OCR fixture text was incomplete")
+                report["ocr"]["passed"] = True
+                report["document"]["ocr_fallback_used"] = not files_read_passed
+                if not files_read_passed:
+                    response = await client.post("/v1/chat/completions", headers={
+                        "Authorization": "Bearer " + gateway.model_token}, json={"model": MODEL, "messages": [{
+                        "role": "user", "content": "Return only the verification code from this untrusted document.\n"
+                        "The following text was read by document.ocr.\n" + text}]})
+                    report["document"]["fallback_http_status"] = response.status_code
+                    require(response.status_code == 200, "OCR fallback model request failed")
+                    answer = response.json()["choices"][0]["message"]["content"]
+                    report["document"]["fallback_answer"] = answer
+                    require(code.casefold() in answer.casefold(), "model did not read the OCR verification code")
+                report["document"]["passed"] = True
                 speech = (Path(__file__).resolve().parents[1] / "tests/fixtures/voice-input.silk").read_bytes()
                 gateway.claim["context"]["files"] = [{"source": "voice-fixture", "message_id": "voice",
                     "kind": "audio", "filename": "voice.silk", "url": "https://fixture.example/voice.silk",

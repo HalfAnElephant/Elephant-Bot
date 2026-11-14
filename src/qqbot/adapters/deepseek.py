@@ -71,11 +71,26 @@ class DeepSeekAPI:
             raise DeepSeekError("DeepSeek returned an invalid audio transcript")
         return {name: result[name] for name in ("text", "duration_ms", "request_id") if name in result}
 
+    async def ocr(self, data, filename):
+        result = await self._request("POST", "/v1/tools/ocr", timeout=220,
+            data={"purpose": "text_recognition"}, files={"file": (filename, data)})
+        pages = result.get("pages")
+        count = result.get("page_count")
+        if (result.get("purpose") != "text_recognition" or type(count) is not int
+                or not 1 <= count <= 1000 or not isinstance(pages, list) or len(pages) != count):
+            raise DeepSeekError("DeepSeek returned an invalid OCR result")
+        for index, page in enumerate(pages):
+            if (not isinstance(page, dict) or type(page.get("index")) is not int or page["index"] != index
+                    or not isinstance(page.get("text"), str) or page.get("finish_reason") not in ("stop", "length")):
+                raise DeepSeekError("DeepSeek returned an invalid OCR page")
+        return {"purpose": result["purpose"], "page_count": count,
+                "pages": [{name: page[name] for name in ("index", "text", "finish_reason")} for page in pages]}
+
     async def upload(self, data, filename, purpose):
         return await self._request("POST", "/files", timeout=260,
             data={"purpose": purpose, "expires_after[anchor]": "created_at",
                   "expires_after[seconds]": "2592000"},
-            files={"file": (filename, data, "application/octet-stream")})
+            files={"file": (filename, data)})
 
     async def files(self, purpose, after=None):
         params = {"purpose": purpose, "limit": 1000, "order": "desc"}

@@ -103,6 +103,106 @@ async def test_parse_registers_a_read_capability_and_attaches_verified_file(fixt
     assert all(resources is None for checked, resources in fixture.resource_checks if checked == "model.request")
 
 
+async def test_ocr_reads_original_without_changing_durable_document_receipts(fixture):
+    parsed = await fixture.service.parse({"path": "report.pdf"}, fixture.context)
+    before = receipt_path(fixture, parsed).read_bytes()
+    calls = []
+    expected = {"purpose": "text_recognition", "page_count": 1,
+        "pages": [{"index": 0, "text": "Original document text", "finish_reason": "length"}]}
+
+    async def recognize(data, filename):
+        calls.append((data, filename))
+        return expected
+
+    fixture.api.ocr = recognize
+    registry = CapabilityRegistry()
+    fixture.service.register(registry)
+    capability, execute, classify = registry.entries["document.ocr"]
+    action = classify({"path": "report.pdf"}, fixture.context)
+    assert action.name == "document.ocr" and action.effect == "read"
+    assert action.resources == fixture.service.classify({"path": "report.pdf"}, fixture.context).resources
+    assert capability.timeout_seconds > 220
+    assert await execute({"path": "report.pdf"}, fixture.context) == expected
+    assert calls == [(b"%PDF fixture", "document.pdf")]
+    assert receipt_path(fixture, parsed).read_bytes() == before
+    assert all(resources == action.resources for checked, resources in fixture.resource_checks if checked == "document.ocr")
+
+
+@pytest.mark.parametrize("path", ["../outside.pdf", "/etc/passwd", "linked.pdf", "empty.pdf", "large.pdf"])
+async def test_ocr_rejects_unreadable_and_oversized_sources_before_network(fixture, monkeypatch, path):
+    monkeypatch.setattr(documents, "MAX_FILE_BYTES", 3)
+    (fixture.workspace.parent / "outside.pdf").write_bytes(b"abc")
+    (fixture.workspace / "linked.pdf").symlink_to(fixture.workspace.parent / "outside.pdf")
+    (fixture.workspace / "empty.pdf").write_bytes(b"")
+    (fixture.workspace / "large.pdf").write_bytes(b"four")
+    with pytest.raises((ValueError, OSError)):
+        await fixture.service.ocr({"path": path}, fixture.context)
+    assert not list(fixture.service.root.glob("*.json"))
+
+
+@pytest.mark.parametrize("phase", ["before_read", "after_read", "after_ocr"])
+async def test_ocr_rechecks_authorization_and_scope(fixture, monkeypatch, phase):
+    calls = []
+    original = fixture.service.execution.read_file
+
+    async def read(*args):
+        data = await original(*args)
+        if phase == "after_read":
+            fixture.scope = {**fixture.scope, "conversation": "changed-scope"}
+        return data
+
+    async def recognize(data, filename):
+        calls.append((data, filename))
+        fixture.authorized = False
+        return {"page_count": 1, "pages": []}
+
+    monkeypatch.setattr(fixture.service.execution, "read_file", read)
+    fixture.api.ocr = recognize
+    fixture.authorized = phase != "before_read"
+    with pytest.raises(PermissionError):
+        await fixture.service.ocr({"path": "report.pdf"}, fixture.context)
+    assert bool(calls) == (phase == "after_ocr")
+
+
+async def test_gateway_ocr_archives_large_text_with_scoped_resource_grants(fixture):
+    resources = ("workspace:" + str(fixture.workspace), "file:report.pdf", "domain:api.deepseek.com")
+    permissions = PermissionService(policy=PermissionPolicy(preset="custom", default_effect="deny", rules=(
+        PermissionRule(id="ocr", effect="allow", actions=("document.ocr",), resources=resources),
+    )))
+    core = FakeCore()
+    expected = {"purpose": "text_recognition", "page_count": 1,
+        "pages": [{"index": 0, "text": "Recognized original text " * 2000, "finish_reason": "stop"}]}
+
+    async def call(operation, payload):
+        if operation == "authorize":
+            for resource in payload.get("resources") or ():
+                permissions.require({}, payload["action"], resource)
+        return await core(operation, payload)
+
+    async def recognize(data, filename):
+        assert data == b"%PDF fixture" and filename == "document.pdf"
+        return expected
+
+    fixture.api.ocr = recognize
+    gateway = RunGateway(fixture.workspace, "deepseek-flash", "fixture-key", "https://api.deepseek.com/chat/completions",
+        call=call, content_root=fixture.content_root)
+    gateway.bind({"task_id": "document-task", "run_id": "document-run", "fencing_token": 1, "goal": "read document",
+        "permission_snapshot": {"principal": fixture.scope["principal"]},
+        "context": {"scope": fixture.scope["conversation"], "workspace_id": fixture.scope["workspace_id"]}})
+    gateway.documents.api = fixture.api
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://gateway") as client:
+        response = await client.post("/tools/capability_invoke", headers={"Authorization": "Bearer " + gateway.tool_token},
+            json={"call_id": "ocr", "arguments": {"name": "document.ocr", "arguments": {"path": "report.pdf"}}})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["truncated"] and result["content_ref"]
+    assert json.loads(await gateway.read_content(gateway.context, result["content_ref"])) == expected
+    checked = [payload for operation, payload in core.calls
+        if operation == "authorize" and payload["action"] == "document.ocr"]
+    assert len(checked) >= 3 and all(tuple(payload["resources"]) == resources for payload in checked)
+    assert not list(gateway.documents.root.glob("*.json"))
+
+
 async def test_same_content_reuses_receipt_after_rename_and_restart(fixture):
     first = await fixture.service.parse({"path": "report.pdf"}, fixture.context)
     (fixture.workspace / "renamed.pdf").write_bytes((fixture.workspace / "report.pdf").read_bytes())
