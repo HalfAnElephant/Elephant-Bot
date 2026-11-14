@@ -36,8 +36,8 @@ def public_addresses(host, port, *, timeout=None):
             raise OSError("public DNS lookup failed")
         addresses = [(family, kind, protocol, canon, tuple(address))
                      for family, kind, protocol, canon, address in json.loads(result.stdout)]
-    if not addresses or len(addresses) > 16:
-        raise ValueError('public DNS response is empty or exceeds address limit')
+    if not addresses:
+        raise ValueError('public DNS response is empty')
     for item in addresses:
         address = ipaddress.ip_address(item[4][0])
         if not address.is_global or address.is_multicast or address.is_reserved:

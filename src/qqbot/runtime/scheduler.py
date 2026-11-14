@@ -43,6 +43,10 @@ class RuntimeClient:
                 return httpx.Response(200, content=b"null", headers={"content-type": "application/json"}, request=request)
             return httpx.Response(200, json=result, request=request)
         except PermissionError as error:
+            if path.endswith("/session-receipt"):
+                payload = body.payload or {}
+                logger.warning("Session receipt rejected run_id=%s kind=%s inflight=%s tools_paired=%s detail=%s",
+                    body.run_id, payload.get("kind"), payload.get("inflight"), payload.get("tools_paired"), error)
             return httpx.Response(409, json={"detail": str(error)}, request=request)
         except (ValueError, LookupError, TypeError) as error:
             return httpx.Response(422, json={"detail": str(error)}, request=request)

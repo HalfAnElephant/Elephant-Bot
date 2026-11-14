@@ -114,6 +114,7 @@ class RunGateway:
         self.revoked = True
         self.inflight = 0
         self.request_tasks = set()
+        self.model_requests = set()
         self.waiting = False
         self.event_sink = None
         self.app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -532,6 +533,9 @@ class RunGateway:
     async def request_scope(self, authorization, kind):
         task, generation = asyncio.current_task(), self.generation
         token = self.process_token if kind == "binding" else self.model_token if kind == "model" else self.tool_token
+        finished = asyncio.Event() if kind == "model" else None
+        if finished is not None:
+            self.model_requests.add(finished)
         self.inflight += 1
         self.request_tasks.add(task)
         try:
@@ -542,6 +546,9 @@ class RunGateway:
         finally:
             self.inflight -= 1
             self.request_tasks.discard(task)
+            if finished is not None:
+                self.model_requests.discard(finished)
+                finished.set()
 
     async def stop_requests(self):
         self.revoke()
@@ -587,9 +594,15 @@ class RunGateway:
 
         @self.app.post("/session-receipt")
         async def session_receipt(request: Request, authorization: str = Header(default="")):
-            async with self.request_scope(authorization, "tool"):
-                await self.authenticate(authorization, self.tool_token)
+            async with self.request_scope(authorization, "tool") as generation:
                 body = await bounded_json(request, 256 * 1024)
+                if body.get("kind") in {"turn_finished", "run_yielded"}:
+                    # Pi can settle after [DONE] while the model stream still commits usage.
+                    for finished in tuple(self.model_requests):
+                        await finished.wait()
+                await self.authenticate(authorization, self.tool_token)
+                if generation != self.generation:
+                    raise HTTPException(403, "binding changed while settling")
                 body["inflight"] = max(0, self.inflight - 1)
                 if body.get("kind") in {"turn_finished", "run_yielded"}:
                     body["result"] = {"status": self.wait_kind or (self.outcome or {}).get("status", "completed"),
@@ -597,7 +610,14 @@ class RunGateway:
                         "observation_refs": list(self.observations), "effect_refs": list(self.effects),
                         "limitations": (self.outcome or {}).get("unresolved_items", [])}
                     body["attachments"] = list(self.artifacts)
-                result = await self.call("session-receipt", body)
+                try:
+                    result = await self.call("session-receipt", body)
+                except httpx.HTTPStatusError as error:
+                    try:
+                        detail = error.response.json().get("detail", str(error))
+                    except (ValueError, AttributeError):
+                        detail = str(error)
+                    raise HTTPException(error.response.status_code, self.safe_error(detail)) from error
                 if body.get("kind") in {"turn_finished", "run_yielded"}:
                     self.session_receipt = body
                 return result
