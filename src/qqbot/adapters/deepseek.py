@@ -17,7 +17,8 @@ class DeepSeekAPI:
 
     def __init__(self, key, *, transport=None):
         self.key, self.transport = key, transport
-        self.account = hashlib.sha256(key.encode()).hexdigest()
+        self.account = hashlib.scrypt(key.encode(), salt=b"ElephantBot DeepSeek cache",
+            n=16384, r=8, p=1, dklen=32).hex()
 
     @classmethod
     def from_model(cls, endpoint, key, *, transport=None):

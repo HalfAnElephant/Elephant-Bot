@@ -12,6 +12,7 @@ from qqbot.adapters.deepseek import DeepSeekAPI, DeepSeekError
 def test_official_model_reuses_its_credential(endpoint):
     api = DeepSeekAPI.from_model(endpoint, "dedicated-key")
     assert api.key == "dedicated-key" and len(api.account) == 64
+    assert DeepSeekAPI.from_model(endpoint, "dedicated-key").account == api.account
     assert DeepSeekAPI.from_model(endpoint, "") is None
 
 
