@@ -41,6 +41,13 @@ def document_pdf(code):
     return bytes(result)
 
 
+async def tool_data(gateway, result):
+    if result.truncated:
+        require(bool(result.content_ref), "truncated tool result has no content reference")
+        return json.loads(await gateway.read_content(gateway.context, result.content_ref))
+    return result.data
+
+
 async def exercise(report):
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     require(bool(key), "DEEPSEEK_API_KEY is required")
@@ -63,12 +70,15 @@ async def exercise(report):
         uploaded = None
         try:
             search = await gateway.tools.invoke("web.search", {"query": "DeepSeek API documentation"}, gateway.context)
-            require(bool(search.data.get("results")), "Search returned no structured results")
-            report["search"] = {"passed": True, "results": len(search.data["results"])}
+            search_data = await tool_data(gateway, search)
+            report["search"] = {"results": len(search_data.get("results", [])), "truncated": search.truncated}
+            require(bool(search_data.get("results")), "Search returned no structured results")
+            report["search"]["passed"] = True
             page = await gateway.tools.invoke("web.fetch", {
                 "url": "https://api-docs.deepseek.com/zh-cn/guides/asr/"}, gateway.context)
-            require("语音识别" in page.data["text"], "Fetch did not extract the official ASR page")
-            report["fetch"] = {"passed": True, "characters": len(page.data["text"])}
+            page_data = await tool_data(gateway, page)
+            require("语音识别" in page_data["text"], "Fetch did not extract the official ASR page")
+            report["fetch"] = {"passed": True, "characters": len(page_data["text"]), "truncated": page.truncated}
             code = "ELEPHANT" + uuid4().hex[:12].upper()
             (gateway.workspace / "input.pdf").write_bytes(document_pdf(code))
             parsed = await gateway.tools.invoke("document.parse", {"path": "input.pdf"}, gateway.context)
