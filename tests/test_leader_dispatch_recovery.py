@@ -53,7 +53,8 @@ async def submit_tool(runtime, claim, arguments):
         "payload": {"operation": "tasks.submit", "call_id": "native-submit-call", "arguments": arguments}})
 
 
-async def test_committed_submit_lost_response_restores_native_receipt_before_releasing_writer(runtime):
+@pytest.mark.parametrize("legacy_intent", [False, True])
+async def test_committed_submit_lost_response_restores_native_receipt_before_releasing_writer(runtime, legacy_intent):
     runtime.sessions.enqueue(runtime.event, runtime.access)
     old = runtime.sessions.claim("leader")
     arguments = {"goal": "检查项目", "children": [{"goal": "独立检查", "delegation_key": "primary"}]}
@@ -62,6 +63,13 @@ async def test_committed_submit_lost_response_restores_native_receipt_before_rel
         assert response.status_code == 200
         original = response.json()
         raise httpx.ReadTimeout("Host committed before the response reached Pi")
+    if legacy_intent:
+        with runtime.db.transaction() as conn:
+            context = json.loads(conn.execute(select(tasks.c.context_json).where(
+                tasks.c.id == original["task_id"])).scalar_one())
+            for child in context["dispatch_spec"]["children"]:
+                child.pop("environment", None)
+            conn.execute(update(tasks).where(tasks.c.id == original["task_id"]).values(context_json=json.dumps(context)))
     path = native_pending_submit(runtime, old, arguments)
     before = path.read_bytes()
     runtime.clock.advance(31)

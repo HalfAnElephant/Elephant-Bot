@@ -238,6 +238,7 @@ home 已安装本次 wheel 并切换生产服务，启用 `Delegate=yes` 和宿�
 | Leader 直接执行 | 真实模型通过生产 HOST 输入直接运行命令，读取工作区外的随机标记，记录实际 UID 和 daemon 子 cgroup。 |
 | Worker 环境选择 | 同一根目标的两个 Worker 分别采用默认 sandbox 和显式 host，均成功。sandbox 无法读取宿主标记或连接宿主回环端口，host 可以。两个 JSON 制品均经受保护下载接口核对。 |
 | 持久 Job | Leader 启动的 host Job 在 daemon 重启后保留同一 PID、启动标识和 systemd InvocationID，仅派发一次，最终 EXITED/0 并写入预期标记。 |
+| 恢复兼容 | 缺少新增环境字段的旧派发意图按当前契约补齐默认值后匹配，已提交任务的原生回执恢复通过定点复验。 |
 | 进程清理 | 临时 Linux 服务中验证双重 fork、脱离进程组、保留输出管道、启动取消及服务 SIGKILL 后的后代清理。 |
 | QQ 私聊 | 用户发送终端 `date` 请求，生产 Leader 在 host 模式执行且退出码为 0，最终回复为 SENT，用户确认客户端收到正确结果。 |
 

@@ -529,7 +529,8 @@ class LeaderRuntime:
                             stable_id(owner, source["id"], call["id"]))
                         intent = GoalSpec.model_validate_json(json.dumps(call["arguments"])).model_dump(mode="json")
                         if (not task or task["origin_dialogue_id"] != source["dialogue_id"]
-                                or task["coordinator_session_id"] != claim["session_id"] or committed_intent != intent):
+                                or task["coordinator_session_id"] != claim["session_id"]
+                                or GoalSpec.model_validate(committed_intent).model_dump(mode="json") != intent):
                             raise ValueError("native dispatch has no matching committed host intent")
                         receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
                 receipts.extend({"call": call, "is_error": True, "result": {
