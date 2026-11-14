@@ -79,10 +79,13 @@ async def test_document_acceptance_records_files_failure_and_checks_ocr(monkeypa
     report = {}
     if ocr_correct:
         await live.exercise(report)
-        assert report["document"]["passed"] and report["ocr"]["passed"]
+        assert report["document"]["passed"]
         assert report["document"]["ocr_fallback_used"] == (not files_read_passed)
         assert len(instances[0].model_messages) == (2 if files_read_passed else 3)
-        if not files_read_passed:
+        if files_read_passed:
+            assert "ocr" not in report
+        else:
+            assert report["ocr"]["passed"]
             assert report["document"]["answer"] == "The file content is empty."
             assert report["document"]["fallback_answer"] == report["document"]["expected_code"]
     else:

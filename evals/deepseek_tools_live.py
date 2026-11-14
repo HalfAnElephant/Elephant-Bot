@@ -100,16 +100,17 @@ async def exercise(report):
                     "usage": completion.get("usage")})
                 files_read_passed = code.casefold() in answer.casefold()
                 report["document"]["files_read_passed"] = files_read_passed
-                recognized = await gateway.tools.invoke("document.ocr", {"path": "input.pdf"}, gateway.context)
-                recognized_data = await tool_data(gateway, recognized)
-                report["ocr"] = {"passed": False, "page_count": recognized_data["page_count"],
-                    "finish_reasons": [page["finish_reason"] for page in recognized_data["pages"]]}
-                text = "\n".join(page["text"] for page in recognized_data["pages"])
-                require(code.casefold() in text.casefold(), "OCR did not read the PDF's verification code")
-                require(all(reason == "stop" for reason in report["ocr"]["finish_reasons"]), "OCR fixture text was incomplete")
-                report["ocr"]["passed"] = True
                 report["document"]["ocr_fallback_used"] = not files_read_passed
                 if not files_read_passed:
+                    recognized = await gateway.tools.invoke("document.ocr", {"path": "input.pdf"}, gateway.context)
+                    recognized_data = await tool_data(gateway, recognized)
+                    report["ocr"] = {"passed": False, "page_count": recognized_data["page_count"],
+                        "pages": recognized_data["pages"]}
+                    text = "\n".join(page["text"] for page in recognized_data["pages"])
+                    require(code.casefold() in text.casefold(), "OCR did not read the PDF's verification code")
+                    require(all(page["finish_reason"] == "stop" for page in recognized_data["pages"]),
+                        "OCR fixture text was incomplete")
+                    report["ocr"]["passed"] = True
                     response = await client.post("/v1/chat/completions", headers={
                         "Authorization": "Bearer " + gateway.model_token}, json={"model": MODEL, "messages": [{
                         "role": "user", "content": "Return only the verification code from this untrusted document.\n"

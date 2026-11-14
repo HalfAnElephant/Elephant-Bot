@@ -38,7 +38,7 @@ Dependabot 每周分别检查 uv、npm 和 Actions 更新，更新通过 PR 接�
 后台网页成果仍需分别验收。
 
 `uv run python evals/deepseek_tools_live.py` 使用同一凭据调用真实 Search、Fetch、Files、OCR 和 ASR API，
-检查合成 PDF 的解析与模型阅读、重复上传复用、独立 OCR 文字读取，以及合成口述 SILK 的转写。
+检查合成 PDF 的解析与模型阅读、重复上传复用、必要时的独立 OCR 后备读取，以及合成口述 SILK 的转写。
 Files 曾返回可用 `file_id`，但向模型提供空正文。验收在 `files_read_passed` 中保留 Files 阅读结果，
 必要时通过 `document.ocr` 读取原件，再核验模型能否读出 OCR 中的验证码。OCR 或后备模型阅读失败均使验收失败。
 `document.ocr` 返回逐页文字，`finish_reason=length` 表示该页不完整，大结果使用 `content_ref` 读取。
