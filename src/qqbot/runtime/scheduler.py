@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 from sqlalchemy import select, update
 
+from qqbot.adapters.deepseek import DeepSeekAPI
 from qqbot.capabilities.gateway import standard_registry
 from qqbot.contracts.harness import resolve_harness
 from qqbot.harness.pool import SessionPool
@@ -158,8 +159,11 @@ class Scheduler:
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)
         async def waiter_call(operation, payload):
             return await self.worker.call(operation, payload=payload)
+        import os
+        deepseek = DeepSeekAPI.from_model(self.settings.model.endpoint,
+            os.environ.get(self.settings.model.api_key_env, ""))
         self.waiters = ExternalWaiters(waiter_call, standard_registry(github=configured_github(self.args),
-                                                                    execution=self.execution))
+                                                                    execution=self.execution, deepseek=deepseek))
         self.active = set()
 
     async def step(self):

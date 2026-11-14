@@ -37,21 +37,28 @@ def _items(value):
     return value[:100] if isinstance(value, list) else []
 
 
-def _media(data, kind=None):
+def _media(data, kind=None, *, quoted=False):
     mime = str(data.get("content_type") or data.get("mime_type") or "")[:255]
     filename = data.get("filename") or data.get("file_name") or data.get("name")
     kind = kind or next((p for p in ("image", "audio", "video") if mime.startswith(p + "/")), "file")
-    if kind == "file" and not mime and isinstance(filename, str) and PurePosixPath(filename.lower()).suffix in {
-            ".png", ".jpg", ".jpeg", ".gif", ".webp"}:
-        kind = "image"
-    url = attachment_url(data.get("url") or data.get("file_url"))
+    if kind == "file" and mime == "voice":
+        kind = "audio"
+    if kind == "file" and mime in {"", "application/octet-stream"} and isinstance(filename, str):
+        suffix = PurePosixPath(filename.lower()).suffix
+        if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            kind = "image"
+        elif suffix in {".silk", ".amr", ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".aac", ".flac"}:
+            kind = "audio"
+    url = attachment_url((data.get("voice_wav_url") if kind == "audio" else None)
+                         or data.get("url") or data.get("file_url"))
     size = data.get("size", data.get("file_size"))
-    transcript = data.get("transcript") or data.get("text") if kind == "audio" else None
+    transcript = data.get("asr_refer_text") or data.get("transcript") or data.get("text") if kind == "audio" else None
     return MediaSegment(
         type=kind, attachment_ref="unresolved:" + stable_id(json.dumps(data, sort_keys=True)),
         image_url=url if kind == "image" else None, source_url=url, mime_type=mime or None,
         filename=str(filename)[:255] if filename else None,
         transcript=transcript[:10000] if isinstance(transcript, str) else None,
+        quoted=quoted,
         size=size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
     )
 
@@ -92,7 +99,7 @@ def _project(value, *, quoted=False):
             if isinstance(text, str):
                 add(TextSegment(text=("[转发内容] " if quoted else "") + text))
         if kind in ("image", "audio", "video", "file"):
-            add(_media(data, kind))
+            add(_media(data, kind, quoted=quoted))
         if kind in ("mention", "at"):
             user = data.get("user_openid") or data.get("id") or data.get("qq")
             if isinstance(user, (str, int)):
@@ -105,7 +112,7 @@ def _project(value, *, quoted=False):
             add(TextSegment(text="[转发内容] " + node["content"]))
         for attachment in _items(node.get("attachments")):
             if isinstance(attachment, dict):
-                add(_media(attachment))
+                add(_media(attachment, quoted=quoted))
         # Known share-card fields, including Ark key/value convention.
         if kind in ("ark", "card", "share"):
             for key in ("title", "description", "desc", "prompt"):
@@ -138,7 +145,8 @@ def extra_segments(data):
             payload = {"value": value}
             encoded = json.dumps(payload, ensure_ascii=False)
             if len(encoded.encode()) <= 65536:
-                result.extend(_project(value, quoted=field == "forward_messages"))
+                result.extend(_project(value, quoted=field == "forward_messages"
+                                       or (field == "msg_elements" and data.get("message_type") == 103)))
                 result.append(StructuredSegment(original_type=field, payload=payload))
             else:
                 result.append(UnknownSegment(original_type=field, digest=stable_id(encoded)))

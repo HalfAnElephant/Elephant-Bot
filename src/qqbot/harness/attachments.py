@@ -78,6 +78,35 @@ def cached_attachment(content_root, identity):
         return _cached_attachment(root, identity)
 
 
+def cached_transcript(content_root, identity, account):
+    root = _cache_root(content_root)
+    with _cache_lock(root):
+        if _cached_attachment(root, identity) is None:
+            return None
+        if not re.fullmatch(r"[0-9a-f]{64}", account):
+            raise ValueError("invalid transcription account")
+        try:
+            result = json.loads(_read_regular(root / identity / ("asr-" + account + ".json"), 65536))
+        except FileNotFoundError:
+            return None
+        if not isinstance(result, dict) or not isinstance(result.get("text"), str) or len(result["text"]) > 10000:
+            raise ValueError("invalid cached transcript")
+        return result
+
+
+def cache_transcript(content_root, identity, account, result):
+    from qqbot.configuration import atomic_write
+
+    root = _cache_root(content_root)
+    with _cache_lock(root, exclusive=True):
+        if _cached_attachment(root, identity) is None or not re.fullmatch(r"[0-9a-f]{64}", account):
+            raise ValueError("transcription requires a preserved original and account")
+        encoded = json.dumps(result, ensure_ascii=False)
+        if len(encoded.encode()) > 65536:
+            raise ValueError("transcript exceeds cache limit")
+        atomic_write(root / identity / ("asr-" + account + ".json"), encoded)
+
+
 def cache_attachment(content_root, identity, data, *, source_id):
     if len(data) > MAX_FILE_BYTES:
         raise ValueError('attachment exceeds byte limit')

@@ -173,6 +173,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "icalendar" },
+    { name = "pilk-nogil" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "qrcode" },
@@ -197,6 +198,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.121,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "icalendar", specifier = ">=6,<8" },
+    { name = "pilk-nogil", specifier = "==0.4.3" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "qrcode", specifier = ">=8,<9" },
@@ -377,6 +379,25 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
+]
+
+[[package]]
+name = "pilk-nogil"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/59/4c693aa823245edfc3ef0cabbcfed3486acc41e2920113999c8fe287ee8d/pilk_nogil-0.4.3.tar.gz", hash = "sha256:1d68b75bd4c685850436958c5219151f49d0aceef8e10b89657095b68f34b245", size = 227570, upload-time = "2026-08-16T12:03:14.396Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/ac/6715a44f3c708c872af25b5f6d2b7470ac7af58b77050c161de4e56ddf39/pilk_nogil-0.4.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b755fa3efb2d3c75c7540cc96e9d328dd5ab9b8a9730cfa85cb9413569c76def", size = 170150, upload-time = "2026-08-16T12:02:17.816Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/75/ebaec479ebf58d2e52875dd58ddeff0dad1fe4b4a9f830021eef939d0eb8/pilk_nogil-0.4.3-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:72420ba85152c3895c504d18330014a2710e4c226a620b6bc9f06f0866e6c574", size = 489023, upload-time = "2026-08-16T12:02:19.311Z" },
+    { url = "https://files.pythonhosted.org/packages/82/30/432441d0314c07785a7fce394c271fd391ad91472df3afd53ee60ec249f7/pilk_nogil-0.4.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fa6b6bda629994c3acf1fe2b92ad0c175a281e369ca93a82f8f50943aba9850d", size = 505960, upload-time = "2026-08-16T12:02:20.813Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/c2/5870ef450ac1d2237c81f7f4c8d259d2c1832fc0b5b8ed04473892e0ab33/pilk_nogil-0.4.3-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:d39fd1a1ef5672ab7c5cace72f917092359a89cc566684a2d75b6bf82d816b35", size = 485290, upload-time = "2026-08-16T12:02:22.437Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/d8/ea158481cb9ec140a5cd9e3f371963c780d16fadb21e7cd07864c4ae8281/pilk_nogil-0.4.3-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:781536383399f57e2a200cbd3393bded1e7bfcd235920ff8c66824d78ab889e8", size = 502264, upload-time = "2026-08-16T12:02:23.983Z" },
+    { url = "https://files.pythonhosted.org/packages/70/36/3d5089bc7c4da946fff34373289359e5d42b2339bab8445f51ccd0ab8be9/pilk_nogil-0.4.3-cp313-cp313-win32.whl", hash = "sha256:6cc6495d26e95c684955f57cb68eb970da809fe4c7bb012bc467ad3776687a49", size = 114473, upload-time = "2026-08-16T12:02:25.334Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/6c/3a0d72a31aaa0f17c179077fca975ee17e00e8feb3d25efa6b1ea6b724e2/pilk_nogil-0.4.3-cp313-cp313-win_amd64.whl", hash = "sha256:785e1d4bcc50de9a4aad7e27d8b27e2246555d46ee8f95674399932929939c5d", size = 129971, upload-time = "2026-08-16T12:02:26.603Z" },
+    { url = "https://files.pythonhosted.org/packages/29/ec/0afa8111aab9ee1971a03f60c59d112d8202505757c3e5ae0b0df9d2db06/pilk_nogil-0.4.3-cp313-cp313-win_arm64.whl", hash = "sha256:a14d4e992780510b6262b9dd4c07ef0670337922df1de1ee25e68e928918f338", size = 123485, upload-time = "2026-08-16T12:02:27.828Z" },
 ]
 
 [[package]]

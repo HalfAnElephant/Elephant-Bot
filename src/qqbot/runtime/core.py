@@ -322,7 +322,7 @@ class Core:
             age = (event.received_at - prior.received_at).total_seconds()
             if (prior.conversation != event.conversation or prior.principal != event.principal
                     or age < 0 or (age > 600 and prior.platform_message_id != event.reply_to)
-                    or not any(s.type in {"image", "file"} for s in prior.segments)):
+                    or not any(s.type in {"image", "file", "audio"} for s in prior.segments)):
                 continue
             manifest = {"kind": "inbox", "id": prior.event_id, "digest": hashlib.sha256(candidate.encode()).hexdigest()}
             if self.validate_context(access, {"source_manifest": [manifest], "workspace_id": workspace_id}):
@@ -336,8 +336,10 @@ class Core:
                        for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"][-16:],
             "files": [{"source": source.event_id, "message_id": source.platform_message_id,
                 "url": segment.source_url, "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
-                "attachment_ref": segment.attachment_ref}
-                for source, _body in reversed(sources) for segment in source.segments if segment.type == "file"][-16:],
+                "attachment_ref": segment.attachment_ref,
+                **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
+                    "is_current_input": source.event_id == event.event_id} if segment.type == "audio" else {})}
+                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}][-16:],
             "now": self.clock.now().isoformat(), "timezone": self.settings.timezone,
             "limits": self.settings.context.limits(self.settings.model.context_window,
                 self.settings.execution.interactive_budget.output_tokens_per_call),

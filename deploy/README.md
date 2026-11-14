@@ -12,7 +12,8 @@ Interrupted or blocked Workers preserve results for a Leader decision. A Leader
 takeover requires stopped related execution and reconciled external operations.
 
 Install the locked Python and npm packages under root-owned `/opt/qqbot`, with
-Python 3.13, Node and the pinned Pi executable accessible to `qqbot`. Install
+Python 3.13, Node, FFmpeg 6 or newer and the pinned Pi executable accessible to `qqbot`. The locked
+Python dependency `pilk-nogil` decodes QQ SILK voice messages in a bounded child process. Install
 `deploy/qqbot.service`, root-owned `scripts/elephant-daemon-stopped` at
 `/usr/local/libexec/elephant-daemon-stopped`, and create root-owned mode 0755
 `/var/lib/qqbot-daemon-stops`. The service grants the stop helper write access to this directory in its mount namespace. Keep `/var/lib/qqbot` owned by the daemon, mode 0700.

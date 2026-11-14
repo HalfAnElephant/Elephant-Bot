@@ -913,7 +913,7 @@ class TaskService:
             inbox_table.c.conversation_id == access.conversation.key,
             inbox_table.c.principal_id == access.principal.key)).scalar_one_or_none()
         if raw is None:
-            if any(segment.type in {"image", "file"} for segment in event.segments):
+            if any(segment.type in {"image", "file", "audio"} for segment in event.segments):
                 raise PermissionError("media input requires a durably accepted source")
             return {}
         self.permissions.require(access, "history.source.read", "event:" + event.event_id)
@@ -926,11 +926,13 @@ class TaskService:
         def metadata(segment):
             return {"source": source.event_id, "message_id": source.platform_message_id,
                 "url": segment.image_url or segment.source_url, "filename": segment.filename,
-                "mime_type": segment.mime_type, "size": segment.size, "attachment_ref": segment.attachment_ref}
+                "mime_type": segment.mime_type, "size": segment.size, "attachment_ref": segment.attachment_ref,
+                **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
+                    "is_current_input": True} if segment.type == "audio" else {})}
         return {"source_manifest": [{"kind": "inbox", "id": source.event_id,
                     "digest": hashlib.sha256(raw.encode()).hexdigest()}],
             "images": [metadata(segment) for segment in source.segments if segment.type == "image"][-16:],
-            "files": [metadata(segment) for segment in source.segments if segment.type == "file"][-16:]}
+            "files": [metadata(segment) for segment in source.segments if segment.type in {"file", "audio"}][-16:]}
 
     def _merge_input_sources(self, conn, task_ids, sources):
         if not sources:
@@ -957,6 +959,8 @@ class TaskService:
                 return "[用户发送了文件，请读取工作区中的原始附件]"
             if "image" in kinds:
                 return "[图片]"
+            if "audio" in kinds:
+                return "[用户发送了语音，请根据带来源的语音转写理解本次输入]"
         return text
 
     def add_input(self, public_id, event, access, text, question_id=None):

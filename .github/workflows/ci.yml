@@ -44,6 +44,8 @@ jobs:
           enable-cache: true
       - run: uv sync --python "$(cat .python-version)"
       - run: npm ci --ignore-scripts
+      - name: Install audio decoder
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Record environment and require Pi fixtures
         run: |
           mkdir -p test-results
@@ -159,10 +161,16 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: uv run python evals/dialogue_live.py
+      - name: Exercise DeepSeek web, files and voice APIs
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: uv run python evals/deepseek_tools_live.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
           name: dialogue-live-results
-          path: test-results/dialogue-live.json
+          path: |
+            test-results/dialogue-live.json
+            test-results/deepseek-tools-live.json
           if-no-files-found: error
           retention-days: 14

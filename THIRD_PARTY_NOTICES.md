@@ -12,6 +12,7 @@
 | AstrBot Webhook | 协议参考 | AGPL-3.0；未复制代码 |
 | pi 1.5.0 | 独立进程 JSONL RPC | MIT，安装包保留上游版权；不捆绑个人配置 |
 | croniter 7.0.0 | 定时目标的 cron 与时区计算 | MIT，按 uv.lock 固定安装版本 |
+| pilk-nogil 0.4.3 | 子进程解码 QQ SILK 语音，按 uv.lock 固定安装版本 | GPL-3.0，安装包保留上游许可 |
 | NapCat | 用户另行安装，经 OneBot 连接 | 自定义 Limited Redistribution License；含非商业和修改发布限制，本仓库不打包其代码/二进制 |
 | OneBot v11 | 独立实现协议 | 固定快照未发现根 LICENSE，不复制其文档或夹具 |
 | QQ OpenAPI | 协议调用 | 应用权限与平台条款另行适用；不代表已获全量/主动权限 |
