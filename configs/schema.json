@@ -319,6 +319,24 @@
     "ExecutionConfig": {
       "additionalProperties": false,
       "properties": {
+        "leader_environment": {
+          "default": "host",
+          "enum": [
+            "sandbox",
+            "host"
+          ],
+          "title": "Leader Environment",
+          "type": "string"
+        },
+        "worker_environment": {
+          "default": "sandbox",
+          "enum": [
+            "sandbox",
+            "host"
+          ],
+          "title": "Worker Environment",
+          "type": "string"
+        },
         "notify_before_tools": {
           "default": true,
           "title": "Notify Before Tools",
@@ -1143,6 +1161,8 @@
     "execution": {
       "$ref": "#/$defs/ExecutionConfig",
       "default": {
+        "leader_environment": "host",
+        "worker_environment": "sandbox",
         "notify_before_tools": true,
         "max_active": 8,
         "sustained_limit": 2,

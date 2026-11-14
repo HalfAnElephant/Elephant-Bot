@@ -76,9 +76,13 @@ class LeaderRuntime:
             raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
         if effect != "read" and not personal:
-            if not claim.get("takeover") or not root_id:
-                raise PermissionError("Leader business execution requires a stopped task takeover")
-            self.service.graph.check_authority(conn, root, payload)
+            if claim["purpose"] == "user" and not root_id and run["role"] == "leader":
+                if self.sessions.owner(event) is None:
+                    raise PermissionError("Leader business execution requires a verified owner binding")
+            else:
+                if not claim.get("takeover") or not root_id:
+                    raise PermissionError("Leader business execution requires a stopped task takeover")
+                self.service.graph.check_authority(conn, root, payload)
         if personal and self.sessions.owner(event) is None:
             raise PermissionError("personal knowledge requires a verified owner binding")
         for resource in payload.get("resources") or ["conversation:" + access.conversation.key]:
@@ -489,6 +493,13 @@ class LeaderRuntime:
                 conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
                     .values(state="NEEDS_RECONCILIATION"))
             return {"run_id": run_id, "state": "NEEDS_RECONCILIATION"}
+        now = self.clock.now().isoformat()
+        with self.db.transaction() as conn:
+            conn.execute(update(operations).where(operations.c.run_id == run_id,
+                operations.c.state == "DISPATCHED").values(state="UNKNOWN", updated_at=now))
+            conn.execute(update(operations).where(operations.c.run_id == run_id,
+                operations.c.state == "PREPARED").values(state="FAILED",
+                    result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
         proof = json.loads(run["receipt_json"]) if run["receipt_json"] else None
         mutation = claim.get("memory_mutation")
         try:
@@ -497,20 +508,13 @@ class LeaderRuntime:
             pending = () if mutation else adapter.unfinished_tools(path)
             submitted = [call for call in pending if call.get("name") == "tasks_submit"]
             if claim.get("target_root_task_id") and claim["purpose"] in {"attention", "finalize"}:
-                now = self.clock.now().isoformat()
-                with self.db.transaction() as conn:
-                    conn.execute(update(operations).where(operations.c.run_id == run_id,
-                        operations.c.state == "DISPATCHED").values(state="UNKNOWN", updated_at=now))
-                    conn.execute(update(operations).where(operations.c.run_id == run_id,
-                        operations.c.state == "PREPARED").values(state="FAILED",
-                            result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
                 if pending:
                     adapter.restore_tool_results(path, [{"call": call, "is_error": True, "result": {
                         "state": "INTERRUPTED", "stopped": True,
                         "instruction": "上次调用随进程中断，结果尚未确认。先读取当前任务和操作记录，核对 UNKNOWN 操作，不重复外部写入。",
                     }} for call in pending])
             elif pending:
-                if len(submitted) != len(pending) or run["role"] != "leader" or claim["purpose"] != "user":
+                if run["role"] != "leader" or claim["purpose"] != "user":
                     raise ValueError("native dispatch recovery requires an isolated owner submission")
                 receipts = []
                 with self.db.engine.connect() as conn:
@@ -528,6 +532,10 @@ class LeaderRuntime:
                                 or task["coordinator_session_id"] != claim["session_id"] or committed_intent != intent):
                             raise ValueError("native dispatch has no matching committed host intent")
                         receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
+                receipts.extend({"call": call, "is_error": True, "result": {
+                    "state": "INTERRUPTED", "stopped": True,
+                    "instruction": "上次调用随进程中断。先核对操作记录中的 UNKNOWN 结果，不重复执行。",
+                }} for call in pending if call.get("name") != "tasks_submit")
                 adapter.restore_tool_results(path, receipts)
         except (OSError, ValueError, KeyError):
             with self.db.transaction() as conn:
@@ -616,6 +624,57 @@ class LeaderRuntime:
         self.service.wakeup.set()
         return {"run_id": run_id, "state": "RECOVERED"}
 
+    async def _reconcile_direct_operation(self, identity, claim, payload):
+        from qqbot.capabilities.types import Action, ToolContext
+
+        operation_id = payload["operation_id"]
+        with self.db.engine.connect() as conn:
+            record = conn.execute(select(operations).where(operations.c.id == operation_id,
+                operations.c.task_id == claim["task_id"])).mappings().first()
+            if not record:
+                raise PermissionError("operation belongs to another Leader turn")
+            original = conn.execute(select(runs).where(runs.c.id == record["run_id"])).mappings().one()
+            original_claim = json.loads(original["request_json"])
+            if original_claim["task_id"] != claim["task_id"] or original["role"] != "leader":
+                raise PermissionError("operation execution does not match its Leader scope")
+        if record["state"] not in {"UNKNOWN", "PARTIAL"}:
+            return {"operation_id": operation_id, "state": record["state"],
+                "result": json.loads(record["result_json"]), "changed": False}
+        action_data = json.loads(record["action_json"])
+        action = Action(**{**action_data, "resources": tuple(action_data["resources"])})
+        recovery = self.core.recovery
+        read_action = {"action": recovery._read_action(action), "resources": action.resources}
+        def authorize():
+            with self.db.engine.connect() as conn:
+                current, current_claim = self.lease(conn, *identity)
+                self.authorize(conn, current, current_claim, read_action)
+        authorize()
+        plan, binding = original_claim["plan"], original_claim.get("binding", {})
+        workspace = recovery.execution.workspace(Path(self.db.path).resolve().parent,
+            original_claim["task_id"], plan.get("workspace_ref"), binding.get("workspace_bindings", {}), strict=False)
+        context = ToolContext(task_id=claim["task_id"], run_id=record["run_id"], fence=original["fencing"],
+            principal=self.sessions.access_for_claim(claim).principal.model_dump(mode="json"),
+            workspace=str(workspace), repository=original_claim.get("repository"),
+            host=original_claim.get("host") or self.sessions.settings.orchestration.github_host,
+            environment=plan.get("environment", "host"))
+        if context.host != self.sessions.settings.orchestration.github_host:
+            raise PermissionError("readback credential host differs from the Leader binding")
+        verification = await recovery._verify(context, action, json.loads(record["arguments_json"]),
+            json.loads(record["result_json"]))
+        state, result = verification or ("UNKNOWN", json.loads(record["result_json"]))
+        if state not in {"VERIFIED", "FAILED", "PARTIAL", "UNKNOWN"}:
+            raise ValueError("readback returned an invalid operation state")
+        if len(json.dumps(result).encode()) > 1048576:
+            raise ValueError("readback result exceeds the operation evidence limit")
+        authorize()
+        with self.db.transaction() as conn:
+            changed = conn.execute(update(operations).where(operations.c.id == operation_id,
+                operations.c.state == record["state"]).values(state=state,
+                    result_json=json.dumps(result, ensure_ascii=False), updated_at=self.clock.now().isoformat())).rowcount
+            current = conn.execute(select(operations).where(operations.c.id == operation_id)).mappings().one()
+        return {"operation_id": operation_id, "state": current["state"],
+            "result": json.loads(current["result_json"]), "changed": bool(changed)}
+
     async def invoke(self, operation, identity, payload=None, **values):
         run_id, _fencing, worker_id = identity
         payload = payload or {}
@@ -642,16 +701,20 @@ class LeaderRuntime:
                 idempotency_key=stable_id("schedule", claim["source_ids"][0], payload["call_id"]))
         if operation in {"ledger", "ask"}:
             readback_target = None
+            direct = False
             with self.db.transaction() as conn:
                 run, claim = self.lease(conn, *identity)
                 self.authorize(conn, run, claim, {"action": "task.execute"})
                 if operation == "ledger":
                     readback = payload.get("operation") in {"read", "list", "reconcile"} or (
                         payload.get("operation") == "transition" and payload.get("expected") == "UNKNOWN")
-                    if not claim.get("takeover") and not (
+                    direct = run["role"] == "leader" and claim["purpose"] == "user" and not claim.get("target_root_task_id")
+                    if direct and self.sessions.owner(InboundEvent.model_validate_json(claim["event_json"])) is None:
+                        raise PermissionError("Leader operations require a verified owner binding")
+                    if not direct and not claim.get("takeover") and not (
                             readback and claim["purpose"] in {"attention", "finalize"} and claim.get("target_root_task_id")):
                         raise PermissionError("Leader ledger requires a stopped task takeover")
-                    if payload.get("operation") == "reconcile":
+                    if payload.get("operation") == "reconcile" and not direct:
                         readback_target = conn.execute(select(tasks.c.public_id).join(
                             operations, operations.c.task_id == tasks.c.id).where(
                                 operations.c.id == payload["operation_id"],
@@ -671,6 +734,19 @@ class LeaderRuntime:
                     self.authorize(conn, run, claim, {"action": "task.execute"})
                 return result
             if operation == "ledger":
+                if direct:
+                    if payload.get("operation") == "reconcile":
+                        return await self._reconcile_direct_operation(identity, claim, payload)
+                    from qqbot.capabilities.types import ToolContext
+
+                    context = ToolContext(task_id=claim["task_id"], run_id=run_id, fence=_fencing,
+                        principal=self.sessions.access_for_claim(claim), workspace="")
+                    def authorize(action):
+                        with self.db.engine.connect() as conn:
+                            current, current_claim = self.lease(conn, *identity)
+                            return self.authorize(conn, current, current_claim, action)
+                    return await self.service.ledger_operation(context, payload, [claim["task_id"]],
+                        authorize, deduplicate=True)
                 return await self.service.ledger(*identity, payload)
             return self.service.ask(*identity, payload)
         if operation == "skills":

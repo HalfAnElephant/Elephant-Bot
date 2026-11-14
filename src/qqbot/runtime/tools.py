@@ -5,7 +5,7 @@ from qqbot.domain.agents import ChildSpec, GoalSpec, ProgressSpec, TaskInputSpec
 def task_schemas():
     definitions = {
         "tasks.submit": ("Accept a user goal with initial Workers, reusing matching active work. Immediately acknowledge naturally, then end the Leader turn without waiting or polling.", GoalSpec.model_json_schema()),
-        "tasks.spawn": ("Create an independent work/consult child or linked rework in this task tree.", ChildSpec.model_json_schema()),
+        "tasks.spawn": ("Create an independent work/consult child or linked rework in this task tree. Select host or sandbox using environment; omitted uses the configured Worker default. Sandbox Workers cannot delegate host execution.", ChildSpec.model_json_schema()),
         "tasks.wait": ("Persist all/any dependency on this task's children, safely yield and release execution capacity.", WaitSpec.model_json_schema()),
         "tasks.take_over": ("Take over the bound goal after all Workers have stopped and external operations are reconciled. Enables direct business execution for this decision turn.",
                             {"type": "object", "properties": {}, "additionalProperties": False}),

@@ -9,6 +9,8 @@ permissions:
   default_effect: allow
   rules: []
 execution:
+  leader_environment: host
+  worker_environment: sandbox
   max_active: 8
   foreground_wait_ms: 5000
   warm_max: 4

@@ -143,7 +143,7 @@ class RunGateway:
         self.business_exhausted = False
         self.system_prompt = assemble_prompt(claim.get("role", "worker"),
             purpose=claim.get("purpose", "work"), preferences=claim.get("context", {}).get("preferences", ""),
-            skills_guidance=SKILLS_GUIDANCE)
+            skills_guidance=SKILLS_GUIDANCE, environment=claim.get("plan", {}).get("environment", "sandbox"))
         if self.documents:
             self.system_prompt += "\n文档按需要调用 document.parse，可选择文字或图文解析。返回的 document_ref 用于后续读取，交接和压缩时保留实际使用的引用。"
         if self.notify_before_tools:
@@ -161,7 +161,8 @@ class RunGateway:
         self.context = ToolContext(task_id=claim["task_id"], run_id=claim["run_id"],
             fence=claim["fencing_token"], principal=claim["permission_snapshot"]["principal"],
             workspace=str(self.workspace), repository=claim.get("repository"), host=self.github_host,
-            requested_actions=tuple(claim.get("goal_spec", {}).get("requested_actions", ())))
+            requested_actions=tuple(claim.get("goal_spec", {}).get("requested_actions", ())),
+            environment=claim.get("plan", {}).get("environment", "sandbox"))
         self.tools = ToolGateway(self.registry, authority=lambda _context: self.authority(),
             permission=self.permission, ledger=RemoteLedger(self.call), verify=self.verify,
             prepare=self.prepare,

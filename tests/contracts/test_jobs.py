@@ -24,7 +24,8 @@ class FakeSystemd:
         self.cancel_unknown = False
 
     async def describe(self):
-        return ExecutionCapabilities(persistent_jobs=True, daemon_restart_survival=True, process_tree_cancel=True)
+        return ExecutionCapabilities(persistent_jobs=True, daemon_restart_survival=True, process_tree_cancel=True,
+                                     environments=('sandbox', 'host'))
 
     async def launch(self, **request):
         if self.launch_hook:

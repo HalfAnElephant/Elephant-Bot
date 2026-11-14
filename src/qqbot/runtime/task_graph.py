@@ -72,6 +72,7 @@ class TaskGraph:
 
     @staticmethod
     def _goal_intent(intent):
+        intent = GoalSpec.model_validate(intent).model_dump(mode="json")
         return {**intent, "children": [{key: value for key, value in child.items() if key != "delegation_key"}
                                       for child in intent["children"]]}
 
@@ -83,7 +84,7 @@ class TaskGraph:
         old, previous_intent = self.dispatch_receipt(conn, dialogue["owner_id"], dispatch_key)
         intent = spec.model_dump(mode="json")
         if old:
-            if previous_intent != intent:
+            if GoalSpec.model_validate(previous_intent).model_dump(mode="json") != intent:
                 raise ValueError("dispatch key reused for another goal")
             status = self.status(conn, old)
             return {**status, "reused": True} if old["dispatch_key"] != dispatch_key else status
@@ -115,7 +116,8 @@ class TaskGraph:
             return {**self.status(conn, candidate), "reused": True}
         root_id = str(uuid4())
         plan = ExecutionPlan(initial_delivery="DETACHED", foreground_wait_ms=0,
-                             budget=self.settings.execution.budget)
+                             budget=self.settings.execution.budget,
+                             environment=context.get("environment", self.settings.execution.leader_environment))
         task_context = {key: value for key, value in context.items()
                         if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
@@ -154,9 +156,15 @@ class TaskGraph:
             tasks.c.delegation_key == spec.delegation_key)).mappings().first()
         intent = spec.model_dump(mode="json")
         if old:
-            if json.loads(old["context_json"]).get("child_spec") != intent:
+            previous_intent = json.loads(old["context_json"]).get("child_spec")
+            if ChildSpec.model_validate(previous_intent).model_dump(mode="json") != intent:
                 raise ValueError("delegation key reused for another child")
-            return {"task_id": old["id"], "public_id": old["public_id"], "state": old["state"]}
+            return {"task_id": old["id"], "public_id": old["public_id"], "state": old["state"],
+                    "environment": ExecutionPlan.model_validate_json(old["plan_json"]).environment}
+        environment = spec.environment or self.settings.execution.worker_environment
+        parent_plan = ExecutionPlan.model_validate_json(parent["plan_json"])
+        if parent["kind"] != "goal" and parent_plan.environment == "sandbox" and environment == "host":
+            raise PermissionError("sandbox Worker cannot delegate host execution")
         if spec.rework_of_task_id:
             previous = conn.execute(select(tasks).where(tasks.c.id == spec.rework_of_task_id,
                 tasks.c.root_task_id == root["id"], tasks.c.state.in_(TERMINAL))).mappings().first()
@@ -169,11 +177,11 @@ class TaskGraph:
         event = InboundEvent.model_validate_json(parent["event_json"])
         context = json.loads(root["context_json"])
         context.pop("dispatch_spec", None)
-        context.update(child_spec=intent, root_task_id=root["id"], role="worker")
+        context.update(child_spec=intent, root_task_id=root["id"], role="worker", environment=environment)
         # Workers receive only the task handoff, never the Leader transcript.
         context["key"] = str(uuid4())
         task_id = str(uuid4())
-        plan = ExecutionPlan.model_validate_json(root["plan_json"])
+        plan = ExecutionPlan.model_validate_json(root["plan_json"]).model_copy(update={"environment": environment})
         child = self.service.new_task(task_id, event, access,
             TaskGoal(text=spec.goal, success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
             plan, context=context)
@@ -186,7 +194,7 @@ class TaskGraph:
         conn.execute(insert(tasks).values(**child))
         self.event(conn, child, "queued", {"public_summary": "已排队"})
         self.service.wakeup.set()
-        return {"task_id": task_id, "public_id": child["public_id"], "state": "QUEUED"}
+        return {"task_id": task_id, "public_id": child["public_id"], "state": "QUEUED", "environment": environment}
 
     def input_handoff(self, conn, task):
         context = json.loads(task["context_json"])
@@ -259,21 +267,22 @@ class TaskGraph:
         stale_task = bool(revoked_handoff or context.get("memory_replan_pending") or replanning and
             json.loads(task["context_json"]).get("memory_epoch") != context.get("memory_epoch"))
         children = conn.execute(select(tasks.c.id, tasks.c.public_id, tasks.c.kind, tasks.c.state,
-            tasks.c.goal, tasks.c.result_json, tasks.c.context_json).where(tasks.c.parent_task_id == task["id"])
+            tasks.c.goal, tasks.c.result_json, tasks.c.context_json, tasks.c.plan_json).where(tasks.c.parent_task_id == task["id"])
             .order_by(tasks.c.created_at, tasks.c.id)).mappings().all()
         child_status = []
         for row in children:
             old_context = json.loads(row["context_json"])
+            environment = ExecutionPlan.model_validate_json(row["plan_json"]).environment
             stale = (revoked_handoff or bool(validator and not validator(access, old_context))
                 or replanning and (context.get("memory_replan_pending") or
                     old_context.get("memory_epoch") != context.get("memory_epoch")))
             if stale:
                 operation_ids = list(conn.execute(select(operations.c.id).where(operations.c.task_id == row["id"])).scalars())
                 child_status.append({key: row[key] for key in ("id", "public_id", "kind", "state")} | {
-                    "rework_required": True, "operation_ids": operation_ids})
+                    "rework_required": True, "operation_ids": operation_ids, "environment": environment})
             else:
                 child_status.append({key: row[key] for key in ("id", "public_id", "kind", "state", "goal")} | {
-                    "result_json": row["result_json"],
+                    "environment": environment, "result_json": row["result_json"],
                     "result": json.loads(row["result_json"]) if row["result_json"] else None})
         last = conn.execute(select(agent_events.c.kind, agent_events.c.payload_json, agent_events.c.created_at)
             .where(agent_events.c.task_id == task["id"]).order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
@@ -283,6 +292,7 @@ class TaskGraph:
         projection = task_progress(self, conn, task, root, access=access, stale=stale_task,
                                    delivery_states=delivery)
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
+            "environment": ExecutionPlan.model_validate_json(task["plan_json"]).environment,
             "progress": projection,
             "state": task["state"], "goal": None if stale_task else task["goal"],
             "goal_revision": task["goal_revision"], "children": child_status,

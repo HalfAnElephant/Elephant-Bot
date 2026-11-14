@@ -225,3 +225,20 @@ PR#6 承接 Leader/Workers 主线。PR#4 的 GitHub 授权与效果回读、安�
 - 技能管理增加目录、读取、变更记录、ZIP 导出及带最新 ledger 检查的回退入口。管理状态汇总任务、Session、Inbox、调用量、未知操作、记忆水位和技能写入失败。旧 social/Judge/主动搭话、表达学习及独立 Worker 部署模板已清理，旧库迁移与删除审计保留。
 
 本批回归入口包括 `test_schedules.py`、`test_schedule_tools.py`、`test_project_scopes.py`、`test_project_migration.py`、`test_task_progress.py`、`test_task_input_media.py`、`test_attachments.py`、`test_skills_admin.py` 和 `test_runtime_metrics.py`。统一验证以本批提交的 CI 为准。真实 QQ 四种 surface、供应商视觉兼容、旧备份完整恢复及当前逐事件记忆质量集继续按各自环境记录。
+
+## 2026-11-14 Agent 执行环境部署
+
+默认配置为 `execution.leader_environment=host`、`execution.worker_environment=sandbox`。Leader 可以在派发时指定子任务的 `environment`。已接受任务保存实际模式，旧任务继续沿用原有沙箱模式。沙箱 Worker 的子任务不能提升到 host。
+
+home 已安装本次 wheel 并切换生产服务，启用 `Delegate=yes` 和宿主机文件系统访问。前台 host 命令在执行用户程序前进入 daemon 内的独立 cgroup，清理确认后才报告停止。执行身份为 `qqbot`，系统级提权仍需另行配置。
+
+| 验证范围 | 结果 |
+| --- | --- |
+| 发布与服务 | 安装冒烟、配置校验、数据库完整性、健康检查及 QQ WebSocket 重连通过。 |
+| Leader 直接执行 | 真实模型通过生产 HOST 输入直接运行命令，读取工作区外的随机标记，记录实际 UID 和 daemon 子 cgroup。 |
+| Worker 环境选择 | 同一根目标的两个 Worker 分别采用默认 sandbox 和显式 host，均成功。sandbox 无法读取宿主标记或连接宿主回环端口，host 可以。两个 JSON 制品均经受保护下载接口核对。 |
+| 持久 Job | Leader 启动的 host Job 在 daemon 重启后保留同一 PID、启动标识和 systemd InvocationID，仅派发一次，最终 EXITED/0 并写入预期标记。 |
+| 进程清理 | 临时 Linux 服务中验证双重 fork、脱离进程组、保留输出管道、启动取消及服务 SIGKILL 后的后代清理。 |
+| QQ 私聊 | 用户发送终端 `date` 请求，生产 Leader 在 host 模式执行且退出码为 0，最终回复为 SENT，用户确认客户端收到正确结果。 |
+
+本地全量回归及后续相关改动的定点复验、17 项控制台测试、Ruff 和配置 schema 一致性检查通过。此次 QQ 验收覆盖一条真实私聊命令及回复，其他 surface 与媒体能力沿用各自已有验收边界。发布目录、逐文件校验、备份和真实任务证据保存在 home 的本次部署事实文件中。

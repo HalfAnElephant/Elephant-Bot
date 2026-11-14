@@ -35,10 +35,14 @@ progress 只描述提供的事实，不能验收目标。finalize 只验收宿�
 }
 
 
-def assemble_prompt(role, *, purpose="work", preferences="", skills_guidance=""):
+def assemble_prompt(role, *, purpose="work", preferences="", skills_guidance="", environment=None):
     if role not in ROLES:
         raise ValueError("unsupported agent role")
     parts = [COMMON, ROLES[role], "本轮用途：" + purpose]
+    if environment is not None:
+        if environment not in {"host", "sandbox"}:
+            raise ValueError("unsupported execution environment")
+        parts.append("本轮实际执行环境：" + environment + "。委派时可通过 environment 选择 Worker 环境；省略沿用配置默认。sandbox Worker 不能派出 host 子任务。")
     if role == "leader":
         parts.extend(("角色与聊天习惯\n" + PERSONA, PUBLIC_REPLY))
     if role == "leader" and purpose == "finalize":

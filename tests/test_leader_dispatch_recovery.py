@@ -141,16 +141,16 @@ async def test_uncommitted_or_changed_submit_intent_retains_writer_without_nativ
         assert conn.execute(select(func.count()).select_from(tasks).where(tasks.c.kind == "goal")).scalar_one() == int(committed)
 
 
-def test_unsupported_pending_native_tool_retains_writer_for_readback(runtime):
+def test_interrupted_direct_tool_releases_writer_with_recovery_receipt(runtime):
     runtime.sessions.enqueue(runtime.event, runtime.access)
     old = runtime.sessions.claim("leader")
     path = native_pending_submit(runtime, old, {"name": "github.issue.create", "arguments": {}},
                                  tool_name="capability_invoke")
-    before = path.read_bytes()
     runtime.clock.advance(31)
-    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "NEEDS_RECONCILIATION"
-    assert path.read_bytes() == before and len(unfinished_tools(path)) == 1
-    assert runtime.sessions.claim("replacement-leader") is None
+    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "RECOVERED"
+    assert unfinished_tools(path) == ()
+    replacement = runtime.sessions.claim("replacement-leader")
+    assert replacement["task_id"] == old["task_id"]
     with runtime.db.engine.connect() as conn:
-        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 1
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 0
         assert conn.execute(select(func.count()).select_from(tasks)).scalar_one() == 0

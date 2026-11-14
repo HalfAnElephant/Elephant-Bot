@@ -1201,9 +1201,7 @@ class TaskService:
         return task["id"]
 
     async def ledger(self, run_id, fencing_token, worker_id, payload):
-        from qqbot.capabilities.ledger import SQLiteActionLedger
-        from qqbot.capabilities.types import Action, ToolContext
-        from qqbot.storage.action_schema import operations
+        from qqbot.capabilities.types import ToolContext
         with self.db.engine.connect() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
             decision = _run["role"] == "leader" and task["kind"] == "goal"
@@ -1216,6 +1214,15 @@ class TaskService:
                 tasks.c.root_task_id == task["id"])).scalars()) if decision else [operation_task_id]
             context = ToolContext(task_id=operation_task_id, run_id=run_id, fence=fencing_token,
                 principal=self._access_for(task), workspace="")
+        return await self.ledger_operation(context, payload, scope_task_ids,
+            lambda action: self.authorize(run_id, fencing_token, worker_id, action))
+
+    async def ledger_operation(self, context, payload, scope_task_ids, authorize, *, deduplicate=False):
+        from qqbot.capabilities.ledger import SQLiteActionLedger
+        from qqbot.capabilities.types import Action
+        from qqbot.storage.action_schema import operations
+
+        with self.db.engine.connect() as c:
             if payload["operation"] in {"read", "list"}:
                 query = select(operations).where(operations.c.task_id.in_(scope_task_ids))
                 if payload["operation"] == "read":
@@ -1226,16 +1233,15 @@ class TaskService:
             if payload["operation"] == "transition":
                 old = c.execute(select(operations).where(operations.c.id == payload["operation_id"])).mappings().first()
                 if not old or old["task_id"] not in scope_task_ids or (
-                    (old["run_id"] != run_id or old["fence"] != fencing_token) and payload["expected"] != "UNKNOWN"
+                    (old["run_id"] != context.run_id or old["fence"] != context.fence) and payload["expected"] != "UNKNOWN"
                 ):
                     raise PermissionError("operation belongs to another binding")
         ledger = SQLiteActionLedger(self.db)
         if payload["operation"] == "prepare":
             action = Action(**{**payload["action"], "resources": tuple(payload["action"]["resources"])})
-            self.authorize(run_id, fencing_token, worker_id, {"action": action.name,
-                "resources": action.resources, "effect": action.effect})
+            authorize({"action": action.name, "resources": action.resources, "effect": action.effect})
             return await ledger.prepare(payload["operation_id"], context, action,
-                payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids)
+                payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids, deduplicate=deduplicate)
         if payload["operation"] == "transition":
             return {"changed": await ledger.transition(payload["operation_id"], payload["expected"], payload["state"], payload["result"])}
         raise ValueError("unknown ledger operation")

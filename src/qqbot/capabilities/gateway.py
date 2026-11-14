@@ -8,7 +8,7 @@ import re
 import stat
 from dataclasses import asdict
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -169,11 +169,15 @@ class ToolGateway:
 
 def workspace_parent(context, relative):
     path = PurePosixPath(relative)
-    if path.is_absolute() or not path.parts or any(part in {"..", ".git"} for part in path.parts):
+    host_path = getattr(context, "environment", "sandbox") == "host" and path.is_absolute()
+    if host_path:
+        path = PurePosixPath(Path(relative).resolve())
+    if (path.is_absolute() and not host_path or not path.parts
+            or any(part in {"..", ".git"} for part in path.parts) and not host_path):
         raise ValueError("path must be a workspace-relative file outside .git")
-    directory = os.open(context.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = os.open("/" if host_path else context.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        for part in path.parts[:-1]:
+        for part in path.parts[1:-1] if host_path else path.parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
@@ -258,7 +262,8 @@ def standard_registry(*, github=None, execution=None, deepseek=None):
         await execution.write_file(context, arguments["path"], content)
         return {"path": arguments["path"], "bytes": len(content)}
     for name, handler, effect in (("read", read, "read"), ("write", write, "write")):
-        registry.register(Capability("workspace." + name, "Bounded workspace file " + name), handler,
+        registry.register(Capability("workspace." + name,
+            "File " + name + "; workspace-relative paths, or absolute host paths in host environment"), handler,
             lambda a, c, n=name, e=effect: Action("workspace.file." + n,
                                                 ("workspace:" + c.workspace, "file:" + a["path"]), e))
     registry.register(Capability("gh.exec", "Execute installed GitHub CLI with literal argv/stdin",

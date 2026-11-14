@@ -79,9 +79,9 @@ class SystemdJobProvider:
                 await stop_process(process)
 
     async def describe(self):
-        missing = [name for name in ('systemd-run', 'systemctl', 'journalctl', 'bwrap') if not self.available(name)]
+        missing = [name for name in ('systemd-run', 'systemctl', 'journalctl') if not self.available(name)]
         if self.platform != 'linux' or missing:
-            return ExecutionCapabilities(reason='Persistent Jobs require Linux systemd user manager and bubblewrap')
+            return ExecutionCapabilities(reason='Persistent Jobs require Linux systemd user manager')
         if not (self.cgroup_root / 'cgroup.controllers').is_file():
             return ExecutionCapabilities(reason='Persistent Jobs require the unified cgroup v2 hierarchy')
         try:
@@ -95,6 +95,7 @@ class SystemdJobProvider:
         ready = code in {0, 1} and output.strip() in {'running', 'degraded'}
         return ExecutionCapabilities(persistent_jobs=ready, daemon_restart_survival=ready,
                                      process_tree_cancel=ready,
+                                     environments=('sandbox', 'host') if self.available('bwrap') else ('host',),
                                      reason=None if ready else 'systemd user manager is unavailable; enable linger')
 
     @staticmethod
@@ -103,7 +104,9 @@ class SystemdJobProvider:
             raise ValueError('Invalid host-managed Job unit')
         return unit
 
-    async def launch(self, *, unit, description, request, workspace, deadline_seconds):
+    async def launch(self, *, unit, description, request, workspace, deadline_seconds, environment='sandbox'):
+        if environment not in {'sandbox', 'host'}:
+            raise ValueError('Unknown Job execution environment')
         unit = self._unit(unit)
         command = ['systemd-run', '--user', '--quiet', '--no-ask-password', '--service-type=exec',
                    '--unit=' + unit, '--description=' + description,
@@ -112,8 +115,22 @@ class SystemdJobProvider:
                    '--property=RuntimeMaxSec=' + str(deadline_seconds),
                    '--property=NoNewPrivileges=yes', '--property=StandardInput=null',
                    '--property=StandardOutput=journal', '--property=StandardError=inherit',
-                   '--property=UMask=0077', '--',
-                   'bwrap', '--unshare-all', '--new-session', '--clearenv',
+                   '--property=UMask=0077']
+        if environment == 'host':
+            directory = (workspace / request.cwd).resolve(strict=True)
+            command.extend(['--working-directory=' + str(directory), '--', '/usr/bin/env', '-i', '--',
+                'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME=' + str(Path.home()), 'LANG=C.UTF-8',
+                *(name + '=' + value for name, value in sorted(request.env.items())), *request.argv])
+        else:
+            command.extend(self._sandbox_command(request, workspace))
+        code, _ = await self.command(tuple(command))
+        # A failed CLI receipt cannot prove the transient unit was never created.
+        if code != 0:
+            raise RuntimeError('systemd-run did not confirm Job dispatch; inspect the recorded unit')
+
+    @staticmethod
+    def _sandbox_command(request, workspace):
+        command = ['--', 'bwrap', '--unshare-all', '--new-session', '--clearenv',
                    '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
                    '--setenv', 'HOME', '/tmp', '--setenv', 'LANG', 'C.UTF-8']
         for name, value in sorted(request.env.items()):
@@ -124,10 +141,7 @@ class SystemdJobProvider:
         command.extend(['--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
                         '--bind', str(workspace), '/workspace', '--chdir',
                         '/workspace' + ('' if request.cwd == '.' else '/' + request.cwd), '--', *request.argv])
-        code, _ = await self.command(tuple(command))
-        # A failed CLI receipt cannot prove the transient unit was never created.
-        if code != 0:
-            raise RuntimeError('systemd-run did not confirm Job dispatch; inspect the recorded unit')
+        return command
 
     async def inspect(self, unit):
         unit = self._unit(unit)
@@ -207,6 +221,11 @@ class JobService:
             raise ValueError('Job workspace must be an existing real local directory')
         root = root.resolve(strict=True)
         relative = Path(cwd)
+        if scope.environment == 'host':
+            target = (root / relative).resolve(strict=True)
+            if not target.is_dir():
+                raise ValueError('Job cwd must be a directory')
+            return root, str(target)
         if relative.is_absolute() or '..' in relative.parts or '\x00' in cwd or '\\' in cwd:
             raise ValueError('Job cwd must be a relative path inside its workspace')
         target = (root / relative).resolve(strict=True)
@@ -245,7 +264,15 @@ class JobService:
                          cgroup=identity.get('cgroup'), pid=identity.get('pid'),
                          process_started_at=identity.get('started_at'), deadline=datetime.fromisoformat(row['deadline']),
                          exit_code=row['exit_code'], log_ref=row['log_ref'], error=row['error'],
-                         daemon_restart_survival=True)
+                         daemon_restart_survival=True,
+                         environment=json.loads(row['request_json']).get('environment', 'sandbox'))
+
+    @staticmethod
+    def arguments(request, environment):
+        values = request.model_dump(mode='json')
+        if environment == 'host':
+            values['environment'] = environment
+        return json.dumps(values, sort_keys=True, separators=(',', ':'))
 
     async def start_job(self, request: JobStart, scope: JobScope):
         capabilities = await self.describe()
@@ -253,6 +280,8 @@ class JobService:
             raise RuntimeError(capabilities.reason or 'Provider does not support daemon restart survival')
         if capabilities.world_id != scope.world_id or capabilities.filesystem != 'local':
             raise RuntimeError('Job provider and workspace execution worlds do not match')
+        if scope.environment not in capabilities.environments:
+            raise RuntimeError('Job provider does not support the requested execution environment')
         if self.dispatch_guard is not None:
             self.dispatch_guard(scope)
         root, cwd = self._workspace(scope, request.cwd)
@@ -264,7 +293,7 @@ class JobService:
         seconds = int((deadline - now).total_seconds())
         if seconds < 1:
             raise PermissionError('Job task deadline has expired')
-        arguments = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        arguments = self.arguments(request, scope.environment)
         digest = hashlib.sha256(arguments.encode()).hexdigest()
         with self.db.transaction() as conn:
             previous = conn.execute(select(jobs).where(jobs.c.task_id == scope.task_id,
@@ -289,7 +318,7 @@ class JobService:
         async with self._lock(job_id):
             try:
                 await self.provider.launch(unit=row['unit'], description=row['description'], request=request,
-                                           workspace=root, deadline_seconds=seconds)
+                                           workspace=root, deadline_seconds=seconds, environment=scope.environment)
             except (OSError, RuntimeError, TimeoutError):
                 row = self._save(row, state='UNKNOWN', error='dispatch_receipt_unknown')
             return self._handle(await self._refresh(row))

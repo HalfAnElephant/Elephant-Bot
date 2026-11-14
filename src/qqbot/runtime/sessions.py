@@ -152,7 +152,8 @@ class SessionService:
             dialogue = self.dialogue(conn, event, new_title=new_title, select_ref=select_ref,
                 workspace_id=context.get("workspace_id"))
             context["workspace_id"] = dialogue["workspace_id"]
-            plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
+            plan = ExecutionPlan(budget=self.settings.execution.interactive_budget,
+                environment=self.settings.execution.leader_environment)
             context["leader_turn"] = {"plan": plan.model_dump(mode="json"), "used": {},
                 "deadline": (self.clock.now() + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat()}
             conn.execute(insert(dialogue_inputs).values(id=event.event_id, dialogue_id=dialogue["id"],
@@ -245,9 +246,15 @@ class SessionService:
                         continue
                     turn = context.get("leader_turn")
                     if turn is None:
-                        legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget)
+                        legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget,
+                            environment="sandbox")
                         turn = {"plan": legacy_plan.model_dump(mode="json"), "used": {}, "deadline": (
                             datetime.fromisoformat(user["created_at"]) + timedelta(seconds=legacy_plan.budget.total_wall_seconds)).isoformat()}
+                        context["leader_turn"] = turn
+                        conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"])
+                            .values(context_json=json.dumps(context, ensure_ascii=False)))
+                    if "environment" not in turn["plan"]:
+                        turn["plan"]["environment"] = "sandbox"
                         context["leader_turn"] = turn
                         conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"])
                             .values(context_json=json.dumps(context, ensure_ascii=False)))
@@ -332,17 +339,19 @@ class SessionService:
                     conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(fencing=fencing))
                 binding = json.loads(dialogue["binding_json"])
                 plan = ExecutionPlan.model_validate_json(json.dumps(turn["plan"])) if turn else ExecutionPlan(
-                    budget=self.settings.execution.interactive_budget)
+                    budget=self.settings.execution.interactive_budget,
+                    environment=json.loads(root["plan_json"]).get("environment", "sandbox")
+                        if root else self.settings.execution.leader_environment)
                 context.update(key=dialogue["session_id"], session_id=dialogue["session_id"],
                     dialogue_id=dialogue["id"], owner_id=dialogue["owner_id"], source_input_ids=source_ids + [item["id"] for item in task_inputs],
-                    role="leader", purpose=purpose, now=now.isoformat(), timezone=self.settings.timezone,
+                    role="leader", environment=plan.environment, purpose=purpose, now=now.isoformat(), timezone=self.settings.timezone,
                     model_context_window=binding["context_window"],
                     limits=self.settings.context.limits(binding["context_window"], plan.budget.output_tokens_per_call),
                     pool={"max_resident": self.service.max_resident, "max_idle": self.settings.execution.warm_idle_max,
                           "ttl": self.settings.execution.warm_ttl_seconds})
                 context["preferences"] = self.settings.owner.preferences
                 context.pop("seed", None)
-                claim = {"task_id": root["id"] if root else run_id, "run_id": run_id, "fencing_token": fencing,
+                claim = {"task_id": root["id"] if root else stable_id("leader-turn", dialogue["id"], *source_ids), "run_id": run_id, "fencing_token": fencing,
                     "goal": goal, "goal_spec": {"text": goal}, "plan": plan.model_dump(mode="json"),
                     "context": context, "binding": binding, "delivery": "ATTACHED", "protocol_version": 2,
                     "role": "leader", "purpose": purpose, "session_id": dialogue["session_id"],
@@ -471,7 +480,7 @@ class SessionLearning:
                         InboundEvent.model_validate_json(claim["event_json"]).conversation.surface == Surface.PRIVATE
                         or self.settings.skills.group_enabled))
                 if pending:
-                    review_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget.model_copy(
+                    review_plan = ExecutionPlan(environment="sandbox", budget=self.settings.execution.interactive_budget.model_copy(
                         update={"model_calls": pending["max_iterations"]}))
                     pending.update(id=str(uuid4()), source_run_id=run_id, review_session_id=str(uuid4()),
                         claim=claim, plan=review_plan.model_dump(mode="json"), used={},
@@ -509,7 +518,7 @@ class SessionLearning:
         for candidate in candidates:
             pending = json.loads(candidate["pending_json"])
             if "plan" not in pending:
-                legacy_plan = ExecutionPlan(budget=self.settings.execution.interactive_budget.model_copy(update={"model_calls": 16}))
+                legacy_plan = ExecutionPlan(environment="sandbox", budget=self.settings.execution.interactive_budget.model_copy(update={"model_calls": 16}))
                 pending.update(plan=legacy_plan.model_dump(mode="json"), used={}, deadline=(
                     datetime.fromisoformat(candidate["updated_at"]) + timedelta(seconds=legacy_plan.budget.total_wall_seconds)).isoformat())
                 with self.db.transaction() as conn:
@@ -563,10 +572,11 @@ class SessionLearning:
                 session_id, run_id = pending["review_session_id"], str(uuid4())
                 if conn.execute(select(runs.c.id).where(runs.c.session_id == session_id, runs.c.slot_reserved == 1)).first():
                     continue
-                plan = ExecutionPlan.model_validate_json(json.dumps(pending["plan"]))
+                plan = ExecutionPlan.model_validate_json(json.dumps(pending["plan"])).model_copy(
+                    update={"environment": "sandbox"})
                 budget = plan.budget
                 context = {**claim["context"], "key": session_id, "session_id": session_id,
-                    "role": "skill_review", "purpose": "skill_review", "source_input_ids": [pending["id"]],
+                    "role": "skill_review", "purpose": "skill_review", "environment": "sandbox", "source_input_ids": [pending["id"]],
                     "now": now.isoformat(), "timezone": self.settings.timezone,
                     "model_context_window": claim["binding"]["context_window"],
                     "pool": {"max_resident": self.service.max_resident,
