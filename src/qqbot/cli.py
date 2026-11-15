@@ -21,9 +21,10 @@ def configuration_warnings(settings):
     warnings = []
     if not settings.model.endpoint or not settings.model.model:
         warnings.append("Set model.endpoint and model.model before submitting tasks or chatting.")
-    for name in (settings.admin_token_env, settings.model.api_key_env):
-        if not os.environ.get(name):
-            warnings.append(f"Environment variable {name} is empty; load the private environment file before starting.")
+    if not os.environ.get(settings.admin_token_env):
+        warnings.append("Administrator credential is empty. Check admin_token_env and load the private environment file.")
+    if not os.environ.get(settings.model.api_key_env):
+        warnings.append("Model credential is empty. Check model.api_key_env and load the private environment file.")
     from qqbot.adapters.qq_official.credential_store import master_key
     try:
         master_key()
@@ -35,9 +36,8 @@ def configuration_warnings(settings):
             warnings.append("OpenViking has an endpoint but no bindings; memory is disabled. See docs/openviking.md.")
         elif not any(binding.owner_id == settings.owner.id for binding in memory.bindings):
             warnings.append("OpenViking has no binding for owner.id; this owner's memory is disabled.")
-        for binding in memory.bindings:
-            if not os.environ.get(binding.api_key_env):
-                warnings.append(f"OpenViking USER credential {binding.api_key_env} is empty.")
+        if any(not os.environ.get(binding.api_key_env) for binding in memory.bindings):
+            warnings.append("OpenViking USER credential is empty. Check memory.openviking.bindings[].api_key_env.")
     return warnings
 
 

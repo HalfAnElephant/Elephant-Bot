@@ -57,7 +57,9 @@ def test_complete_setup_has_no_configuration_warnings(monkeypatch):
     }, strict=False)
     assert cli.configuration_warnings(settings) == []
     monkeypatch.delenv("QQBOT_OPENVIKING_KEY")
-    assert cli.configuration_warnings(settings) == ["OpenViking USER credential QQBOT_OPENVIKING_KEY is empty."]
+    assert cli.configuration_warnings(settings) == [
+        "OpenViking USER credential is empty. Check memory.openviking.bindings[].api_key_env.",
+    ]
     monkeypatch.setenv("QQBOT_OPENVIKING_KEY", "private-test-value")
     other_owner = settings.model_copy(update={"owner": settings.owner.model_copy(update={"id": "other-owner"})})
     assert cli.configuration_warnings(other_owner) == [
@@ -78,8 +80,8 @@ def test_doctor_reports_missing_executables_and_environment(tmp_path, monkeypatc
     assert output["dependencies"]["node"] is None
     assert output["dependencies"]["ffmpeg"] is None
     assert output["qq_live"] == output["pi_model_run"] == "not_tested"
-    assert any("QQBOT_ADMIN_TOKEN" in message for message in output["warnings"])
-    assert any("QQBOT_MODEL_KEY" in message for message in output["warnings"])
+    assert any("admin_token_env" in message for message in output["warnings"])
+    assert any("model.api_key_env" in message for message in output["warnings"])
     assert any("Executable node" in message for message in output["warnings"])
     assert not (tmp_path / "core.db").exists()
 
