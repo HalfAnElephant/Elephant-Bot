@@ -437,3 +437,16 @@ async def test_confirmed_failed_send_can_retry_only_the_same_authorized_frozen_c
     assert len(mail.smtp.sent) == 1
     with pytest.raises(ValueError, match='confirmed FAILED'):
         await mail.core.mail.invoke(identity, {'operation': 'send.retry', 'arguments': arguments})
+
+
+def test_non_mail_dependencies_reuse_the_callers_authenticated_access(mail, monkeypatch):
+    root = mail.runtime.root()
+    access = mail.core.access(mail.event)
+
+    def unexpected_identity_lookup(event):
+        raise AssertionError('the caller already authenticated this access')
+
+    monkeypatch.setattr(mail.core, 'access', unexpected_identity_lookup)
+    with mail.core.db.engine.connect() as conn:
+        assert mail.core.mail.receipts(conn, mail.event, {}, access=access) == []
+        assert mail.core.mail.receipts(conn, mail.event, {'task_sources': [root['task_id']]}, access=access) == []

@@ -382,7 +382,7 @@ class Core:
                     self.tasks.graph.merge_source_dependencies(context, history["task_sources"],
                         history.get("source_manifest", ()))
             try:
-                self.mail.receipts(conn, event, context)
+                self.mail.receipts(conn, event, context, access=access)
             except (PermissionError, LookupError, ValueError):
                 return False
             for source in context.get("source_manifest", ()):

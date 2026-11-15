@@ -21,8 +21,10 @@ class MailRuntime:
         self.sender = sender or MailSender(core, self.accounts)
         self.triggers = MailTriggers(core, self.accounts)
 
-    def receipts(self, conn, event, context):
-        access = self.core.access(event)
+    def receipts(self, conn, event, context, *, access=None):
+        if not context.get("mail_receipt_id") and not context.get("task_sources"):
+            return []
+        access = access or self.core.access(event)
         pending, visited, receipts = [context], set(), {}
         while pending:
             current = pending.pop()
@@ -66,7 +68,7 @@ class MailRuntime:
     def authorize_context(self, access, context, action, resources):
         event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
         with self.db.engine.connect() as conn:
-            receipts = self.receipts(conn, event, context)
+            receipts = self.receipts(conn, event, context, access=access)
         if not receipts or context.get("role") == "leader" and context.get("purpose") == "user":
             return
         if action == "model.request" or action.startswith("task.") or action in {
