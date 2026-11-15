@@ -293,7 +293,7 @@ class DialogueSuite:
                             require(any(Path(path).name == "summary.md" for path in spec.requested_outputs)
                                     and re.search(r"三|3", spec.goal),
                                     "mail draft lost the requested output or summary requirement")
-                            require(re.search(r"未启用|禁用|停用|不.*扫描|不会.*扫描", final_text),
+                            require(re.search(r"(?:未|没(?:有)?)启用|禁用|停用|不.*扫描|不会.*扫描", final_text),
                                     "mail draft reply omitted its inactive state")
                             case["mail_draft"] = {"enabled": False, "account_id": spec.mail.account_id,
                                                   "folder": spec.mail.folder, "spec": spec.model_dump(mode="json")}
