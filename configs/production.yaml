@@ -1,0 +1,13 @@
+deployment_id: elephant-production
+database: /var/lib/qqbot/core.db
+internal_socket: /run/qqbot/internal.sock
+adapters: []
+tasks_enabled: true
+interactive_execution_enabled: true
+model:
+  endpoint: null # Set the full Chat Completions URL before starting.
+  model: null # Set the model name supported by your provider.
+  api_key_env: QQBOT_MODEL_KEY
+  context_window: 32768 # Set the actual window supported by your model.
+orchestration:
+  pi_executable: /opt/qqbot/node_modules/.bin/pi

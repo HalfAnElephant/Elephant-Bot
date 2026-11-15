@@ -2,9 +2,11 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +15,30 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from qqbot.config import Settings, load_runtime_settings, load_settings
+
+
+def configuration_warnings(settings):
+    warnings = []
+    if not settings.model.endpoint or not settings.model.model:
+        warnings.append("Set model.endpoint and model.model before submitting tasks or chatting.")
+    for name in (settings.admin_token_env, settings.model.api_key_env):
+        if not os.environ.get(name):
+            warnings.append(f"Environment variable {name} is empty; load the private environment file before starting.")
+    from qqbot.adapters.qq_official.credential_store import master_key
+    try:
+        master_key()
+    except ValueError:
+        warnings.append("QQ scan onboarding requires QQBOT_CREDENTIAL_KEY, a Base64-encoded 32-byte key.")
+    memory = settings.memory.openviking
+    if memory.endpoint:
+        if not memory.bindings:
+            warnings.append("OpenViking has an endpoint but no bindings; memory is disabled. See docs/openviking.md.")
+        elif not any(binding.owner_id == settings.owner.id for binding in memory.bindings):
+            warnings.append("OpenViking has no binding for owner.id; this owner's memory is disabled.")
+        for binding in memory.bindings:
+            if not os.environ.get(binding.api_key_env):
+                warnings.append(f"OpenViking USER credential {binding.api_key_env} is empty.")
+    return warnings
 
 
 def migrate(path: str, *, backup=True):
@@ -69,6 +95,8 @@ def main():
         print(json.dumps(Settings.model_json_schema(), ensure_ascii=False, indent=2))
     elif args.command == "validate":
         print("configuration valid")
+        for warning in configuration_warnings(settings):
+            print("warning: " + warning, file=sys.stderr)
     elif args.command == "migrate":
         migrate(settings.database)
         print("migration complete")
@@ -79,6 +107,14 @@ def main():
             with sqlite3.connect(db) as connection:
                 assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
                 connection.execute("CREATE VIRTUAL TABLE probe USING fts5(content)")
+        dependencies = {
+            "node": shutil.which("node"),
+            "pi": shutil.which(settings.orchestration.pi_executable),
+            "ffmpeg": shutil.which("ffmpeg"),
+        }
+        warnings = configuration_warnings(settings)
+        warnings.extend(f"Executable {name} was not found; install it or correct its configured path."
+                        for name, path in dependencies.items() if path is None)
         print(
             json.dumps(
                 {
@@ -86,6 +122,8 @@ def main():
                     "adapters_configured": len(settings.adapters),
                     "qq_live": "not_tested",
                     "pi_model_run": "not_tested",
+                    "dependencies": dependencies,
+                    "warnings": warnings,
                 }
             )
         )

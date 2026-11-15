@@ -4,7 +4,14 @@
 
 ## 一次性部署准备
 
-在 daemon 的环境文件配置 `QQBOT_ADMIN_TOKEN` 与 `QQBOT_CREDENTIAL_KEY`。后者为随机生成的 32 字节密钥的 Base64 编码，用于 AES-256-GCM 加密应用凭据。home 使用 `/etc/qqbot/core.env`，密钥在后续扫码和服务重启时持续复用。密钥应由部署秘密管理流程保管，已有加密凭据依赖原密钥。
+在 daemon 的环境文件配置 `QQBOT_ADMIN_TOKEN` 与 `QQBOT_CREDENTIAL_KEY`。本地使用仓库根目录的 `.env`，生产使用 `/etc/qqbot/core.env`。首次配置可以用以下命令生成管理员令牌和随机 32 字节密钥的 Base64 编码，将输出分别填入环境模板的对应字段。
+
+```sh
+uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+uv run python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+```
+
+`QQBOT_CREDENTIAL_KEY` 用于 AES-256-GCM 加密应用凭据，生成一次后随私有配置备份，后续扫码、重启和升级持续复用原值。修改环境文件后重启 daemon，本地启动需先通过 `set -a; . ./.env; set +a` 加载环境。管理页顶部显示凭据加密密钥状态；缺失或长度错误时创建接口返回 `503 configure QQBOT_CREDENTIAL_KEY before onboarding`。
 
 管理页面使用现有 Bearer 认证和统一权限策略。自动模式另核验配置保存与权限管理权限；服务端在远程校验返回后再次检查当前管理员身份与权限。管理访问使用 HTTPS 或私有本地隧道。
 

@@ -2,6 +2,8 @@
 
 QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 对话、根目标和按需 Worker；Pi 管理各 Agent 的原生历史与压缩，OpenViking 管理长期记忆，Hermes 原生工具管理标准 `SKILL.md`。
 
+首次使用从[本地启动](#本地启动)开始，Ubuntu 常驻服务使用[生产部署步骤](deploy/README.md)。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
+
 - 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。
 - 任务、输入、操作回执和投递状态保存在 SQLite。等待会让出执行资格，取消与恢复需要真实停止证明。
 - 后台 Worker 按需执行，取消固定名额与总执行时长限制，模型请求保留上游并发背压。Linux 上的持久 Job 由 systemd user manager 监督，可跨 daemon 重启继续运行。
@@ -33,7 +35,18 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 
 ## 本地启动
 
-在仓库根目录运行：
+准备 Python 3.13、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Node.js](https://nodejs.org/en/download) >= 22.19.0（含 npm）和 FFmpeg >= 6。macOS 可用 `brew install uv node ffmpeg`，Ubuntu 的完整安装命令见[部署说明](deploy/README.md)。
+
+首次安装使用源码仓库。已有安装升级时保留自己的配置、环境文件和数据目录。
+
+```sh
+git clone https://github.com/HalfAnElephant/Elephant-Bot.git
+cd Elephant-Bot
+```
+
+也可从 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 下载完整源码包 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`，按[发布包校验步骤](docs/runbooks/releases.md#手动部署)解压后进入 `elephant-bot` 目录。
+
+在仓库根目录安装锁定依赖并创建本地配置。
 
 ```sh
 uv sync --locked
@@ -43,7 +56,24 @@ cp .env.example .env
 chmod 600 .env configs/local.yaml
 ```
 
-配置模型的完整 Chat Completions 地址、模型名及 `api_key_env`。通过进程环境提供实际密钥；管理页只保存环境变量名。至少配置 `QQBOT_ADMIN_TOKEN` 和模型使用的密钥变量。官方 QQ 另需实际 AppID/AppSecret；长期记忆使用 OpenViking 对应普通用户的凭据。
+编辑 `configs/local.yaml` 的 `model`。例如使用本项目真实 API 回归覆盖的 DeepSeek 配置。
+
+```yaml
+model:
+  endpoint: https://api.deepseek.com/chat/completions
+  model: deepseek-flash
+  api_key_env: QQBOT_MODEL_KEY
+  context_window: 32768
+```
+
+其他供应商填写其完整 Chat Completions 地址、模型名和实际支持的上下文窗口。`api_key_env` 是环境变量名。编辑 `.env`，将供应商密钥填入 `QQBOT_MODEL_KEY`，将下面两条命令的输出分别填入 `QQBOT_ADMIN_TOKEN` 和 `QQBOT_CREDENTIAL_KEY`。
+
+```sh
+uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
+uv run python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+```
+
+管理员令牌用于登录管理页。凭据加密密钥用于 QQ 扫码接入，生成一次后随私有配置备份，后续重启和升级沿用原值。实际密钥通过进程环境提供，管理页保存环境变量名。`QQBOT_OFFICIAL_SECRET` 供手动配置已有 QQ 应用使用，自动扫码流程会加密保存应用凭据。
 
 ```sh
 set -a
@@ -54,11 +84,38 @@ uv run qqbot doctor --config configs/local.yaml
 uv run qqbot serve --config configs/local.yaml
 ```
 
-`serve` 迁移数据库并监听 `127.0.0.1:8080`。默认适配器列表为空，可先使用受保护的管理任务入口；它创建真实 host 任务，不伪造 QQ 消息。`doctor` 检查临时数据库、迁移与 FTS5，不代表模型、QQ 或生产环境已经验收。
+`serve` 迁移数据库并监听 `127.0.0.1:8080`。示例已启用管理任务，默认适配器列表为空。`validate` 检查配置结构并提示缺失的首次配置；`doctor` 检查临时数据库、迁移、FTS5、可执行文件位置和配置告警。先补齐相关告警，再提交首次任务。真实模型和 QQ 连接状态通过后续实际操作确认。
 
 - [管理页](http://127.0.0.1:8080/admin)
 - [存活检查](http://127.0.0.1:8080/health/live)
 - [就绪检查](http://127.0.0.1:8080/health/ready)
+
+### 第一个任务
+
+打开管理页并输入 `QQBOT_ADMIN_TOKEN`，也可在已加载 `.env` 的另一个终端提交一次任务。
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks \
+  -H "Authorization: Bearer $QQBOT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: first-hello-1' \
+  -d '{"goal":"请用一句中文介绍你能做什么，无需调用工具。"}'
+```
+
+使用返回的 `public_id` 查询结果，或在管理页任务列表查看。相同需求重试沿用原 `Idempotency-Key`，新需求使用新值。
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks/PUBLIC_ID \
+  -H "Authorization: Bearer $QQBOT_ADMIN_TOKEN"
+```
+
+任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。Linux 工具执行需按生产说明准备 cgroup、bubblewrap 和 user manager；macOS 本地调试工具时可显式将 `execution.worker_environment` 设为 `host`，以当前账号权限执行。
+
+### 接入 QQ 与长期记忆
+
+打开[扫码接入页](http://127.0.0.1:8080/admin/qq-onboarding)，输入管理员令牌并创建二维码，使用手机 QQ 授权。流程会绑定扫码者为 owner、保存权限并连接官方长连接。页面显示连接就绪后，发送一条私聊并检查回复。平台账号权限与失败处理见[扫码说明](docs/operations/qq-onboarding.md)。
+
+长期记忆可在首次任务成功后配置。按 [OpenViking 安装与身份绑定](docs/openviking.md) 部署后端、创建普通 USER，并填写 `memory.openviking.bindings` 及对应密钥。示例中的空 endpoint 表示关闭远端记忆。
 
 ## 身份、配置和任务
 

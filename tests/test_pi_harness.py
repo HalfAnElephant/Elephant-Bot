@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,33 @@ for line in sys.stdin:
     result = await harness.run("hello")
     assert result.summary == "done next"
     assert harness.process.returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_pi_uses_node_from_startup_path(tmp_path, monkeypatch):
+    node_directory = tmp_path / "custom-node" / "bin"
+    node_directory.mkdir(parents=True)
+    node = node_directory / "node"
+    node.write_text(f"#!{sys.executable}\n" + """
+import json, sys
+for line in sys.stdin:
+    command = json.loads(line)
+    if command['type'] == 'abort':
+        break
+    print(json.dumps({'type': 'response', 'id': command['id'], 'success': True,
+                      'data': {'node': 'custom-startup-node'}}), flush=True)
+""")
+    node.chmod(0o700)
+    executable = tmp_path / "pi"
+    executable.write_text("#!/usr/bin/env node\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(node_directory))
+    harness = PiHarness(executable, tmp_path / "work", timeout=8)
+    await harness.start()
+    try:
+        assert await harness.rpc("get_state") == {"node": "custom-startup-node"}
+    finally:
+        assert await harness.stop()
 
 
 @pytest.mark.asyncio
