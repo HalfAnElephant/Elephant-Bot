@@ -74,9 +74,9 @@ def require(condition, message):
 class LiveModelTransport(httpx.AsyncBaseTransport):
     """Allow only the official model endpoint and explicitly disable thinking for this suite."""
 
-    def __init__(self, report, *, role="leader", transport=None):
+    def __init__(self, report, *, gateway=None, transport=None):
         self.report = report
-        self.role = role
+        self.gateway = gateway
         self.transport = transport if transport is not None else httpx.AsyncHTTPTransport(retries=0)
 
     async def handle_async_request(self, request):
@@ -87,7 +87,7 @@ class LiveModelTransport(httpx.AsyncBaseTransport):
         schemas = {tool["function"]["name"]: tool["function"]["parameters"]
                    for tool in body.get("tools", [])}
         self.report["requests"].append({
-            "role": self.role,
+            "role": self.gateway.claim["role"] if self.gateway is not None else "leader",
             "communication_schemas": {name: "user_message" in schema.get("required", [])
                                       for name, schema in schemas.items()
                                       if name in {"capability_search", "capability_invoke", "content_read"}},
@@ -449,7 +449,7 @@ class DialogueSuite:
                     self.current.setdefault("workspace_operations", []).append(name)
                     return result
                 gateway.registry.entries[name] = (capability, observed, classifier)
-            gateway.transport = LiveModelTransport(self.report, role=gateway.claim["role"],
+            gateway.transport = LiveModelTransport(self.report, gateway=gateway,
                                                    transport=self.transport.transport)
 
         async def start(runner):
