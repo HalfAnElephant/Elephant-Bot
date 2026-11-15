@@ -64,7 +64,7 @@ class TaskGraph:
     def _request_context(context):
         return {
             **{key: context.get(key) for key in ("scope", "principal", "preferences", "memory_scope", "memory_epoch", "retrieved_data",
-                    "workspace_id", "schedule_fire_id", "structured_request", "files", "task_sources")},
+                    "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "structured_request", "files", "task_sources")},
             "images": [{key: value for key, value in image.items() if key not in {"source", "message_id"}}
                        for image in context.get("images", ())],
             "references": [source for source in context.get("source_manifest", ()) if source.get("kind") != "inbox"],
@@ -121,7 +121,7 @@ class TaskGraph:
         task_context = {key: value for key, value in context.items()
                         if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
-                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "structured_request"}}
+                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "structured_request"}}
         task_context.update(dispatch_spec=intent, owner_id=dialogue["owner_id"], role="worker")
         root = self.service.new_task(root_id, event, access,
             TaskGoal(text=spec.goal, success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),

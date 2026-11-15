@@ -18,6 +18,8 @@ schedules = Table(
     Column("revision", Integer, nullable=False),
     Column("enabled", Integer, nullable=False),
     Column("next_fire_at", String),
+    Column("synthetic_mail_last_uid", Integer),
+    Column("synthetic_mail_activation_uid", Integer),
     Column("last_fire_at", String),
     Column("last_task_id", String),
     Column("last_error", String),
@@ -37,4 +39,15 @@ schedule_fires = Table(
     Column("task_id", String, nullable=False),
     Column("created_at", String, nullable=False),
     UniqueConstraint("schedule_id", "scheduled_fire_at"),
+)
+
+# Used only by the host-injected synthetic acceptance source; not a production mailbox ledger.
+synthetic_mail_receipts = Table(
+    "synthetic_mail_receipts", metadata,
+    Column("id", String, primary_key=True),
+    Column("schedule_id", String, nullable=False),
+    Column("uid", Integer, nullable=False),
+    Column("task_id", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    UniqueConstraint("schedule_id", "uid"),
 )

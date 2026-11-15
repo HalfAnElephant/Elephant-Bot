@@ -363,6 +363,9 @@ class Core:
         if not self.permissions.check(access, "history.read", "conversation:" + access.conversation.key).allowed:
             return False
         with self.db.engine.connect() as conn:
+            if context.get("synthetic_mail_schedule_id") and not self.schedules.synthetic_fire_authorized(
+                    conn, event, context):
+                return False
             if context.get("session_id"):
                 history = conn.execute(select(sessions.c.manifest_json).where(
                     sessions.c.id == context["session_id"])).scalar_one_or_none()
