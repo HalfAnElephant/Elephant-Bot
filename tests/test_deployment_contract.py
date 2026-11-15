@@ -84,7 +84,7 @@ def test_job_setup_targets_selected_unit_and_is_repeatable(job_setup, tmp_path, 
 
 @pytest.mark.parametrize("unit", ["", "../qqbot.service", "qqbot.service\n[Service]", "qqbot", ".service"])
 def test_job_setup_rejects_invalid_unit_before_writing(job_setup, tmp_path, unit):
-    result = subprocess.run(["sh", str(job_setup), "qqbot", unit], capture_output=True, text=True)
+    result = subprocess.run(["sh", str(job_setup), "qqbot", unit], check=False, capture_output=True, text=True)
     assert result.returncode == 2
     assert "SERVICE_UNIT" in result.stderr
     assert not (tmp_path / "etc").exists()
