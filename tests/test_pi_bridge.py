@@ -305,13 +305,152 @@ async def test_locked_pi_uses_one_million_window_for_large_normal_context(compac
 
 @pytest.mark.parametrize("compaction_session", [{"response_text":
     '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'}], indirect=True)
-async def test_locked_pi_rejects_raw_tool_protocol_before_result(compaction_session):
+async def test_locked_pi_reports_raw_tool_protocol_after_one_correction(compaction_session):
     state = compaction_session
-    with pytest.raises(ValueError, match="model emitted tool-call protocol"):
-        await state.runner.run("List PRs", keep_alive=True)
-    assert state.runner.stopped_verified
-    assert not state.runner.quiescent_verified
+    state.gateway.claim["session_id"] = state.runner.session_path.stem
+    result = await state.runner.run("List PRs", keep_alive=True)
+    assert result.status == "failed" and not result.agent_authored
+    assert result.limitations == ("model_tool_protocol_recovery_failed",)
+    assert "DSML" not in result.summary
+    assert len(state.requests) == 2
+    assert all(request["kind"] == "business" for request in state.requests)
+    assert state.runner.quiescent_verified
     assert state.gateway.revoked
+    receipts = [call[2] for call in state.host_calls if call[1] == "session-receipt"
+        and call[2]["kind"] == "turn_finished"]
+    assert len(receipts) == 2 and all(receipt["input_ids"] == [] for receipt in receipts)
+
+
+async def test_locked_pi_protocol_correction_keeps_real_tool_results_and_same_session(compaction_session):
+    from qqbot.capabilities.types import Action, Capability
+
+    state = compaction_session
+    state.gateway.claim["session_id"] = state.runner.session_path.stem
+    read_calls, requests, upstream_sessions = [], [], []
+    state.gateway.registry.register(Capability("fixture.read", "Read fixture"),
+        lambda arguments, context: read_calls.append(context.run_id) or {"verified_value": "ACTUAL_TOOL_RECEIPT"},
+        lambda arguments, context: Action("fixture.read", ()))
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        upstream_sessions.append(request.headers["x-opencode-session"])
+        message = {"role": "assistant", "content": "已读取 ACTUAL_TOOL_RECEIPT，处理完成。"}
+        if len(requests) == 1:
+            message = {"role": "assistant", "content": None, "tool_calls": [{"id": "actual-read", "type": "function",
+                "function": {"name": "capability_invoke", "arguments": json.dumps({"name": "fixture.read", "arguments": {}})}}]}
+        elif len(requests) == 2:
+            message["content"] = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    state.gateway.provider.transport = httpx.MockTransport(upstream)
+    public = []
+    state.runner.public_event_sink = public.append
+    result = await state.runner.run("Read and report the verified fixture", keep_alive=True)
+    assert result.status == "completed" and result.agent_authored
+    assert result.summary == "已读取 ACTUAL_TOOL_RECEIPT，处理完成。"
+    assert read_calls == [state.claim["run_id"]]
+    assert len(requests) == 3 and len(set(upstream_sessions)) == 1
+    assert any(message["role"] == "tool" and "ACTUAL_TOOL_RECEIPT" in str(message["content"])
+        for message in requests[2]["messages"])
+    assert any(message["role"] == "user" and "原生结构化工具接口" in str(message["content"])
+        for message in requests[2]["messages"])
+    assert result.observation_refs and state.runner.quiescent_verified
+    assert state.gateway.session_receipt["summary"] == result.summary
+    assert not state.runner.protocol_recovery_attempted
+    assert not any("DSML" in event.get("text", "") for event in public)
+
+
+async def test_failed_protocol_correction_preserves_refs_for_worker_failure(compaction_session):
+    from qqbot.jobs.worker import Worker
+
+    state = compaction_session
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse({
+                "role": "assistant", "content": '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'}))
+        return httpx.Response(400, json={"error": {"message": "fixture correction rejected"}})
+    state.gateway.provider.transport = httpx.MockTransport(upstream)
+    state.gateway.observations["observation:verified-read"] = "{}"
+    state.gateway.effects["verified-operation"] = "verified"
+    with pytest.raises(RuntimeError) as failure:
+        await state.runner.run("Continue completed work", keep_alive=True)
+    assert state.runner.stopped_verified and state.runner.protocol_recovery_attempted
+    worker = Worker(None, "fixture", None, None)
+    result = worker.failure_result(state.claim, failure.value, state.runner)
+    assert result["status"] == "failed" and result["agent_authored"] is False
+    assert result["limitations"] == ["model_tool_protocol_recovery_failed"]
+    assert result["observation_refs"] == ["observation:verified-read"]
+    assert result["effect_refs"] == ["verified-operation"]
+    assert "1 条操作已核验" in result["summary"]
+
+
+async def test_locked_pi_raw_protocol_preserves_committed_wait_without_correction(compaction_session):
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    async def host(operation, payload):
+        if operation == "ask":
+            return {"accepted": True, "waiting": True}
+        return await original_call(operation, payload)
+    gateway.call = host
+    gateway.revoke()
+    gateway.bind({**state.claim, "session_id": state.runner.session_path.stem,
+        "context": {**state.claim["context"], "source_input_ids": ["fixture-input"]}})
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        message = {"role": "assistant", "content": '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>',
+            "tool_calls": [{"id": "committed-wait", "type": "function", "function": {"name": "task_ask_user",
+                "arguments": json.dumps({"text": "请提供仓库全名。", "checkpoint": "等待仓库身份"})}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("Ask for the repository", keep_alive=True)
+    assert result.status == "failed" and not result.agent_authored
+    assert result.limitations == ("model_tool_protocol_recovery_failed",)
+    assert "等待条件已保存" in result.summary
+    assert len(requests) == 1
+    assert gateway.waiting and gateway.wait_kind == "waiting_input"
+    assert gateway.session_receipt["kind"] == "run_yielded"
+    assert gateway.session_receipt["input_ids"] == ["fixture-input"]
+    assert state.runner.quiescent_verified
+
+
+@pytest.mark.parametrize("prior_status", [None, "completed", "failed"])
+async def test_locked_pi_protocol_correction_budget_exhaustion_is_durable_partial(compaction_session, prior_status):
+    state = compaction_session
+    gateway = state.gateway
+    gateway.claim["session_id"] = state.runner.session_path.stem
+    if prior_status:
+        gateway.outcome = {"status": prior_status, "unresolved_items": ["previous-limitation"]}
+    original_call = gateway.call
+    business_calls = 0
+    async def host(operation, payload):
+        nonlocal business_calls
+        if operation == "reserve-budget" and payload["kind"] == "business":
+            business_calls += 1
+            if business_calls == 2:
+                raise ValueError("model budget exhausted")
+        return await original_call(operation, payload)
+    gateway.call = host
+    requests = []
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        content = ("已有执行记录已保留，任务完成状态尚未确认。" if len(requests) > 1 else
+            '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>')
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text=completion_sse({"role": "assistant", "content": content}))
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("Continue with the remaining execution budget", keep_alive=True)
+    expected_status = "failed" if prior_status == "failed" else "partial"
+    assert result.status == expected_status
+    assert gateway.session_receipt["result"]["status"] == expected_status
+    assert result.summary == gateway.session_receipt["result"]["summary"]
+    assert ("model_tool_protocol_recovery_budget_exhausted" in result.limitations) == (expected_status == "partial")
+    if prior_status:
+        assert "previous-limitation" in result.limitations
+    assert len(requests) == 2 and business_calls == 2
+    assert requests[1]["tool_choice"] == "none"
+    assert state.runner.quiescent_verified and gateway.revoked
 
 
 @pytest.mark.parametrize("notification", [False, True])

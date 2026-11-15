@@ -130,6 +130,7 @@ class PiRunnerAdapter:
         self.input_lock = asyncio.Lock()
         self.accepting_input = False
         self.steered_inputs = set()
+        self.protocol_recovery_attempted = False
         self.actual_session_id = None
         self.event_sink = None
         self.public_event_sink = None
@@ -330,12 +331,26 @@ class PiRunnerAdapter:
         tail = self.safe_diagnostic(self.stderr_tail.decode("utf-8", errors="replace"))[-2000:]
         return "Runner failed. " + detail + ("\nRunner stderr\n" + tail if tail else "")
 
+    def protocol_failure_result(self):
+        observations = tuple(self.gateway.observations)
+        effects = tuple(self.gateway.effects)
+        verified = sum(state == "verified" for state in self.gateway.effects.values())
+        continuation = ("本轮等待条件已保存，将按等待条件恢复。" if self.gateway.waiting
+            else "自动纠正未能完成本轮处理。")
+        return TaskResult(status="failed", agent_authored=False,
+            summary=("模型返回了无效的工具调用格式。" + continuation +
+                f"已保留 {len(observations)} 条工具观察和 {len(effects)} 条操作记录，"
+                f"其中 {verified} 条操作已核验。任务完成状态尚未确认。"),
+            observation_refs=observations, effect_refs=effects,
+            limitations=("model_tool_protocol_recovery_failed",))
+
     async def run(self, goal, *, keep_alive=False):
         if self.busy:
             raise RuntimeError("session already has an active run")
         self.busy, self.quiescent_verified = True, False
         self.accepting_input = True
         self.steered_inputs = set()
+        self.protocol_recovery_attempted = False
         self.public_answers = PublicAnswerEvents(self.safe_diagnostic, public_prefix=self.public_text_prefix)
         text, error, settled = "", None, False
         try:
@@ -375,7 +390,28 @@ class PiRunnerAdapter:
                             error = None
                         if error or (not text.strip() and not (self.gateway and self.gateway.waiting)):
                             raise RuntimeError(error or "no final assistant output")
-                        validate_user_facing_text(text)
+                        protocol_failed = False
+                        try:
+                            validate_user_facing_text(text)
+                        except ValueError:
+                            if not self.gateway:
+                                raise
+                            if self.gateway.waiting:
+                                self.protocol_recovery_attempted = True
+                                protocol_failed = True
+                            elif not self.protocol_recovery_attempted:
+                                self.protocol_recovery_attempted = True
+                                self.gateway.protocol_recovery_attempted = True
+                                if self.gateway.business_exhausted:
+                                    self.gateway.budget_exhausted()
+                                self.gateway.session_receipt = None
+                                prompt_id = await self.command("prompt", message=json.dumps({
+                                    "binding_id": self.gateway.binding, "protocol_recovery": True}))
+                                self.accepting_input = True
+                                text, error = "", None
+                                continue
+                            else:
+                                protocol_failed = True
                         if self.gateway:
                             state = await self.rpc("get_state")
                             if state.get("isStreaming") or state.get("isCompacting"):
@@ -399,6 +435,9 @@ class PiRunnerAdapter:
                                 raise RuntimeError("pi settled without a durable session receipt")
                             self.last_receipt = self.gateway.session_receipt
                         self.quiescent_verified, settled = True, True
+                        if protocol_failed:
+                            return self.protocol_failure_result()
+                        self.protocol_recovery_attempted = False
                         outcome = (self.gateway.outcome or {}) if self.gateway else {}
                         status = (self.gateway.claim.get("notification_status") if self.gateway else None) or outcome.get("status", "completed")
                         if self.gateway and self.gateway.waiting:

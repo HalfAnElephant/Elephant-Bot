@@ -49,11 +49,11 @@ class LeaderRuntime:
             raise PermissionError("stale Leader attempt")
         return run, json.loads(run["request_json"])
 
-    def authorize(self, conn, run, claim, payload, *, ending_wait=False):
+    def authorize(self, conn, run, claim, payload, *, ending_wait=False, reporting_failure=False):
         event = InboundEvent.model_validate_json(claim["event_json"])
         if not self.core.allowed(event) or run["state"] != "RUNNING":
             raise PermissionError("Leader input is no longer authorized")
-        if not claim.get("memory_mutation") and claim["deadline"] <= self.clock.now().isoformat():
+        if not claim.get("memory_mutation") and not reporting_failure and claim["deadline"] <= self.clock.now().isoformat():
             raise PermissionError("Leader turn deadline expired")
         root_id = claim.get("target_root_task_id")
         if root_id:
@@ -302,8 +302,8 @@ class LeaderRuntime:
                         state="STOPPED" if stopped else "IDLE", last_used=now))
         self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
             origin_kind="chat", origin_id=origin_id,
-            reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-            anchor_message_id=event.platform_message_id, purpose="result",
+            reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
+            anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True,
             defer_reply=claim.get("public_answer_events", False))
         if claim.get("public_answer_events"):
             self.core.stream_delivery.hold_result(conn, run["id"], "chat", origin_id)
@@ -352,7 +352,9 @@ class LeaderRuntime:
             if mutation:
                 self.authorize(conn, run, claim, {"action": "task.execute"})
                 return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
-            if not result.agent_authored and not mutation:
+            protocol_failure = (not result.agent_authored and result.status == "failed" and run["role"] == "leader"
+                and "model_tool_protocol_recovery_failed" in result.limitations)
+            if not result.agent_authored and not protocol_failure:
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
                 source_values = {"claimed_attempt_id": None}
                 conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
@@ -371,7 +373,8 @@ class LeaderRuntime:
                 return {"state": "FINISHED"}
             pending_wait = conn.execute(select(waits).where(waits.c.run_id == run_id,
                 waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
-            self.authorize(conn, run, claim, {"action": "task.execute"}, ending_wait=bool(pending_wait))
+            self.authorize(conn, run, claim, {"action": "task.execute"}, ending_wait=bool(pending_wait),
+                reporting_failure=protocol_failure)
             target = None
             if claim.get("target_root_task_id"):
                 target = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
@@ -379,6 +382,21 @@ class LeaderRuntime:
                 conn.execute(update(waits).where(waits.c.id == pending_wait["id"]).values(state="WAITING"))
                 conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(state="WAITING_INPUT"))
                 self.service._wake(conn, target["id"], pending_wait["id"])
+            elif protocol_failure and target is not None:
+                if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
+                    condition = json.loads(target["wait_json"])
+                    condition["yielded"] = True
+                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
+                        state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                elif claim["purpose"] == "finalize" and self.service.graph.finalize_ready(conn, target):
+                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
+                        state="BLOCKED", result_json=result.model_dump_json()))
+                    self.service.graph.event(conn, target, "finished", {"state": "BLOCKED"}, attempt_id=run_id,
+                        event_id="final:" + target["id"] + ":" + str(target["goal_revision"]))
+                notice = self.service._notification(conn, target, run_id, result.summary, "result", "important",
+                    "protocol-failure:" + run_id, defer_reply=claim.get("public_answer_events", False))
+                if claim.get("public_answer_events"):
+                    self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif claim["purpose"] in {"finalize", "attention"} and result.agent_authored and (
                     claim["purpose"] == "finalize"
                     or target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id
@@ -445,8 +463,8 @@ class LeaderRuntime:
                 event = InboundEvent.model_validate_json(claim["event_json"])
                 self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
                     origin_kind="chat", origin_id="turn:" + claim["session_id"] + ":" + claim["source_ids"][0],
-                    reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-                    anchor_message_id=event.platform_message_id, purpose="result",
+                    reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
+                    anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True,
                     defer_reply=claim.get("public_answer_events", False))
                 if claim.get("public_answer_events"):
                     self.core.stream_delivery.hold_result(conn, run_id, "chat",

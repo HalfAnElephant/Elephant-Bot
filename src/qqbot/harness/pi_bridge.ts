@@ -59,6 +59,9 @@ export default function (pi: ExtensionAPI) {
     if (!envelope.binding_id) return {action: "handled"};
     const current = await request("/binding", {binding_id: envelope.binding_id}, process.env.QQBOT_PROCESS_TOKEN!);
     if (binding && current.generation === binding.generation) {
+      if (envelope.protocol_recovery === true && !waiting) {
+        return {action: "transform", text: "上一轮把工具调用协议写进了正文，宿主未执行其中的调用。请依据当前会话中已持久化的真实工具回执继续处理。已完成的操作应复用回执，需要核实时先读回。需要调用工具时使用原生结构化工具接口，完成后给出自然语言汇报。"};
+      }
       if (!envelope.input_id || typeof envelope.text !== "string" || waiting) return {action: "handled"};
       if (deliveredInputs.has(envelope.input_id)) return {action: "handled"};
       activeInputs.add(envelope.input_id);
