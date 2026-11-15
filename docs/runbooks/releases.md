@@ -50,7 +50,7 @@ Files 曾返回可用 `file_id`，但向模型提供空正文。验收在 `files
 
 ## 发布版本
 
-1. 在同一 PR 中修改 `pyproject.toml` 的 `project.version` 并执行 `uv lock`，提交锁文件。
+1. 首次发布使用 `pyproject.toml` 已声明的初始版本。后续发布在同一 PR 中更新 `project.version` 并执行 `uv lock`，提交锁文件。
 2. 等待检查成功并合入 `main`。
 3. 从最新 `main` 创建与项目版本完全对应的标签并推送。首次版本可使用以下命令。
 
@@ -70,7 +70,7 @@ git push origin v0.1.0
 
 ## 手动部署
 
-从对应 Release 下载 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`。
+从 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 的对应版本下载 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`。
 源码包包含迁移、默认人格、前端资源、锁文件、runner 脚本及部署模板。
 wheel 和 sdist 一并提供，生产安装使用完整源码包中的运行目录。
 
@@ -86,6 +86,7 @@ npm ci --ignore-scripts
 ```
 
 随后按 [Ubuntu 部署说明](../../deploy/README.md) 准备 root 控制的 `/opt/qqbot`。
+使用发布包时，将已校验的 `elephant-bot` 完整目录放到 `/opt/qqbot`，继续部署说明中的依赖安装、账号、配置和服务初始化步骤。
 更新已有主机前核对任务状态并备份，沿用主机上的配置、凭据和运行数据。
 部署后检查 `/health/live`、`/health/ready`、Worker 状态和目标主机隔离。
 QQ 收发与真实供应商调用按各自环境验收。

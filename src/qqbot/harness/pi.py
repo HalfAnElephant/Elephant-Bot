@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 from pathlib import Path
 from uuid import uuid4
@@ -182,6 +183,9 @@ class PiRunnerAdapter:
             "PI_TELEMETRY": "0",
             "LANG": "C.UTF-8",
         }
+        node = shutil.which("node")
+        if node:
+            env["PATH"] = str(Path(node).absolute().parent) + os.pathsep + env["PATH"]
         limits = self.gateway.claim.get("context", {}).get("limits", {}) if self.gateway else {}
         compaction = compaction_settings(self.gateway.model_window, limits,
             max(self.gateway.provider.output_tokens or 0, self.gateway.provider.compaction_output)) if self.gateway else {

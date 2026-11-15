@@ -2,11 +2,20 @@
 # Administrative provisioning only; the daemon never receives sudo/systemd-run privileges.
 set -eu
 
-if [ "$(id -u)" -ne 0 ] || [ "$#" -ne 1 ]; then
-    echo "Usage as root: $0 EXISTING_SERVICE_ACCOUNT" >&2
+if [ "$(id -u)" -ne 0 ] || [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    echo "Usage as root: $0 EXISTING_SERVICE_ACCOUNT [SERVICE_UNIT]" >&2
     exit 2
 fi
 account=$1
+# Keep the installed service name used by existing one-argument calls.
+service_unit=${2-elephant-bot.service}
+case "$service_unit" in
+    *[!a-zA-Z0-9_.@-]*|.service)
+        echo "SERVICE_UNIT must be a service name without a path." >&2
+        exit 2 ;;
+    *.service) ;;
+    *) echo "SERVICE_UNIT must end with .service." >&2; exit 2 ;;
+esac
 service_uid=$(id -u -- "$account")
 if [ "$service_uid" -eq 0 ]; then
     echo "Jobs must run under an ordinary service account." >&2
@@ -31,8 +40,8 @@ esac
 mkdir -p /etc/qqbot
 install -m 0644 /dev/null /etc/qqbot/jobs.env
 printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$service_uid" "$bus_address" > /etc/qqbot/jobs.env
-mkdir -p /etc/systemd/system/elephant-bot.service.d
+mkdir -p "/etc/systemd/system/$service_unit.d"
 printf '[Unit]\nRequires=user@%s.service\nAfter=user@%s.service\n[Service]\nBindReadOnlyPaths=/run/user/%s\n' \
-    "$service_uid" "$service_uid" "$service_uid" > /etc/systemd/system/elephant-bot.service.d/jobs.conf
+    "$service_uid" "$service_uid" "$service_uid" > "/etc/systemd/system/$service_unit.d/jobs.conf"
 systemctl daemon-reload
-echo "User manager provisioned for $account. Run the documented isolated Job acceptance before enabling tools."
+echo "User manager provisioned for $account and $service_unit. Run the documented isolated Job acceptance before enabling tools."

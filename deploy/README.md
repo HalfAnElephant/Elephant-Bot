@@ -11,29 +11,140 @@ backpressure, and individual tools and external waits retain their timeouts.
 Interrupted or blocked Workers preserve results for a Leader decision. A Leader
 takeover requires stopped related execution and reconciled external operations.
 
-Install the locked Python and npm packages under root-owned `/opt/qqbot`, with
-Python 3.13, Node, FFmpeg 6 or newer and the pinned Pi executable accessible to `qqbot`. The locked
-Python dependency `pilk-nogil` decodes QQ SILK voice messages in a bounded child process. Install
-`deploy/qqbot.service`, root-owned `scripts/elephant-daemon-stopped` at
-`/usr/local/libexec/elephant-daemon-stopped`, and create root-owned mode 0755
-`/var/lib/qqbot-daemon-stops`. The privileged stop helper writes to this root-owned directory. Keep `/var/lib/qqbot` owned by the daemon, mode 0700.
+## Fresh Ubuntu installation
 
-Configure `/etc/qqbot/core.yaml` and private `/etc/qqbot/core.env`. Enable the
-model endpoint and its key, official QQ AppID/secret and verified owner OpenID,
-and OpenViking's scoped user credentials. Do not infer an official identity from
-an old OneBot numeric QQ ID. Preserve explicitly configured personal preferences
-in `owner.preferences`. Remove retired social, Judge, expression and persona
-settings before validating. `configs/example.yaml` and `configs/schema.json` are
-the configuration contract. Configure `orchestration.pi_executable` with an absolute
-path in production. Run `qqbot validate` before starting the service.
+The commands below prepare a new Ubuntu 24.04 or newer machine using systemd,
+cgroup v2 and an amd64 or arm64 CPU. Run them in a root shell opened with `sudo -i`.
+They install the daemon as `qqbot.service`. Existing installations use the upgrade
+section below and retain their current configuration and service name.
 
-Run the normal Alembic migration before service startup. It bridges the recognized
+Install the system dependencies, uv and Node.js. The pinned Pi package requires
+Node.js 22.19.0 or newer. Python 3.13 will be installed by uv in a root-owned,
+service-readable directory. FFmpeg 6 or newer and the locked `pilk-nogil` Python
+dependency decode QQ voice messages.
+
+```sh
+set -eu
+apt-get update
+apt-get install -y ca-certificates curl git xz-utils openssl sudo \
+  bubblewrap ffmpeg dbus-user-session
+install_tmp=$(mktemp -d)
+curl -fLsS https://astral.sh/uv/0.11.8/install.sh -o "$install_tmp/uv-install.sh"
+env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh "$install_tmp/uv-install.sh"
+
+case "$(dpkg --print-architecture)" in
+  amd64) node_arch=x64 ;;
+  arm64) node_arch=arm64 ;;
+  *) echo 'Use a Node.js installation matching this CPU' >&2; exit 1 ;;
+esac
+node_archive="node-v22.19.0-linux-$node_arch.tar.xz"
+curl -fLsS "https://nodejs.org/dist/v22.19.0/$node_archive" -o "$install_tmp/$node_archive"
+curl -fLsS https://nodejs.org/dist/v22.19.0/SHASUMS256.txt -o "$install_tmp/SHASUMS256.txt"
+(cd "$install_tmp" && sha256sum --check --ignore-missing SHASUMS256.txt)
+install -d -o root -g root -m 0755 /opt/qqbot-node
+tar -xJf "$install_tmp/$node_archive" -C /opt/qqbot-node --strip-components=1 --no-same-owner
+ln -sf /opt/qqbot-node/bin/node /usr/local/bin/node
+ln -sf /opt/qqbot-node/bin/npm /usr/local/bin/npm
+rm -rf "$install_tmp"
+```
+
+Create the service account, both groups used by the service unit, and its writable
+data directory. Install the locked packages and stop helper from the checkout.
+
+```sh
+getent group qqbot-worker >/dev/null || groupadd --system qqbot-worker
+getent group qqbot >/dev/null || groupadd --system qqbot
+getent passwd qqbot >/dev/null || useradd --system --gid qqbot-worker \
+  --home-dir /var/lib/qqbot --shell /usr/sbin/nologin qqbot
+install -d -o qqbot -g qqbot-worker -m 0700 /var/lib/qqbot
+install -d -o root -g qqbot-worker -m 0750 /etc/qqbot
+install -d -o root -g root -m 0755 /var/lib/qqbot-daemon-stops /usr/local/libexec /opt/qqbot-python
+
+git clone https://github.com/HalfAnElephant/Elephant-Bot.git /opt/qqbot
+cd /opt/qqbot
+UV_PYTHON_INSTALL_DIR=/opt/qqbot-python uv sync --locked --no-dev --no-editable --python 3.13
+npm ci --ignore-scripts
+chmod -R go+rX /opt/qqbot /opt/qqbot-python /opt/qqbot-node
+install -o root -g root -m 0755 scripts/elephant-daemon-stopped /usr/local/libexec/elephant-daemon-stopped
+install -o root -g root -m 0644 deploy/qqbot.service /etc/systemd/system/qqbot.service
+if [ ! -e /etc/qqbot/core.yaml ]; then
+  install -o root -g qqbot-worker -m 0640 configs/production.yaml /etc/qqbot/core.yaml
+fi
+if [ ! -e /etc/qqbot/core.env ]; then
+  install -o root -g root -m 0600 .env.example /etc/qqbot/core.env
+fi
+deploy/elephant-job-user-setup.sh qqbot qqbot.service
+```
+
+The production template puts SQLite, Pi sessions, workspaces and other durable
+state under `/var/lib/qqbot`. Its internal socket is `/run/qqbot/internal.sock`,
+whose directory systemd creates for the daemon. Pi uses the absolute executable
+`/opt/qqbot/node_modules/.bin/pi`. Keep `/opt/qqbot` and the Python installation
+root-owned and readable by the service account.
+
+Edit `/etc/qqbot/core.yaml` and `/etc/qqbot/core.env` before starting. Set
+`model.endpoint` to the complete Chat Completions URL, `model.model` to your
+provider's model name, and `model.context_window` to its supported context size.
+Set `QQBOT_MODEL_KEY` in the environment file. Generate an admin token with
+`openssl rand -hex 32` and a credential encryption key with
+`openssl rand -base64 32`, then put those values in `QQBOT_ADMIN_TOKEN` and
+`QQBOT_CREDENTIAL_KEY`. Generate the encryption key once and keep it with the
+instance's secrets across restarts and upgrades. The existing-key dependency and
+QQ scan steps are described in [QQ onboarding](../docs/operations/qq-onboarding.md).
+
+The empty adapter list allows initial setup through the protected admin page.
+After startup, use QQ onboarding to save credentials, verify the owner and connect
+the official adapter. Long-term memory is optional and requires its own
+[OpenViking configuration](../docs/openviking.md). Explicit personal
+preferences belong in `owner.preferences`. The production template and
+`configs/schema.json` describe the runtime configuration.
+
+Validate and migrate with the daemon's identity and environment, then start the
+service. The shell below reads the private environment file as root and passes
+the variables to the service-account processes.
+
+```sh
+cd /opt/qqbot
+set -a
+. /etc/qqbot/core.env
+set +a
+runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot validate --config /etc/qqbot/core.yaml
+runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot doctor --config /etc/qqbot/core.yaml
+runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot migrate --config /etc/qqbot/core.yaml
+runuser -u qqbot -g qqbot-worker -- /opt/qqbot/node_modules/.bin/pi --version
+runuser -u qqbot -g qqbot-worker -- bwrap --unshare-all --ro-bind / / -- /usr/bin/true
+systemctl daemon-reload
+systemctl enable --now qqbot.service
+systemctl status qqbot.service --no-pager
+curl --fail http://127.0.0.1:8080/health/live
+curl --fail http://127.0.0.1:8080/health/ready
+```
+
+The server listens on loopback. On your own computer, run
+`ssh -L 8080:127.0.0.1:8080 USER@SERVER` and open
+`http://127.0.0.1:8080/admin` with the configured admin token. A failed service
+reports its startup error through `journalctl -u qqbot.service -n 100 --no-pager`.
+Complete an actual model request and QQ message exchange during acceptance.
+The bubblewrap probe must succeed as `qqbot` for sandbox Workers. A user-namespace
+denial requires the host's bubblewrap/AppArmor policy to permit this account's
+sandbox execution before using that mode.
+
+## Existing installations
+
+Drain and stop the current service before replacing its installed packages. Keep
+its service name, environment file, encryption key, database and runtime-config
+history. Use the existing configuration with the current schema and explicitly
+review the production template's paths when adopting it. Remove retired social,
+Judge, expression and persona settings before validating. Disable any retired
+Core and Worker units and start the daemon after validation and migration.
+
+The normal Alembic migration bridges the recognized
 experimental 0010 schema without modifying published revisions. `migrate(path,
 backup=False)` supports an explicitly authorized deployment without a database
-backup; the CLI otherwise keeps its existing pre-migration backup behavior. Drain
-and stop the previous services first. Preserve Inbox, Outbox UNKNOWN states,
-operation receipts and deletion barriers. Disable the old Core and Worker units;
-start only this daemon.
+backup. The CLI keeps its pre-migration backup behavior. Preserve Inbox, Outbox
+UNKNOWN states, operation receipts and deletion barriers. See the
+[release and deployment procedure](../docs/runbooks/releases.md) for the package
+and backup steps.
 
 The daemon service uses `KillMode=control-group`. Its privileged `ExecStopPost`
 helper checks the cgroup is empty and fsyncs a root-owned receipt bound to the
@@ -46,10 +157,13 @@ helper and receipt directory unwritable by the daemon.
 ## Persistent Jobs and execution isolation
 
 Provision the daemon account with root-only
-`deploy/elephant-job-user-setup.sh qqbot`. This enables its systemd user manager
+`deploy/elephant-job-user-setup.sh qqbot qqbot.service`. This enables its systemd user manager
 and linger, so Jobs survive daemon restarts. See
 [Job operations](../docs/operations/persistent-jobs.md) for receipts and acceptance.
 The setup script writes `/etc/qqbot/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes its `/run/user/UID` directory. Host execution uses the service account's existing filesystem permissions and does not grant sudo or root.
+The optional second argument selects the installed service unit. An existing
+`elephant-bot.service` installation can pass that name explicitly. One-argument
+calls retain the historical `elephant-bot.service` target.
 
 Install `bubblewrap` and validate user namespaces under the actual service account.
 `execution.leader_environment` defaults to `host`, and `execution.worker_environment`
@@ -75,7 +189,8 @@ calls the host gateway.
 
 For explicitly authorized full host administration, configure the daemon account
 with passwordless sudo and allow privilege elevation in the service. Use
-`systemctl edit elephant-bot.service` for an installed service with that name.
+`systemctl edit qqbot.service` for a new installation, or the actual unit name for
+an existing installation.
 
 ```ini
 [Service]
