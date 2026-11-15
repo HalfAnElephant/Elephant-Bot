@@ -73,6 +73,26 @@ use their existing controlled credential providers. Pi has no built-in tools,
 automatic skill scan, context-file injection or plugin mirror; its trusted extension
 calls the host gateway.
 
+For explicitly authorized full host administration, configure the daemon account
+with passwordless sudo and allow privilege elevation in the service. Use
+`systemctl edit elephant-bot.service` for an installed service with that name.
+
+```ini
+[Service]
+NoNewPrivileges=false
+```
+
+Use `visudo -f /etc/sudoers.d/qqbot-host-admin` to grant the account root access.
+
+```sudoers
+qqbot ALL=(root) NOPASSWD: ALL
+```
+
+Validate with `visudo -c`, reload systemd, and restart the daemon. Verify
+`sudo -n id -u` returns `0` through an actual host process and persistent Job.
+This grants root access to the Leader and host Workers running as `qqbot`.
+Sandbox execution enforces its workspace isolation and privilege restrictions.
+
 To use an existing local GitHub login, add service credentials:
 
 ```ini
@@ -89,6 +109,10 @@ and `Environment=ICLOUD_CALENDAR_CONFIG=%d/icloud-calendar.json`. A retired nume
 QQ identity does not authorize the official OpenID or host identity.
 
 ## Acceptance
+
+Console-created tasks expose progress, questions and results through
+`GET /api/v1/tasks/{public_id}`, including a bounded `notifications` list.
+`progress.delivery.required=false` identifies this internal result channel.
 
 Check readiness reports supervisor failures, actual provider calls, native Pi
 continuation, two concurrent task trees, cancellation and cgroup cleanup, daemon

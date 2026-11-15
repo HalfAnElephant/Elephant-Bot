@@ -10,7 +10,7 @@ daemon 的 Scheduler 装配 `JobRuntime` 和 `JobService`，RunGateway 通过同
 
 `job_key` 在同 task 内幂等，参数和作用域冻结。不同参数复用同 key 明确失败。dispatch intent 先落 SQLite `execution_jobs`（迁移 0019），再调用唯一 unit 名的 `systemd-run --user`。回执丢失或重启恢复只查询 unit，不重新启动已登记工作。不能确认的记录保持 UNKNOWN 并占容量，防止重复效果。Scheduler 在首次恢复 Job 状态后才准入新的模型任务，此后独立维护任务处理单位状态、过期、权限撤销、任务树取消和用户修订。它不占用模型轮次，也不等待原 run 的租约。
 
-Job 使用同一个 local execution world，并沿用任务已保存的 `environment`。sandbox 模式使用 bubblewrap 映射 workspace 到 `/workspace`，`cwd` 必须在其中。系统二进制只读，`/tmp`、`/proc`、`/dev` 隔离，网络关闭。host 模式在宿主机直接以服务账号执行，`cwd` 可以是宿主机绝对目录。两种模式均清空环境后设置 PATH/HOME/LANG，可额外传 LANG、LC_ALL、TZ，不继承 daemon 或 Pi 的凭据变量。实际模式包含在 Job 回执中。仍活跃或 UNKNOWN 的 Job 保留工作区写资格，TaskService.claim 会阻止其他 task 占用相同规范目录。普通任务恢复自己的 Job 时保持同一 task 和目录。
+Job 使用同一个 local execution world，并沿用任务已保存的 `environment`。sandbox 模式使用 bubblewrap 映射 workspace 到 `/workspace`，`cwd` 必须在其中。系统二进制只读，`/tmp`、`/proc`、`/dev` 隔离，网络关闭。host 模式在宿主机直接以服务账号执行，`cwd` 可以是宿主机绝对目录。host Job 单位设置 `NoNewPrivileges=no`，可按服务账号现有 sudoers 授权使用 `sudo -n` 执行管理员命令。实际提权范围由管理员配置的服务账号和 sudoers 决定，Job 的标准输入为 null。sandbox 单位保持 `NoNewPrivileges=yes`。两种模式均清空环境后设置 PATH/HOME/LANG，可额外传 LANG、LC_ALL、TZ，不继承 daemon 或 Pi 的凭据变量。实际模式包含在 Job 回执中。仍活跃或 UNKNOWN 的 Job 保留工作区写资格，TaskService.claim 会阻止其他 task 占用相同规范目录。普通任务恢复自己的 Job 时保持同一 task 和目录。
 
 systemd 单位使用 `ExitType=cgroup`、`KillMode=control-group`、`RemainAfterExit=yes`、有限 `RuntimeMaxSec` 和停止宽限。回读包含 unit、InvocationID、cgroup 和启动标识。不凭裸 PID 回收。成功退出还要确认 cgroup 已空，父进程退出但孩子仍运行不会报告完成。取消请求先持久保存，回执不明时重启仍继续核对。发现 InvocationID 改变会保留未核对状态。Task 及其后代的 Pi 与 Job 均确认停止后，取消状态才收敛为 CANCELLED。
 

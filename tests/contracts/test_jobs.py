@@ -265,12 +265,36 @@ async def test_real_provider_builds_controlled_unit_and_bwrap_command(tmp_path):
     command = commands[0]
     assert command[:2] == ('systemd-run', '--user')
     assert '--property=ExitType=cgroup' in command and '--property=KillMode=control-group' in command
+    assert '--property=NoNewPrivileges=yes' in command
     assert '--property=RuntimeMaxSec=60' in command and '--clearenv' in command
     assert '--die-with-parent' not in command
     bind = command.index('--bind')
     assert command[bind + 1:bind + 3] == (str(tmp_path), '/workspace')
     assert command[command.index('--chdir') + 1] == '/workspace/sub'
     assert command[-2:] == ('--', '/usr/bin/true')
+    assert not any('QQBOT_' in item or 'TOKEN=' in item for item in command)
+
+
+async def test_host_provider_allows_sudoers_elevation_in_controlled_unit(tmp_path):
+    commands = []
+    async def capture(argv):
+        commands.append(argv)
+        return 0, ''
+    provider = SystemdJobProvider(command=capture, platform='linux')
+    unit = 'elephant-job-' + 'c' * 32 + '.service'
+    host_request = JobStart(job_key='admin', argv=('/usr/bin/sudo', '-n', '/usr/bin/true'))
+    await provider.launch(unit=unit, description='host admin request', request=host_request,
+                          workspace=tmp_path, deadline_seconds=60, environment='host')
+    command = commands[0]
+    assert command[:2] == ('systemd-run', '--user')
+    assert '--property=NoNewPrivileges=no' in command
+    assert '--property=NoNewPrivileges=yes' not in command
+    assert '--property=ExitType=cgroup' in command and '--property=KillMode=control-group' in command
+    assert '--property=RuntimeMaxSec=60' in command and '--property=StandardInput=null' in command
+    assert '--working-directory=' + str(tmp_path.resolve()) in command
+    assert command[command.index('/usr/bin/env') + 1:command.index('/usr/bin/env') + 3] == ('-i', '--')
+    assert command[-3:] == host_request.argv
+    assert '--bind' not in command and '--clearenv' not in command
     assert not any('QQBOT_' in item or 'TOKEN=' in item for item in command)
 
 

@@ -288,10 +288,10 @@ def router(core, authenticate):
             visible = []
             for row in rows:
                 try:
-                    task_row(row["id"])
+                    _, access = task_row(row["id"])
                 except HTTPException:
                     continue
-                visible.append({**core.tasks.graph.status(c, row), "created_at": row["created_at"]})
+                visible.append({**core.tasks.graph.status(c, row, access=access), "created_at": row["created_at"]})
             return visible
 
     @router.get("/api/v1/tasks/{public_id}")
@@ -301,7 +301,7 @@ def router(core, authenticate):
         try:
             core.tasks.get(row["public_id"], access)
             with core.db.engine.connect() as c:
-                result = core.tasks.graph.status(c, row)
+                result = core.tasks.graph.status(c, row, access=access)
         except (KeyError, PermissionError) as error:
             raise HTTPException(404, "task unavailable") from error
         with core.db.engine.connect() as c:

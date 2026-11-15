@@ -288,6 +288,17 @@ class TaskGraph:
             .where(agent_events.c.task_id == task["id"]).order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
         delivery = conn.execute(select(notifications.c.state).where(notifications.c.task_id == task["id"],
             notifications.c.purpose == "result")).scalars().all()
+        notices = []
+        if not stale_task and task["goal_revision"] == root["goal_revision"]:
+            notices = [dict(row) for row in conn.execute(select(
+                notifications.c.id, notifications.c.sequence, notifications.c.purpose,
+                notifications.c.importance, func.substr(notifications.c.body, 1, 10000).label("body"),
+                notifications.c.created_at, notifications.c.state)
+                .outerjoin(runs, runs.c.id == notifications.c.run_id).where(
+                    notifications.c.task_id == task["id"], notifications.c.state.not_in(["CANCELLED", "SUPERSEDED"]),
+                    or_(notifications.c.run_id.is_(None), runs.c.basis_goal_revision == root["goal_revision"]))
+                .order_by(notifications.c.sequence.desc()).limit(20)).mappings()]
+            notices.reverse()
         from .progress import task_progress
         projection = task_progress(self, conn, task, root, access=access, stale=stale_task,
                                    delivery_states=delivery)
@@ -298,7 +309,7 @@ class TaskGraph:
             "goal_revision": task["goal_revision"], "children": child_status,
             "result": json.loads(task["result_json"]) if task["result_json"] and not stale_task else None,
             "last_progress": dict(last) if last and not replanning and not revoked_handoff else None,
-            "delivery_states": delivery, **({"context_revoked": True} if revoked_handoff else {})}
+            "notifications": notices, "delivery_states": delivery, **({"context_revoked": True} if revoked_handoff else {})}
 
     def check_authority(self, conn, task, payload):
         if not task["root_task_id"]:

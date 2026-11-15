@@ -113,7 +113,8 @@ class SystemdJobProvider:
                    '--property=RemainAfterExit=yes', '--property=ExitType=cgroup', '--property=KillMode=control-group',
                    '--property=TimeoutStopSec=' + str(self.cancellation_grace_seconds),
                    '--property=RuntimeMaxSec=' + str(deadline_seconds),
-                   '--property=NoNewPrivileges=yes', '--property=StandardInput=null',
+                   '--property=NoNewPrivileges=' + ('no' if environment == 'host' else 'yes'),
+                   '--property=StandardInput=null',
                    '--property=StandardOutput=journal', '--property=StandardError=inherit',
                    '--property=UMask=0077']
         if environment == 'host':

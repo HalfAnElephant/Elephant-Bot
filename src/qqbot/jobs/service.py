@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, insert, select, update
 
 from qqbot.domain.execution import ExecutionPlan, RunBudget, TaskGoal, WaitCondition
-from qqbot.domain.messages import AccessContext, InboundEvent
+from qqbot.domain.messages import AccessContext, InboundEvent, Surface
 from qqbot.domain.tasks import TaskResult, validate_user_facing_text
 from qqbot.harness.launcher import verify_stop_marker
 from qqbot.jobs.streaming import PUBLIC_KINDS, validate_public_event
@@ -806,6 +806,14 @@ class TaskService:
             state = self._queue_failure_notice(c, task, result, state)
             return {"state": state}
 
+    @staticmethod
+    def _internal_reply(task):
+        event = InboundEvent.model_validate_json(task["event_json"])
+        return (event.conversation.adapter_instance_id == "admin_api"
+            and event.conversation.bot_identity_id == "host" and event.conversation.surface == Surface.PRIVATE
+            and event.principal.adapter_instance_id == "admin_api" and event.principal.identity_namespace == "admin_api"
+            and event.principal.remote_user_id == event.conversation.remote_conversation_id)
+
     def _notification(self, c, task, run_id, text, purpose, importance, notification_id, *, defer_reply=False):
         if not isinstance(text, str) or not text.strip() or len(text) > 10000:
             raise ValueError("notification text must contain 1..10000 characters")
@@ -816,13 +824,17 @@ class TaskService:
             if old["task_id"] != task["id"] or old["body"] != text or old["purpose"] != purpose:
                 raise ValueError("notification identity conflict")
             return {"accepted": True, "notification_id": notification_id}
+        internal = self._internal_reply(task)
         if purpose == "progress":
-            duplicate = c.execute(select(notifications.c.id).join(runs, runs.c.id == notifications.c.run_id)
-                .join(outbox_table, outbox_table.c.origin_id == notifications.c.id).where(
-                    notifications.c.task_id == task["id"], notifications.c.purpose == purpose,
-                    notifications.c.body == text, runs.c.basis_goal_revision == task["goal_revision"],
+            query = select(notifications.c.id).join(runs, runs.c.id == notifications.c.run_id).where(
+                notifications.c.task_id == task["id"], notifications.c.purpose == purpose,
+                notifications.c.body == text, runs.c.basis_goal_revision == task["goal_revision"],
+                notifications.c.state.not_in(["CANCELLED", "SUPERSEDED"]))
+            if not internal:
+                query = query.join(outbox_table, outbox_table.c.origin_id == notifications.c.id).where(
                     outbox_table.c.state.in_(["PENDING", "RETRYABLE", "SENDING", "SENT", "UNKNOWN",
-                                              "WAITING_FOR_TRIGGER", "STREAM_PENDING"])).limit(1)).scalar_one_or_none()
+                                              "WAITING_FOR_TRIGGER", "STREAM_PENDING"]))
+            duplicate = c.execute(query.limit(1)).scalar_one_or_none()
             if duplicate:
                 return {"accepted": True, "notification_id": duplicate}
         seq = (c.execute(select(func.max(notifications.c.sequence)).where(
@@ -836,6 +848,8 @@ class TaskService:
         now = self.clock.now()
         c.execute(insert(notifications).values(id=notification_id, task_id=task["id"], run_id=run_id,
             sequence=seq, purpose=purpose, importance=importance, body=text, created_at=now.isoformat(), state="ACCEPTED"))
+        if internal:
+            return {"accepted": True, "notification_id": notification_id}
         event = InboundEvent.model_validate_json(task["event_json"])
         streaming = bool(purpose == "result" and run_id and c.execute(select(stream_runs.c.run_id).where(
             stream_runs.c.run_id == run_id)).first())
@@ -1379,6 +1393,10 @@ class TaskService:
             return {"accepted": True, "budget": values}
 
     def _notification_due(self, c, task):
+        if self._internal_reply(task):
+            latest = c.execute(select(func.max(notifications.c.created_at)).where(
+                notifications.c.task_id == task["id"], notifications.c.state == "ACCEPTED")).scalar_one()
+            return (self.clock.now() - datetime.fromisoformat(latest or task["created_at"])).total_seconds() >= 90
         latest = c.execute(select(func.max(outbox_table.c.sent_at)).where(outbox_table.c.origin_id.in_(
             select(notifications.c.id).where(notifications.c.task_id == task["id"])))).scalar_one()
         return (self.clock.now() - datetime.fromisoformat(latest or task["created_at"])).total_seconds() >= 90

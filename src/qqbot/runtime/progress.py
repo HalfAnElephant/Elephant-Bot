@@ -48,11 +48,12 @@ def task_progress(graph, conn, task, root, *, access, stale, delivery_states):
     budget = {"used": json.loads(task["budget_json"]),
               "limits": None if task["kind"] == "goal" else json.loads(task["plan_json"]).get("budget", {}),
               "scope": "tree_usage" if task["kind"] == "goal" else "task"}
+    delivery_required = not graph.service._internal_reply(task)
     progress = {"verified_completed": [], "current_action": None, "waiting_for": [],
                 "last_effective_progress_at": None, "budget": budget,
-                "delivery": {"states": delivery_states, "execution_complete": task["state"] in {
+                "delivery": {"required": delivery_required, "states": delivery_states, "execution_complete": task["state"] in {
                     "SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"},
-                    "delivered": "SENT" in delivery_states}}
+                    "delivered": delivery_required and "SENT" in delivery_states}}
     if stale:
         progress["current_action"] = "正在根据最新授权和资料重新核实"
         return progress
@@ -141,7 +142,10 @@ def task_progress(graph, conn, task, root, *, access, stale, delivery_states):
     active = conn.execute(select(runs.c.id).where(runs.c.task_id.in_(ids), runs.c.slot_reserved == 1)).first()
     settled_children = [row for row in visible if row["id"] != task["id"]]
     if task["state"] == "SUCCEEDED":
-        action = "目标已完成，结果已送达" if progress["delivery"]["delivered"] else "目标已完成，等待结果投递"
+        if not delivery_required:
+            action = "目标已完成，结果可在控制台查看"
+        else:
+            action = "目标已完成，结果已送达" if progress["delivery"]["delivered"] else "目标已完成，等待结果投递"
     elif task["state"] in {"PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}:
         action = {"PARTIAL": "已完成一部分", "BLOCKED": "暂时无法继续", "FAILED": "这次未能完成",
                   "CANCELLED": "已取消", "EXPIRED": "已超时停止"}[task["state"]]
