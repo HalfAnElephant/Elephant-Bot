@@ -404,14 +404,48 @@ async def test_locked_pi_raw_protocol_preserves_committed_wait_without_correctio
                 "arguments": json.dumps({"text": "请提供仓库全名。", "checkpoint": "等待仓库身份"})}}]}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
     gateway.provider.transport = httpx.MockTransport(upstream)
+    public = []
+    state.runner.public_event_sink = public.append
     result = await state.runner.run("Ask for the repository", keep_alive=True)
-    assert result.status == "failed" and not result.agent_authored
-    assert result.limitations == ("model_tool_protocol_recovery_failed",)
-    assert "等待条件已保存" in result.summary
+    assert result.status == "waiting_input"
+    assert "model_tool_protocol_recovery_failed" not in result.limitations
+    assert "DSML" not in result.summary
+    assert not any("DSML" in event.get("text", "") for event in public)
     assert len(requests) == 1
     assert gateway.waiting and gateway.wait_kind == "waiting_input"
     assert gateway.session_receipt["kind"] == "run_yielded"
     assert gateway.session_receipt["input_ids"] == ["fixture-input"]
+    assert state.runner.quiescent_verified
+
+
+async def test_runner_malformed_settled_text_preserves_existing_wait_boundary(compaction_session, monkeypatch):
+    state = compaction_session
+    gateway = state.gateway
+    gateway.claim["session_id"] = state.runner.session_path.stem
+    gateway.waiting, gateway.wait_kind = True, "waiting_input"
+    gateway.session_receipt = {"kind": "run_yielded", "tools_paired": True, "inflight": 0}
+    prompts = []
+    original_command = state.runner.command
+    async def command(kind, **values):
+        if kind == "prompt":
+            prompts.append(values)
+            await state.runner.queue.put({"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="capability_invoke">unexecuted call</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'}]}})
+            await state.runner.queue.put({"type": "agent_settled"})
+            return "wait-prompt"
+        if kind == "get_state":
+            await state.runner.queue.put({"type": "response", "id": "wait-state", "success": True,
+                "data": {"sessionId": state.runner.session_path.stem, "sessionFile": str(state.runner.session_path)}})
+            return "wait-state"
+        return await original_command(kind, **values)
+    monkeypatch.setattr(state.runner, "command", command)
+    result = await state.runner.run("Resume the existing wait", keep_alive=True)
+    assert result.status == "failed" and not result.agent_authored
+    assert result.limitations == ("model_tool_protocol_recovery_failed",)
+    assert "等待条件已保存" in result.summary
+    assert len(prompts) == 1 and "protocol_recovery" not in json.loads(prompts[0]["message"])
+    assert gateway.waiting and gateway.wait_kind == "waiting_input"
+    assert gateway.session_receipt["kind"] == "run_yielded"
     assert state.runner.quiescent_verified
 
 
