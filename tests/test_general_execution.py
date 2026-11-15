@@ -110,7 +110,8 @@ def test_image_only_task_input_is_persisted_and_delivered_once(execution, questi
     first = service.add_input(task["public_id"], stored, access, "", "q" if question_reply else None)
     assert service.add_input(task["public_id"], stored, access, "", "q" if question_reply else None) == first
     expected_image = {"source": stored.event_id, "message_id": stored.platform_message_id,
-                      "url": "https://gchat.qpic.cn/image"}
+                      "url": "https://gchat.qpic.cn/image", "filename": None, "mime_type": None,
+                      "size": None, "attachment_ref": "unresolved:fixture"}
     with service.db.engine.connect() as c:
         context = json.loads(c.execute(select(tasks.c.context_json)).scalar_one())
     assert context["images"] == [expected_image]
@@ -123,7 +124,7 @@ def test_image_only_task_input_is_persisted_and_delivered_once(execution, questi
         assert continuation["continuation"]["inputs"] == [{"id": first["input_id"], "text": "[图片]"}]
     else:
         assert service.take_inputs(*identity) == [{"id": first["input_id"], "text": "[图片]",
-                                                  "images": [expected_image]}]
+            "images": [expected_image], "source_manifest": context["source_manifest"]}]
 
 
 def test_task_input_images_use_persisted_source_and_text_only_shape(execution):

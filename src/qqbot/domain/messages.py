@@ -70,6 +70,7 @@ class MediaSegment(DTO):
     source_url: str | None = Field(default=None, max_length=8192)
     filename: str | None = Field(default=None, max_length=255)
     transcript: str | None = Field(default=None, max_length=10000)
+    quoted: bool = Field(default=False, exclude_if=lambda value: not value)
     mime_type: str | None = None
     size: int | None = Field(default=None, ge=0)
     sha256: str | None = None

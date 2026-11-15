@@ -19,7 +19,7 @@ skills:
   enabled: true
   group_enabled: false
   provider: hermes
-  owner_storage_root: /var/lib/elephant/owners/personal-owner
+  owner_storage_root: /var/lib/elephant/owners
   background_review_enabled: true
   hermes:
     write_approval: false
@@ -28,7 +28,9 @@ skills:
     creation_nudge_interval: 10
 ```
 
-`create_dir` 若配置，必须与宿主绑定的 owner 根目录下的 `skills` 一致。其他 owner 的发现根、锁、ledger 和备份互相隔离。运行时不扫描外部 profile、项目或插件技能，不执行技能内联 shell，不自动安装依赖；脚本只能通过正常受控执行工具运行。Pi 原生技能扫描应关闭，统一使用这三个工具。
+`create_dir` 若配置，必须与宿主绑定的 owner 根目录下的 `skills` 一致。个人范围沿用该目录；项目范围由宿主固定为同一 owner 的 `projects/<workspace_id>/skills`，同项目的 Leader、Worker 和复盘共用锁、ledger 与备份。不同项目互不发现，个人技能保持在个人范围。项目必须已配置，群使用项目还需显式群权限。运行时不扫描外部 profile 或插件技能，不执行技能内联 shell，不自动安装依赖；脚本只能通过正常受控执行工具运行。Pi 原生技能扫描应关闭，统一使用这三个工具。
+
+管理员可通过 `GET /api/v1/skills` 和 `/read?name=...` 查看目录、正文与附件，`/history?skill=...` 读取变更记录，`/export` 下载标准文件 ZIP。各入口接受 `workspace_id`，默认 `personal`。`POST /api/v1/skills/rollback` 接受 `entry_id`、`expected_latest_id` 和 `workspace_id`；宿主在同一技能锁内比较最新变更，过时请求返回冲突。回退沿用上游安全快照和回退语义，操作记录进入管理员审计。
 
 学习钩子为 `AgentLearningState`：按实际 Agent Session 保存 `dataclasses.asdict(state)`，每次真实工具循环调用 `note_iteration()`，工具调用时调用 `note_tool(name)`；`skill_manage` 重置计数。回合持久完成后调用 `finish_turn(final_response=..., interrupted=..., is_review=...)`，满足上游阈值和条件时返回一次受限复盘请求。宿主将其持久排入统一准入队列，使用相同 Harness，工具仅限三个技能工具，预算最多 16 轮。复盘读取快照，不回写原 Session；完成后调用 `finish_review()`。它不持有原对话写者，也不递归触发学习。
 

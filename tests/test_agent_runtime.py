@@ -339,7 +339,7 @@ async def test_review_tools_share_read_marks_enforce_origin_and_cannot_recurse(r
     adapter = HermesSkills(runtime.path / "owner")
     content = "---\nname: sample\ndescription: Test reusable workflow\n---\nRead the source.\n"
     assert adapter.skill_manage({"operations": [{"action": "create", "name": "sample", "content": content}]})["success"]
-    runtime.service.skills_provider = lambda _access: adapter
+    runtime.service.skills_provider = lambda _access, **_: adapter
     identity = (review["run_id"], review["fencing_token"], "leader")
     patch = {"operation": "skill_manage", "arguments": {"operations": [{"action": "patch", "name": "sample",
         "old_string": "Read the source.", "new_string": "Read and verify the source."}]}}
@@ -403,7 +403,7 @@ async def test_foreground_skill_manage_resets_the_source_counter(runtime):
     identity = (claim["run_id"], claim["fencing_token"], "leader")
     await reserve_iteration(runtime, claim, "model-1")
     adapter = HermesSkills(runtime.path / "owner")
-    runtime.service.skills_provider = lambda _access: adapter
+    runtime.service.skills_provider = lambda _access, **_: adapter
     payload = {"call_id": "create-skill", "operation": "skill_manage", "arguments": {"operations": [{
         "action": "create", "name": "sample", "content": "---\nname: sample\ndescription: Test workflow\n---\nRead first.\n"}]}}
     result = await runtime.leader.invoke("skills", identity, payload)

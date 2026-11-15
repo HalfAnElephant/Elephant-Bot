@@ -1,11 +1,11 @@
-"""Run-owned Linux namespace processes. No task-lease handoff is implied."""
+"""Run-owned processes in the task's persisted execution environment."""
 import asyncio
 import shutil
 import sys
 from pathlib import Path
 from uuid import uuid4
 
-from .subprocesses import start_process, stop_process
+from .subprocesses import HOST_LAUNCH, create_host_cgroup, start_process, stop_process
 from .types import Action, Capability
 
 
@@ -22,7 +22,11 @@ class ProcessService:
         return record
 
     async def start(self, arguments, context):
-        if sys.platform != "linux" or not shutil.which(self.executable):
+        environment = getattr(context, "environment", "sandbox")
+        if environment not in {"sandbox", "host"}:
+            raise ValueError("unknown process execution environment")
+        sandbox = environment == "sandbox"
+        if sandbox and (sys.platform != "linux" or not shutil.which(self.executable)):
             raise RuntimeError("isolated process execution requires Linux bubblewrap")
         argv = arguments["argv"]
         if not isinstance(argv, list) or not argv or any(not isinstance(a, str) or "\x00" in a for a in argv):
@@ -36,23 +40,36 @@ class ProcessService:
         workspace = Path(context.workspace).resolve(strict=True)
         if workspace.is_symlink() or not workspace.is_dir():
             raise ValueError("workspace must be a directory")
-        command = [self.executable, "--unshare-all", "--die-with-parent", "--new-session",
-                   "--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
-                   "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8"]
-        for directory in ("/usr", "/bin", "/lib", "/lib64"):
-            if Path(directory).exists():
-                command.extend(["--ro-bind", directory, directory])
-        command.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-                        "--bind", str(workspace), "/workspace", "--chdir", "/workspace", "--", *argv])
+        cwd = arguments.get("cwd", ".")
+        if not isinstance(cwd, str) or not cwd or "\x00" in cwd:
+            raise ValueError("process cwd must be a directory path")
+        directory = (workspace / cwd).resolve(strict=True)
+        if not directory.is_dir() or sandbox and not directory.is_relative_to(workspace):
+            raise ValueError("process cwd escapes its workspace")
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()), "LANG": "C.UTF-8"}
+        command = list(argv)
+        group = None
+        if sandbox:
+            command = self._sandbox_command(workspace, directory, argv)
+            env = {}
         async with self.lock:
             if sum(not record["cleanup_done"] for record in self.processes.values()) >= self.max_processes:
                 raise ValueError("process capacity exhausted")
-            process = await start_process(*command, env={}, start_new_session=True,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            if not sandbox:
+                group = create_host_cgroup()
+                command = [sys.executable, "-I", "-S", "-c", HOST_LAUNCH, str(group / "cgroup.procs"), *argv]
             reference = "process:" + str(uuid4())
-            record = {"owner": (context.task_id, context.run_id, context.fence), "process": process,
-                      "output": bytearray(), "total_bytes": 0, "expired": False, "cleanup_done": False}
+            record = {"owner": (context.task_id, context.run_id, context.fence), "process": None,
+                      "output": bytearray(), "total_bytes": 0, "expired": False, "cleanup_done": False,
+                      "cgroup": group}
             self.processes[reference] = record
+            try:
+                process = await start_process(*command, cgroup=group, env=env, cwd=directory, start_new_session=True,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            except BaseException:
+                await self._cleanup(record)
+                raise
+            record["process"] = process
         async def supervise():
             async def drain():
                 while chunk := await process.stdout.read(65536):
@@ -78,11 +95,23 @@ class ProcessService:
             finally:
                 await self._cleanup(record)
         record["supervisor"] = asyncio.create_task(supervise())
-        return {"process_ref": reference, "pid": process.pid, "running": True}
+        return {"process_ref": reference, "pid": process.pid, "running": True, "environment": environment}
+
+    def _sandbox_command(self, workspace, directory, argv):
+        command = [self.executable, "--unshare-all", "--die-with-parent", "--new-session",
+                   "--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+                   "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C.UTF-8"]
+        for system_directory in ("/usr", "/bin", "/lib", "/lib64"):
+            if Path(system_directory).exists():
+                command.extend(["--ro-bind", system_directory, system_directory])
+        command.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                        "--bind", str(workspace), "/workspace", "--chdir",
+                        str(Path("/workspace") / directory.relative_to(workspace)), "--", *argv])
+        return command
 
     async def _cleanup(self, record):
         try:
-            await stop_process(record["process"])
+            await stop_process(record["process"], cgroup=record["cgroup"])
         except asyncio.CancelledError:
             record["cleanup_done"] = True
             raise
@@ -146,11 +175,11 @@ class ProcessService:
             effect = "write" if name in {"start", "terminate"} else "read"
             properties = {"argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                           "stdin": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1,
-                          "maximum": 1800}} if name == "start" else {
+                          "maximum": 1800}, "cwd": {"type": "string"}} if name == "start" else {
                           "process_ref": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
                           "limit": {"type": "integer", "minimum": 1, "maximum": 65536},
                           "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30}}
-            registry.register(Capability("process." + name, "Isolated run-owned workspace process " + name,
+            registry.register(Capability("process." + name, "Run-owned process " + name + " in the assigned sandbox or host environment",
                 {"type": "object", "properties": properties, "required": ["argv" if name == "start" else "process_ref"],
                  "additionalProperties": False}, timeout_seconds=35), getattr(self, name),
                 lambda a, c, n=name, e=effect: Action("workspace.process." + n, ("workspace:" + c.workspace,), e))

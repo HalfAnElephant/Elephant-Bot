@@ -19,6 +19,8 @@ from qqbot.admin.api import ADMIN_HTML
 from qqbot.admin.api import router as admin_router
 from qqbot.admin.qq_delivery import router as qq_delivery_router
 from qqbot.admin.qq_onboarding import install_qq_onboarding
+from qqbot.admin.schedules import build_schedule_router
+from qqbot.admin.skills import build_skills_router
 from qqbot.cli import migrate
 from qqbot.clock import Clock
 from qqbot.configuration import ConfigurationStore
@@ -151,6 +153,8 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
             raise HTTPException(401, "administrator authentication required")
 
     app.include_router(admin_router(core, admin))
+    app.include_router(build_schedule_router(core, admin))
+    app.include_router(build_skills_router(core, admin))
     interaction_store = InteractionStore(db, clock)
     app.state.qq_interactions = interaction_store
 
@@ -244,9 +248,14 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
                 select(func.count()).select_from(inbox).where(inbox.c.state == "PENDING")
             ).scalar_one()
             delivery_states = c.execute(select(outbox.c.state, func.count()).group_by(outbox.c.state)).all()
+        from qqbot.runtime.metrics import runtime_snapshot
+
+        background = background_health()
+        runtime = await asyncio.to_thread(runtime_snapshot, core, background)
         return {
+            **runtime,
             "inbox_pending": pending,
-            "background": background_health(),
+            "background": background,
             "deliveries": dict(delivery_states),
             "model_configured": bool(core.settings.model.endpoint and core.settings.model.model
                                      and os.environ.get(core.settings.model.api_key_env)),

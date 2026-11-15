@@ -23,6 +23,10 @@ memory:
 
 把凭据放在进程环境中，不要写入配置或版本库。群聊或项目工作区需单独配置匹配的作用域和身份绑定。运行当前数据库迁移以创建记忆操作与删除屏障账本；无需安装 OpenViking Python SDK。
 
+`/项目` 列出已配置项目，`/项目 <workspace_id>` 选择对应的独立 Dialogue。项目名来自宿主 workspace 或当前 owner 的记忆绑定，`personal` 为个人范围。Dialogue、Task、原生来源和定时安排持久保存项目身份，切换当前焦点后仍按原项目同步和恢复。群项目访问同时要求显式的当前群 `workspace.use`／`project:<workspace_id>` 授权和 `group_enabled`。
+
+管理任务入口会在同一事务保存原始结构化请求、来源 hash、项目与记忆 epoch，再创建任务树。更正后返工从这个已认证来源保留独立的产物路径和验收检查；原来源撤销时停止自动重规划。
+
 ## 数据流与边界
 
 - [KnowledgeRuntime](../src/qqbot/runtime/knowledge.py) 从授权的 Pi 原生 Session 增量导出来源事件。空白、疑似密钥、工具输出、转述、摘要、技能复盘及缺少来源证据的 verified fact 不提交提炼。

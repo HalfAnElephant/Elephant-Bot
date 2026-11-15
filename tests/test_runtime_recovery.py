@@ -242,7 +242,7 @@ async def test_maintenance_recovery_leaves_event_loop_available():
 
 
 @pytest.mark.parametrize("operation", ["maintenance", "cleanup_artifacts"])
-async def test_background_file_work_finishes_before_shutdown(operation, monkeypatch):
+async def test_background_file_work_finishes_before_shutdown(operation, monkeypatch, tmp_path):
     from qqbot.runtime.core import Core
 
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -256,10 +256,12 @@ async def test_background_file_work_finishes_before_shutdown(operation, monkeypa
         pass
 
     monkeypatch.setattr("qqbot.harness.artifacts.cleanup_artifacts", blocking)
+    monkeypatch.setattr("qqbot.harness.attachments.cleanup_attachment_cache", blocking)
     core = SimpleNamespace(recovery=SimpleNamespace(recover_workers=blocking),
         leader=SimpleNamespace(recover=lambda: None),
         knowledge=SimpleNamespace(recover_mutations=lambda: None, sync=sync),
-        db=None, tasks=SimpleNamespace(archive_root=None), clock=SimpleNamespace(now=lambda: None))
+        db=SimpleNamespace(path=tmp_path / "state.db"), tasks=SimpleNamespace(archive_root=None),
+        clock=SimpleNamespace(now=lambda: None))
     work = asyncio.create_task(getattr(Core, operation)(core))
     try:
         assert await asyncio.to_thread(entered.wait, 2)

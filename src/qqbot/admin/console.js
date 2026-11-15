@@ -220,7 +220,7 @@ if (typeof document !== 'undefined') (() => {
   const labels = {
     deployment_id: '部署标识', database: '数据库路径', adapters: 'QQ 官方接入', admin_token_env: '管理员令牌变量', internal_token_env: '内部令牌变量', model: '模型', source_url: '源码地址', send_budget_per_minute: '每分钟发送预算', timezone: '时区', tasks_enabled: '启用后台任务', interactive_execution_enabled: '启用交互执行', permissions: '初始权限策略', execution: '执行与资源预算', orchestration: 'Leader 与 Worker 调度', owner: '个人助手', context: '上下文', internal_socket: '内部通信 Socket', memory: 'OpenViking 记忆', skills: 'Hermes 技能',
     instance_id: '接入实例标识', kind: '类型', bot_id: '机器人账号标识', secret_env: '接入密钥变量', credential_ref: '凭据引用', credential_store_dir: '凭据目录', app_id: '应用 ID', allowed_groups: '兼容群列表', allowed_users: '兼容用户列表', admin_users: '管理员角色列表', full_mode_enabled: '启用全量消息权限', full_mode_verified: '已验证全量消息', proactive_verified: '已验证主动消息', reply_window_seconds: '回复窗口（秒）', max_replies: '最多回复数', signature_max_age_seconds: '签名最大时效（秒）', api_base: 'API 地址', token_url: '令牌地址',
-    endpoint: '请求地址', api_key_env: 'API 密钥变量', timeout_seconds: '超时（秒）', context_window: '模型上下文窗口', max_active: '最大活跃执行数', sustained_limit: '旧兼容值（不参与调度）', foreground_wait_ms: '前台等待（毫秒）', notify_before_tools: '操作前告知用户', interactive_budget: '交互任务预算', budget: '后台任务预算', warm_max: '常驻进程上限', warm_idle_max: '空闲进程上限', warm_ttl_seconds: '空闲保留（秒）',
+    endpoint: '请求地址', api_key_env: 'API 密钥变量', timeout_seconds: '超时（秒）', context_window: '模型上下文窗口', max_active: '最大活跃执行数', sustained_limit: '旧兼容值（不参与调度）', foreground_wait_ms: '前台等待（毫秒）', notify_before_tools: '操作前告知用户', leader_environment: 'Leader 执行环境', worker_environment: 'Worker 默认执行环境', interactive_budget: '交互任务预算', budget: '后台任务预算', warm_max: '常驻进程上限', warm_idle_max: '空闲进程上限', warm_ttl_seconds: '空闲保留（秒）',
     max_request_bytes: '最大请求字节数', max_tokens: '上下文软上限', keep_recent_tokens: '近期消息保留 Token', compaction_output_tokens: '压缩输出预算', recent_messages: '近期消息条数', topic_idle_seconds: '话题空闲超时（秒）', version: '版本',
     id: '标识', preferences: '个人偏好', qq_bindings: 'QQ 官方身份绑定', user_openid: '用户 OpenID', verified_at: '验证时间',
     preset: '预设', default_effect: '默认行为', rules: '权限规则', enabled: '启用', priority: '优先级', subject: '主体范围', actions: '操作匹配', resources: '资源匹配', effect: '行为', adapter_instance_id: '接入实例 ID', bot_identity_id: '机器人身份 ID', identity_namespace: '身份命名空间', group_id: '群 ID', user_id: '用户 ID',
@@ -238,6 +238,8 @@ if (typeof document !== 'undefined') (() => {
   };
   const helps = {
     notify_before_tools: '旧执行记录的兼容设置。Leader 根据实际过程自主决定接收确认和进度通知。',
+    leader_environment: 'host 使用宿主机环境，sandbox 使用工作区沙箱。新任务接受时保存所选环境。',
+    worker_environment: 'Leader 派发任务时可以选择 host 或 sandbox，省略时使用此默认值。',
     output_tokens_per_call: '勾选“暂不设置”时使用模型服务默认输出长度。填写数字可设置单次请求的输出 Token 上限。',
     adapters: '添加 QQ 官方机器人接入。账号、群号与用户 ID 均使用字符串。',
     permissions: '仅用作初始策略；数据库已有权限策略时，以“权限策略”页为准。',

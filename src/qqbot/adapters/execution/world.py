@@ -2,6 +2,25 @@
 from pathlib import Path
 
 
+def _publish_exclusive(directory, temporary, name):
+    import ctypes
+    import errno
+    import os
+    import sys
+
+    library = ctypes.CDLL(None, use_errno=True)
+    operation = getattr(library, "renameatx_np" if sys.platform == "darwin" else "renameat2", None)
+    if operation is None or sys.platform not in {"darwin", "linux"}:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    operation.restype = ctypes.c_int
+    # macOS RENAME_EXCL (sys/stdio.h) and Linux RENAME_NOREPLACE preserve an existing target.
+    flags = 4 if sys.platform == "darwin" else 1
+    if operation(directory, os.fsencode(temporary), directory, os.fsencode(name), flags):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), name)
+
+
 class LocalExecution:
     world_id = "local"
 
@@ -38,15 +57,33 @@ class LocalExecution:
     async def write_file(self, context, path, content):
         import asyncio
         import os
+        from uuid import uuid4
 
-        from qqbot.capabilities.gateway import workspace_file
+        from qqbot.capabilities.gateway import workspace_parent
 
         def write():
-            # Exclusive creation preserves an existing document if a write fails.
-            with os.fdopen(workspace_file(context, path, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as target:
-                target.write(content)
-                target.flush()
-                os.fsync(target.fileno())
+            directory, name = workspace_parent(context, path)
+            temporary = ".incoming-" + uuid4().hex
+            created = False
+            try:
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600, dir_fd=directory)
+                created = True
+                with os.fdopen(fd, "wb") as target:
+                    target.write(content)
+                    target.flush()
+                    os.fsync(target.fileno())
+                _publish_exclusive(directory, temporary, name)
+            finally:
+                try:
+                    if created:
+                        try:
+                            os.unlink(temporary, dir_fd=directory)
+                        except FileNotFoundError:
+                            pass
+                        os.fsync(directory)
+                finally:
+                    os.close(directory)
         writing = asyncio.create_task(asyncio.to_thread(write))
         try:
             await asyncio.shield(writing)

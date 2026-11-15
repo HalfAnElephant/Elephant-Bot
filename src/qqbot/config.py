@@ -95,6 +95,8 @@ class MemoryConfig(DTO):
 
 
 class ExecutionConfig(DTO):
+    leader_environment: Literal["sandbox", "host"] = "host"
+    worker_environment: Literal["sandbox", "host"] = "sandbox"
     notify_before_tools: bool = True
     max_active: int = Field(default=8, ge=0, deprecated=True,
         description="Legacy compatibility field; active Agent admission is unrestricted")

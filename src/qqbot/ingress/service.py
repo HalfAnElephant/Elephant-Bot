@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 from sqlalchemy import func, insert, select, update
 
 from qqbot.domain import InboundEvent
@@ -8,8 +10,8 @@ class Inbox:
     def __init__(self, db):
         self.db = db
 
-    def accept(self, event: InboundEvent) -> tuple[InboundEvent, bool]:
-        with self.db.transaction() as c:
+    def accept(self, event: InboundEvent, *, conn=None) -> tuple[InboundEvent, bool]:
+        with (nullcontext(conn) if conn is not None else self.db.transaction()) as c:
             existing = c.execute(select(inbox.c.event_json).where(inbox.c.id == event.event_id)).scalar()
             old_event = InboundEvent.model_validate_json(existing) if existing else None
             if old_event and (old_event.mentions_bot or not event.mentions_bot):

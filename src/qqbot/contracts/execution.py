@@ -13,6 +13,7 @@ class ExecutionCapabilities(DTO):
     persistent_jobs: bool = False
     daemon_restart_survival: bool = False
     process_tree_cancel: bool = False
+    environments: tuple[Literal['sandbox', 'host'], ...] = ('sandbox',)
     reason: str | None = None
 
 
@@ -23,6 +24,7 @@ class JobScope(DTO):
     workspace: str = Field(min_length=1, max_length=4096)
     expires_at: AwareDatetime | None = None
     world_id: str = 'local'
+    environment: Literal['sandbox', 'host'] = 'sandbox'
 
 
 class JobStart(DTO):
@@ -64,6 +66,7 @@ class JobHandle(DTO):
     log_ref: str
     error: str | None = None
     daemon_restart_survival: bool
+    environment: Literal['sandbox', 'host'] = 'sandbox'
 
 
 class ExecutionPort(Protocol):

@@ -1,7 +1,7 @@
 [Unit]
 Description=Elephant isolated runner network
 After=network-online.target
-Before=qqbot-worker.service
+Before=qqbot.service
 
 [Service]
 Type=oneshot

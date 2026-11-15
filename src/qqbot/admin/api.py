@@ -44,6 +44,7 @@ class TaskRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=16000)
     success_checks: tuple[str, ...] = Field(default=(), max_length=20)
     requested_outputs: tuple[str, ...] = Field(default=(), max_length=20)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ConfigRequest(BaseModel):
@@ -270,7 +271,8 @@ def router(core, authenticate):
             raise HTTPException(409, "tasks disabled")
         try:
             return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
-                                           success_checks=body.success_checks, requested_outputs=body.requested_outputs)
+                success_checks=body.success_checks, requested_outputs=body.requested_outputs,
+                workspace_id=body.workspace_id)
         except (ValueError, PermissionError) as error:
             raise HTTPException(422, str(error)) from error
 
@@ -286,10 +288,10 @@ def router(core, authenticate):
             visible = []
             for row in rows:
                 try:
-                    task_row(row["id"])
+                    _, access = task_row(row["id"])
                 except HTTPException:
                     continue
-                visible.append({**core.tasks.graph.status(c, row), "created_at": row["created_at"]})
+                visible.append({**core.tasks.graph.status(c, row, access=access), "created_at": row["created_at"]})
             return visible
 
     @router.get("/api/v1/tasks/{public_id}")
@@ -299,7 +301,7 @@ def router(core, authenticate):
         try:
             core.tasks.get(row["public_id"], access)
             with core.db.engine.connect() as c:
-                result = core.tasks.graph.status(c, row)
+                result = core.tasks.graph.status(c, row, access=access)
         except (KeyError, PermissionError) as error:
             raise HTTPException(404, "task unavailable") from error
         with core.db.engine.connect() as c:

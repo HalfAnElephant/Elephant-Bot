@@ -40,6 +40,36 @@ class JobRuntime:
         return execution_workspace(self.data_root, task['id'], plan.get('workspace_ref'),
                                    binding.get('workspace_bindings', {}), strict=strict)
 
+    def _direct_source(self, conn, task_id):
+        source = conn.execute(select(runs.c.request_json).where(runs.c.role == 'leader',
+            runs.c.task_id.is_(None), func.json_extract(runs.c.request_json, '$.task_id') == task_id)
+            .order_by(runs.c.session_generation).limit(1)).scalar_one_or_none()
+        claim = json.loads(source) if source else None
+        if not claim or claim.get('purpose') != 'user' or claim.get('target_root_task_id'):
+            raise PermissionError('Job has no original direct Leader source')
+        return claim
+
+    def _direct_scope(self, claim, operation):
+        event = InboundEvent.model_validate_json(claim['event_json'])
+        owner = self.core.sessions.owner(event)
+        if not owner or claim['context'].get('owner_id') != owner or not self.core.allowed(event):
+            raise PermissionError('Persistent Job requires the verified Leader owner')
+        access = self.core.sessions.access_for_claim(claim)
+        validator = getattr(self.core, 'validate_context', None)
+        if validator and not validator(access, claim['context']):
+            raise PermissionError('Persistent Job source context is no longer authorized')
+        plan, binding = claim['plan'], claim.get('binding', {})
+        if binding.get('execution_world', 'local') != 'local':
+            raise PermissionError('Persistent Jobs require the Leader local execution world')
+        workspace = execution_workspace(self.data_root, claim['task_id'], plan.get('workspace_ref'),
+            binding.get('workspace_bindings', {}), strict=operation in {'start', 'prepare'})
+        action = 'workspace.job.' + ('start' if operation == 'prepare' else
+                                     'inspect' if operation == 'lookup' else operation)
+        for resource in ('workspace:' + str(workspace), 'task:' + claim['task_id']):
+            self.task_service.permissions.require(access, action, resource)
+        return JobScope(owner_id=owner, task_id=claim['task_id'], root_task_id=claim['task_id'],
+            workspace=str(workspace), environment=plan.get('environment', 'host'))
+
     def _authorized(self, identity, operation):
         if operation not in {'start', 'prepare', 'inspect', 'lookup', 'cancel'}:
             raise ValueError('Unknown host Job operation')
@@ -47,8 +77,17 @@ class JobRuntime:
         with self.db.engine.connect() as conn:
             run = conn.execute(select(runs).where(runs.c.id == run_id)).mappings().first()
             if (not run or run['worker'] != worker or run['fencing'] != fence
-                    or run['role'] not in {'worker', 'leader'} or not run['task_id']):
+                    or run['role'] not in {'worker', 'leader'}):
                 raise PermissionError('Job operation belongs to another Worker attempt')
+            if run['role'] == 'leader' and not run['task_id']:
+                claim = self._direct_source(conn, json.loads(run['request_json'])['task_id'])
+                scope = self._direct_scope(claim, operation)
+                if operation in {'start', 'prepare', 'cancel'}:
+                    current, current_claim = self.core.leader.lease(conn, *identity)
+                    self.core.leader.authorize(conn, current, current_claim, {
+                        'action': 'workspace.job.' + ('start' if operation == 'prepare' else operation),
+                        'resources': ['workspace:' + scope.workspace, 'task:' + scope.task_id], 'effect': 'write'})
+                return scope
             task = conn.execute(select(tasks).where(tasks.c.id == run['task_id'])).mappings().one()
             root = conn.execute(select(tasks).where(tasks.c.id == (task['root_task_id'] or task['id']))).mappings().one()
             if run['role'] == 'leader':
@@ -80,6 +119,7 @@ class JobRuntime:
             for resource in resources:
                 self.task_service.permissions.require(access, action, resource)
         return JobScope(owner_id=owner, task_id=task['id'], root_task_id=root['id'], workspace=str(workspace),
+                        environment=(claim['plan'] if run['role'] == 'leader' else json.loads(task['plan_json'])).get('environment', 'sandbox'),
                         expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline']))
                             if self.task_service._time_limited(task) and self.task_service._time_limited(root) else None)
 
@@ -88,9 +128,17 @@ class JobRuntime:
         if identity is None or self._authorized(identity, 'start') != scope:
             raise PermissionError('Job dispatch authority changed')
 
-    def _leader_inspection_scope(self, identity, job_id):
+    def _leader_inspection_scope(self, identity, job_id, operation="inspect"):
         with self.db.engine.connect() as conn:
-            run, claim = self.core.leader.lease(conn, *identity)
+            run = conn.execute(select(runs).where(runs.c.id == identity[0])).mappings().first()
+            if not run or run['worker'] != identity[2] or run['fencing'] != identity[1]:
+                raise PermissionError('Job inspection belongs to another Leader attempt')
+            active = run['slot_reserved'] and run['lease'] > self.core.clock.now().isoformat()
+            if active or operation != 'inspect' or run['task_id']:
+                run, claim = self.core.leader.lease(conn, *identity)
+            else:
+                claim = json.loads(run['request_json'])
+                self._direct_scope(claim, 'inspect')
             if run['role'] != 'leader':
                 raise PermissionError('Job inspection requires the current Leader')
             event = InboundEvent.model_validate_json(claim['event_json'])
@@ -98,6 +146,26 @@ class JobRuntime:
             job = self.jobs._row(job_id)
             task = conn.execute(select(tasks).where(tasks.c.id == job['task_id'])).mappings().first()
             root = conn.execute(select(tasks).where(tasks.c.id == job['root_task_id'])).mappings().first()
+            if not task and not root:
+                source_claim = self._direct_source(conn, job['task_id'])
+                source = InboundEvent.model_validate_json(source_claim['event_json'])
+                if (not owner or job['owner_id'] != owner or claim['purpose'] != 'user'
+                        or claim.get('target_root_task_id') or source.principal != event.principal
+                        or source.conversation != event.conversation):
+                    raise PermissionError('Job inspection requires the same owner, requester and conversation')
+                scope = self._direct_scope(source_claim, operation)
+                if scope.owner_id != owner or scope.workspace != job['workspace'] or scope.root_task_id != job['root_task_id']:
+                    raise PermissionError('Job source does not match its original Leader scope')
+                authorization = {'action': 'workspace.job.' + operation,
+                    'resources': ['workspace:' + scope.workspace, 'task:' + scope.task_id],
+                    'effect': 'write' if operation == 'cancel' else 'read'}
+                if active:
+                    self.core.leader.authorize(conn, run, claim, authorization)
+                else:
+                    access = self.core.sessions.access_for_claim(claim)
+                    for resource in authorization['resources']:
+                        self.task_service.permissions.require(access, authorization['action'], resource)
+                return scope
             if (not owner or not task or not root or job['owner_id'] != owner
                     or task['owner_id'] != owner or root['owner_id'] != owner
                     or (task['root_task_id'] or task['id']) != root['id']
@@ -118,6 +186,7 @@ class JobRuntime:
             self.core.leader.authorize(conn, run, claim, {'action': 'workspace.job.inspect',
                 'resources': ['workspace:' + str(workspace), 'task:' + task['id']], 'effect': 'read'})
         return JobScope(owner_id=owner, task_id=task['id'], root_task_id=root['id'], workspace=str(workspace),
+                        environment=json.loads(job['request_json']).get('environment', 'sandbox'),
                         expires_at=min(datetime.fromisoformat(task['deadline']), datetime.fromisoformat(root['deadline']))
                             if self.task_service._time_limited(task) and self.task_service._time_limited(root) else None)
 
@@ -125,15 +194,20 @@ class JobRuntime:
         if not isinstance(payload, dict) or set(payload) != {'operation', 'arguments'}:
             raise ValueError('Job operation and arguments are required')
         operation, arguments = payload['operation'], payload['arguments']
-        if operation == 'inspect':
+        if operation in {'inspect', 'cancel'}:
             with self.db.engine.connect() as conn:
-                role = conn.execute(select(runs.c.role).where(runs.c.id == identity[0])).scalar_one_or_none()
-            if role == 'leader':
+                source_run = conn.execute(select(runs).where(runs.c.id == identity[0])).mappings().first()
+                job_task = conn.execute(select(tasks.c.id).join(jobs, jobs.c.task_id == tasks.c.id)
+                    .where(jobs.c.id == arguments.get('job_id'))).first() if isinstance(arguments, dict) else None
+            active_leader = (source_run and source_run['role'] == 'leader' and source_run['slot_reserved']
+                             and source_run['lease'] > self.core.clock.now().isoformat())
+            if source_run and source_run['role'] == 'leader' and (
+                    operation == 'inspect' or active_leader and not source_run['task_id'] and not job_task):
                 if not isinstance(arguments, dict):
                     raise ValueError('Invalid Job inspection arguments')
-                scope = self._leader_inspection_scope(identity, arguments.get('job_id'))
-                result = await self.jobs.inspect(arguments, scope)
-                if self._leader_inspection_scope(identity, arguments.get('job_id')) != scope:
+                scope = self._leader_inspection_scope(identity, arguments.get('job_id'), operation)
+                result = await getattr(self.jobs, operation)(arguments, scope)
+                if self._leader_inspection_scope(identity, arguments.get('job_id'), operation) != scope:
                     raise PermissionError('Leader Job inspection authority changed')
                 return result
         scope = self._authorized(identity, operation)
@@ -149,12 +223,13 @@ class JobRuntime:
             request = JobStart.model_validate_json(json.dumps(arguments))
             _, cwd = self.jobs._workspace(scope, request.cwd)
             request = request.model_copy(update={'cwd': cwd})
-            digest = hashlib.sha256(json.dumps(request.model_dump(mode='json'), sort_keys=True,
-                                               separators=(',', ':')).encode()).hexdigest()
+            digest = hashlib.sha256(self.jobs.arguments(request, scope.environment).encode()).hexdigest()
             capabilities = await self.jobs.describe()
             if not capabilities.persistent_jobs or not capabilities.daemon_restart_survival:
                 raise ValueError(capabilities.reason or 'Persistent Job provider is unavailable')
-            return {'world_id': capabilities.world_id, 'job_key': request.job_key,
+            if scope.environment not in capabilities.environments:
+                raise ValueError('Job provider does not support the requested execution environment')
+            return {'world_id': capabilities.world_id, 'environment': scope.environment, 'job_key': request.job_key,
                     'arguments_hash': digest, 'workspace': scope.workspace,
                     'daemon_restart_survival': True}
         token = _call_identity.set(identity)
@@ -271,7 +346,16 @@ class JobRuntime:
         for row in rows:
             task, root = task_rows.get(row['task_id']), task_rows.get(row['root_task_id'])
             stop = self._requires_stop(task) or self._requires_stop(root)
-            if not stop:
+            if not task and not root:
+                try:
+                    with self.db.engine.connect() as conn:
+                        source_claim = self._direct_source(conn, row['task_id'])
+                    scope = self._direct_scope(source_claim, 'start')
+                    stop = (scope.owner_id != row['owner_id'] or scope.workspace != row['workspace']
+                            or scope.root_task_id != row['root_task_id'])
+                except (PermissionError, ValueError, KeyError):
+                    stop = True
+            elif not stop:
                 event = InboundEvent.model_validate_json(task['event_json'])
                 stop = self.core.sessions.owner(event) != row['owner_id'] or not self.core.allowed(event)
                 if not stop:
@@ -312,7 +396,8 @@ class JobRuntime:
     def reconcile_operations(self):
         """Trusted stored unit receipts can settle a late effect after its run lost its lease."""
         with self.db.transaction() as conn:
-            pending = conn.execute(select(operations, runs.c.task_id.label('source_task_id'))
+            pending = conn.execute(select(operations, runs.c.task_id.label('source_task_id'),
+                runs.c.request_json.label('source_claim_json'))
                 .join(runs, runs.c.id == operations.c.run_id)
                 .where(operations.c.state.in_({'DISPATCHED', 'UNKNOWN'}))).mappings().all()
             for operation in pending:
@@ -320,18 +405,33 @@ class JobRuntime:
                 if action.get('name') not in {'workspace.job.start', 'workspace.job.cancel'}:
                     continue
                 arguments = json.loads(operation['arguments_json'])
+                source_task_id = operation['source_task_id'] or json.loads(operation['source_claim_json']).get('task_id')
+                if not operation['source_task_id'] and source_task_id != operation['task_id']:
+                    continue
                 expected = arguments.get('_preconditions', {})
                 if action['name'] == 'workspace.job.start':
-                    query = select(jobs).where(jobs.c.task_id == operation['source_task_id'],
+                    query = select(jobs).where(jobs.c.task_id == source_task_id,
                         jobs.c.job_key == arguments.get('job_key'),
                         jobs.c.arguments_hash == expected.get('arguments_hash'),
                         jobs.c.workspace == expected.get('workspace'))
                 else:
-                    query = select(jobs).where(jobs.c.task_id == operation['source_task_id'],
-                                               jobs.c.id == arguments.get('job_id'))
+                    query = select(jobs).where(jobs.c.id == arguments.get('job_id'))
+                    if operation['source_task_id']:
+                        query = query.where(jobs.c.task_id == source_task_id)
                 job = conn.execute(query).mappings().first()
                 if not job or not job['identity_json']:
                     continue
+                if not operation['source_task_id'] and job['task_id'] != source_task_id:
+                    try:
+                        source_claim = json.loads(operation['source_claim_json'])
+                        target_claim = self._direct_source(conn, job['task_id'])
+                        source = InboundEvent.model_validate_json(source_claim['event_json'])
+                        target = InboundEvent.model_validate_json(target_claim['event_json'])
+                        if (source.principal != target.principal or source.conversation != target.conversation
+                                or source_claim['context'].get('owner_id') != job['owner_id']):
+                            continue
+                    except (PermissionError, ValueError, KeyError):
+                        continue
                 identity = json.loads(job['identity_json'])
                 if not identity.get('invocation_id') or job['error'] == 'unit_identity_mismatch':
                     continue

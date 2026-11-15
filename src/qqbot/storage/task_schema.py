@@ -107,6 +107,7 @@ inputs = Table(
     Column("task_id", String, nullable=False),
     Column("question_id", String),
     Column("source_id", String, nullable=False, unique=True),
+    Column("source_event_id", String),
     Column("text", Text, nullable=False),
     Column("state", String, nullable=False),
     Column("created_at", String, nullable=False),

@@ -8,6 +8,18 @@ from qqbot.storage.schema import outbox
 from qqbot.storage.task_schema import notifications, tasks
 
 
+def report_progress(r, worker, key, text):
+    identity = (worker["run_id"], worker["fencing_token"], "worker")
+    reference = "observation:" + key
+    r.core.tasks.observation(*identity, {"id": reference, "data": {"checked": key}, "sha256": "a" * 64,
+        "retrieved_at": r.core.clock.now().isoformat()})
+    arguments = {"phase": "checking", "public_text": text, "evidence_refs": [reference]}
+    result = r.core.tasks.task_operation(*identity, {"operation": "tasks.report_progress", "call_id": key,
+        "arguments": arguments})
+    assert result["accepted"]
+    return arguments
+
+
 def complete_progress(r, text):
     r.core.clock.advance(3)
     claim = r.core.sessions.claim("leader")
@@ -29,8 +41,11 @@ async def test_worker_progress_goes_through_leader_and_identical_updates_are_coa
     r.root()
     worker = r.core.tasks.claim("worker")
     for index in range(2):
-        r.core.tasks.notify(worker["run_id"], worker["fencing_token"], "worker",
-            {"text": "Worker 内部执行细节", "notification_id": "update-" + str(index)})
+        arguments = report_progress(r, worker, "update-" + str(index), "已核验阶段事实")
+        duplicate = r.core.tasks.task_operation(worker["run_id"], worker["fencing_token"], "worker", {
+            "operation": "tasks.report_progress", "call_id": "duplicate-" + str(index),
+            "arguments": {**arguments, "public_text": "相同事实的另一种表述"}})
+        assert duplicate == {"accepted": False, "reason": "coalesced"}
         with r.core.db.engine.connect() as conn:
             assert conn.execute(select(leader_inbox.c.id).where(leader_inbox.c.handled_at.is_(None))).first()
             assert len(conn.execute(select(outbox)).all()) == index
@@ -44,8 +59,7 @@ async def test_new_user_revision_invalidates_queued_progress(control_runtime):
     r = control_runtime
     r.root()
     worker = r.core.tasks.claim("worker")
-    r.core.tasks.notify(worker["run_id"], worker["fencing_token"], "worker",
-        {"text": "完成一部分", "notification_id": "old-update"})
+    report_progress(r, worker, "old-update", "完成一部分")
     complete_progress(r, "第一部分完成啦")
     envelope = OutboundEnvelope.model_validate_json(progress_rows(r)[0]["envelope_json"])
     assert r.core.pre_send(envelope)
@@ -55,8 +69,7 @@ async def test_new_user_revision_invalidates_queued_progress(control_runtime):
     r.core.tasks.session_receipt(worker["run_id"], worker["fencing_token"], "worker", {
         "kind": "input_consumed", "session_id": worker["session_id"], "run_id": worker["run_id"],
         "session_revision": "updated", "input_ids": [item["id"] for item in pending]})
-    r.core.tasks.notify(worker["run_id"], worker["fencing_token"], "worker",
-        {"text": "已按新要求完成一部分", "notification_id": "new-update"})
+    report_progress(r, worker, "new-update", "已按新要求完成一部分")
     complete_progress(r, "第一部分完成啦")
     assert len(progress_rows(r)) == 2
 
