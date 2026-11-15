@@ -375,3 +375,19 @@ def test_inactive_mail_draft_cannot_switch_account_or_trigger(timers):
     with pytest.raises(ValueError, match='require enabled=false'):
         service.update(runtime.event, item['id'], {'enabled': True}, expected_revision=1)
     assert service.get(runtime.event, item['id']) == item
+
+
+async def test_mail_filter_update_still_requires_stored_qq_source(control_runtime):
+    from qqbot.storage.schema import inbox
+
+    core = control_runtime.core
+    source, _ = core.inbox.accept(control_runtime.event('save a mail draft'))
+    item = core.schedules.create(source, {'goal': 'save summary', 'enabled': False,
+        'mail': {'account_id': 'demo'}}, idempotency_key='mail-update-source')
+    unstored = control_runtime.event('only weekly mail')
+    with pytest.raises(PermissionError, match='verified user message'):
+        core.schedules.update(unstored, item['id'], {'mail': {'account_id': 'demo', 'all': [
+            {'field': 'subject', 'op': 'contains', 'value': 'weekly'}]}}, expected_revision=1)
+    with core.db.engine.connect() as conn:
+        assert not conn.execute(select(inbox.c.id).where(inbox.c.id == unstored.event_id)).first()
+    assert core.schedules.get(source, item['id']) == item

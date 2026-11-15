@@ -13,7 +13,7 @@ from sqlalchemy import insert, select, update
 
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import GoalSpec
-from qqbot.domain.messages import TextSegment
+from qqbot.domain.messages import StructuredSegment, TextSegment
 from qqbot.runtime.mail_filters import MailTrigger
 from qqbot.runtime.mail_source import MailBinding, SyntheticMailSource
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues
@@ -273,6 +273,21 @@ class ScheduleService:
                 next_fire = None
             source_context = json.loads(row["source_context_json"])
             if set(changes) & {"goal", "success_checks", "requested_outputs", "mail"}:
+                admin_source = (event.principal.identity_namespace == "admin_api"
+                    and event.principal.key == row["principal"] and event.conversation.key == row["conversation"])
+                if "mail" in changes and admin_source:
+                    event = event.model_copy(update={"segments": (*event.segments, StructuredSegment(
+                        original_type="schedule_update", payload={"schedule_id": schedule_id,
+                            "expected_revision": expected_revision,
+                            "spec_sha256": hashlib.sha256(spec.model_dump_json().encode()).hexdigest()}))})
+                    event, _ = self.core.inbox.accept(event, conn=conn)
+                    conn.execute(update(inbox).where(inbox.c.id == event.event_id).values(state="DONE"))
+                    context = self.core.context_for(event, self.core.access(event),
+                        workspace_id=spec.workspace_id, conn=conn)
+                    conn.execute(insert(dialogue_inputs).values(id=event.event_id, dialogue_id=row["dialogue_id"],
+                        owner_id=row["owner_id"], event_json=event.model_dump_json(),
+                        context_json=json.dumps(context, ensure_ascii=False), state="HANDLED",
+                        created_at=now.isoformat(), handled_at=now.isoformat()))
                 stored_source = conn.execute(select(inbox.c.id).where(inbox.c.id == event.event_id,
                     inbox.c.conversation_id == row["conversation"])).first()
                 if (stored_source and event.principal.key == row["principal"]

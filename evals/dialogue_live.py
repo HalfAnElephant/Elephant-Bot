@@ -28,6 +28,7 @@ from qqbot.harness.gateway import RunGateway
 from qqbot.harness.pi import PiRunnerAdapter
 from qqbot.runtime.scheduler import RuntimeClient
 from qqbot.storage.agent_schema import dialogue_inputs
+from qqbot.storage.schedule_schema import schedules
 from qqbot.storage.schema import outbox
 from qqbot.storage.task_schema import tasks
 
@@ -170,6 +171,8 @@ class DialogueSuite:
 
     async def case(self, app, label, text):
         core = app.state.core
+        with core.db.engine.connect() as conn:
+            prior_schedules = {row.id for row in conn.execute(select(schedules.c.id))}
         case = {"label": label, "input": text, "started": time.perf_counter(), "received": [],
                 "claims": [], "business_calls": [], "business_completed_seconds": None, "runner_failed": False,
                 "passed": False}
@@ -205,6 +208,7 @@ class DialogueSuite:
                 case["first_reply_seconds"] = case["received"][0]["seconds"]
                 case["replies"] = [{"purpose": envelope.get("purpose"), "text": envelope["text"],
                                     "sent_at": row["sent_at"]} for row, envelope in sent]
+                final_text = "\n".join(item["text"] for item in finals)
                 worker_claims = [claim for claim in case["claims"] if claim["role"] == "worker"]
                 if label == "webpage":
                     require(roots and children, "webpage did not persist a delegated goal and child")
@@ -226,6 +230,45 @@ class DialogueSuite:
                         number = r"(?<!\d)18(?!\d)|十八" if label == "weather" else r"(?<!\d)17(?!\d)|十七"
                         require(re.search(number, "\n".join(item["text"] for item in finals)),
                                 "final reply omitted the observed fixture result")
+                    if label.startswith("mail_"):
+                        with core.db.engine.connect() as conn:
+                            saved = [dict(row) for row in conn.execute(select(schedules)).mappings()
+                                     if row["id"] not in prior_schedules]
+                        if label == "mail_draft":
+                            from qqbot.runtime.schedules import ScheduleSpec
+
+                            require(len(saved) == 1, "mail request did not persist exactly one draft")
+                            row = saved[0]
+                            spec = ScheduleSpec.model_validate_json(row["spec_json"])
+                            require(not row["enabled"] and not spec.enabled and row["next_fire_at"] is None,
+                                    "mail draft was enabled or scheduled as a timer")
+                            require(spec.mail and spec.mail.account_id == "weekly-demo" and spec.mail.folder == "INBOX",
+                                    "mail draft changed the user's account or folder")
+                            mail = {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"}
+                            require(spec.mail.matches(**mail), "mail draft does not match the requested weekly report")
+                            require(not spec.mail.matches(**{**mail, "sender_address": "office@elsewhere.org"})
+                                    and not spec.mail.matches(**{**mail, "subject": "通知"})
+                                    and not spec.mail.matches(**{**mail, "body": "旧稿"}),
+                                    "mail draft lost the requested sender, subject or exclusion")
+                            require(any(Path(path).name == "summary.md" for path in spec.requested_outputs)
+                                    and re.search(r"三|3", spec.goal),
+                                    "mail draft lost the requested output or summary requirement")
+                            require(re.search(r"未启用|禁用|停用|不.*扫描|不会.*扫描", final_text),
+                                    "mail draft reply omitted its inactive state")
+                            case["mail_draft"] = {"enabled": False, "account_id": spec.mail.account_id,
+                                                  "folder": spec.mail.folder, "spec": spec.model_dump(mode="json")}
+                        else:
+                            require(not saved, "mail clarification unexpectedly saved an invented configuration")
+                            if label == "mail_config":
+                                require(re.search(r"尚未|暂不|无法|还不能|未接入|不支持|不能|没有|暂未", final_text),
+                                        "mail setup reply did not explain unavailable account configuration")
+                                require(re.search(r"不要|勿|无需|不需要|别|切勿", final_text)
+                                        and re.search(r"密码|授权码|凭据", final_text),
+                                        "mail setup reply omitted credential protection")
+                            if label == "mail_missing_account":
+                                require(re.search(r"邮箱|账号|标识", final_text)
+                                        and re.search(r"[？?]|请.*提供|需要.*提供|告诉我|哪个", final_text),
+                                        "mail request did not ask for its missing account")
                 case["passed"] = True
                 return
         raise AssertionError("dialogue case timed out")
@@ -283,6 +326,9 @@ class DialogueSuite:
                     for label, text in cases or [("hello", "Hello～"), ("available", "在吗？"),
                                                 ("weather", "查看一下今天嘉定的天气"),
                                                 ("issues_legacy", "查看一下 yourtjhub 现在有多少 Issue"),
+                                                ("mail_config", "帮我添加并配置一个 iCloud 邮箱账号，让你以后能收发邮件。密码或应用专用密码应该怎么提交？"),
+                                                ("mail_missing_account", "另外帮我建一条收信规则，以后收到主题含周报的邮件就总结成三条。"),
+                                                ("mail_draft", "邮箱标识用 weekly-demo，文件夹 INBOX。收到发件域名等于 example.org、主题包含周报、正文不包含旧稿的邮件时，总结为三条，输出文件 summary.md。请保存为未启用的草稿，不扫描邮箱，也不发送邮件。"),
                                                 ("webpage", "帮我写一个网页，里面用 svg 描绘一个秦始皇骑北极熊的动画")]:
                         await self.case(app, label, text)
                     sessions = {claim["session_id"] for case in self.report["cases"] for claim in case["claims"]
