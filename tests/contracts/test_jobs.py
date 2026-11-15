@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -312,7 +313,10 @@ async def test_real_provider_parses_exit_and_filters_journal_by_invocation():
     receipt = await provider.inspect(unit)
     assert receipt.stopped and receipt.exit_code == 0 and receipt.invocation_id == 'c' * 32
     assert await provider.logs(unit, invocation_id=receipt.invocation_id) == 'final output'
-    assert '_SYSTEMD_INVOCATION_ID=' + 'c' * 32 in commands[-1]
+    assert commands[-1] == ('journalctl', '--no-pager', '--output=cat', '--lines=100', '--quiet',
+                            '_SYSTEMD_USER_UNIT=' + unit, '_SYSTEMD_OWNER_UID=' + str(os.getuid()),
+                            '_SYSTEMD_INVOCATION_ID=' + 'c' * 32)
+    assert not any(item.startswith('--user-unit') for item in commands[-1])
 
 
 async def test_capability_handshake_checks_systemd_version_and_cgroup_v2(tmp_path):

@@ -193,8 +193,10 @@ class SystemdJobProvider:
     async def logs(self, unit, *, invocation_id, lines=100):
         if not re.fullmatch(r"[a-f0-9]{32}", invocation_id or ""):
             raise RuntimeError("Job log invocation identity is unavailable")
-        code, output = await self.command(('journalctl', '--user-unit=' + self._unit(unit), '--no-pager',
+        code, output = await self.command(('journalctl', '--no-pager',
                                            '--output=cat', '--lines=' + str(lines), '--quiet',
+                                           '_SYSTEMD_USER_UNIT=' + self._unit(unit),
+                                           '_SYSTEMD_OWNER_UID=' + str(os.getuid()),
                                            '_SYSTEMD_INVOCATION_ID=' + invocation_id))
         if code != 0:
             raise RuntimeError('Job journal is unavailable')
