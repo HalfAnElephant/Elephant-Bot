@@ -140,6 +140,7 @@ export default function (pi: ExtensionAPI) {
         retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
         active_tasks: binding.active_tasks, workspace_id: binding.workspace_id,
         input_refs: binding.input_refs,
+        mail_input: binding.mail_input,
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
       details: {kind: "runtime"}}};
   });

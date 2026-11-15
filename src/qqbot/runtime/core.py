@@ -76,6 +76,9 @@ class Core:
         self.knowledge = KnowledgeRuntime(self)
         from .schedules import ScheduleService
         self.schedules = ScheduleService(self)
+        from qqbot.mail.runtime import MailRuntime
+        self.mail = MailRuntime(self)
+        self.tasks.action_authorizer = self.mail.authorize_context
         self.stopping = False
         self.supervisor = LoopSupervisor(lambda: self.stopping)
         from .recovery import RuntimeRecovery
@@ -244,6 +247,8 @@ class Core:
         workspace_id = self.sessions.validate_workspace(event, workspace_id or self.sessions.workspace_for(event, conn))
         request = {"workspace_id": workspace_id, "goal": goal_spec["goal"],
             "success_checks": goal_spec["success_checks"], "requested_outputs": goal_spec["requested_outputs"]}
+        if goal_spec["requested_actions"]:
+            request["requested_actions"] = goal_spec["requested_actions"]
         source_payload = {key: value for key, value in request.items() if key != "goal"}
         source_payload["goal_sha256"] = hashlib.sha256(request["goal"].encode()).hexdigest()
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -265,7 +270,8 @@ class Core:
                 memory_status="ready" if owner is None or owner["state"] == "READY" else "blocked", retrieved_data=[])
         return event, context
 
-    def enqueue_admin_task(self, goal, *, idempotency_key, success_checks=(), requested_outputs=(), workspace_id=None):
+    def enqueue_admin_task(self, goal, *, idempotency_key, success_checks=(), requested_outputs=(),
+                           requested_actions=(), workspace_id=None):
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("an Idempotency-Key of at most 200 characters is required")
         now = self.clock.now()
@@ -281,6 +287,7 @@ class Core:
             workspace_id = workspace_id or self.sessions.workspace_for(event, conn)
             dialogue = self.sessions.dialogue(conn, event, workspace_id=workspace_id)
             spec = {"goal": goal, "success_checks": list(success_checks), "requested_outputs": list(requested_outputs),
+                "requested_actions": list(requested_actions),
                 "children": [{"mode": "work", "goal": goal, "delegation_key": "primary",
                     "success_checks": list(success_checks), "requested_outputs": list(requested_outputs)}]}
             event, context = self.structured_goal_context(event, spec, workspace_id, conn)
@@ -374,13 +381,10 @@ class Core:
                     context = dict(context)
                     self.tasks.graph.merge_source_dependencies(context, history["task_sources"],
                         history.get("source_manifest", ()))
-            for task_id in context.get("task_sources", ()):
-                source = conn.execute(select(tasks.c.requester, tasks.c.conversation).where(
-                    tasks.c.id == task_id)).mappings().first()
-                if (not source or source["requester"] != access.principal.key
-                        or source["conversation"] != access.conversation.key
-                        or not self.permissions.check(access, "task.read", "task:" + task_id).allowed):
-                    return False
+            try:
+                self.mail.receipts(conn, event, context)
+            except (PermissionError, LookupError, ValueError):
+                return False
             for source in context.get("source_manifest", ()):
                 if source["kind"] != "inbox":
                     return False
@@ -671,6 +675,7 @@ class Core:
         self.scheduler = Scheduler(self, self.leader)
         self.retire_adapters()
         self.outbox.recover()
+        self.mail.sender.recover()
         self.stream_delivery.recover()
         self.recovery.recover_processes()
         self.tasks.recover()
@@ -683,6 +688,7 @@ class Core:
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
         self.supervisor.start("schedules", self.schedules.step, interval=1, critical=True)
+        self.supervisor.start("mail", self.mail.triggers.step, interval=30)
         self.supervisor.start("memory", self.maintenance, interval=10)
         self.supervisor.start("artifacts", self.cleanup_artifacts, interval=3600)
         while not self.stopping:

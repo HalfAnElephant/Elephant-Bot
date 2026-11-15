@@ -64,7 +64,7 @@ class TaskGraph:
     def _request_context(context):
         return {
             **{key: context.get(key) for key in ("scope", "principal", "preferences", "memory_scope", "memory_epoch", "retrieved_data",
-                    "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "structured_request", "files", "task_sources")},
+                    "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "mail_receipt_id", "structured_request", "files", "task_sources")},
             "images": [{key: value for key, value in image.items() if key not in {"source", "message_id"}}
                        for image in context.get("images", ())],
             "references": [source for source in context.get("source_manifest", ()) if source.get("kind") != "inbox"],
@@ -121,10 +121,11 @@ class TaskGraph:
         task_context = {key: value for key, value in context.items()
                         if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
-                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "structured_request"}}
+                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "mail_receipt_id", "structured_request"}}
         task_context.update(dispatch_spec=intent, owner_id=dialogue["owner_id"], role="worker")
         root = self.service.new_task(root_id, event, access,
-            TaskGoal(text=spec.goal, success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
+            TaskGoal(text=spec.goal, requested_actions=spec.requested_actions,
+                success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
             plan, context=task_context)
         root.update(source="dispatch:" + dispatch_key, kind="goal", root_task_id=root_id,
             owner_id=dialogue["owner_id"], origin_dialogue_id=dialogue["id"],
@@ -183,7 +184,8 @@ class TaskGraph:
         task_id = str(uuid4())
         plan = ExecutionPlan.model_validate_json(root["plan_json"]).model_copy(update={"environment": environment})
         child = self.service.new_task(task_id, event, access,
-            TaskGoal(text=spec.goal, success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
+            TaskGoal(text=spec.goal, requested_actions=tuple(root_context.get("dispatch_spec", {}).get("requested_actions", ())),
+                success_checks=spec.success_checks, requested_outputs=spec.requested_outputs),
             plan, context=context)
         child.update(source="child:" + stable_id(parent["id"], spec.delegation_key), kind=spec.mode,
             owner_id=root["owner_id"], root_task_id=root["id"], parent_task_id=parent["id"],
@@ -253,7 +255,7 @@ class TaskGraph:
 
     def handoff_valid(self, task):
         context = json.loads(task["context_json"])
-        return (not context.get("task_sources") or not self.service.context_validator
+        return (not (context.get("task_sources") or context.get("mail_receipt_id")) or not self.service.context_validator
             or self.service.context_validator(self.service._access_for(task), context))
 
     def status(self, conn, task, *, access=None):

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>邮箱配置</title>
+  <style>
+    body {
+      font: 16px system-ui, sans-serif;
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 0 20px;
+      color: #18202a;
+      background: #f7f8fa;
+    }
+
+    form, section {
+      background: white;
+      padding: 24px;
+      margin: 20px 0;
+      border: 1px solid #dbe0e6;
+      border-radius: 12px;
+    }
+
+    label {
+      display: block;
+      margin: 12px 0;
+    }
+
+    input, select, button {
+      font: inherit;
+      padding: 9px;
+      box-sizing: border-box;
+    }
+
+    input, select {
+      display: block;
+      width: 100%;
+      margin-top: 5px;
+    }
+
+    input:read-only {
+      background: #f0f2f5;
+    }
+
+    button {
+      cursor: pointer;
+      margin: 6px 8px 0 0;
+    }
+
+    button:disabled {
+      cursor: default;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    summary {
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>邮箱配置</h1>
+  <p>管理员令牌仅保存在当前页面内存中。应用专用密码或授权码只通过已认证的接口提交，并加密保存。请使用 HTTPS 或可信本地连接打开此页。</p>
+  <label>管理员令牌
+    <input id="token" type="password" autocomplete="off">
+  </label>
+  <button id="load" type="button">加载账号</button>
+
+  <form id="create">
+    <h2 id="editor-title">添加账号</h2>
+    <label>账号标识
+      <input name="account_id" required maxlength="128" placeholder="例如 weekly">
+    </label>
+    <label>邮箱服务商
+      <select name="provider">
+        <option value="icloud">iCloud</option>
+        <option value="qq">QQ 邮箱</option>
+        <option value="163">163 邮箱</option>
+        <option value="custom">自定义</option>
+      </select>
+    </label>
+    <label>邮箱地址
+      <input name="address" type="email" required>
+    </label>
+    <label>使用此邮箱的对话
+      <select id="scopes" name="scope_event_id">
+        <option value="">管理 API</option>
+      </select>
+    </label>
+    <p id="bound-scope" hidden></p>
+    <label>项目标识
+      <input name="workspace_id" value="personal" required>
+    </label>
+    <details>
+      <summary>服务器与登录名</summary>
+      <label>登录名
+        <input name="username" placeholder="默认使用邮箱地址">
+      </label>
+      <label>IMAP 主机
+        <input name="imap_host">
+      </label>
+      <label>IMAP 端口
+        <input name="imap_port" type="number" min="1" max="65535">
+      </label>
+      <label>IMAP 加密
+        <select name="imap_security">
+          <option value="">服务商默认</option>
+          <option value="ssl">TLS</option>
+          <option value="starttls">STARTTLS</option>
+        </select>
+      </label>
+      <label>SMTP 主机
+        <input name="smtp_host">
+      </label>
+      <label>SMTP 端口
+        <input name="smtp_port" type="number" min="1" max="65535">
+      </label>
+      <label>SMTP 加密
+        <select name="smtp_security">
+          <option value="">服务商默认</option>
+          <option value="ssl">TLS</option>
+          <option value="starttls">STARTTLS</option>
+        </select>
+      </label>
+    </details>
+    <button id="save-config" type="submit">添加账号</button>
+    <button id="cancel-edit" type="button" hidden>取消编辑</button>
+  </form>
+
+  <form id="credential">
+    <h2>管理已配置账号</h2>
+    <label>账号
+      <select id="accounts" required></select>
+    </label>
+    <button id="edit" type="button" disabled>编辑配置</button>
+    <p id="guidance"></p>
+    <label>授权码或应用专用密码
+      <input id="secret" type="password" autocomplete="new-password" required maxlength="4096">
+    </label>
+    <button type="submit">加密保存凭据</button>
+    <button id="test" type="button" disabled>测试 IMAP 与 SMTP 登录</button>
+    <button id="disable" type="button" disabled>停用账号</button>
+  </form>
+
+  <section aria-live="polite">
+    <pre id="status">输入管理员令牌后加载账号。</pre>
+  </section>
+
+  <script>
+    const accountApi = '/api/v1/mail/accounts';
+    const status = document.querySelector('#status');
+    const accountSelect = document.querySelector('#accounts');
+    const scopeSelect = document.querySelector('#scopes');
+    const boundScope = document.querySelector('#bound-scope');
+    const configurationForm = document.querySelector('#create');
+    const editorTitle = document.querySelector('#editor-title');
+    const saveButton = document.querySelector('#save-config');
+    const cancelButton = document.querySelector('#cancel-edit');
+    const editButton = document.querySelector('#edit');
+    const testButton = document.querySelector('#test');
+    const toggleButton = document.querySelector('#disable');
+    let accounts = [];
+    let scopes = [];
+    let editingAccount = null;
+
+    function selectedAccount() {
+      return accounts.find(account => account.id === accountSelect.value);
+    }
+
+    function show(value) {
+      status.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    }
+
+    function resetEditor() {
+      editingAccount = null;
+      configurationForm.reset();
+      configurationForm.elements.namedItem('account_id').readOnly = false;
+      configurationForm.elements.namedItem('workspace_id').readOnly = false;
+      scopeSelect.disabled = false;
+      scopeSelect.hidden = false;
+      boundScope.hidden = true;
+      editorTitle.textContent = '添加账号';
+      saveButton.textContent = '添加账号';
+      cancelButton.hidden = true;
+    }
+
+    function updateSelection() {
+      const account = selectedAccount();
+      document.querySelector('#guidance').textContent = account?.provider_guidance || '';
+      editButton.disabled = !account;
+      testButton.disabled = !account;
+      toggleButton.disabled = !account;
+      toggleButton.textContent = account?.enabled === false ? '启用账号' : '停用账号';
+      if (editingAccount && editingAccount.id !== account?.id) {
+        resetEditor();
+      }
+    }
+
+    async function request(path, method = 'GET', body) {
+      const response = await fetch(path, {
+        method,
+        headers: {
+          Authorization: 'Bearer ' + document.querySelector('#token').value,
+          'Content-Type': 'application/json',
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        cache: 'no-store',
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail || '请求失败');
+      }
+      return result;
+    }
+
+    async function loadAccounts() {
+      const previous = accountSelect.value || new URLSearchParams(location.search).get('account_id');
+      accounts = (await request(accountApi)).accounts;
+      accountSelect.replaceChildren();
+      for (const account of accounts) {
+        const option = document.createElement('option');
+        option.value = account.id;
+        let state = '已停用';
+        if (account.enabled) {
+          state = account.ready ? '凭据已保存' : '待提交凭据';
+        }
+        option.textContent = account.account_id + ' · ' + account.spec.address + ' · '
+          + (account.scope_label || account.workspace_id) + ' · ' + state;
+        accountSelect.append(option);
+      }
+      if (accounts.some(account => account.id === previous)) {
+        accountSelect.value = previous;
+      }
+      updateSelection();
+    }
+
+    async function loadScopes() {
+      const previous = scopeSelect.value;
+      scopes = (await request(accountApi + '/scopes')).scopes;
+      scopeSelect.replaceChildren();
+      const administrative = document.createElement('option');
+      administrative.value = '';
+      administrative.textContent = '管理 API';
+      scopeSelect.append(administrative);
+      for (const scope of scopes) {
+        const option = document.createElement('option');
+        option.value = scope.scope_event_id;
+        option.textContent = scope.label;
+        scopeSelect.append(option);
+      }
+      if (scopes.some(scope => scope.scope_event_id === previous)) {
+        scopeSelect.value = previous;
+      }
+    }
+
+    scopeSelect.onchange = () => {
+      const scope = scopes.find(item => item.scope_event_id === scopeSelect.value);
+      const workspace = configurationForm.elements.namedItem('workspace_id');
+      workspace.value = scope?.workspace_id || 'personal';
+      workspace.readOnly = Boolean(scope);
+    };
+
+    async function action(work) {
+      try {
+        await work();
+      } catch (error) {
+        show(error.message);
+      }
+    }
+
+    document.querySelector('#load').onclick = () => action(async () => {
+      await loadAccounts();
+      await loadScopes();
+      show('账号已加载。');
+    });
+
+    accountSelect.onchange = updateSelection;
+    cancelButton.onclick = resetEditor;
+
+    editButton.onclick = () => {
+      const account = selectedAccount();
+      if (!account) {
+        return;
+      }
+      resetEditor();
+      editingAccount = {id: account.id, revision: account.revision};
+      const values = {
+        ...account.spec,
+        account_id: account.account_id,
+        workspace_id: account.workspace_id,
+      };
+      for (const [name, value] of Object.entries(values)) {
+        configurationForm.elements.namedItem(name).value = value;
+      }
+      configurationForm.elements.namedItem('account_id').readOnly = true;
+      configurationForm.elements.namedItem('workspace_id').readOnly = true;
+      scopeSelect.disabled = true;
+      scopeSelect.hidden = true;
+      boundScope.textContent = '当前绑定 ' + (account.scope_label || account.workspace_id);
+      boundScope.hidden = false;
+      editorTitle.textContent = '编辑账号 ' + account.account_id;
+      saveButton.textContent = '保存修改';
+      cancelButton.hidden = false;
+      show('正在编辑现有账号。修改连接参数后，需要重新提交凭据。');
+    };
+
+    configurationForm.elements.namedItem('provider').onchange = () => {
+      for (const name of ['imap_host', 'smtp_host', 'smtp_port', 'smtp_security']) {
+        configurationForm.elements.namedItem(name).value = '';
+      }
+      configurationForm.elements.namedItem('imap_port').value = '993';
+      configurationForm.elements.namedItem('imap_security').value = 'ssl';
+    };
+
+    configurationForm.onsubmit = event => {
+      event.preventDefault();
+      return action(async () => {
+        const values = Object.fromEntries(new FormData(configurationForm));
+        const spec = {};
+        for (const [name, value] of Object.entries(values)) {
+          if (!['account_id', 'workspace_id', 'scope_event_id'].includes(name) && value) {
+            spec[name] = name.endsWith('_port') ? Number(value) : value;
+          }
+        }
+        if (editingAccount && !spec.username) {
+          spec.username = spec.address;
+        }
+        let result;
+        if (editingAccount) {
+          result = await request(accountApi + '/' + editingAccount.id, 'PATCH', {
+            expected_revision: editingAccount.revision,
+            changes: {spec},
+          });
+        } else {
+          result = await request(accountApi, 'POST', {
+            account_id: values.account_id,
+            workspace_id: values.workspace_id,
+            scope_event_id: values.scope_event_id || null,
+            spec,
+          });
+        }
+        resetEditor();
+        await loadAccounts();
+        accountSelect.value = result.id;
+        updateSelection();
+        show(result.credential_ref ? '配置已保存。' : '配置已保存，请通过下方表单提交凭据。');
+      });
+    };
+
+    document.querySelector('#credential').onsubmit = event => {
+      event.preventDefault();
+      return action(async () => {
+        const account = selectedAccount();
+        if (!account) {
+          throw new Error('请先选择账号。');
+        }
+        const field = document.querySelector('#secret');
+        const secret = field.value;
+        field.value = '';
+        await request(accountApi + '/' + account.id + '/credential', 'POST', {
+          expected_revision: account.revision,
+          secret,
+        });
+        await loadAccounts();
+        show('凭据已加密保存。');
+      });
+    };
+
+    testButton.onclick = () => action(async () => {
+      const account = selectedAccount();
+      if (!account) {
+        throw new Error('请先选择账号。');
+      }
+      show('正在测试登录…');
+      const result = await request(accountApi + '/' + account.id + '/test', 'POST');
+      await loadAccounts();
+      show(result);
+    });
+
+    toggleButton.onclick = () => action(async () => {
+      const account = selectedAccount();
+      if (!account) {
+        throw new Error('请先选择账号。');
+      }
+      const enabled = !account.enabled;
+      await request(accountApi + '/' + account.id, 'PATCH', {
+        expected_revision: account.revision,
+        changes: {enabled},
+      });
+      await loadAccounts();
+      show(enabled ? '账号已启用。' : '账号已停用。');
+    });
+  </script>
+</body>
+</html>

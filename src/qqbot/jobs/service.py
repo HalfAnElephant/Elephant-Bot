@@ -1068,6 +1068,8 @@ class TaskService:
             waiting = c.execute(select(waits.c.id).where(waits.c.run_id == run_id)).first()
             if waiting and action not in {"model.request", "task.execute", "notification.send"}:
                 raise PermissionError("wait intent blocks further business tools")
+            if getattr(self, "action_authorizer", None):
+                self.action_authorizer(access, context, action, resources)
             for resource in resources:
                 decision = self.permissions.require(access, action, resource)
             return {"allowed": True, "policy_version": decision.policy_version, "waiting": bool(waiting)}
@@ -1344,6 +1346,8 @@ class TaskService:
                 raise PermissionError("waiter action is not a remote observation")
             if action == "github.graphql.read" and self.permissions.has_restrictions(access):
                 raise PermissionError("GraphQL observation cannot prove restricted resource scope")
+            if getattr(self, "action_authorizer", None):
+                self.action_authorizer(access, context, action, payload["resources"])
             for resource in payload["resources"]:
                 self.permissions.require(access, action, resource)
             return {"allowed": True}

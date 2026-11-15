@@ -14,6 +14,7 @@ from sqlalchemy import insert, select, update
 from qqbot.domain import InboundEvent, stable_id
 from qqbot.domain.agents import GoalSpec
 from qqbot.domain.messages import StructuredSegment, TextSegment
+from qqbot.permissions import PermissionRule, PermissionSubject
 from qqbot.runtime.mail_filters import MailTrigger
 from qqbot.runtime.mail_source import MailBinding, SyntheticMailSource
 from qqbot.storage.agent_schema import dialogue_inputs, dialogues
@@ -27,7 +28,15 @@ class ScheduleSpec(BaseModel):
     goal: str = Field(min_length=1, max_length=16000)
     cron: str | None = Field(default=None, max_length=128)
     run_at: AwareDatetime | None = None
-    mail: MailTrigger | None = Field(default=None, description="Mail trigger draft; requires enabled=false.")
+    mail: MailTrigger | None = Field(default=None,
+        description="Mail source and deterministic filters. Enabling requires a configured account in this scope.")
+    mail_permissions: tuple[PermissionRule, ...] = Field(default=(), max_length=32,
+        description="Mail-task action/resource grants explicitly authorized by the user. Default denies business tools. "
+        "For local output allow workspace.file.* on workspace:* and file:outputs/*. "
+        "For sending also allow mail.send on mail-account:<account UUID> and each mail-recipient:<address>. "
+        "mail-recipient:$sender permits only the triggering message's original From address.")
+    mail_replay_from_uid: int | None = Field(default=None, ge=1,
+        description="Explicit historical replay start UID. Omit to process only new mail after activation.")
     timezone: str = Field(default="Asia/Shanghai", max_length=128)
     success_checks: tuple[str, ...] = ()
     requested_outputs: tuple[str, ...] = ()
@@ -38,6 +47,8 @@ class ScheduleSpec(BaseModel):
     def valid_schedule(self):
         if sum(trigger is not None for trigger in (self.cron, self.run_at, self.mail)) != 1:
             raise ValueError("provide exactly one of cron, run_at, or mail")
+        if self.mail is None and (self.mail_permissions or self.mail_replay_from_uid is not None):
+            raise ValueError("mail permissions and replay require a mail trigger")
         try:
             zone = ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as error:
@@ -79,8 +90,14 @@ class ScheduleService:
     def _require_mail(self, event, owner, workspace, spec):
         if spec.mail and spec.enabled:
             if self.synthetic_mail is None:
-                raise ValueError("mail trigger drafts require enabled=false; no mailbox is connected")
-            if not self.synthetic_mail.allows(self._mail_binding(event, owner, workspace, spec.mail)):
+                runtime = getattr(self.core, "mail", None)
+                if runtime is None:
+                    raise ValueError("mail trigger drafts require enabled=false; no mailbox is connected")
+                try:
+                    return runtime.accounts.resolve(event, workspace, spec.mail.account_id, require_ready=True)
+                except LookupError:
+                    raise ValueError("mail triggers require enabled=false until their account is configured") from None
+            elif not self.synthetic_mail.allows(self._mail_binding(event, owner, workspace, spec.mail)):
                 raise PermissionError("mail account is not available in this authenticated scope")
 
 
@@ -194,6 +211,20 @@ class ScheduleService:
             raise ValueError("schedule creation requires an idempotency key of at most 200 characters")
         encoded = spec.model_dump_json()
         now = self.clock.now().astimezone(UTC)
+        activation = None
+        if spec.mail and spec.enabled and self.synthetic_mail is None and getattr(self.core, "mail", None):
+            with self.db.engine.connect() as conn:
+                existing = conn.execute(select(schedules.c.id).where(schedules.c.owner_id == owner,
+                    schedules.c.principal == event.principal.key, schedules.c.conversation == event.conversation.key,
+                    schedules.c.creation_key == idempotency_key)).first()
+                workspace = self.core.sessions.validate_workspace(event,
+                    spec.workspace_id or self.core.sessions.workspace_for(event, conn))
+                if existing is None and event.principal.identity_namespace != "admin_api":
+                    self._capture_sources(conn, event, workspace)
+            if existing is None:
+                self._require_mail(event, owner, workspace, spec)
+                activation = self.core.mail.triggers.prepare_activation(event, workspace, spec,
+                    replay_from_uid=spec.mail_replay_from_uid)
         with self.db.transaction() as conn:
             old = conn.execute(select(schedules).where(schedules.c.owner_id == owner,
                 schedules.c.principal == event.principal.key, schedules.c.conversation == event.conversation.key,
@@ -224,13 +255,15 @@ class ScheduleService:
             source_context = self._capture_sources(conn, event, workspace_id)
             schedule_id = str(uuid4())
             next_fire = spec.next_after(now)
-            watermark = self.synthetic_mail.watermark() if spec.mail and spec.enabled else None
+            watermark = self.synthetic_mail.watermark() if spec.mail and spec.enabled and self.synthetic_mail else None
             conn.execute(insert(schedules).values(id=schedule_id, owner_id=owner, principal=event.principal.key,
                 conversation=event.conversation.key, creation_key=idempotency_key, creation_json=encoded,
                 event_json=event.model_dump_json(), dialogue_id=dialogue["id"], spec_json=resolved_spec.model_dump_json(),
                 source_context_json=json.dumps(source_context, ensure_ascii=False), revision=1, enabled=int(spec.enabled), next_fire_at=next_fire.isoformat() if next_fire is not None else None,
                 synthetic_mail_last_uid=watermark, synthetic_mail_activation_uid=watermark,
                 created_at=now.isoformat(), updated_at=now.isoformat()))
+            if spec.mail and spec.enabled and self.synthetic_mail is None:
+                self.core.mail.triggers.activate(conn, schedule_id, event, resolved_spec, activation)
             return self._view(conn.execute(select(schedules).where(schedules.c.id == schedule_id)).mappings().one())
 
     def get(self, event, schedule_id):
@@ -249,21 +282,59 @@ class ScheduleService:
             return [self._view(row) for row in conn.execute(query.order_by(schedules.c.created_at)).mappings()
                     if self.core.permissions.check(self.core.access(event), "task.read", "conversation:" + row["conversation"]).allowed]
 
+    @staticmethod
+    def _updated_spec(row, changes):
+        previous = ScheduleSpec.model_validate_json(row["spec_json"])
+        spec = ScheduleSpec.model_validate(previous.model_dump()
+            | {"enabled": bool(row["enabled"]), "mail_replay_from_uid": None} | changes)
+        if (previous.mail is None) != (spec.mail is None):
+            raise ValueError("create a new schedule to change between time and mail triggers")
+        if previous.mail and (previous.mail.account_id, previous.mail.folder) != (spec.mail.account_id, spec.mail.folder):
+            raise ValueError("create a new schedule to change its mail account or folder")
+        if spec.workspace_id != previous.workspace_id:
+            raise ValueError("create a new schedule to change its workspace")
+        return spec
+
+    def _update_identity(self, event, row, workspace_id):
+        if event.principal.identity_namespace != "admin_api":
+            return event
+        self.core.permissions.require(PermissionSubject(adapter_instance_id="admin_api",
+            identity_namespace="admin_api", user_id="owner"), "admin.patch", "http:/api/v1/schedules/" + row["id"])
+        original = InboundEvent.model_validate_json(row["event_json"])
+        if self._identity(original, write=True) != row["owner_id"]:
+            raise PermissionError("schedule original owner changed")
+        self.core.sessions.validate_workspace(original, workspace_id)
+        return event.model_copy(update={"event_type": "host.schedule.updated",
+            "principal": original.principal, "conversation": original.conversation})
+
     def update(self, event, schedule_id, changes, *, expected_revision):
         if not isinstance(changes, dict):
             raise TypeError("schedule changes must be an object")
+        activation = None
+        if self.synthetic_mail is None and getattr(self.core, "mail", None):
+            with self.db.engine.connect() as conn:
+                pending = self._owned(conn, event, schedule_id, write=True)
+                if pending["revision"] != expected_revision:
+                    raise ValueError("schedule revision conflict")
+                spec = self._updated_spec(pending, changes)
+                activation_event = self._update_identity(event, pending, spec.workspace_id) if spec.mail and spec.enabled else event
+                if spec.mail and spec.enabled:
+                    original = InboundEvent.model_validate_json(pending["event_json"])
+                    self._validate_sources(conn, original, json.loads(pending["source_context_json"]))
+            if spec.mail and spec.enabled and (not pending["enabled"]
+                    or "mail_replay_from_uid" in changes and spec.mail_replay_from_uid is not None):
+                self._require_mail(activation_event, pending["owner_id"], spec.workspace_id, spec)
+                activation = self.core.mail.triggers.prepare_activation(activation_event, spec.workspace_id, spec,
+                    replay_from_uid=spec.mail_replay_from_uid)
+        request_event = event
         with self.db.transaction() as conn:
             row = self._owned(conn, event, schedule_id, write=True)
             if row["revision"] != expected_revision:
                 raise ValueError("schedule revision conflict")
-            previous = ScheduleSpec.model_validate_json(row["spec_json"])
-            spec = ScheduleSpec.model_validate(previous.model_dump() | changes)
-            if (previous.mail is None) != (spec.mail is None):
-                raise ValueError("create a new schedule to change between time and mail triggers")
-            if previous.mail and (previous.mail.account_id, previous.mail.folder) != (spec.mail.account_id, spec.mail.folder):
-                raise ValueError("create a new schedule to change its mail account or folder")
-            if spec.workspace_id != previous.workspace_id:
-                raise ValueError("create a new schedule to change its workspace")
+            spec = self._updated_spec(row, changes)
+            source_change = bool(set(changes) & {"goal", "success_checks", "requested_outputs", "mail", "mail_permissions", "mail_replay_from_uid"})
+            if spec.mail and (spec.enabled or source_change):
+                event = self._update_identity(request_event, row, spec.workspace_id)
             self._require_mail(event, row["owner_id"], spec.workspace_id, spec)
             now = self.clock.now().astimezone(UTC)
             timing_changed = bool(set(changes) & {"cron", "run_at", "timezone"}) or (spec.enabled and not row["enabled"])
@@ -272,13 +343,16 @@ class ScheduleService:
             if spec.run_at is not None and row["last_fire_at"] == next_fire:
                 next_fire = None
             source_context = json.loads(row["source_context_json"])
-            if set(changes) & {"goal", "success_checks", "requested_outputs", "mail"}:
-                admin_source = (event.principal.identity_namespace == "admin_api"
+            if source_change:
+                admin_source = (request_event.principal.identity_namespace == "admin_api"
                     and event.principal.key == row["principal"] and event.conversation.key == row["conversation"])
-                if "mail" in changes and admin_source:
+                mail_changed = bool(set(changes) & {"mail", "mail_permissions", "mail_replay_from_uid"})
+                if admin_source and (mail_changed or spec.mail is not None):
                     event = event.model_copy(update={"segments": (*event.segments, StructuredSegment(
                         original_type="schedule_update", payload={"schedule_id": schedule_id,
                             "expected_revision": expected_revision,
+                            "actor": request_event.principal.model_dump(),
+                            "actor_conversation": request_event.conversation.model_dump(),
                             "spec_sha256": hashlib.sha256(spec.model_dump_json().encode()).hexdigest()}))})
                     event, _ = self.core.inbox.accept(event, conn=conn)
                     conn.execute(update(inbox).where(inbox.c.id == event.event_id).values(state="DONE"))
@@ -294,10 +368,10 @@ class ScheduleService:
                         and self.core.sessions.workspace_for(event, conn) == spec.workspace_id):
                     current_sources = self._capture_sources(conn, event, spec.workspace_id)
                     source_context = self._merge_sources(source_context, current_sources)
-                elif "mail" in changes and getattr(self.core, "validate_context", None) is not None:
+                elif (mail_changed or spec.mail is not None) and getattr(self.core, "validate_context", None) is not None:
                     raise PermissionError("mail filter updates require a verified user message in the original scope")
             watermark = None
-            if spec.mail and spec.enabled and not row["enabled"]:
+            if spec.mail and spec.enabled and not row["enabled"] and self.synthetic_mail:
                 watermark = self.synthetic_mail.watermark()
                 if row["synthetic_mail_last_uid"] is not None:
                     watermark = max(watermark, row["synthetic_mail_last_uid"])
@@ -308,6 +382,8 @@ class ScheduleService:
                 synthetic_mail_last_uid=watermark if watermark is not None else row["synthetic_mail_last_uid"],
                 synthetic_mail_activation_uid=(watermark if watermark is not None
                                                else row["synthetic_mail_activation_uid"])))
+            if activation is not None:
+                self.core.mail.triggers.activate(conn, schedule_id, event, spec, activation)
             return self._view(conn.execute(select(schedules).where(schedules.c.id == schedule_id)).mappings().one())
 
     def delete(self, event, schedule_id, *, expected_revision):
@@ -395,7 +471,7 @@ class ScheduleService:
                 next_fire_at=spec.next_after(now).isoformat() if spec.cron else None,
                 enabled=int(bool(spec.cron)), updated_at=now.isoformat()))
 
-    def _submit_fire(self, conn, dialogue, event, trigger, spec, row, workspace_id, fire_id):
+    def _submit_fire(self, conn, dialogue, event, trigger, spec, row, workspace_id, fire_id, *, mail_receipt_id=None):
         source_context = json.loads(row["source_context_json"])
         if source_context.get("workspace_id") != workspace_id:
             raise PermissionError("schedule source project changed")
@@ -411,7 +487,9 @@ class ScheduleService:
             context[kind] = list({json.dumps(item, sort_keys=True, ensure_ascii=False): item for item in attachments}.values())
         context["task_sources"] = sorted(set(context.get("task_sources", ())) | set(source_context.get("task_sources", ())))
         context["schedule_fire_id"] = fire_id
-        if spec.mail is not None:
+        if mail_receipt_id is not None:
+            context["mail_receipt_id"] = mail_receipt_id
+        elif spec.mail is not None:
             context["synthetic_mail_schedule_id"] = row["id"]
         result = self.core.tasks.graph.submit(conn, dialogue, trigger, self.core.access(event),
             spec.goal_spec(), fire_id, self.core.sessions.binding(), context)

@@ -157,3 +157,109 @@ test('console contains only current host-task and configuration workflows', () =
   assert.match(source, /body: \{goal: required\('task-goal'/);
   assert.doesNotMatch(source, /conversation_id:\s*cid\(\)/);
 });
+
+function mailboxPage() {
+  const html = fs.readFileSync('src/qqbot/admin/mail.html', 'utf8');
+  const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => ['#' + match[1], {value: ''}]));
+  const fields = new Map([...html.matchAll(/name="([^"]+)"/g)].map(match => [match[1], {value: ''}]));
+  fields.set('scope_event_id', elements.get('#scopes'));
+  const form = elements.get('#create');
+  form.elements = {namedItem: name => fields.get(name)};
+  form.reset = () => {
+    for (const field of fields.values()) field.value = '';
+    fields.get('provider').value = 'icloud';
+    fields.get('workspace_id').value = 'personal';
+  };
+  form.reset();
+  const select = elements.get('#accounts');
+  select.replaceChildren = () => { select.value = ''; };
+  select.append = option => { if (!select.value) select.value = option.value; };
+  const scopes = elements.get('#scopes');
+  scopes.replaceChildren = () => { scopes.value = ''; };
+  scopes.append = option => { if (!scopes.value) scopes.value = option.value; };
+  elements.get('#token').value = 'protected-admin';
+  const account = {
+    id: 'mail-uuid', account_id: 'weekly', workspace_id: 'personal', revision: 5,
+    enabled: true, ready: true, credential_ref: 'encrypted-reference',
+    spec: {provider: 'icloud', address: 'weekly@icloud.com', username: 'weekly',
+      imap_host: 'imap.mail.me.com', imap_port: 993, imap_security: 'ssl',
+      smtp_host: 'smtp.mail.me.com', smtp_port: 587, smtp_security: 'starttls'},
+  };
+  const calls = [];
+  class FormDataFixture {
+    *[Symbol.iterator]() {
+      for (const [name, field] of fields) yield [name, field.value];
+    }
+  }
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  require('node:vm').runInNewContext(script, {
+    document: {querySelector: selector => elements.get(selector), createElement: () => ({})},
+    location: {search: '?account_id=mail-uuid'}, URLSearchParams, FormData: FormDataFixture,
+    fetch: async (path, options) => {
+      const body = options.body === undefined ? undefined : JSON.parse(options.body);
+      calls.push({path, method: options.method, body, secretInField: elements.get('#secret').value});
+      let result;
+      if (options.method === 'GET' && path.endsWith('/scopes')) {
+        result = {scopes: []};
+      } else if (options.method === 'GET') {
+        result = {accounts: [account]};
+      } else if (options.method === 'PATCH') {
+        assert.equal(body.expected_revision, account.revision);
+        if (body.changes.spec) account.spec = {...account.spec, ...body.changes.spec};
+        if ('enabled' in body.changes) account.enabled = body.changes.enabled;
+        account.revision += 1;
+        result = account;
+      } else if (path.endsWith('/credential')) {
+        assert.equal(body.expected_revision, account.revision);
+        account.revision += 1;
+        result = account;
+      } else {
+        throw new Error('unexpected request');
+      }
+      return {ok: true, json: async () => JSON.parse(JSON.stringify(result))};
+    },
+  });
+  return {html, elements, fields, calls};
+}
+
+test('mail form edits the selected account with its revision and can disable then re-enable it', async () => {
+  const page = mailboxPage();
+  await page.elements.get('#load').onclick();
+  page.elements.get('#edit').onclick();
+  assert.equal(page.fields.get('account_id').readOnly, true);
+  assert.equal(page.fields.get('workspace_id').readOnly, true);
+  assert.equal(page.elements.get('#save-config').textContent, '保存修改');
+  page.fields.get('username').value = 'updated-login';
+  await page.elements.get('#create').onsubmit({preventDefault() {}});
+  const edit = page.calls.find(call => call.method === 'PATCH');
+  assert.equal(edit.path, '/api/v1/mail/accounts/mail-uuid');
+  assert.equal(edit.body.expected_revision, 5);
+  assert.equal(edit.body.changes.spec.username, 'updated-login');
+  assert.equal(page.elements.get('#editor-title').textContent, '添加账号');
+  assert.equal(page.elements.get('#cancel-edit').hidden, true);
+  await page.elements.get('#disable').onclick();
+  assert.equal(page.elements.get('#disable').textContent, '启用账号');
+  await page.elements.get('#disable').onclick();
+  assert.equal(page.elements.get('#disable').textContent, '停用账号');
+  assert.deepEqual(page.calls.filter(call => call.method === 'PATCH').slice(1).map(call => call.body), [
+    {expected_revision: 6, changes: {enabled: false}},
+    {expected_revision: 7, changes: {enabled: true}},
+  ]);
+});
+
+test('mail form cancels editing and clears credentials before sending the protected request', async () => {
+  const page = mailboxPage();
+  await page.elements.get('#load').onclick();
+  page.elements.get('#edit').onclick();
+  page.elements.get('#cancel-edit').onclick();
+  assert.equal(page.fields.get('account_id').readOnly, false);
+  assert.equal(page.elements.get('#save-config').textContent, '添加账号');
+  page.elements.get('#secret').value = 'protected-secret';
+  await page.elements.get('#credential').onsubmit({preventDefault() {}});
+  const submission = page.calls.find(call => call.path.endsWith('/credential'));
+  assert.equal(submission.method, 'POST');
+  assert.equal(submission.body.secret, 'protected-secret');
+  assert.equal(submission.secretInField, '');
+  assert.equal(page.elements.get('#secret').value, '');
+  assert.doesNotMatch(page.html, /localStorage|sessionStorage|indexedDB/);
+});

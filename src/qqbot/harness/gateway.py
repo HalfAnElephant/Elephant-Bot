@@ -84,6 +84,8 @@ class RunGateway:
             self.documents.register(self.registry)
         from qqbot.capabilities.skills import register_skills
         register_skills(self.registry, self.call)
+        from qqbot.capabilities.mail import register_mail
+        register_mail(self.registry, self.call, self.execution)
         from qqbot.capabilities.qq import register_qq
         register_qq(self.registry, self.call, workspace=lambda: self.workspace, upload=upload,
                     snapshot_file=self.execution.snapshot_file)
@@ -424,6 +426,27 @@ class RunGateway:
         return await prepare(context, action, arguments) if prepare else {}
 
     async def verify(self, context, action, arguments, data):
+        if action.name in {"mail.accounts.write", "mail.send.prepare"} and isinstance(data, dict) and data.get("id"):
+            return "VERIFIED", data
+        if action.name == "mail.accounts.write" and isinstance(data, dict) and data.get("deleted"):
+            return "VERIFIED", data
+        if action.name == "mail.send":
+            receipt = await self.call("mail", {"operation": "send.status", "arguments": {"draft_id": arguments["draft_id"]}})
+            state = receipt["state"]
+            if state == "DRAFT":
+                if isinstance(data, dict) and data.get("retry_prepared"):
+                    return "VERIFIED", {**receipt, "verified_effect": "confirmed_failure_retry_prepared"}
+                return "FAILED", {**receipt, "verified_effect": "smtp_not_dispatched"}
+            if state in {"ACCEPTED", "PARTIAL_ACCEPTED"}:
+                return "VERIFIED", {**receipt, "verified_effect": "smtp_acceptance"}
+            return ("FAILED" if state == "FAILED" else "UNKNOWN"), receipt
+        if action.name == "workspace.file.write" and isinstance(data, dict) and data.get("mail_attachment"):
+            content = await self.execution.read_file(context, data["path"], 0, data["size"] + 1)
+            if len(content) == data["size"] and hashlib.sha256(content).hexdigest() == data["sha256"]:
+                if data["path"] in self.claim.get("goal_spec", {}).get("requested_outputs", []):
+                    self.artifacts.append(data["path"])
+                return "VERIFIED", data
+            return "FAILED", {"error": "saved mail attachment failed verification"}
         if action.name in {"workspace.job.start", "workspace.job.cancel"}:
             if action.name == "workspace.job.start":
                 receipt = await self.call("jobs", {"operation": "lookup", "arguments": {"job_key": arguments["job_key"]}})
@@ -587,6 +610,7 @@ class RunGateway:
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
                     "goal": self.claim["goal"], "audio_context": audio_context, "goal_spec": self.claim.get("goal_spec", {}),
                     "input_refs": context.get("input_refs", []),
+                    "mail_input": {"receipt_id": context["mail_receipt_id"], "untrusted": True} if context.get("mail_receipt_id") else None,
                     "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
                     "reply_limit": (event.get("reply_context") or {}).get("max_replies"),

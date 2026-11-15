@@ -85,6 +85,9 @@ class LeaderRuntime:
                 self.service.graph.check_authority(conn, root, payload)
         if personal and self.sessions.owner(event) is None:
             raise PermissionError("personal knowledge requires a verified owner binding")
+        if getattr(self.core, "mail", None) is not None:
+            self.core.mail.authorize_context(access, claim["context"], action,
+                payload.get("resources") or ["conversation:" + access.conversation.key])
         for resource in payload.get("resources") or ["conversation:" + access.conversation.key]:
             self.service.permissions.require(access, action, resource)
         return {"allowed": True, "policy_version": self.service.permissions.policy_version}

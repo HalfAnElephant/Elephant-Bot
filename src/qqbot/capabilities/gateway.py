@@ -44,6 +44,7 @@ class CapabilityRegistry:
             "web.fetch": "web fetch url link page 网页 网站 抓取 链接",
             "workspace": "workspace file read write edit 文件 工作区 读取 写入 编辑",
             "process": "process command shell bash terminal execute test pytest 命令 终端 执行 运行 测试 进程",
+            "mail": "mail email mailbox imap smtp account sender recipient attachment 邮箱 邮件 收信 发信 配置 账号 文件夹 附件 回复",
         }
         words = set(re.findall(r"[a-z0-9]+", query))
         chinese = {part[index:index + 2] for part in re.findall(r"[\u4e00-\u9fff]+", query)

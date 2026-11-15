@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -31,12 +32,22 @@ class ExternalWaiters:
                     value = await self.call("wait-job-inspect", {"wait_id": record["id"], "revision": record["revision"]})
                 else:
                     capability, execute, classify = self.registry.entries[condition["capability"]]
-                    action = classify(condition["arguments"], context)
+                    arguments = dict(condition["arguments"])
+                    action = classify(arguments, context)
                     if action.effect != "read" or not action.name.startswith(("github.", "web.")):
                         raise PermissionError("external waiter only observes registered remote read capabilities")
                     await self.call("wait-authorize", {"wait_id": record["id"], "revision": record["revision"],
                         "action": action.name, "resources": action.resources})
-                    value = execute(condition["arguments"], context)
+                    if condition["capability"] in {"web.fetch", "web.search"}:
+                        loop = asyncio.get_running_loop()
+
+                        async def authorize_url(url, record=record, action=action):
+                            await self.call("wait-authorize", {"wait_id": record["id"], "revision": record["revision"],
+                                "action": action.name, "resources": ("domain:" + (urlsplit(url).hostname or ""),)})
+
+                        arguments["_authorize_url"] = lambda url, authorize_url=authorize_url, loop=loop: (
+                            asyncio.run_coroutine_threadsafe(authorize_url(url), loop).result(timeout=15))
+                    value = execute(arguments, context)
                     value = await asyncio.wait_for(value, capability.timeout_seconds) if inspect.isawaitable(value) else value
                 if isinstance(value, dict) and "stdout" in value:
                     if value.get("exit_code") or value.get("truncated"):
