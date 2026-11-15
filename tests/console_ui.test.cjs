@@ -191,7 +191,7 @@ function mailboxPage() {
       for (const [name, field] of fields) yield [name, field.value];
     }
   }
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const script = html.match(/<script>([\s\S]*?)<\/script>/i)[1];
   require('node:vm').runInNewContext(script, {
     document: {querySelector: selector => elements.get(selector), createElement: () => ({})},
     location: {search: '?account_id=mail-uuid'}, URLSearchParams, FormData: FormDataFixture,

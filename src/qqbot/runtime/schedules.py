@@ -40,6 +40,9 @@ class ScheduleSpec(BaseModel):
     timezone: str = Field(default="Asia/Shanghai", max_length=128)
     success_checks: tuple[str, ...] = ()
     requested_outputs: tuple[str, ...] = ()
+    requested_actions: tuple[str, ...] = Field(default=(), max_length=32,
+        description="External actions explicitly authorized for this goal, such as mail.send for a timer. "
+        "Mail triggers additionally enforce mail_permissions.")
     workspace_id: str | None = Field(default=None, max_length=256)
     enabled: bool = True
 
@@ -66,7 +69,7 @@ class ScheduleSpec(BaseModel):
     def goal_spec(self):
         child = {"mode": "work", "goal": self.goal, "delegation_key": "primary",
                  "success_checks": self.success_checks, "requested_outputs": self.requested_outputs}
-        return {"goal": self.goal, "success_checks": self.success_checks,
+        return {"goal": self.goal, "requested_actions": self.requested_actions, "success_checks": self.success_checks,
                 "requested_outputs": self.requested_outputs, "children": [child]}
 
     def next_after(self, moment):
@@ -332,8 +335,8 @@ class ScheduleService:
             if row["revision"] != expected_revision:
                 raise ValueError("schedule revision conflict")
             spec = self._updated_spec(row, changes)
-            source_change = bool(set(changes) & {"goal", "success_checks", "requested_outputs", "mail", "mail_permissions", "mail_replay_from_uid"})
-            if spec.mail and (spec.enabled or source_change):
+            source_change = bool(set(changes) & {"goal", "success_checks", "requested_outputs", "requested_actions", "mail", "mail_permissions", "mail_replay_from_uid"})
+            if (spec.mail or "requested_actions" in changes) and (spec.enabled or source_change):
                 event = self._update_identity(request_event, row, spec.workspace_id)
             self._require_mail(event, row["owner_id"], spec.workspace_id, spec)
             now = self.clock.now().astimezone(UTC)
@@ -346,8 +349,8 @@ class ScheduleService:
             if source_change:
                 admin_source = (request_event.principal.identity_namespace == "admin_api"
                     and event.principal.key == row["principal"] and event.conversation.key == row["conversation"])
-                mail_changed = bool(set(changes) & {"mail", "mail_permissions", "mail_replay_from_uid"})
-                if admin_source and (mail_changed or spec.mail is not None):
+                authorization_changed = bool(set(changes) & {"mail", "mail_permissions", "mail_replay_from_uid", "requested_actions"})
+                if admin_source and (authorization_changed or spec.mail is not None):
                     event = event.model_copy(update={"segments": (*event.segments, StructuredSegment(
                         original_type="schedule_update", payload={"schedule_id": schedule_id,
                             "expected_revision": expected_revision,
@@ -368,8 +371,8 @@ class ScheduleService:
                         and self.core.sessions.workspace_for(event, conn) == spec.workspace_id):
                     current_sources = self._capture_sources(conn, event, spec.workspace_id)
                     source_context = self._merge_sources(source_context, current_sources)
-                elif (mail_changed or spec.mail is not None) and getattr(self.core, "validate_context", None) is not None:
-                    raise PermissionError("mail filter updates require a verified user message in the original scope")
+                elif (authorization_changed or spec.mail is not None) and getattr(self.core, "validate_context", None) is not None:
+                    raise PermissionError("schedule authorization updates require a verified user message in the original scope")
             watermark = None
             if spec.mail and spec.enabled and not row["enabled"] and self.synthetic_mail:
                 watermark = self.synthetic_mail.watermark()

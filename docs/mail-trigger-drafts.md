@@ -19,7 +19,7 @@
 
 `mail.folders` 列出文件夹。`mail.messages.list/search/get` 支持按 UID 分页、关键词搜索及指定邮件读取，返回解码后的中文主题和文本、线程字段及附件元数据。邮件内容标记为不可信外部输入。IMAP 使用只读选择和 `BODY.PEEK`，正文编码体总量上限 256 KiB，截断时 `body_complete=false`。附件通过 `mail.attachment.save` 按需进入现有工作目录与文件能力，读取时核对 UIDVALIDITY，附件编码体上限 20 MiB。
 
-`mail.send.prepare` 固定收件人、正文、回复线程、附件和内容摘要。`mail.send` 使用返回的草稿编号、账号 UUID 及摘要执行，重复请求沿用同一持久化回执。普通后台发信任务通过 `requested_actions` 记录用户明确授权的 `mail.send`。
+`mail.send.prepare` 固定收件人、正文、回复线程、附件和内容摘要。`mail.send` 使用返回的草稿编号、账号 UUID 及摘要执行，重复请求沿用同一持久化回执。普通后台与时间触发的发信任务通过任务或 schedules 的 `requested_actions` 记录用户明确授权的 `mail.send`；收信触发同时遵守原始与当前 `mail_permissions`。
 
 SMTP 的 `ACCEPTED`、`PARTIAL_ACCEPTED` 分别表示服务器接受全部或部分收件人。最终投递仍需独立证据。`FAILED` 保留实际失败状态，`UNKNOWN` 与进程在发送中断开的情况保留待核对记录，状态查询使用 `mail.send.status`，核对结果后再决定后续动作。连接成功和发送任务去重不能替代外部送达证据。
 

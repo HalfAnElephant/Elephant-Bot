@@ -74,9 +74,10 @@ def require(condition, message):
 class LiveModelTransport(httpx.AsyncBaseTransport):
     """Allow only the official model endpoint and explicitly disable thinking for this suite."""
 
-    def __init__(self, report):
+    def __init__(self, report, *, role="leader", transport=None):
         self.report = report
-        self.transport = httpx.AsyncHTTPTransport(retries=0)
+        self.role = role
+        self.transport = transport if transport is not None else httpx.AsyncHTTPTransport(retries=0)
 
     async def handle_async_request(self, request):
         require(str(request.url) == ENDPOINT, "unexpected external model endpoint")
@@ -86,6 +87,7 @@ class LiveModelTransport(httpx.AsyncBaseTransport):
         schemas = {tool["function"]["name"]: tool["function"]["parameters"]
                    for tool in body.get("tools", [])}
         self.report["requests"].append({
+            "role": self.role,
             "communication_schemas": {name: "user_message" in schema.get("required", [])
                                       for name, schema in schemas.items()
                                       if name in {"capability_search", "capability_invoke", "content_read"}},
@@ -447,7 +449,8 @@ class DialogueSuite:
                     self.current.setdefault("workspace_operations", []).append(name)
                     return result
                 gateway.registry.entries[name] = (capability, observed, classifier)
-            gateway.transport = self.transport
+            gateway.transport = LiveModelTransport(self.report, role=gateway.claim["role"],
+                                                   transport=self.transport.transport)
 
         async def start(runner):
             return await self.seed_history(runner, original_start)
@@ -498,7 +501,8 @@ class DialogueSuite:
                     expected = {"capability_search", "capability_invoke", "content_read"}
                     for request in self.report["requests"]:
                         schemas = request["communication_schemas"]
-                        require(set(schemas) == expected and all(schemas.values()),
+                        require(set(schemas) == expected
+                                and all(required == (request["role"] == "leader") for required in schemas.values()),
                                 "communication schemas missing or lost required choice")
 
 

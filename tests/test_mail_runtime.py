@@ -2,6 +2,7 @@
 import base64
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -450,3 +451,36 @@ def test_non_mail_dependencies_reuse_the_callers_authenticated_access(mail, monk
     with mail.core.db.engine.connect() as conn:
         assert mail.core.mail.receipts(conn, mail.event, {}, access=access) == []
         assert mail.core.mail.receipts(conn, mail.event, {'task_sources': [root['task_id']]}, access=access) == []
+
+
+@pytest.mark.parametrize('authorized', [False, True])
+async def test_timer_can_send_only_with_the_scheduled_user_action_grant(mail, authorized):
+    mail.core.schedules.create(mail.event, {'goal': 'send the daily report',
+        'run_at': (mail.core.clock.now() + timedelta(seconds=1)).isoformat(),
+        'requested_actions': ['mail.send'] if authorized else []}, idempotency_key='daily-mail')
+    mail.core.clock.advance(2)
+    mail.core.schedules.once()
+    _worker, identity = claim(mail)
+    draft = await mail.core.mail.invoke(identity, {'operation': 'send.prepare', 'arguments': {
+        'account_id': mail.account['id'], 'to': ['recipient@example.org'], 'body': 'daily report'}})
+    payload = {'operation': 'send.send', 'arguments': {'account_id': draft['account_id'],
+        'draft_id': draft['id'], 'expected_digest': draft['digest']}}
+    if authorized:
+        assert (await mail.core.mail.invoke(identity, payload))['state'] == 'ACCEPTED'
+    else:
+        with pytest.raises(PermissionError, match='recorded user authorization'):
+            await mail.core.mail.invoke(identity, payload)
+        assert not mail.smtp.sent
+
+
+async def test_root_action_list_cannot_expand_a_mail_triggers_resource_grants(mail):
+    rule(mail, requested_actions=['mail.send'])
+    mail.mailbox.append(1)
+    mail.core.mail.triggers.once()
+    _worker, identity = claim(mail)
+    draft = await mail.core.mail.invoke(identity, {'operation': 'send.prepare', 'arguments': {
+        'account_id': mail.account['id'], 'to': ['ungranted@example.org'], 'body': 'denied'}})
+    with pytest.raises(PermissionError, match='authorize'):
+        await mail.core.mail.invoke(identity, {'operation': 'send.send', 'arguments': {
+            'account_id': draft['account_id'], 'draft_id': draft['id'], 'expected_digest': draft['digest']}})
+    assert not mail.smtp.sent
