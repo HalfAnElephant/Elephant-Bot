@@ -16,6 +16,7 @@ from elephant.harness.pool import SessionPool
 from elephant.jobs.protocol import WorkerRequest
 from elephant.jobs.waiters import ExternalWaiters
 from elephant.jobs.worker import Spool, Worker, configured_github
+from elephant.pi_installation import runtime_pi_path
 from elephant.providers import ModelCapacity
 from elephant.storage.task_schema import runs
 
@@ -139,7 +140,7 @@ class Scheduler:
         self.job_maintenance = None
         self.jobs_recovered = False
         self.next_job_maintenance = 0.0
-        self.args = SimpleNamespace(pi=self.settings.orchestration.pi_executable,
+        self.args = SimpleNamespace(pi=runtime_pi_path(self.settings.orchestration.pi_executable),
             workspace=str(data / "pi"), archive=str(data / "artifacts"), spool=str(data / "spool"),
             worker_id="daemon", github_host=self.settings.orchestration.github_host,
             gh="gh", github_token_env="ELEPHANT_GITHUB_TOKEN", workspace_binding=[])

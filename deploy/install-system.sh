@@ -3,22 +3,29 @@
 set -eu
 
 usage() {
-    printf '%s\n' 'Usage: deploy/install-system.sh [--dry-run | --apply]' \
+    printf '%s\n' 'Usage: deploy/install-system.sh [--dry-run | --apply [--install-pi]]' \
         'Dry run (default): print the plan without changing this host.' \
         'Apply: provision system dependencies and elephant.service from /opt/elephant.' \
+        'Reuse a matching trusted Pi when available; --install-pi approves a private fallback.' \
         'Linux: Ubuntu 24.04+, Debian 13+, Fedora 43+, official Arch rolling.' \
         'The service is not enabled, started, restarted or migrated by this command.'
 }
 
-mode=${1:---dry-run}
-[ "$#" -le 1 ] || { usage >&2; exit 2; }
-case "$mode" in
-    --help|-h) usage; exit 0 ;;
-    --dry-run|--apply) ;;
-    *) usage >&2; exit 2 ;;
-esac
+mode=
+allow_pi=no
+for flag do
+    case "$flag" in
+        --apply|--dry-run) [ -z "$mode" ] || { usage >&2; exit 2; }; mode=$flag ;;
+        --install-pi) [ "$allow_pi" = no ] || { usage >&2; exit 2; }; allow_pi=yes ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+mode=${mode:---dry-run}
+[ "$allow_pi" = no ] || [ "$mode" = --apply ] || { usage >&2; exit 2; }
 
 echo 'Plan: ensure distribution dependencies, Elephant service account, locked runtime and elephant.service.'
+echo 'Reuse Pi of the exact required version, or ask before installing it privately.'
 echo 'Keep /etc/elephant/core.yaml, /etc/elephant/core.env and /var/lib/elephant intact.'
 echo 'Do not import legacy qqbot services or data. Validate configuration before starting the service.'
 [ "$mode" = --apply ] || exit 0
@@ -69,6 +76,11 @@ case "$(uname -m)" in
 esac
 [ -d /run/systemd/system ] || fail 'A running systemd instance is required.'
 [ -e /sys/fs/cgroup/cgroup.controllers ] || fail 'cgroup v2 is required.'
+# The root cgroup deliberately has no cgroup.kill. Inspect an existing child
+# instead; this only checks the kernel interface, not service-level delegation.
+kill_interface=$(find /sys/fs/cgroup -xdev -mindepth 2 -maxdepth 2 -name cgroup.kill -type f -print -quit) ||
+    fail 'Could not inspect the cgroup v2 hierarchy.'
+[ -n "$kill_interface" ] || fail 'cgroup v2 with cgroup.kill in a non-root cgroup is required.'
 
 app=/opt/elephant
 config=/etc/elephant
@@ -81,7 +93,26 @@ unit_path=/etc/systemd/system/$unit
 stamp=/etc/elephant/.installed-unit.sha256
 uv=/usr/local/libexec/elephant-tools/uv
 helper=/usr/local/libexec/elephant-daemon-stopped
-command -v flock >/dev/null || fail 'Missing required base command: flock.'
+for tool in flock runuser; do
+    command -v "$tool" >/dev/null || fail "Missing required base command: $tool."
+done
+
+# Check effective access rather than assuming a numeric mode proves that the
+# service account can traverse parent directories (ACLs can matter as well).
+as_service() {
+    runuser -u elephant -g elephant-worker -- /usr/bin/test "$@"
+}
+check_service_config() {
+    if [ -e "$config" ]; then
+        as_service -x "$config" ||
+            fail "Service account cannot traverse $config. Existing configuration was not changed."
+    fi
+    if [ -e "$config/core.yaml" ]; then
+        as_service -r "$config/core.yaml" ||
+            fail "Service account cannot read $config/core.yaml. Existing configuration was not changed."
+    fi
+    # core.env is read by systemd as root; never make it service-readable.
+}
 
 for path in /etc/qqbot /var/lib/qqbot /opt/qqbot /etc/systemd/system/qqbot.service \
     /etc/systemd/system/elephant-bot.service; do
@@ -142,7 +173,7 @@ else
 fi
 [ ! -L "$state" ] || fail "Refusing symbolic link: $state"
 for file in uv.lock package-lock.json configs/production.yaml .env.example deploy/elephant.service \
-    deploy/elephant-job-user-setup.sh scripts/elephant-daemon-stopped; do
+    deploy/elephant-job-user-setup.sh deploy/pi-install.sh scripts/elephant-daemon-stopped; do
     [ -f "$app/$file" ] || fail "Missing release file: $file"
 done
 
@@ -165,6 +196,7 @@ if getent passwd elephant >/dev/null; then
         [ "$(echo "$entry" | cut -d: -f7)" = /usr/sbin/nologin ] &&
         [ "$(id -gn elephant)" = elephant-worker ] && [ "$(id -u elephant)" != 0 ] ||
         fail 'An incompatible elephant account already exists.'
+    check_service_config
 fi
 if [ -e "$state" ]; then
     [ -d "$state" ] && getent passwd elephant >/dev/null &&
@@ -217,8 +249,18 @@ export PATH
 cd "$app"
 chmod 0755 "$app"
 env -i PATH="$PATH" HOME=/root UV_PYTHON_INSTALL_DIR="$python" "$uv" --no-config sync --locked --no-dev --no-editable --python 3.13.9
-env -i PATH="$PATH" HOME=/root npm ci --ignore-scripts
-chmod -R a+rX "$python" "$app/.venv" "$app/node_modules"
+# The sourced helper is within the root-owned release checked above. It probes
+# only trusted system paths and asks before falling back to a private install.
+. "$app/deploy/pi-install.sh"
+elephant_prepare_pi "$app" "$allow_pi" system
+IFS= read -r selected_pi < "$app/.elephant-pi" || fail 'Could not read the Pi installation selection.'
+case "$selected_pi" in
+    bundled) selected_pi=$app/node_modules/.bin/pi ;;
+    /*) ;;
+    *) fail 'The Pi installation selection is invalid.' ;;
+esac
+chmod -R a+rX "$python" "$app/.venv"
+[ ! -d "$app/node_modules" ] || chmod -R a+rX "$app/node_modules"
 
 getent group elephant-worker >/dev/null || groupadd --system elephant-worker
 getent group elephant >/dev/null || groupadd --system elephant
@@ -228,6 +270,16 @@ getent passwd elephant >/dev/null || useradd --system --gid elephant-worker --ho
 [ -e "$stops" ] || install -d -o root -g root -m 0755 "$stops"
 [ -e "$config/core.yaml" ] || install -o root -g elephant-worker -m 0640 configs/production.yaml "$config/core.yaml"
 [ -e "$config/core.env" ] || install -o root -g root -m 0600 .env.example "$config/core.env"
+check_service_config
+for path in "$app" "$app/.venv/bin/python" "$app/.venv/bin/elephant" "$selected_pi" "$node/bin/node"; do
+    as_service -x "$path" || fail "Service account cannot execute or traverse $path. The daemon unit was not changed."
+done
+# Alembic uses the deployment working directory, not the installed wheel.
+for path in "$app/alembic.ini" "$app/migrations/env.py" "$app"/migrations/versions/*.py; do
+    as_service -r "$path" || fail "Service account cannot read release migration files at $path. The daemon unit was not changed."
+done
+as_service -x "$state" && as_service -w "$state" ||
+    fail "Service account cannot use $state. The daemon unit was not changed."
 
 install -o root -g root -m 0755 scripts/elephant-daemon-stopped "$helper"
 # Install the bundle unit and record its digest, without changing other unit drop-ins.

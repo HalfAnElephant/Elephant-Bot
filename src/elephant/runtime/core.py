@@ -29,6 +29,7 @@ from elephant.jobs.streaming import StreamDelivery
 from elephant.observability.supervision import LoopSupervisor
 from elephant.outbox.service import Outbox
 from elephant.permissions import PermissionService, PermissionSubject
+from elephant.pi_installation import runtime_pi_path
 from elephant.storage.schema import audit_events, inbox, outbox, runtime_state
 from elephant.storage.task_schema import notifications, runs, sessions, tasks
 
@@ -48,7 +49,7 @@ class Core:
         from elephant.adapters.execution.world import LocalExecution
         from elephant.adapters.pi.adapter import PiAdapter
         from elephant.contracts.harness import resolve_harness
-        self.harnesses = {"pi": PiAdapter(settings.orchestration.pi_executable), **(harnesses or {})}
+        self.harnesses = {"pi": PiAdapter(runtime_pi_path(settings.orchestration.pi_executable)), **(harnesses or {})}
         self.execution = execution or LocalExecution()
         harness = resolve_harness(self, {"harness": default_harness})
         self.permissions = PermissionService(db, clock, settings.permissions)

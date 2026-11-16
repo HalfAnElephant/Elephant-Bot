@@ -43,11 +43,13 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 
 Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）和 FFmpeg 6 或以上。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
 
+安装时优先复用与项目锁定版本一致的系统 Pi；如果没有，也没有可用的 Elephant 私有副本，安装器会先询问。默认不安装，不覆盖系统 Pi。无人值守安装时，可明确加上 `--install-pi` 允许在需要时安装私有副本。
+
 Linux 常驻服务支持 Ubuntu、Debian、Fedora 和官方 Arch Linux；macOS 可选择当前窗口运行，或登录当前用户时运行。版本、架构、限制与升级流程见[各平台部署](deploy/README.md)。不要把新安装当作旧数据迁移。
 
 向导分四步：选择模型服务和推荐模型、按需检测连接、用手机 QQ 扫码、选择是否直接启动。普通终端用方向键和回车操作，窄终端或不支持彩色菜单的终端可用编号。常用服务不需要填写接口地址；仅自定义服务需要提供地址与模型名称。密钥输入不回显。
 
-内置 DeepSeek、OpenAI、OpenRouter、通义千问（阿里云北京）、Kimi（国际站）、GLM（Z.AI 国际站）、Google Gemini、Groq 和 xAI 的 API 配置，不包含订阅登录或 OAuth。可选检测只验证模型能否回复，插件工具、多轮对话和地域可用性另行验证。重复运行默认保留已有设置和 QQ 绑定；更换服务时会要求使用新服务的密钥。仅完成绑定或网关接通不代表消息已送达，用 QQ 发一条私聊确认首个回复。
+内置 DeepSeek、OpenAI、OpenRouter、通义千问（阿里云北京）、Kimi（国际站）、GLM（Z.AI 国际站）、Google Gemini、Groq 和 xAI 的 API 配置，不包含订阅登录或 OAuth。可选检测只验证模型能否回复，插件工具、多轮对话和地域可用性另行验证。重复运行默认保留已有设置和 QQ 绑定；更换服务时会要求使用新服务的密钥。如果本地 Elephant 正在运行，先停再改模型，或在管理页调整；系统服务沿用管理页明确保存的模型。仅完成绑定或网关接通不代表消息已送达，用 QQ 发一条私聊确认首个回复。
 
 ### 手动配置（可选）
 

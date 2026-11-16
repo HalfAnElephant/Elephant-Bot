@@ -53,6 +53,17 @@ launchctl bootout "gui/$(id -u)/dev.elephant.bot"
 rm "$HOME/Library/LaunchAgents/dev.elephant.bot.plist"
 ```
 
+Pi is reused only when its executable reports the exact version locked in
+`package.json`. A compatible installed command is preferred over a private
+copy; prefer running with the intended native Node and Pi on your terminal PATH.
+The privileged Linux installer only considers trusted system-owned paths.
+If none are suitable, you are asked before installing the locked private copy.
+The default answer is no. Noninteractive deployments must pre-authorize that
+fallback with `--install-pi`; it does not force a download when an existing Pi
+is compatible, and never modifies a global Pi. The private install needs npm.
+Rerun the installer after changing or updating the externally supplied Pi.
+An explicitly configured custom executable remains authoritative.
+
 The default installation action is a preview. Without `--setup`, a successful
 install stops before the wizard. `./elephant` opens setup again. The core listener
 remains loopback-only on all supported paths.
@@ -60,7 +71,7 @@ remains loopback-only on all supported paths.
 ## Guided Linux installation
 
 Supported system versions and architectures are in the table above. The
-installer requires active systemd with **cgroup v2**, a root-owned release under
+installer requires active systemd with **cgroup v2 and its `cgroup.kill` interface**, a root-owned release under
 `/opt/elephant` and the distribution's package repositories. Fedora uses
 `ffmpeg-free`; it does not enable third-party repositories. Bring official
 Arch fully up to date before running the installer; it does not issue a
@@ -87,6 +98,10 @@ To update an installer-managed unit, drain and stop it first, back up data,
 then rerun the installer from a verified replacement release. Existing
 configuration and state files are retained. The installer refuses unknown or
 locally edited unit files and does not automatically migrate legacy installs.
+It does not widen existing configuration permissions: if the service account
+cannot load the configuration, it stops before changing the unit. The kernel
+interface check does not prove the live service has delegation; verify that on
+the deployment host before enabling isolated host tools.
 
 ## Fresh Ubuntu installation (manual)
 

@@ -21,7 +21,8 @@ from alembic.util import CommandError
 from dotenv import dotenv_values
 from sqlalchemy.exc import SQLAlchemyError
 
-from elephant.config import Settings, load_runtime_settings
+from elephant.config import Settings, load_runtime_settings, overlay_runtime_settings, runtime_config_path
+from elephant.configuration import ConfigurationStore
 from elephant.providers import output_limit_parameter
 from elephant.setup_providers import MODEL_PROVIDERS
 from elephant.setup_ui import SetupUI
@@ -46,21 +47,22 @@ def _private_write(path, data):
         raise
 
 
-def _private_read(path, *, system_config=False):
+def _private_read(path, *, system_config=False, allowed_uids=None):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, encoding="utf-8") as stream:
         info = os.fstat(stream.fileno())
         mask = 0o037 if system_config else 0o077
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & mask:
+        owners = (os.geteuid(),) if allowed_uids is None else allowed_uids
+        if not stat.S_ISREG(info.st_mode) or info.st_uid not in owners or info.st_mode & mask:
             raise ValueError("setup files must be owned by the current user and protected")
         if info.st_size > 1_048_576:
             raise ValueError("setup file exceeds size limit")
         return stream.read()
 
 
-def _read_if_present(path, *, system_config=False):
+def _read_if_present(path, *, system_config=False, allowed_uids=None):
     try:
-        return _private_read(path, system_config=system_config)
+        return _private_read(path, system_config=system_config, allowed_uids=allowed_uids)
     except FileNotFoundError:
         return None
 
@@ -202,6 +204,10 @@ def _collect_credentials(values, names):
     return updates
 
 
+class _DatabaseBusy(ValueError):
+    pass
+
+
 @contextmanager
 def _exclusive_database(path):
     database = Path(path)
@@ -213,7 +219,7 @@ def _exclusive_database(path):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError("已有 Elephant 服务占用该数据库；不会启动第二个实例") from None
+            raise _DatabaseBusy("已有 Elephant 服务占用该数据库；不会启动第二个实例") from None
         yield
     finally:
         os.close(fd)
@@ -432,7 +438,7 @@ def _bind_qq(ui, settings, values, *, system):
     if resolved.adapters:
         ui.status("ok", "已配置 QQ，保留原有连接。")
         return 0
-    names = (settings.model.api_key_env, settings.admin_token_env, CREDENTIAL_KEY)
+    names = (resolved.model.api_key_env, settings.admin_token_env, CREDENTIAL_KEY)
     with _setup_environment(values, names):
         return asyncio.run(_scan_local(settings, token, ui=ui))
 
@@ -456,6 +462,31 @@ def _configuration_lock(directory):
         os.close(fd)
 
 
+def _read_setup_overrides(startup, *, system):
+    path = runtime_config_path(startup)
+    owners = None
+    if system:
+        import pwd
+
+        from elephant.setup_system import ACCOUNT
+        try:
+            owners = (os.geteuid(), pwd.getpwnam(ACCOUNT).pw_uid)
+        except KeyError as exc:
+            raise ValueError("installer-managed service account is missing") from exc
+    raw = _read_if_present(path, allowed_uids=owners)
+    return path, raw, json.loads(raw) if raw is not None else {}
+
+
+def _persist_setup_files(cfg, env, *, existing_config, config, original, existing_env, values, updates, system):
+    if updates:
+        updated_env = _add_credentials(existing_env, updates)
+        _replace_private(env, existing_env, updated_env)
+        values.update(updates)
+    if original != config:
+        _replace_private(cfg, existing_config, json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                         system_config=system)
+
+
 def _prepare_configuration(ui, directory, *, system):
     with _configuration_lock(directory):
         cfg = directory / ("core.yaml" if system else "config.yaml")
@@ -463,7 +494,7 @@ def _prepare_configuration(ui, directory, *, system):
         existing_config = _read_if_present(cfg, system_config=system)
         existing_env = _read_if_present(env)
         if system and existing_config is None:
-            ui.status("error", "未找到受管安装，请先完成 Ubuntu 安装。")
+            ui.status("error", "未找到受管安装，请先完成 Linux 系统安装。")
             return None
         values = _credentials(existing_env)
         original = yaml.safe_load(existing_config) if existing_config is not None else None
@@ -479,37 +510,71 @@ def _prepare_configuration(ui, directory, *, system):
             not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in setting_names
         ):
             raise ValueError("invalid credential variable names")
-        runtime = load_runtime_settings(startup)
+        snapshot_path, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
+        runtime = overlay_runtime_settings(startup, overrides)
+        snapshot_owns_model = "model" in overrides
+        edit_model = (runtime.admin_token_env == startup.admin_token_env
+                      and (not system or not snapshot_owns_model))
 
         ui.banner()
         ui.section("1/4  模型服务", "从常用服务中选择，地址会自动配置。")
-        if runtime.model != startup.model or runtime.admin_token_env != startup.admin_token_env:
-            ui.status("warn", "正在使用管理页里的模型设置。请在管理页调整，向导不会覆盖它。")
-            settings, verified = startup, False
-            names = (startup.admin_token_env, CREDENTIAL_KEY)
-            updates = _collect_credentials(values, names)
+        settings, effective = startup, runtime
+        if not edit_model:
+            ui.status("warn", "当前模型由管理页维护；请在管理页更换。向导不会覆盖设置。")
+            verified = False
+            updates = _collect_credentials(values, (startup.admin_token_env, CREDENTIAL_KEY))
             ui.section("2/4  连接检测", "已保留当前模型，不重新验证。")
         else:
-            selection = _load_wizard_model(ui, config, values)
+            # Presence, not equality, determines which file owns the model.
+            initial = config if not snapshot_owns_model else {**config, "model": runtime.model.model_dump(mode="json")}
+            selection = _load_wizard_model(ui, initial, values)
             if selection is None:
                 return None
-            config, settings, updates, verified = selection
+            chosen_config, chosen, updates, verified = selection
+            if snapshot_owns_model:
+                effective = overlay_runtime_settings(startup, {**overrides, "model": chosen.model.model_dump(mode="json")})
+            else:
+                config, settings = chosen_config, chosen
+                effective = overlay_runtime_settings(settings, overrides)
         if not (values.get(settings.admin_token_env) or updates.get(settings.admin_token_env)):
             updates[settings.admin_token_env] = secrets.token_urlsafe(32)
         if not (values.get(CREDENTIAL_KEY) or updates.get(CREDENTIAL_KEY)):
             updates[CREDENTIAL_KEY] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-        if updates:
-            updated_env = _add_credentials(existing_env, updates)
-            _replace_private(env, existing_env, updated_env)
-            values.update(updates)
-        if original != config:
-            _replace_private(cfg, existing_config, json.dumps(config, ensure_ascii=False, indent=2) + "\n",
-                             system_config=system)
-        ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
 
-        return settings, values, verified, _model_label(
-            runtime.model.endpoint if runtime.model != startup.model else settings.model.endpoint
-        )
+        def save_files():
+            _persist_setup_files(
+                cfg, env, existing_config=existing_config, config=config, original=original, existing_env=existing_env,
+                values=values, updates=updates, system=system,
+            )
+        changed_model = effective.model != runtime.model
+        if not system and changed_model and (snapshot_owns_model or existing_config is not None):
+            try:
+                with _exclusive_database(runtime.database):
+                    if _read_if_present(snapshot_path) != saved_snapshot:
+                        ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
+                        return None
+                    # New credential slots don't replace prior keys; write them
+                    # first so a failed snapshot update leaves the old model usable.
+                    save_files()
+                    store = ConfigurationStore(settings)
+                    if snapshot_owns_model:
+                        store.save_model_while_stopped(runtime, effective, overrides)
+                    if store.read().model != effective.model:
+                        ui.status("error", "未能确认模型设置生效，请检查管理页。")
+                        return None
+            except _DatabaseBusy:
+                ui.status("warn", "Elephant 正在运行。请先停止服务再更换模型，或使用管理页。")
+                return None
+        else:
+            if system and changed_model and _read_setup_overrides(startup, system=True)[1] != saved_snapshot:
+                ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
+                return None
+            save_files()
+            if system and changed_model and load_runtime_settings(settings).model != effective.model:
+                ui.status("warn", "管理页有更新的模型设置，向导未能切换当前模型。")
+                return None
+        ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
+        return settings, values, verified, _model_label(effective.model.endpoint)
 
 
 def run_setup(directory: Path | str, *, system: bool = False) -> int:
@@ -573,7 +638,9 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
                 from elephant.setup_macos import LaunchAgentError, install_launch_agent
                 try:
                     with ui.progress("正在设置登录后自动运行…"):
-                        loaded = install_launch_agent(directory)
+                        loaded = install_launch_agent(
+                            directory, pi_executable=load_runtime_settings(settings).orchestration.pi_executable,
+                        )
                 except LaunchAgentError as error:
                     ui.status("warn", str(error))
                     return 1

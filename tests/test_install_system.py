@@ -30,9 +30,15 @@ def test_default_and_explicit_dry_run_do_not_call_host_tools(tmp_path):
         assert not marker.exists()
 
 
-def test_invalid_option_does_not_apply():
+@pytest.mark.parametrize("options", [
+    ("--start-now",),
+    ("--install-pi",),
+    ("--dry-run", "--install-pi"),
+    ("--apply", "--install-pi", "--install-pi"),
+])
+def test_invalid_option_does_not_apply(options):
     result = subprocess.run(
-        ["/bin/sh", str(INSTALLER), "--start-now"], check=False, capture_output=True, text=True,
+        ["/bin/sh", str(INSTALLER), *options], check=False, capture_output=True, text=True,
     )
     assert result.returncode == 2
     assert "Usage:" in result.stderr
@@ -41,6 +47,7 @@ def test_invalid_option_does_not_apply():
 def staged_preflight(
     tmp_path, *, uid="0", version="24.04", distro="ubuntu", architecture="x86_64",
     active="inactive", legacy=False, unmanaged=False, partial_jobs=False, systemd=True, cgroup=True,
+    child_kill=True, root_kill=False, config_access=None, allow_pi=False,
 ):
     root = tmp_path / "root"
     mockdir = tmp_path / "commands"
@@ -49,7 +56,7 @@ def staged_preflight(
     audit = shlex.quote(str(marker))
     record_package = f"""printf '%s %s\n' "${{0##*/}}" "$*" >> {audit}"""
     commands = {
-        "id": f"echo {uid}",
+        "id": f'case "$*" in "-gn elephant") echo elephant-worker;; "-u elephant") echo 601;; *) echo {uid};; esac',
         "uname": f'case "$1" in -s) echo Linux;; -m) echo {architecture};; *) exit 2;; esac',
         "dpkg": '[ "$1" = --compare-versions ] && [ "$3" = ge ] && '
                 'test "$(printf "%s\\n" "$2" "$4" | sort -V | tail -1)" = "$2"',
@@ -67,7 +74,15 @@ def staged_preflight(
         "pacman": record_package + "\nexit 92",
         "curl": f"touch {shlex.quote(str(marker))}; exit 92",
         "getent": "exit 2",
+        "runuser": "exit 91",
     }
+    if config_access is not None:
+        state = shlex.quote(str(root / "var/lib/elephant"))
+        commands["getent"] = f'[ "$*" = "passwd elephant" ] && echo "elephant:x:601:601::{state}:/usr/sbin/nologin"'
+        commands["runuser"] = (
+            'test "$#" -eq 8 && test "$1 $2 $3 $4 $5 $6" = "-u elephant -g elephant-worker -- /usr/bin/test"'
+            f' && test "$7" != {shlex.quote(config_access)}'
+        )
     for name, source in commands.items():
         executable = mockdir / name
         executable.write_text(f"#!/bin/sh\n{source}\n")
@@ -84,6 +99,11 @@ def staged_preflight(
     (root / "etc/os-release").write_text(release)
     if cgroup:
         (root / "sys/fs/cgroup/cgroup.controllers").touch()
+        if root_kill:
+            (root / "sys/fs/cgroup/cgroup.kill").touch()
+        if child_kill:
+            (root / "sys/fs/cgroup/system.slice").mkdir()
+            (root / "sys/fs/cgroup/system.slice/cgroup.kill").touch()
     if not systemd:
         (root / "run/systemd/system").rmdir()
     if legacy:
@@ -93,9 +113,16 @@ def staged_preflight(
     if partial_jobs:
         (root / "etc/elephant").mkdir()
         (root / "etc/elephant/jobs.env").write_text("# existing operator Job config\n")
+    if config_access is not None:
+        conf = root / "etc/elephant"
+        conf.mkdir(exist_ok=True)
+        (conf / "core.yaml").write_text("# existing operator settings\n")
+        (conf / "core.yaml").chmod(0o640)
+        (conf / "core.env").write_text("ELEPHANT_MODEL_KEY=fixture\n")
+        (conf / "core.env").chmod(0o600)
     for path in (
         "uv.lock", "package-lock.json", "configs/production.yaml", ".env.example",
-        "deploy/elephant.service", "deploy/elephant-job-user-setup.sh",
+        "deploy/elephant.service", "deploy/elephant-job-user-setup.sh", "deploy/pi-install.sh",
         "scripts/elephant-daemon-stopped",
     ):
         (root / "opt/elephant" / path).touch()
@@ -110,8 +137,9 @@ def staged_preflight(
     script = script.replace("! -user root -o ", "")
     executable = tmp_path / "install-system-staged.sh"
     executable.write_text(script)
+    args = ["--apply", "--install-pi"] if allow_pi else ["--apply"]
     result = subprocess.run(
-        ["/bin/sh", str(executable), "--apply"], check=False, capture_output=True, text=True,
+        ["/bin/sh", str(executable), *args], check=False, capture_output=True, text=True,
     )
     return result, marker
 
@@ -171,6 +199,8 @@ def test_supported_hosts_use_their_own_package_manager(tmp_path, distro, version
     ({"architecture": "riscv64"}, "Unsupported CPU architecture"),
     ({"systemd": False}, "running systemd"),
     ({"cgroup": False}, "cgroup v2"),
+    ({"child_kill": False}, "cgroup.kill in a non-root cgroup"),
+    ({"child_kill": False, "root_kill": True}, "cgroup.kill in a non-root cgroup"),
 ])
 def test_unsupported_hosts_fail_before_package_mutation(tmp_path, host, message):
     result, mutation = staged_preflight(tmp_path, **host)
@@ -197,3 +227,30 @@ def test_apply_preserves_incomplete_existing_job_config(tmp_path):
     assert (
         tmp_path / "root/etc/elephant/jobs.env"
     ).read_text() == "# existing operator Job config\n"
+
+@pytest.mark.parametrize(("failure", "message"), [
+    ("-x", "Service account cannot traverse"),
+    ("-r", "Service account cannot read"),
+])
+def test_unusable_existing_config_fails_before_packages_without_mutating_files(tmp_path, failure, message):
+    result, mutation = staged_preflight(tmp_path, config_access=failure)
+    assert result.returncode == 1 and message in result.stderr
+    assert not mutation.exists()
+    config = tmp_path / "root/etc/elephant"
+    assert (config / "core.yaml").read_text() == "# existing operator settings\n"
+    assert (config / "core.yaml").stat().st_mode & 0o777 == 0o640
+    assert (config / "core.env").read_text() == "ELEPHANT_MODEL_KEY=fixture\n"
+    assert (config / "core.env").stat().st_mode & 0o777 == 0o600
+
+
+def test_readable_existing_config_allows_preflight(tmp_path):
+    result, mutation = staged_preflight(tmp_path, config_access="none")
+    assert result.returncode == 92, result.stderr
+    assert "apt-get install" in mutation.read_text()
+
+
+def test_explicit_pi_approval_still_requires_privileged_preflight(tmp_path):
+    result, mutation = staged_preflight(tmp_path, uid="1000", allow_pi=True)
+    assert result.returncode == 1
+    assert "Run --apply as root" in result.stderr
+    assert not mutation.exists()

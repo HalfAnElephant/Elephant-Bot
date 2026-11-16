@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from elephant.config import Settings, load_runtime_settings, load_settings
 from elephant.credentials_env import credential_env
+from elephant.pi_installation import runtime_pi_path
 
 SERVE_HOST = "127.0.0.1"
 SERVE_PORT = 8080
@@ -33,8 +34,11 @@ def probe_local_database():
 
 
 def executable_paths(settings):
-    return {"node": shutil.which("node"), "pi": shutil.which(settings.orchestration.pi_executable),
-            "ffmpeg": shutil.which("ffmpeg")}
+    try:
+        pi = shutil.which(runtime_pi_path(settings.orchestration.pi_executable))
+    except (OSError, ValueError):
+        pi = None
+    return {"node": shutil.which("node"), "pi": pi, "ffmpeg": shutil.which("ffmpeg")}
 
 
 def share_safe_doctor(settings: Settings, sqlite_status: str) -> dict:

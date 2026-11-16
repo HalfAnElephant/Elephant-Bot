@@ -2,9 +2,17 @@
 # Distribution-neutral local runtime. No system packages, root or service changes.
 set -eu
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-mode=${1:---dry-run}
-[ "$#" -le 1 ] || fail '安装选项无效。'
-case "$mode" in --dry-run|--apply) ;; *) fail '安装选项无效。' ;; esac
+mode=
+allow_pi=no
+for option do
+    case "$option" in
+        --dry-run|--apply) [ -z "$mode" ] || fail '安装选项无效。'; mode=$option ;;
+        --install-pi) [ "$allow_pi" = no ] || fail '安装选项无效。'; allow_pi=yes ;;
+        *) fail '安装选项无效。' ;;
+    esac
+done
+mode=${mode:---dry-run}
+[ "$allow_pi" = no ] || [ "$mode" = --apply ] || fail '--install-pi 需要搭配 --apply。'
 printf '%s\n' '个人安装：准备锁定的 Python 和 Pi 运行环境，不修改系统服务或已有配置。'
 [ "$mode" = --apply ] || exit 0
 [ "$(id -u)" -ne 0 ] || fail '个人安装请使用普通用户，不要使用管理员权限。'
@@ -15,7 +23,7 @@ case "$(uname -m)" in
 esac
 getconf GNU_LIBC_VERSION >/dev/null 2>&1 ||
     fail '通用个人安装目前需要 glibc。基于 musl 的系统尚未验收。'
-for tool in uv node npm ffmpeg; do
+for tool in uv node ffmpeg; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "缺少 $tool，请按部署文档补齐系统依赖后重试。"
 done
@@ -38,10 +46,11 @@ mkdir "$lock" 2>/dev/null || fail '此目录中已有安装未结束。'
 trap 'rmdir "$lock"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# shellcheck source=deploy/pi-install.sh
+. "$base/deploy/pi-install.sh"
+elephant_prepare_pi "$base" "$allow_pi" personal
 printf '%s\n' '正在安装 Python 运行环境…'
 uv sync --locked --no-dev --no-editable --python "$(cat .python-version)"
-printf '%s\n' '正在安装 Pi 运行环境…'
-npm ci --ignore-scripts --no-audit --no-fund
-[ -x .venv/bin/elephant ] && [ -x node_modules/.bin/pi ] ||
+[ -f .venv/bin/elephant ] && [ -x .venv/bin/elephant ] ||
     fail '安装未完成，未找到完整运行环境。'
 printf '%s\n' '安装完成。已保留现有配置，可打开 Elephant 向导。'

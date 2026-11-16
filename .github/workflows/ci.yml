@@ -110,13 +110,14 @@ jobs:
           tar -xzf dist/elephant-bot.tar.gz -C "$RUNNER_TEMP/release"
           cd "$RUNNER_TEMP/release/elephant-bot"
           ./install.sh --dry-run
-          ./install.sh --apply
+          ./install.sh --apply --install-pi
           uv pip install --python .venv/bin/python --no-deps --reinstall "$GITHUB_WORKSPACE"/dist/*.whl
-          node_modules/.bin/pi --version
+          .venv/bin/python -c 'import subprocess; from elephant.pi_installation import runtime_pi_path; subprocess.check_call([runtime_pi_path("node_modules/.bin/pi"), "--version"])'
           ./elephant validate
           .venv/bin/elephant doctor
           .venv/bin/elephant doctor --share-safe
           .venv/bin/python scripts/smoke_release.py
+          .venv/bin/python scripts/smoke_guided_install.py
       - name: Checksum release assets
         working-directory: dist
         run: sha256sum ./*.whl ./*.tar.gz REVISION > SHA256SUMS
@@ -165,11 +166,12 @@ jobs:
           git archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/elephant-bot"
           ./install.sh --dry-run
-          ./install.sh --apply
-          node_modules/.bin/pi --version
+          ./install.sh --apply --install-pi
+          .venv/bin/python -c 'import subprocess; from elephant.pi_installation import runtime_pi_path; subprocess.check_call([runtime_pi_path("node_modules/.bin/pi"), "--version"])'
           ./elephant doctor --share-safe
           .venv/bin/python -c 'from pilk_nogil import decode'
           .venv/bin/python scripts/smoke_release.py
+          .venv/bin/python scripts/smoke_guided_install.py
 
   dialogue:
     name: DeepSeek dialogue

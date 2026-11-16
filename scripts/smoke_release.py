@@ -19,7 +19,7 @@ def main():
     for name in ("harness/pi_bridge.ts",):
         assert package.joinpath(name).is_file(), f"Wheel is missing {name}"
     for name in ("alembic.ini", "uv.lock", "package-lock.json", "deploy/elephant.service",
-                 "configs/production.yaml", ".env.example"):
+                 "configs/production.yaml", ".env.example", "deploy/pi-install.sh"):
         assert Path(name).is_file(), f"Source bundle is missing {name}"
     for executable in ("scripts/pi-runner-launch", "install.sh", "elephant", "deploy/install-local-linux.sh",
                        "deploy/install-macos.sh", "deploy/install-system.sh"):

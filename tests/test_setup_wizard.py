@@ -347,7 +347,8 @@ def test_macos_login_start_is_explicit(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(setup.getpass, "getpass", lambda _prompt, **_opts: "synthetic-key")
     starts = []
 
-    def start(profile):
+    def start(profile, *, pi_executable):
+        assert pi_executable == "node_modules/.bin/pi"
         assert (profile / "config.yaml").exists()
         starts.append(profile)
         return True
@@ -360,3 +361,55 @@ def test_macos_login_start_is_explicit(tmp_path, monkeypatch, capsys):
     assert setup.run_setup(directory) == 0
     assert starts == [directory]
     assert "已向 macOS 提交启动请求" in capsys.readouterr().out
+
+
+def test_switch_updates_the_effective_model_when_console_saved_an_unrelated_field(tmp_path, monkeypatch, capsys):
+    from elephant import config as runtime_config
+    from elephant.configuration import ConfigurationStore
+
+    directory = tmp_path / "private"
+    keys = iter(("old-fixture-key", "new-fixture-key"))
+    monkeypatch.setattr(setup.getpass, "getpass", lambda _prompt, **_opts: next(keys))
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    cfg = directory / "config.yaml"
+    original = cfg.read_bytes()
+    base = load_settings(cfg)
+    other = base.model_copy(update={"send_budget_per_minute": base.send_budget_per_minute + 1})
+    store = ConfigurationStore(base)
+    # Production console save persists the entire effective Settings object.
+    store.save(base, other)
+    assert store.read().model == base.model
+
+    answers(monkeypatch, "2", "2", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    effective = runtime_config.load_runtime_settings(load_settings(cfg))
+    assert cfg.read_bytes() == original
+    assert effective.model.model == "gpt-5.4-mini"
+    assert effective.send_budget_per_minute == other.send_budget_per_minute
+    assert effective.model.api_key_env != base.model.api_key_env
+    values = dotenv_values(directory / "credentials.env", interpolate=False)
+    assert values[effective.model.api_key_env] == "new-fixture-key"
+    assert values[base.model.api_key_env] == "old-fixture-key"
+    assert "模型：OpenAI" in capsys.readouterr().out
+
+
+def test_wizard_does_not_overwrite_model_or_credentials_while_core_is_running(tmp_path, monkeypatch, capsys):
+    from elephant.configuration import ConfigurationStore
+
+    directory = tmp_path / "private"
+    monkeypatch.setattr(setup.getpass, "getpass", lambda _prompt, **_opts: "synthetic-key")
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    cfg = directory / "config.yaml"
+    env = directory / "credentials.env"
+    base = load_settings(cfg)
+    store = ConfigurationStore(base)
+    store.save(base, base)
+    saved = [path.read_bytes() for path in (cfg, env, store.path)]
+
+    with setup._exclusive_database(base.database):
+        answers(monkeypatch, "2", "2", "", "")
+        assert setup.run_setup(directory) == 1
+    assert [path.read_bytes() for path in (cfg, env, store.path)] == saved
+    assert "Elephant 正在运行" in capsys.readouterr().out

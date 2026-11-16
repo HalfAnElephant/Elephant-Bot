@@ -37,6 +37,8 @@ def bundle(tmp_path):
     ("Linux", ("--system",), "install-system.sh: --dry-run"),
     ("Darwin", (), "install-macos.sh: --dry-run"),
     ("Darwin", ("--apply", "--with-deps"), "install-macos.sh: --apply --with-deps"),
+    ("Darwin", ("--apply", "--with-deps", "--install-pi"), "install-macos.sh: --apply --install-pi --with-deps"),
+    ("Linux", ("--apply", "--install-pi"), "install-local-linux.sh: --apply --install-pi"),
 ])
 def test_dispatch_selects_native_helper(bundle, platform, args, result):
     root, env = bundle
@@ -54,6 +56,7 @@ def test_guided_install_runs_launcher_from_the_bundle(bundle):
 
 @pytest.mark.parametrize(("platform", "args"), [
     ("Linux", ("--setup",)),
+    ("Linux", ("--install-pi",)),
     ("Linux", ("--dry-run", "--apply")),
     ("Linux", ("--apply", "--with-deps")),
     ("Linux", ("--apply", "--system")),

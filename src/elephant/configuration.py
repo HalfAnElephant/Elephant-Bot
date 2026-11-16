@@ -52,14 +52,23 @@ class ConfigurationStore:
     def read(self):
         return load_runtime_settings(self.startup)
 
-    def save(self, previous: Settings, candidate: Settings, *, hot=False):
+    def _save(self, previous: Settings, candidate: Settings, values: dict):
         for settings in (previous, candidate):
             snapshot = self.directory / (version(settings) + ".json")
             if not snapshot.exists():
                 atomic_write(snapshot, settings.model_dump_json(indent=2))
+        atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2))
+
+    def save_model_while_stopped(self, previous: Settings, candidate: Settings, overrides: dict):
+        """Reuse version history without introducing unrelated overrides; caller holds Core's file lock."""
+        if candidate != previous.model_copy(update={"model": candidate.model}):
+            raise ValueError("wizard may update only the model")
+        self._save(previous, candidate, {**overrides, "model": candidate.model.model_dump(mode="json")})
+
+    def save(self, previous: Settings, candidate: Settings, *, hot=False):
         values = candidate.model_dump(mode="json")
         if hot:
             # Keep legacy hot updates from masking unrelated future startup-file edits.
             persisted = json.loads(self.path.read_text()) if self.path.exists() else {}
             values = {**persisted, **{key: values[key] for key in ("model", "send_budget_per_minute")}}
-        atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2))
+        self._save(previous, candidate, values)

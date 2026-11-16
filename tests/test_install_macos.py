@@ -18,7 +18,10 @@ def fake_mac(tmp_path):
     deploy = tmp_path / "deploy"
     deploy.mkdir()
     script = deploy / SOURCE.name
-    shutil.copyfile(SOURCE, script)
+    fake_brew_bin = tmp_path / "homebrew" / "bin"
+    fake_brew_bin.mkdir(parents=True)
+    script.write_text(SOURCE.read_text().replace("/opt/homebrew/bin", str(fake_brew_bin)))
+    shutil.copyfile(SOURCE.with_name("pi-install.sh"), deploy / "pi-install.sh")
     for name in ("pyproject.toml", "uv.lock", "package.json", "package-lock.json"):
         (tmp_path / name).touch()
     (tmp_path / ".python-version").write_text("3.13.9\n")
@@ -29,16 +32,33 @@ def fake_mac(tmp_path):
     trace = tmp_path / "trace"
     env = {
         **os.environ,
-        "PATH": f"{tools}:{os.defpath}",
+        "PATH": str(tools),
         "TRACE": str(trace),
         "VIRTUAL_ENV": "/wrong-venv",
     }
+    for command in ("awk", "chmod", "cp", "dirname", "env", "grep", "mkdir", "mktemp", "mv", "rm", "rmdir", "touch"):
+        (tools / command).symlink_to(shutil.which(command))
     for tool, body in {
         "uname": '[ "$1" = -s ] && echo Darwin || echo "${TEST_ARCH:-arm64}"',
         "id": 'echo "${TEST_UID:-501}"',
         "sysctl": 'echo "${TEST_TRANSLATED:-0}"',
-        "node": '[ "${TEST_BAD_NODE:-0}" != 1 ]',
-        "npm": 'echo "npm $*" >>"$TRACE"',
+        "node": (
+            'if [ "$1" = -p ]; then echo 1.5.0; exit 0; fi\n'
+            'case "$2" in *spawnSync*) exec "$3" --offline --version;; esac\n'
+            '[ "${TEST_BAD_NODE:-0}" != 1 ]'
+        ),
+        "npm": (
+            'if [ "$*" = --version ]; then [ "${TEST_BAD_NPM:-0}" != 1 ]; exit; fi\n'
+            'echo "npm $*" >>"$TRACE"\n'
+            '[ "${TEST_MISSING_PI:-0}" = 1 ] && exit 0\n'
+            'mkdir -p node_modules/.bin\n'
+            'printf "#!/bin/sh\\nprintf 1.5.0" >node_modules/.bin/pi\n'
+            'chmod +x node_modules/.bin/pi'
+        ),
+        "ffmpeg": (
+            '[ "${TEST_BROKEN_FFMPEG:-0}" != 1 ] || exit 11\n'
+            'printf "ffmpeg version %s\\n" "${TEST_FFMPEG_VERSION:-n7.1}"'
+        ),
         "uv": (
             '[ -z "${VIRTUAL_ENV:-}" ] || exit 22\n'
             'echo "uv $*" >>"$TRACE"\n'
@@ -51,9 +71,24 @@ def fake_mac(tmp_path):
         path.write_text("#!/bin/sh\n" + body + "\n")
         path.chmod(0o700)
 
+    brew = fake_brew_bin / "brew"
+    brew.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = --prefix ]; then echo "{fake_brew_bin.parent}"; exit 0; fi\n'
+        'echo "brew $*" >>"$TRACE"\n'
+        'shift\n'
+        "for formula do\n"
+        f'  if [ "$formula" = node ]; then cp "{tools}/node-template" "{fake_brew_bin}/node"; '
+        f'cp "{tools}/npm-template" "{fake_brew_bin}/npm"; fi\n'
+        "done\n"
+    )
+    brew.chmod(0o700)
+    for name in ("node", "npm"):
+        shutil.copy2(tools / name, tools / (name + "-template"))
+
     def run(*args, **variables):
         result = subprocess.run(
-            ["sh", str(script), *args],
+            ["/bin/sh", str(script), *args],
             cwd=tmp_path.parent,
             env={**env, **variables},
             text=True,
@@ -75,11 +110,11 @@ def test_dry_run_never_invokes_installers(fake_mac):
 
 def test_arm64_apply_installs_locked_dependencies_only(fake_mac):
     root, trace, run = fake_mac
-    result = run("--apply")
+    result = run("--apply", "--install-pi")
     assert result.returncode == 0, result.stderr
     assert trace.read_text().splitlines() == [
-        "uv sync --locked --no-dev --no-editable --python 3.13.9",
         "npm ci --ignore-scripts --no-audit --no-fund",
+        "uv sync --locked --no-dev --no-editable --python 3.13.9",
     ]
     assert "./elephant" in result.stdout
     assert not (root / ".elephant-install.lock").exists()
@@ -114,8 +149,11 @@ def fake_launchd(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_macos.sys, "platform", "darwin")
     monkeypatch.setattr(setup_macos.os, "getuid", lambda: 501)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(setup_macos, "_node_path", lambda: Path("/native/node/bin/node"))
+    monkeypatch.setattr(setup_macos, "_node_path", lambda uid: Path("/native/node/bin/node"))
+    monkeypatch.setattr(setup_macos, "_trusted_path", lambda path, uid, **kwargs: path)
+    monkeypatch.setattr(setup_macos, "_safe_acl", lambda *args, **kwargs: True)
     root = tmp_path / "Elephant with spaces"
+    monkeypatch.setattr(setup_macos, "_trusted_pi", lambda *args: root / "node_modules/.bin/pi")
     command = root / ".venv/bin/elephant"
     monkeypatch.setattr(setup_macos, "_installed_runtime", lambda uid: (root, command))
     monkeypatch.setattr(setup_macos, "_private", lambda *args, **kwargs: True)
@@ -143,8 +181,14 @@ def test_launch_agent_is_private_scoped_and_idempotent(fake_launchd):
     plist = plistlib.loads(path.read_bytes())
     assert plist["Label"] == "dev.elephant.bot"
     assert plist["WorkingDirectory"] == str(root)
-    assert plist["EnvironmentVariables"]["PATH"].split(":")[0] == "/native/node/bin"
-    assert plist["ProgramArguments"] == [
+    assert "EnvironmentVariables" not in plist
+    argv = plist["ProgramArguments"]
+    assert argv[3].split(":")[0] == "PATH=/native/node/bin"
+    assert argv == [
+        "/usr/bin/env",
+        "-i",
+        f"HOME={path.parents[2]}",
+        argv[3],
         str(command),
         "serve",
         "--config",
@@ -204,6 +248,8 @@ def test_launch_agent_checks_node_at_detected_absolute_path(monkeypatch):
 
     monkeypatch.setattr(setup_macos.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(setup_macos.shutil, "which", lambda *args, **kwargs: "/native/node/bin/node")
+    monkeypatch.setattr(setup_macos, "_trusted_path", lambda path, uid, **kwargs: path)
+    monkeypatch.setattr(setup_macos, "_safe_acl", lambda *args, **kwargs: True)
     calls = []
 
     def run(args, **kwargs):
@@ -212,9 +258,9 @@ def test_launch_agent_checks_node_at_detected_absolute_path(monkeypatch):
 
     monkeypatch.setattr(setup_macos.subprocess, "run", run)
     with pytest.raises(setup_macos.LaunchAgentError, match="架构不匹配"):
-        setup_macos._node_path()
+        setup_macos._node_path(501)
     assert calls[0][0] == "/native/node/bin/node"
-    assert calls[0][-1] == "arm64"
+    assert calls[0][-2:] == ["arm64", "/native/node/bin/node"]
 
 
 def test_launch_agent_rejects_shared_or_linked_secret_files(tmp_path):
@@ -237,3 +283,96 @@ def test_launch_agent_loads_matching_inactive_job_on_explicit_choice(fake_launch
     existing = path.stat().st_ino
     assert setup_macos.install_launch_agent(profile)
     assert path.stat().st_ino == existing
+
+
+def test_npm_success_without_pi_is_not_installer_success(fake_mac):
+    _, trace, run = fake_mac
+    result = run("--apply", "--install-pi", TEST_MISSING_PI="1")
+    assert result.returncode == 1
+    assert "可执行 Pi" in result.stderr
+    assert "安装完成" not in result.stdout
+    assert any(line.startswith("npm ci") for line in trace.read_text().splitlines())
+
+
+@pytest.mark.parametrize("fault", ["TEST_BAD_NODE", "TEST_BAD_NPM", "missing-npm"])
+def test_with_deps_does_not_brew_other_packages_when_node_path_needs_repair(fake_mac, fault):
+    root, trace, run = fake_mac
+    (root / "fake-tools/ffmpeg").unlink()
+    if fault == "missing-npm":
+        (root / "fake-tools/npm").unlink()
+        variables = {}
+    elif fault == "TEST_BAD_NPM":
+        (root / "fake-tools/npm").write_text("#!/bin/sh\nexit 1\n")
+        variables = {}
+    else:
+        variables = {fault: "1"}
+    result = run("--apply", "--with-deps", "--install-pi", **variables)
+    assert result.returncode == 1 and "PATH" in result.stderr and "Node.js/npm" in result.stderr
+    assert not trace.exists()
+
+
+def test_with_deps_installs_completely_missing_node_pair_and_rechecks_it(fake_mac):
+    root, trace, run = fake_mac
+    for name in ("node", "npm"):
+        (root / "fake-tools" / name).unlink()
+    result = run("--apply", "--with-deps", "--install-pi")
+    assert result.returncode == 0, result.stderr
+    assert trace.read_text().splitlines()[0] == "brew install node"
+
+
+@pytest.mark.parametrize(("variables", "expected"), [
+    ({"TEST_FFMPEG_VERSION": "5.1.8"}, "版本低于 6"),
+    ({"TEST_FFMPEG_VERSION": "snapshot"}, "无法确认 FFmpeg 版本"),
+    ({"TEST_BROKEN_FFMPEG": "1"}, "FFmpeg 无法运行"),
+])
+def test_unsupported_ffmpeg_has_optional_voice_warning(fake_mac, variables, expected):
+    _, _, run = fake_mac
+    result = run("--apply", "--install-pi", **variables)
+    assert result.returncode == 0, result.stderr
+    assert expected in result.stdout
+
+
+def test_missing_ffmpeg_has_distinct_optional_voice_warning(fake_mac):
+    root, _, run = fake_mac
+    (root / "fake-tools/ffmpeg").unlink()
+    result = run("--apply", "--install-pi")
+    assert result.returncode == 0, result.stderr
+    assert "未检测到 FFmpeg" in result.stdout
+
+
+def test_compatible_path_pi_is_reused_without_npm_install(fake_mac):
+    root, trace, run = fake_mac
+    pi = root / "fake-tools/pi"
+    pi.write_text(
+        '#!/bin/sh\n'
+        '[ "$*" = "--offline --version" ] && [ "$PI_OFFLINE" = 1 ] && [ -z "${TEST_SECRET:-}" ] || exit 10\n'
+        'printf 1.5.0\n'
+    )
+    pi.chmod(0o700)
+    (root / "fake-tools/npm").unlink()
+    result = run("--apply", TEST_SECRET="must-not-reach-probe")
+    assert result.returncode == 0, result.stderr
+    assert (root / ".elephant-pi").read_text().strip() == str(pi)
+    assert trace.read_text().splitlines() == ["uv sync --locked --no-dev --no-editable --python 3.13.9"]
+
+
+def test_unapproved_private_pi_is_not_installed_or_recorded(fake_mac):
+    root, trace, run = fake_mac
+    pi = root / "fake-tools/pi"
+    pi.write_text("#!/bin/sh\necho 1.0.0\n")
+    pi.chmod(0o700)
+    result = run("--apply")
+    assert result.returncode == 1
+    assert "--install-pi" in result.stderr
+    assert not (root / ".elephant-pi").exists()
+    assert not (root / "node_modules").exists()
+    assert not trace.exists()
+
+
+def test_compatible_private_pi_is_reused_without_reinstall(fake_mac):
+    root, trace, run = fake_mac
+    assert run("--apply", "--install-pi").returncode == 0
+    trace.unlink()
+    assert run("--apply").returncode == 0
+    assert (root / ".elephant-pi").read_text().strip() == "bundled"
+    assert trace.read_text().splitlines() == ["uv sync --locked --no-dev --no-editable --python 3.13.9"]

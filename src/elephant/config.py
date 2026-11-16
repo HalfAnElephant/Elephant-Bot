@@ -222,5 +222,10 @@ def load_runtime_settings(settings: Settings) -> Settings:
     path = runtime_config_path(settings)
     if not path.exists():
         return settings
-    values = json.loads(path.read_text())
-    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **values}), strict=False)
+    return overlay_runtime_settings(settings, json.loads(path.read_text()))
+
+
+def overlay_runtime_settings(settings: Settings, overrides: dict) -> Settings:
+    if not isinstance(overrides, dict):
+        raise TypeError("runtime settings must be an object")
+    return Settings.model_validate_json(json.dumps({**settings.model_dump(mode="json"), **overrides}), strict=False)
