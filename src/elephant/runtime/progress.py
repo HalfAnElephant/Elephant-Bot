@@ -44,7 +44,7 @@ def registered_artifacts(conn, task_ids):
     return found
 
 
-def task_progress(graph, conn, task, root, *, access, stale, delivery_states):
+def task_progress(graph, conn, task, root, *, access, may_read, stale, delivery_states):
     budget = {"used": json.loads(task["budget_json"]),
               "limits": None if task["kind"] == "goal" else json.loads(task["plan_json"]).get("budget", {}),
               "scope": "tree_usage" if task["kind"] == "goal" else "task"}
@@ -78,8 +78,8 @@ def task_progress(graph, conn, task, root, *, access, stale, delivery_states):
             continue
         if not graph.handoff_valid(row):
             continue
-        if access is not None and (not graph.service.permissions.check(access, "task.read", "task:" + row["id"]).allowed
-                or graph.service.context_validator and not graph.service.context_validator(access, json.loads(row["context_json"]))):
+        if not may_read(row["id"]) or (access is not None and graph.service.context_validator
+                and not graph.service.context_validator(access, json.loads(row["context_json"]))):
             continue
         visible.append(row)
     ids = [row["id"] for row in visible]

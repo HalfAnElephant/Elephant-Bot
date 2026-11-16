@@ -263,3 +263,94 @@ test('mail form cancels editing and clears credentials before sending the protec
   assert.equal(page.elements.get('#secret').value, '');
   assert.doesNotMatch(page.html, /localStorage|sessionStorage|indexedDB/);
 });
+
+test('task view keeps completion, external operation and message delivery separate', () => {
+  const {taskDetail} = require('../src/elephant/admin/console.js');
+  const task = {
+    kind: 'goal', state: 'SUCCEEDED', result: {summary: '已准备报告'},
+    progress: {current_action: '目标已完成，结果已送达', delivery: {required: true, delivered: true, states: ['SENT']},
+      waiting_for: [{kind: 'reconciliation', state: 'UNKNOWN', reason: '等待核实外部操作结果'}]},
+    deliveries: [{id: 'd1', state: 'UNKNOWN'}],
+  };
+  const view = taskDetail(task);
+  assert.equal(view.state, '已完成');
+  assert.equal(view.result, '已准备报告');
+  assert.equal(view.action, null);
+  assert.deepEqual(view.waiting, [{text: '外部操作结果未知，等待核实。', unknown: true}]);
+  assert.equal(view.delivery, '有投递记录状态未知，请先核实，不要重复发送。');
+  assert.equal(view.deliveryUnknown, true);
+  const sentOnly = taskDetail({...task, deliveries: [{state: 'SENT'}]});
+  assert.equal(sentOnly.delivery, '有结果发送成功记录。');
+  assert.equal(taskDetail({state: 'FAILED', progress: {delivery: {required: false}}}).delivery,
+    '控制台任务，不会发送外部消息。');
+  assert.equal(taskDetail({state: 'FAILED'}).tone, 'danger');
+  assert.equal(taskDetail({state: 'SOMETHING_NEW'}).state, '状态未识别');
+});
+
+test('task view lets the server authorize children by public ID without reviving restricted goals', () => {
+  const {taskDetail} = require('../src/elephant/admin/console.js');
+  const task = {kind: 'goal', state: 'WAITING_CHILDREN', context_revoked: true, goal: 'private',
+    result: {summary: 'private'},
+    children: [{id: 'internal', public_id: 'worker-public', state: 'RUNNING', goal: 'private'}, {id: 'internal-only'}]};
+  const view = taskDetail(task);
+  assert.equal(view.goal, null);
+  assert.equal(view.result, null);
+  assert.deepEqual(view.children, [{id: 'worker-public', state: '执行中', label: '任务 worker-public'}]);
+});
+
+test('task tickets ignore a response from a previous selection or logout', () => {
+  const {taskRequests} = require('../src/elephant/admin/console.js');
+  const tickets = taskRequests();
+  const goal = tickets.next();
+  const create = tickets.snapshot();
+  assert.equal(tickets.current(goal), true);
+  const worker = tickets.next();
+  assert.equal(tickets.current(goal), false);
+  assert.equal(tickets.current(create), false);
+  assert.equal(tickets.current(worker), true);
+  tickets.invalidate();
+  assert.equal(tickets.current(worker), false);
+});
+
+test('console pagehide purges task details and shows login before BFCache restore', () => {
+  const events = new Map(), nodes = new Map();
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, {
+      value: '', textContent: '', children: [], hidden: false,
+      classList: {contains: () => false, toggle() {}},
+      setAttribute() {}, removeAttribute() {}, addEventListener() {},
+      replaceChildren() { this.children = []; },
+    });
+    return nodes.get(id);
+  };
+  const source = fs.readFileSync('src/elephant/admin/console.js', 'utf8');
+  require('node:vm').runInNewContext(source, {
+    document: {getElementById: node, querySelectorAll: () => []},
+    window: {addEventListener: (type, listener) => events.set(type, listener)},
+    location: {hash: '#tasks'}, crypto: require('node:crypto').webcrypto, clearTimeout,
+  });
+  for (const id of ['task-rows', 'task-view']) node(id).children = [{textContent: 'synthetic protected task'}];
+  for (const id of ['task-output', 'event-output']) node(id).textContent = 'synthetic protected event';
+  for (const id of ['task-id', 'task-goal', 'token']) node(id).value = 'synthetic private text';
+  node('task-diagnostics').open = true;
+  node('app-shell').hidden = false;
+  node('login-screen').hidden = true;
+  events.get('pagehide')({persisted: true});
+  events.get('pageshow')({persisted: true});
+  assert.equal(node('app-shell').hidden, true);
+  assert.equal(node('login-screen').hidden, false);
+  assert.equal(node('auth-error').textContent, '请重新连接。');
+  assert.deepEqual(node('task-view').children, []);
+  assert.deepEqual(node('task-rows').children, []);
+  assert.equal(node('task-output').textContent, '');
+  assert.equal(node('event-output').textContent, '未连接');
+  assert.equal(node('task-diagnostics').open, false);
+  for (const id of ['task-id', 'task-goal', 'token']) assert.equal(node(id).value, '');
+});
+
+test('task events distinguish an access revocation from ordinary diagnostic data', () => {
+  const {taskEvent} = require('../src/elephant/admin/console.js');
+  assert.deepEqual(taskEvent('event: access-revoked\ndata: {}'), {revoked: true});
+  assert.deepEqual(taskEvent('id: 28\ndata: {"type":"progress"}'), {cursor: '28', text: '{"type":"progress"}'});
+  assert.deepEqual(taskEvent(': heartbeat'), {cursor: undefined, text: ''});
+});

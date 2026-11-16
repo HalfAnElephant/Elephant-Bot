@@ -537,3 +537,17 @@ dialog::backdrop { background: #162b2259; }
 .conversation-policy-section input[type=checkbox] { margin: 10px 0; }
 #default-policy-fields > .field { grid-column: 1 / -1; }
 #default-policy-settings > .hint { margin-top: 12px; }
+
+
+.task-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+#task-view { display: grid; gap: 8px; overflow-wrap: anywhere; }
+#task-view:empty, #task-view-status:empty { display: none; }
+#task-view h4 { font-size: 13px; }
+#task-view p { white-space: pre-wrap; }
+#task-view .task-goal-text { color: var(--ink); }
+.task-list { margin: 0; padding-inline-start: 20px; }
+.task-list li + li { margin-top: 6px; }
+.task-child-button { margin-inline-end: 8px; max-width: 100%; text-align: start; overflow-wrap: anywhere; }
+.badge.task-danger { color: var(--danger); background: var(--danger-soft); }
+.badge.task-warning { color: var(--warning); background: var(--warning-soft); }
+.task-warning-text, #task-view p.task-warning-text { color: var(--warning); }

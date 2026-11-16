@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞与凭据泄露
+    url: https://github.com/HalfAnElephant/Elephant-Bot/security/policy
+    about: 请先阅读安全政策，不要在公开 Issue 透露漏洞细节或凭据。

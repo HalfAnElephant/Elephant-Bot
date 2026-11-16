@@ -1,0 +1,25 @@
+name: 建议改进
+description: 建议一项功能、体验或文档改进
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这里是公开讨论。只使用合成示例或脱敏资料；安全问题请先阅读[安全政策](https://github.com/HalfAnElephant/Elephant-Bot/security/policy)。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题？
+      description: 说明使用场景、现有方式哪里不够用。若问题与某个版本或环境有关，请注明。
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: 希望看到什么结果？
+      description: 说明怎样验证改进有用。不确定实现方式也可以提交。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已尝试的方法或相关 Issue（选填）

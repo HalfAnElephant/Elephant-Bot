@@ -1,0 +1,54 @@
+name: 报告故障
+description: 提供可公开分享的最小复现、实际结果和预期结果
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **这个 Issue 是公开的。** 请勿提交真实令牌、QQ 号码或二维码、邮件、用户数据、完整配置、数据库或原始日志包。
+        安全漏洞和泄露请先阅读[安全政策](https://github.com/HalfAnElephant/Elephant-Bot/security/policy)，不要在这里披露细节。
+  - type: input
+    id: version
+    attributes:
+      label: 发布版本或 Git 提交 SHA
+      placeholder: 发布标签，或 git rev-parse --short HEAD 的结果
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 操作系统、架构与运行方式
+      description: 注明是本地前台、系统服务或其他方式。若与问题有关，可补充 Python、Node.js、Pi 版本。
+      placeholder: Ubuntu 24.04 / arm64 / systemd
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现
+      description: 按顺序写出操作或命令。注明是否使用合成夹具；如果只能在真实服务观察到，仅描述经过脱敏的行为。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志或截图（选填）
+      description: 只附定位所需片段。请遮盖令牌、账号、私有地址和路径，不要粘贴完整配置或日志包。
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已检查公开内容，不含真实凭据或私人数据；涉及安全披露时不会使用此表单。
+          required: true

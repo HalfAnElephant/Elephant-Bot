@@ -270,7 +270,7 @@ class Core:
         return event, context
 
     def enqueue_admin_task(self, goal, *, idempotency_key, success_checks=(), requested_outputs=(),
-                           requested_actions=(), workspace_id=None):
+                           requested_actions=(), workspace_id=None, viewer=None):
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("an Idempotency-Key of at most 200 characters is required")
         now = self.clock.now()
@@ -291,7 +291,7 @@ class Core:
                     "success_checks": list(success_checks), "requested_outputs": list(requested_outputs)}]}
             event, context = self.structured_goal_context(event, spec, workspace_id, conn)
             return self.tasks.graph.submit(conn, dialogue, event, access, spec,
-                stable_id("admin-task", idempotency_key), self.sessions.binding(), context)
+                stable_id("admin-task", idempotency_key), self.sessions.binding(), context, viewer=viewer)
 
     def context_for(self, event, access=None, workspace_id=None, *, conn=None, **_):
         access = access or self.access(event)

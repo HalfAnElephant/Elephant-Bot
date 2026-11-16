@@ -105,16 +105,69 @@ const ConsoleModel = (() => {
     const outcome = result.effect === 'allow' ? '允许此操作' : '禁止此操作';
     return outcome + '。' + (result.matched_rule ? '命中规则：' + ruleTarget(result.matched_rule.subject) + '；优先级 ' + result.matched_rule.priority + '。' : '没有规则匹配，使用默认处理方式。') + '（策略版本 ' + result.policy_version + '）';
   }
-  return {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation};
+  const taskStates = Object.freeze({
+    QUEUED: '排队中', RUNNING: '执行中', RECOVERING: '恢复中', WAITING_CHILDREN: '等待 Worker', WAITING_INPUT: '等待补充信息',
+    WAITING_EXTERNAL: '等待外部条件', NEEDS_RECONCILIATION: '待核实', SUCCEEDED: '已完成',
+    PARTIAL: '部分完成', FAILED: '未完成', BLOCKED: '暂时受阻', EXPIRED: '已超时',
+    CANCEL_REQUESTED: '正在停止', CANCELLED: '已取消',
+  });
+  const taskStateLabel = state => Object.hasOwn(taskStates, state) ? taskStates[state] : '状态未识别';
+  function taskDetail(task) {
+    const progress = task.progress || {};
+    const states = [...(progress.delivery?.states || []), ...(task.deliveries || []).map(item => item.state)];
+    const delivery = states.includes('UNKNOWN') ? '有投递记录状态未知，请先核实，不要重复发送。'
+      : progress.delivery?.required === false ? '控制台任务，不会发送外部消息。'
+        : progress.delivery?.delivered ? '有结果发送成功记录。'
+          : states.includes('FAILED') ? '有投递失败记录。'
+            : progress.delivery?.required === true ? '暂无结果发送成功记录。' : null;
+    return {
+      title: task.kind === 'goal' ? '目标' : task.kind === 'consult' ? '咨询 Worker' : 'Worker',
+      state: taskStateLabel(task.state),
+      tone: ['FAILED', 'BLOCKED', 'EXPIRED'].includes(task.state) ? 'danger'
+        : ['PARTIAL', 'NEEDS_RECONCILIATION'].includes(task.state) ? 'warning' : '',
+      goal: task.context_revoked ? null : task.goal,
+      result: task.context_revoked ? null : task.result?.summary,
+      restricted: task.context_revoked === true,
+      action: task.state === 'SUCCEEDED' && progress.delivery?.required === true ? null : progress.current_action,
+      waiting: (progress.waiting_for || []).map(item => ({
+        text: item.state === 'UNKNOWN'
+          ? item.kind === 'job' ? '受管进程状态未知，等待核实。' : '外部操作结果未知，等待核实。'
+          : item.reason,
+        unknown: item.state === 'UNKNOWN',
+      })).filter(item => item.text),
+      delivery, deliveryUnknown: states.includes('UNKNOWN'),
+      children: (task.children || []).filter(item => item.public_id).map(item => ({
+        id: item.public_id, state: taskStateLabel(item.state),
+        label: !task.context_revoked && !item.rework_required && item.goal ? item.goal : '任务 ' + item.public_id,
+      })),
+    };
+  }
+  function taskRequests() {
+    let version = 0;
+    return {next: () => ++version, snapshot: () => version, invalidate: () => { version++; }, current: ticket => ticket === version};
+  }
+  function taskEvent(frame) {
+    let name = '', cursor;
+    const data = [];
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) name = line.slice(6).trim();
+      if (line.startsWith('id:')) cursor = line.slice(3).trim();
+      if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+    }
+    return name === 'access-revoked' ? {revoked: true} : {cursor, text: data.join('\n')};
+  }
+  return {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation, taskStateLabel, taskDetail, taskRequests, taskEvent};
 })();
 if (typeof module !== 'undefined') module.exports = ConsoleModel;
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id), encode = encodeURIComponent;
-  const {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation} = ConsoleModel;
+  const {equal, changes, resolve, defaultValue, errorPath, assertShape, subjectFields, scopeLabels, actionLabels, updateAction, subjectNamespace, validatePolicy, valueType, emptyValue, ruleTarget, newPermissionRule, permissionExplanation, taskStateLabel, taskDetail, taskRequests, taskEvent} = ConsoleModel;
   const editors = [], replaceButtons = ['load-config', 'load-permissions', 'load-versions', 'load-version', 'config-use-json', 'permissions-use-json'];
   let token = '', authEpoch = 0, saving = false, dialogPending = false, activePanel = 'configuration', noticeTimer;
   let configVersion = null, savedConfigVersion = null, permissionVersion = null;
   let configView = null, eventController = null, streamTask = '', eventCursor = '0', fieldCounter = 0;
+  const detailRequests = taskRequests(), listRequests = taskRequests();
+  let taskTrail = [];
   const uuid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -161,7 +214,7 @@ if (typeof document !== 'undefined') (() => {
     try { value = raw ? JSON.parse(raw) : null; } catch { value = raw; }
     if (!response.ok) {
       const messages = {401: '令牌无效或已失效，请重新连接。当前草稿已保留。', 403: '当前权限不允许此操作。请检查权限策略。', 409: '配置已变化或当前状态不允许操作。草稿已保留，请重新读取并核对差异。', 422: '请修正标出的设置后重试。'};
-      if (response.status === 401) { token = ''; authEpoch++; stopEvents(); loginVisible(true); show('auth-error', messages[401]); }
+      if (response.status === 401) { token = ''; authEpoch++; resetTaskSession(); loginVisible(true); show('auth-error', messages[401]); }
       throw Object.assign(new Error(messages[response.status] || '服务暂时无法完成操作，请稍后重试。'), {status: response.status, details: value?.detail ?? value});
     }
     return value;
@@ -661,43 +714,145 @@ if (typeof document !== 'undefined') (() => {
     } catch (error) { empty($('overview-metrics'), '暂时无法读取运行状态。', overview); throw error; }
   }
   async function loadTasks() {
-    const rows = await request('/api/v1/tasks'); $('task-rows').replaceChildren();
-    for (const item of rows) { const row = document.createElement('tr'); cell(row, item.public_id); cell(row, item.state); cell(row, item.created_at); button(cell(row, ''), '查看', async () => { selectTask(item.public_id); await loadTask(); }); $('task-rows').append(row); }
+    const ticket = listRequests.next();
+    let rows;
+    try { rows = await request('/api/v1/tasks'); }
+    catch (error) {
+      if (!listRequests.current(ticket) || error.stale) return;
+      if (error.status === 403) resetTaskSession();
+      throw error;
+    }
+    if (!listRequests.current(ticket)) return;
+    $('task-rows').replaceChildren();
+    for (const item of rows) { const row = document.createElement('tr'); cell(row, item.public_id); cell(row, taskStateLabel(item.state)); cell(row, item.created_at); button(cell(row, ''), '查看', async () => { selectTask(item.public_id); await loadTask(true); }); $('task-rows').append(row); }
     if (!rows.length) { const row = element('tr'); const td = cell(row, '暂无后台任务。'); td.colSpan = 4; $('task-rows').append(row); }
     notice('已读取 ' + rows.length + ' 个任务');
   }
-  function selectTask(id) { if ($('task-id').value !== id) { stopEvents(); eventCursor = '0'; streamTask = ''; show('event-output', '未连接'); } $('task-id').value = id; }
-  $('task-id').addEventListener('change', () => { stopEvents(); eventCursor = '0'; streamTask = ''; show('event-output', '未连接'); });
-  async function loadTask() { show('task-output', await request('/api/v1/tasks/' + encode(taskID()))); $('task-output').closest('details')?.setAttribute('open', ''); }
-  action('load-tasks', loadTasks); action('load-task', loadTask);
-  action('cancel-task', async () => { if (!await confirmDialog('取消此任务？', '取消请求发送后，执行器会停止当前任务。', [], '取消任务')) return; show('task-output', await request('/api/v1/tasks/' + encode(taskID()) + '/cancel', {method: 'POST'})); notice('取消请求已处理'); });
+  function resetTaskSession() {
+    listRequests.invalidate(); clearTaskView(); taskTrail = []; $('task-id').value = ''; $('task-rows').replaceChildren();
+  }
+  function clearTaskView(message = '选择任务以查看状态。') {
+    detailRequests.invalidate(); clearTaskEvents();
+    show('task-view-status', message); $('task-view').replaceChildren();
+    show('task-output', ''); $('task-diagnostics').hidden = true; $('task-diagnostics').open = false;
+    $('task-back').hidden = true;
+    $('task-view').removeAttribute('aria-busy');
+  }
+  function selectTask(id, trail = []) {
+    if ($('task-id').value !== id) clearTaskView();
+    taskTrail = trail; $('task-id').value = id;
+    $('task-back').hidden = !taskTrail.length;
+  }
+  $('task-id').addEventListener('input', () => { taskTrail = []; clearTaskView(); });
+  function renderTask(result, id) {
+    const data = taskDetail(result);
+    const status = element('p', data.state, 'badge' + (data.tone ? ' task-' + data.tone : ''));
+    const title = element('h4', data.title);
+    const heading = element('div', undefined, 'task-view-heading');
+    heading.append(title, status);
+    const view = $('task-view'); view.replaceChildren(heading, element('code', result.public_id || id));
+    if (data.goal) view.append(element('p', data.goal, 'task-goal-text'));
+    if (data.restricted) {
+      clearTaskEvents('访问权限已变化，已停止读取并清除任务事件。');
+      view.append(element('p', '访问权限已变化，目标和结果不再显示。'));
+    }
+    if (data.action) view.append(element('p', data.action));
+    if (data.waiting.length) {
+      const list = element('ul', undefined, 'task-list');
+      for (const item of data.waiting) list.append(element('li', item.text, item.unknown ? 'task-warning-text' : ''));
+      view.append(element('h4', '正在等待'), list);
+    }
+    if (data.result) view.append(element('h4', '任务结果'), element('p', data.result, 'task-goal-text'));
+    if (data.delivery) view.append(element('h4', '消息投递'), element('p', data.delivery, data.deliveryUnknown ? 'task-warning-text' : ''));
+    if (data.children.length) {
+      const children = element('ul', undefined, 'task-list');
+      for (const child of data.children) {
+        const item = element('li');
+        const link = button(item, child.label, async () => { selectTask(child.id, [...taskTrail, id]); await loadTask(true); }, 'task-child-button');
+        link.setAttribute('aria-label', '查看 ' + child.label + '（' + child.state + '）');
+        item.append(element('span', child.state, 'badge'));
+        children.append(item);
+      }
+      view.append(element('h4', '下级任务'), children);
+    }
+    show('task-output', data.restricted ? '' : result);
+    $('task-diagnostics').hidden = data.restricted;
+    if (data.restricted) $('task-diagnostics').open = false;
+  }
+  async function loadTask(focus = false) {
+    const id = taskID(), ticket = detailRequests.next(), view = $('task-view');
+    const current = () => detailRequests.current(ticket) && $('task-id').value.trim() === id;
+    view.setAttribute('aria-busy', 'true'); show('task-view-status', '正在读取任务…');
+    try {
+      const result = await request('/api/v1/tasks/' + encode(id));
+      if (!current()) return;
+      renderTask(result, id); show('task-view-status', '');
+      if (focus) $('task-detail-heading').focus();
+    } catch (error) {
+      if (!current() || error.stale) return;
+      clearTaskView('暂时无法读取任务。请核对任务编号或权限，再查询一次。');
+      $('task-back').hidden = !taskTrail.length;
+      throw error;
+    } finally {
+      if (current()) view.removeAttribute('aria-busy');
+    }
+  }
+  action('task-back', async () => { const trail = taskTrail.slice(0, -1); selectTask(taskTrail.at(-1), trail); await loadTask(true); });
+  action('load-tasks', loadTasks); action('load-task', () => loadTask());
+  action('cancel-task', async () => {
+    const id = taskID(), epoch = authEpoch;
+    const selected = () => epoch === authEpoch && $('task-id').value.trim() === id;
+    if (!await confirmDialog('取消此任务？', '将向当前任务提交取消请求。请刷新详情核对最终状态。', [], '取消任务') || !selected()) return;
+    await request('/api/v1/tasks/' + encode(id) + '/cancel', {method: 'POST'});
+    if (!selected()) return;
+    notice('已提交取消请求'); await loadTask();
+  });
   $('create-key').value = uuid();
   action('new-create-key', () => { $('create-key').value = uuid(); });
   action('create-task', async () => {
+    const ticket = detailRequests.snapshot();
     const result = await request('/api/v1/tasks', {method: 'POST', headers: {'Idempotency-Key': required('create-key', '新任务幂等键')}, body: {goal: required('task-goal', '任务目标')}});
-    selectTask(result.public_id); show('task-output', result); notice('任务已提交');
+    notice('任务已提交：' + result.public_id);
+    if (!detailRequests.current(ticket)) return;
+    selectTask(result.public_id);
+    try { await loadTask(true); }
+    catch { notice('任务已提交：' + result.public_id + '。详情暂时无法读取。', true); }
   });
   function stopEvents() { if (eventController) eventController.abort(); eventController = null; }
+  function clearTaskEvents(message = '未连接') {
+    stopEvents(); eventCursor = '0'; streamTask = ''; show('event-output', message);
+  }
   $('stop-events').addEventListener('click', () => { stopEvents(); notice('事件读取已停止'); });
   action('start-events', async () => {
     stopEvents(); const id = taskID(); if (streamTask !== id) { streamTask = id; eventCursor = '0'; show('event-output', ''); }
     const controller = new AbortController(); eventController = controller;
     try {
       const response = await fetch('/api/v1/tasks/' + encode(id) + '/events', {headers: headers({'Last-Event-ID': eventCursor}), signal: controller.signal, cache: 'no-store'});
-      if (!response.ok) { if (response.status === 401) { token = ''; authEpoch++; loginVisible(true); show('auth-error', '令牌已失效，请重新连接。'); } throw new Error('事件读取失败，请检查权限和连接后重试。'); }
+      if (controller.signal.aborted || controller !== eventController) return;
+      if (!response.ok) {
+        if ([401, 403, 404].includes(response.status)) resetTaskSession();
+        if (response.status === 401) { token = ''; authEpoch++; loginVisible(true); show('auth-error', '令牌已失效，请重新连接。'); }
+        throw new Error('事件读取失败，请检查权限和连接后重试。');
+      }
       if (!response.body) throw new Error('浏览器无法读取事件流');
       notice('正在读取任务事件'); const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
       while (true) {
         const chunk = await reader.read(); if (chunk.done || controller.signal.aborted) break; buffer += decoder.decode(chunk.value, {stream: true}); buffer = buffer.replace(/\r\n/g, '\n');
         let end;
         while ((end = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2); const data = [];
-          for (const line of frame.split('\n')) { if (line.startsWith('id:')) eventCursor = line.slice(3).trim(); if (line.startsWith('data:')) data.push(line.slice(5).trimStart()); }
-          if (data.length) $('event-output').textContent = ($('event-output').textContent + data.join('\n') + '\n').slice(-24000);
+          const frame = taskEvent(buffer.slice(0, end)); buffer = buffer.slice(end + 2);
+          if (frame.revoked) {
+            if (controller !== eventController || controller.signal.aborted) return;
+            resetTaskSession();
+            show('task-view-status', '任务访问权限或登录状态已变化，请重新查询。');
+            return;
+          }
+          if (frame.cursor !== undefined) eventCursor = frame.cursor;
+          if (frame.text) $('event-output').textContent = ($('event-output').textContent + frame.text + '\n').slice(-24000);
         }
         if (buffer.length > 1000000) throw new Error('事件帧超过读取上限');
       }
-      notice('事件流已结束');
+      if (controller === eventController && !controller.signal.aborted) notice('事件流已结束');
     } catch (error) { if (error.name !== 'AbortError') throw error; }
     finally { if (eventController === controller) eventController = null; }
   });
@@ -770,6 +925,7 @@ if (typeof document !== 'undefined') (() => {
     const policy = validatePolicy(permissionEditor.read()), diff = changes(permissionEditor.baseline, policy);
     if (!diff.length || !await confirmDialog('更新生效中的权限策略？', '更改会立即影响所有操作。服务会检查管理员入口是否仍可访问。', diff, '保存权限策略')) return;
     const result = await request('/api/v1/permissions', {method: 'PUT', body: {expected_version: permissionVersion, policy}});
+    resetTaskSession();
     const {policy_version, ...updated} = result; permissionVersion = policy_version; permissionEditor.load(updated); show('permissions-output', result); notice('权限策略已保存并生效。');
   }));
   action('load-versions', async () => {
@@ -825,7 +981,7 @@ if (typeof document !== 'undefined') (() => {
   });
   action('logout', async () => {
     if (editors.some(state => state.dirty) && !await confirmDialog('断开并清除草稿？', '管理员令牌和本页未保存的内容会被清除。', [], '断开连接')) return;
-    stopEvents(); authEpoch++; token = ''; configVersion = savedConfigVersion = permissionVersion = null;
+    resetTaskSession(); authEpoch++; token = ''; configVersion = savedConfigVersion = permissionVersion = null;
     editors.forEach(state => state.clear()); configView = null; $('token').value = ''; $('token').type = 'password';
     document.querySelectorAll('pre').forEach(item => { item.textContent = ''; });
     for (const id of ['task-rows', 'versions', 'credentials', 'overview-metrics', 'overview-adapters']) $(id).replaceChildren();
@@ -836,6 +992,13 @@ if (typeof document !== 'undefined') (() => {
     loginVisible(true); $('token').focus();
   });
   window.addEventListener('beforeunload', event => { if (editors.some(state => state.dirty)) { event.preventDefault(); event.returnValue = ''; } });
-  window.addEventListener('pagehide', () => { stopEvents(); authEpoch++; token = ''; });
+  window.addEventListener('pagehide', () => {
+    authEpoch++; token = ''; resetTaskSession();
+    $('task-goal').value = ''; $('create-key').value = uuid(); $('token').value = '';
+    notice(''); loginVisible(true);
+  });
+  window.addEventListener('pageshow', event => {
+    if (event.persisted) show('auth-error', '请重新连接。');
+  });
   updateSaveButtons(); loginVisible(true); navigate(location.hash.slice(1) || 'configuration', false);
 })();

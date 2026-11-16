@@ -94,7 +94,12 @@
           <div class="section-head"><div><h2 id="tasks-title">后台任务</h2><p class="section-description">查看 Leader 与 Workers 的持久任务，或提交一个新的工作目标。</p></div><button id="load-tasks">读取任务</button></div>
           <div class="scroll"><table><thead><tr><th>任务 ID</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="task-rows"></tbody></table></div>
           <div class="form-card"><h3>任务操作</h3><div class="bar"><label for="task-id">任务 ID<input id="task-id" spellcheck="false" placeholder="选择上方任务或输入 ID"></label><button id="load-task">查询</button><button id="cancel-task" class="danger">取消任务</button><button id="start-events">读取事件</button><button id="stop-events">停止读取</button></div></div>
-          <div class="grid"><div class="form-card"><h3>任务详情</h3><pre id="task-output">选择任务以查看状态。</pre></div><div class="form-card"><h3>实时事件</h3><pre id="event-output" role="log" aria-live="polite">尚未开始读取。</pre></div></div>
+          <div class="grid"><section class="form-card" aria-labelledby="task-detail-heading">
+            <div class="task-view-heading"><h3 id="task-detail-heading" tabindex="-1">任务详情</h3><button id="task-back" type="button" class="quiet" hidden>返回上级任务</button></div>
+            <p id="task-view-status" role="status">选择任务以查看状态。</p>
+            <div id="task-view"></div>
+            <details class="technical-details" id="task-diagnostics" hidden><summary>原始诊断信息</summary><pre id="task-output"></pre></details>
+          </section><div class="form-card"><h3>实时事件</h3><pre id="event-output" role="log" aria-live="polite">尚未开始读取。</pre></div></div>
           <details><summary>创建后台任务</summary><label for="task-goal">任务目标</label><textarea id="task-goal" rows="4" maxlength="16000" placeholder="描述希望小象完成的工作…"></textarea><div class="bar"><label for="create-key">提交幂等键<input id="create-key" spellcheck="false"></label><button id="new-create-key">生成新键</button><button id="create-task" class="primary">提交目标</button></div><p class="hint">任务由当前 host owner 身份进入 Leader 工作流；保存幂等键可安全核对提交结果。</p></details>
         </section>
       </main>
