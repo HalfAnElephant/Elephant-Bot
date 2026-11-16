@@ -121,14 +121,11 @@ def run_smoke(local, model_port):
     config["model"] = {"endpoint": f"http://{LOOPBACK}:{model_port}/chat/completions", "model": MODEL}
     cfg = local / "config.yaml"
     cfg.write_text(yaml.safe_dump(config), encoding="utf-8")
-    env_file = local / "credentials.env"
-    env_file.write_text(f"{settings.admin_token_env}={ADMIN_TOKEN}\n"
-                        f"{settings.model.api_key_env}={MODEL_KEY}\n", encoding="utf-8")
-
     # Do not inherit provider credentials, proxies, or settings from the CI runner.
     env = {"PATH": os.environ["PATH"], "HOME": str(local), "NO_PROXY": f"{LOOPBACK},localhost",
-           "LANG": "en_US.UTF-8", "PYTHONUTF8": "1", "TMPDIR": str(local)}
-    command = ["./elephant", "serve", "--config", str(cfg), "--env-file", str(env_file)]
+           "LANG": "en_US.UTF-8", "PYTHONUTF8": "1", "TMPDIR": str(local),
+           settings.admin_token_env: ADMIN_TOKEN, settings.model.api_key_env: MODEL_KEY}
+    command = ["./elephant", "serve", "--config", str(cfg)]
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     payload = {"goal": "Say hello without tools."}
     with running_service(command, env, local / "serve.log", opener):
