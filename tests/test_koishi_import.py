@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy import func, select
 
-from qqbot.domain import AccessContext, ConversationRef, PrincipalRef, Surface
-from qqbot.memory import SocialService
-from qqbot.storage.db import Database
-from qqbot.storage.operations import backup, export_deletions, restore
-from qqbot.storage.schema import inbox, outbox
-from qqbot.storage.social_schema import social_records
+from elephant.domain import AccessContext, ConversationRef, PrincipalRef, Surface
+from elephant.memory import SocialService
+from elephant.storage.db import Database
+from elephant.storage.operations import backup, export_deletions, restore
+from elephant.storage.schema import inbox, outbox
+from elephant.storage.social_schema import social_records
 
 spec = importlib.util.spec_from_file_location(
     "koishi_import", Path(__file__).parents[1] / "scripts/import_koishi_profile.py"

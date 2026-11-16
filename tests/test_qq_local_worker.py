@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from qqbot.capabilities.gateway import CapabilityRegistry
-from qqbot.capabilities.qq import register_qq
+from elephant.capabilities.gateway import CapabilityRegistry
+from elephant.capabilities.qq import register_qq
 
 
 def setup(tmp_path, call, upload=None):
@@ -17,7 +17,7 @@ def setup(tmp_path, call, upload=None):
 
 
 async def test_worker_local_file_send_reads_after_authorization_off_loop(tmp_path, monkeypatch):
-    from qqbot.adapters.qq_official import local_media
+    from elephant.adapters.qq_official import local_media
     calls, threads = [], []
     def read(root, path, kind):
         assert calls == ["authorize"]
@@ -51,7 +51,7 @@ async def test_worker_rejects_nonoutput_paths_before_authority_or_read(tmp_path,
 
 
 async def test_worker_denial_does_not_read_or_upload(tmp_path, monkeypatch):
-    from qqbot.adapters.qq_official import local_media
+    from elephant.adapters.qq_official import local_media
     monkeypatch.setattr(local_media, "snapshot_workspace_file", lambda *a: pytest.fail("must not read"))
     calls = []
     async def call(op, payload):
@@ -75,7 +75,7 @@ async def test_worker_cannot_override_workspace_or_destination(tmp_path):
 
 
 async def test_cancelled_read_never_uploads_when_background_read_finishes(tmp_path, monkeypatch):
-    from qqbot.adapters.qq_official import local_media
+    from elephant.adapters.qq_official import local_media
     started, release = threading.Event(), threading.Event()
     calls = []
     def read(*args):

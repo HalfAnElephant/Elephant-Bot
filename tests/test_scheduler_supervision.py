@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from qqbot.observability.supervision import LoopSupervisor
-from qqbot.runtime.scheduler import Scheduler
+from elephant.observability.supervision import LoopSupervisor
+from elephant.runtime.scheduler import Scheduler
 
 
 def scheduler_for(once):

@@ -25,15 +25,15 @@ from test_runtime_recovery import (
     runtime as runtime_fixture,
 )
 
-from qqbot.app import create_app
-from qqbot.capabilities.types import Action, Capability
-from qqbot.config import Settings
-from qqbot.contracts.harness import resolve_harness
-from qqbot.domain.tasks import HarnessCapabilities
-from qqbot.harness.gateway import RunGateway
-from qqbot.runtime.scheduler import Scheduler
-from qqbot.storage.agent_schema import leader_inbox
-from qqbot.storage.task_schema import runs, tasks
+from elephant.app import create_app
+from elephant.capabilities.types import Action, Capability
+from elephant.config import Settings
+from elephant.contracts.harness import resolve_harness
+from elephant.domain.tasks import HarnessCapabilities
+from elephant.harness.gateway import RunGateway
+from elephant.runtime.scheduler import Scheduler
+from elephant.storage.agent_schema import leader_inbox
+from elephant.storage.task_schema import runs, tasks
 
 runtime = runtime_fixture
 recovery = recovery_fixture

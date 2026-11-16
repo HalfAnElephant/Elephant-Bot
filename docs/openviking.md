@@ -46,7 +46,7 @@ curl --fail-with-body http://127.0.0.1:1933/api/v1/admin/accounts/elephant/users
 unset OV_ROOT_KEY
 ```
 
-把第二个响应的 `result.user_key` 填入 Elephant Bot 的私有环境文件 `QQBOT_OPENVIKING_KEY`，root key 留在独立的服务端管理环境。生产常驻进程、存储权限和模型设置按锁定版本的上游部署指南完成。[OpenViking v0.5.4.1 部署](https://github.com/volcengine/OpenViking/blob/v0.5.4.1/docs/en/guides/03-deployment.md) · [认证与用户管理](https://github.com/volcengine/OpenViking/blob/v0.5.4.1/docs/en/guides/04-authentication.md)
+把第二个响应的 `result.user_key` 填入 Elephant Bot 的私有环境文件 `ELEPHANT_OPENVIKING_KEY`，root key 留在独立的服务端管理环境。生产常驻进程、存储权限和模型设置按锁定版本的上游部署指南完成。[OpenViking v0.5.4.1 部署](https://github.com/volcengine/OpenViking/blob/v0.5.4.1/docs/en/guides/03-deployment.md) · [认证与用户管理](https://github.com/volcengine/OpenViking/blob/v0.5.4.1/docs/en/guides/04-authentication.md)
 
 ## 配置绑定并确认身份
 
@@ -64,16 +64,16 @@ memory:
         workspace_id: "personal"
         account_id: "elephant"
         user_id: "assistant"
-        api_key_env: "QQBOT_OPENVIKING_KEY"
+        api_key_env: "ELEPHANT_OPENVIKING_KEY"
 ```
 
 把凭据放在进程环境中，不要写入配置或版本库。群聊或项目工作区需单独配置匹配的作用域和身份绑定。运行当前数据库迁移以创建记忆操作与删除屏障账本；无需安装 OpenViking Python SDK。
 
-`owner_id` 必须与 `owner.id` 一致，个人默认值为 `personal-owner`。先加载环境文件，再执行 `qqbot validate --config YOUR_CONFIG` 和 `qqbot doctor --config YOUR_CONFIG`；endpoint 已配置而 bindings 为空时会给出告警。使用普通用户凭据检查后端身份。
+`owner_id` 必须与 `owner.id` 一致，个人默认值为 `personal-owner`。先加载环境文件，再执行 `elephant validate --config YOUR_CONFIG` 和 `elephant doctor --config YOUR_CONFIG`；endpoint 已配置而 bindings 为空时会给出告警。使用普通用户凭据检查后端身份。
 
 ```sh
 curl --fail-with-body http://127.0.0.1:1933/health \
-  -H "X-API-Key: $QQBOT_OPENVIKING_KEY" \
+  -H "X-API-Key: $ELEPHANT_OPENVIKING_KEY" \
   -H 'X-OpenViking-Account: elephant' \
   -H 'X-OpenViking-User: assistant'
 ```
@@ -86,8 +86,8 @@ curl --fail-with-body http://127.0.0.1:1933/health \
 
 ## 数据流与边界
 
-- [KnowledgeRuntime](../src/qqbot/runtime/knowledge.py) 从授权的 Pi 原生 Session 增量导出来源事件。空白、疑似密钥、工具输出、转述、摘要、技能复盘及缺少来源证据的 verified fact 不提交提炼。
-- [OpenVikingMemory](../src/qqbot/adapters/openviking/service.py) 以 owner/workspace 对应的 USER 身份，串行提交同步、提炼和记忆变更。每个原始事件单独进入隔离的 OpenViking Session，显式 commit 并轮询提炼任务；这会为多个事件产生多次 commit。提炼类型限于 profile、preferences、entities、events。working memory、peer memory 与自动 commit 关闭。
+- [KnowledgeRuntime](../src/elephant/runtime/knowledge.py) 从授权的 Pi 原生 Session 增量导出来源事件。空白、疑似密钥、工具输出、转述、摘要、技能复盘及缺少来源证据的 verified fact 不提交提炼。
+- [OpenVikingMemory](../src/elephant/adapters/openviking/service.py) 以 owner/workspace 对应的 USER 身份，串行提交同步、提炼和记忆变更。每个原始事件单独进入隔离的 OpenViking Session，显式 commit 并轮询提炼任务；这会为多个事件产生多次 commit。提炼类型限于 profile、preferences、entities、events。working memory、peer memory 与自动 commit 关闭。
 - OpenViking 保存事实和索引。SQLite 保存 owner 绑定、来源 ID 与 hash、操作回执、索引水位、epoch 和更正/遗忘屏障，不保存事实正文副本。
 - 检索结果只作为候选 URI。宿主核对 URI、owner、来源、索引状态和 epoch，再从 OpenViking 读取正文；当前聊天可用权限仍由宿主检查。
 - 记忆读写受权限服务约束。更正与遗忘由真实用户轮次触发，先写入持久屏障，再串行处理远端变更；已撤回的来源不会重新同步。恢复旧数据库时，须导入最新删除账本并由只读核对确认远端任务、来源和 URI 后才重新开放召回。

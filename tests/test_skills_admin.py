@@ -4,22 +4,22 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.permissions import PermissionRule
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.permissions import PermissionRule
 
 CONTENT = '---\nname: sample\ndescription: Use when checking a workflow.\n---\nRead the original source.\n'
 
 
 def test_skill_management_reads_exports_and_rejects_stale_rollback(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'skill-admin')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'skill-admin')
     app = create_app(Settings(database=str(tmp_path / 'core.db')), clock=clock, run_background=False)
     core = app.state.core
     headers = {'Authorization': 'Bearer skill-admin'}
     with TestClient(app) as client:
         assert client.get('/api/v1/skills').status_code == 401
         assert client.get('/api/v1/skills', headers=headers).json()['skills'] == []
-        from qqbot.domain import AccessContext, ConversationRef, PrincipalRef, Surface
+        from elephant.domain import AccessContext, ConversationRef, PrincipalRef, Surface
         access = AccessContext(conversation=ConversationRef(deployment_id=core.settings.deployment_id,
             adapter_instance_id='admin_api', bot_identity_id='host', surface=Surface.PRIVATE,
             remote_conversation_id=core.settings.owner.id), principal=PrincipalRef(adapter_instance_id='admin_api',
@@ -50,7 +50,7 @@ def test_skill_management_reads_exports_and_rejects_stale_rollback(tmp_path, clo
 def test_empty_skill_export_is_valid_and_link_poisoning_is_rejected(tmp_path):
     import pytest
 
-    from qqbot.adapters.hermes_skills import HermesSkills
+    from elephant.adapters.hermes_skills import HermesSkills
     provider = HermesSkills(tmp_path / 'owner')
     with zipfile.ZipFile(io.BytesIO(provider.export())) as archive:
         assert archive.namelist() == []
@@ -64,7 +64,7 @@ def test_skill_export_rejects_fifo_without_waiting_for_a_writer(tmp_path):
 
     import pytest
 
-    from qqbot.adapters.hermes_skills import HermesSkills
+    from elephant.adapters.hermes_skills import HermesSkills
     provider = HermesSkills(tmp_path / 'owner')
     (provider.root / 'skills').mkdir(parents=True)
     os.mkfifo(provider.root / 'skills' / 'pipe')

@@ -8,7 +8,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.memory_sync_schema import MEMORY_SYNC_TABLES
+    from elephant.storage.memory_sync_schema import MEMORY_SYNC_TABLES
     for table in MEMORY_SYNC_TABLES:
         table.create(op.get_bind(), checkfirst=True)
 

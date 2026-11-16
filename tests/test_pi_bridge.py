@@ -8,9 +8,9 @@ import httpx
 import pytest
 import uvicorn
 
-from qqbot.harness.gateway import RunGateway
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.jobs.worker import CapabilityServer
+from elephant.harness.gateway import RunGateway
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.jobs.worker import CapabilityServer
 
 
 def completion_sse(message, usage=None):
@@ -145,7 +145,7 @@ async def compaction_session(tmp_path, request):
                                 {"prompt_tokens": tokens, "completion_tokens": 20}))
     gateway = RunGateway(tmp_path, "offline", "", "https://model.invalid/v1/chat/completions", call=core,
                          transport=httpx.MockTransport(upstream))
-    from qqbot.config import ContextConfig
+    from elephant.config import ContextConfig
     limits = ContextConfig().limits(window, 4096) if options.get("automatic") else {
         "soft_compaction_input_tokens": 2000, "keep_recent_tokens": 128, "compaction_output_tokens": 1000}
     claim = {"task_id": "compaction-task", "run_id": "first-run", "fencing_token": 1,
@@ -322,7 +322,7 @@ async def test_locked_pi_reports_raw_tool_protocol_after_one_correction(compacti
 
 
 async def test_locked_pi_protocol_correction_keeps_real_tool_results_and_same_session(compaction_session):
-    from qqbot.capabilities.types import Action, Capability
+    from elephant.capabilities.types import Action, Capability
 
     state = compaction_session
     state.gateway.claim["session_id"] = state.runner.session_path.stem
@@ -359,7 +359,7 @@ async def test_locked_pi_protocol_correction_keeps_real_tool_results_and_same_se
 
 
 async def test_failed_protocol_correction_preserves_refs_for_worker_failure(compaction_session):
-    from qqbot.jobs.worker import Worker
+    from elephant.jobs.worker import Worker
 
     state = compaction_session
     requests = []
@@ -527,7 +527,7 @@ async def test_locked_pi_review_exposes_only_native_hermes_tools(compaction_sess
 
 @pytest.mark.parametrize("use_tools", [True, False])
 async def test_locked_pi_reports_before_operation_and_answers_chat_directly(compaction_session, use_tools):
-    from qqbot.capabilities.types import Action, Capability
+    from elephant.capabilities.types import Action, Capability
 
     state = compaction_session
     gateway = state.gateway
@@ -568,7 +568,7 @@ async def test_locked_pi_reports_before_operation_and_answers_chat_directly(comp
 async def test_locked_pi_image_reaches_upstream_without_entering_session(compaction_session, monkeypatch):
     state = compaction_session
     data = "data:image/png;base64,iVBORw0KGgo="
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", lambda url, limit: data)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", lambda url, limit: data)
     state.gateway.claim["context"]["images"] = [
         {"source": "image-event", "message_id": "42", "url": "https://cdn.example/signed-image"}]
     result = await state.runner.run("看看图片", keep_alive=True)
@@ -661,7 +661,7 @@ async def test_locked_leader_sees_elapsed_time_and_notification_acceptance(compa
 
 @pytest.mark.parametrize("scenario", ["message", "quiet", "notification_denied", "business_failure", "worker", "stale_notice", "string_null"])
 async def test_locked_pi_business_call_keeps_explicit_communication_separate(compaction_session, scenario):
-    from qqbot.capabilities.types import Action, Capability
+    from elephant.capabilities.types import Action, Capability
 
     state = compaction_session
     gateway = state.gateway
@@ -725,7 +725,7 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
 
 
 async def test_locked_leader_requires_new_communication_choice_with_legacy_history(compaction_session):
-    from qqbot.capabilities.types import Action, Capability
+    from elephant.capabilities.types import Action, Capability
 
     state = compaction_session
     gateway = state.gateway

@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from qqbot.permissions import (
+from elephant.permissions import (
     PermissionPolicy,
     PermissionRule,
     PermissionService,
@@ -12,7 +12,7 @@ from qqbot.permissions import (
     PolicyVersionConflict,
     SubjectSelector,
 )
-from qqbot.storage.permission_schema import permission_audit
+from elephant.storage.permission_schema import permission_audit
 
 SUBJECT = PermissionSubject(adapter_instance_id="qq", identity_namespace="qq_member", bot_identity_id="bot",
                             group_id="group", user_id="user")
@@ -106,10 +106,10 @@ def test_invalid_policy_boundary(kwargs):
 def test_http_permission_crud_keeps_authentication(tmp_path, official_config, clock, monkeypatch):
     from fastapi.testclient import TestClient
 
-    from qqbot.app import create_app
-    from qqbot.config import Settings
+    from elephant.app import create_app
+    from elephant.config import Settings
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
                      clock=clock, run_background=False)
     auth = {"Authorization": "Bearer admin-test-token"}
@@ -130,8 +130,8 @@ def test_http_permission_crud_keeps_authentication(tmp_path, official_config, cl
 async def test_official_adapter_ignores_legacy_allowlists_but_keeps_platform_checks(
     official_config, incoming, clock, official_event
 ):
-    from qqbot.adapters.qq_official.adapter import OfficialAdapter
-    from qqbot.domain import OutboundEnvelope
+    from elephant.adapters.qq_official.adapter import OfficialAdapter
+    from elephant.domain import OutboundEnvelope
 
     adapter = OfficialAdapter(official_config.model_copy(update={"allowed_groups": ()}), "d", incoming, clock)
     event = adapter.normalize(official_event)
@@ -159,11 +159,11 @@ async def test_scanned_owner_reply_keeps_identity_through_durable_delivery(
     import httpx
     from conftest import official_payload
 
-    from qqbot.adapters.qq_official.adapter import OfficialAdapter
-    from qqbot.admin.qq_provisioning import _owner_policy
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.outbox.service import Outbox
-    from qqbot.storage.schema import outbox
+    from elephant.adapters.qq_official.adapter import OfficialAdapter
+    from elephant.admin.qq_provisioning import _owner_policy
+    from elephant.domain import OutboundEnvelope
+    from elephant.outbox.service import Outbox
+    from elephant.storage.schema import outbox
 
     policy = _owner_policy(PermissionPolicy(), SimpleNamespace(
         instance_id=official_config.instance_id, app_id=official_config.app_id, scanner_openid="300",

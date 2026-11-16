@@ -7,11 +7,11 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
-from qqbot.domain.official import OfficialContent, OfficialMedia, TuwenCard
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
+from elephant.domain.official import OfficialContent, OfficialMedia, TuwenCard
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox
 
 
 def target(surface=Surface.PRIVATE):
@@ -139,8 +139,8 @@ def test_rich_payload_recovery_is_not_plain_text(db,clock):
 
 
 def test_keyboard_json_restart_roundtrip(db,clock):
-    from qqbot.adapters.qq_official.rendering import message_body
-    from qqbot.domain.interactions import (
+    from elephant.adapters.qq_official.rendering import message_body
+    from elephant.domain.interactions import (
         QQButton,
         QQButtonAction,
         QQButtonRender,
@@ -160,14 +160,14 @@ def test_keyboard_json_restart_roundtrip(db,clock):
 
 
 async def test_template_disabled_for_official_adapter(official_config,incoming,clock):
-    from qqbot.domain.official import TemplateMarkdown
+    from elephant.domain.official import TemplateMarkdown
     qq=adapter(official_config.model_copy(update={"markdown_enabled":False}),incoming,clock,lambda r:httpx.Response(500))
     item=envelope(clock,official_content=OfficialContent(template_markdown=TemplateMarkdown(template_id="a")))
     assert (await qq.validate_delivery(item)).reason == "MARKDOWN_DISABLED"
 
 
 async def test_offline_outbox_remains_pending_until_reconnect(db,clock):
-    from qqbot.domain import DeliveryCheck, SendReceipt
+    from elephant.domain import DeliveryCheck, SendReceipt
     class OfflineAdapter:
         online=False
         async def validate_delivery(self,item):

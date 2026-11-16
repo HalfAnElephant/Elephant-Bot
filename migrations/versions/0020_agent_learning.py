@@ -8,7 +8,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.learning_schema import LEARNING_TABLES
+    from elephant.storage.learning_schema import LEARNING_TABLES
     for table in LEARNING_TABLES:
         table.create(op.get_bind(), checkfirst=True)
 

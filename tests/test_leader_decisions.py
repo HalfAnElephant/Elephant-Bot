@@ -8,10 +8,10 @@ from test_agent_runtime import leader_complete, root_goal, worker_complete
 from test_agent_runtime import runtime as agent_runtime
 from test_worker_escalation import expire_task_budget
 
-from qqbot.domain import TextSegment
-from qqbot.runtime.tools import native_tools
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import inputs, runs, tasks, waits
+from elephant.domain import TextSegment
+from elephant.runtime.tools import native_tools
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import inputs, runs, tasks, waits
 
 runtime = agent_runtime
 
@@ -152,7 +152,7 @@ def test_pending_escalation_survives_new_user_revision(runtime):
     root, _, _ = failed_attention(runtime, children=2)
     # Return this unstarted decision claim to the inbox before the new user revision.
     with runtime.db.transaction() as conn:
-        from qqbot.storage.agent_schema import leader_inbox
+        from elephant.storage.agent_schema import leader_inbox
         conn.execute(update(runs).where(runs.c.role == "leader").values(slot_reserved=0))
         conn.execute(update(leader_inbox).values(claimed_attempt_id=None))
         current = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
@@ -175,7 +175,7 @@ async def test_unknown_external_operation_blocks_takeover(runtime):
 
 @pytest.mark.parametrize("state", ["INTENT", "STARTING", "RUNNING", "UNKNOWN"])
 async def test_takeover_waits_for_job_even_before_cancellation_is_registered(runtime, state):
-    from qqbot.storage.job_schema import jobs
+    from elephant.storage.job_schema import jobs
     root, worker, attention = failed_attention(runtime)
     now = runtime.clock.now().isoformat()
     with runtime.db.transaction() as conn:

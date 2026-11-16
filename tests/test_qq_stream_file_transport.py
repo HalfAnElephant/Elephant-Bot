@@ -10,11 +10,11 @@ from conftest import runtime_client_for
 from sqlalchemy import select, update
 from test_qq_agent_rich import rich_setup as _rich_setup
 
-from qqbot.jobs.worker import GeneralRun
-from qqbot.providers import ModelCapacity
-from qqbot.storage.local_media_schema import qq_local_media
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import processes, sessions
+from elephant.jobs.worker import GeneralRun
+from elephant.providers import ModelCapacity
+from elephant.storage.local_media_schema import qq_local_media
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import processes, sessions
 
 rich_setup = _rich_setup
 DATA = b"%PDF-1.7\nreport"
@@ -128,8 +128,8 @@ async def test_official_100_mib_file_stream_is_accepted_without_large_json(rich_
 async def test_cancel_waits_for_disk_owner_before_closing_staging(rich_setup, monkeypatch):
     import threading
 
-    from qqbot.adapters.qq_official.local_media import LocalMediaStore
-    from qqbot.jobs.rich_delivery import local_file_upload
+    from elephant.adapters.qq_official.local_media import LocalMediaStore
+    from elephant.jobs.rich_delivery import local_file_upload
     service, args, _task, _calls = rich_setup
     entered, release = threading.Event(), threading.Event()
     original = LocalMediaStore.put_file

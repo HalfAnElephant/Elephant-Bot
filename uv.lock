@@ -162,7 +162,7 @@ wheels = [
 ]
 
 [[package]]
-name = "elephant-qqbot"
+name = "elephant-bot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -175,6 +175,7 @@ dependencies = [
     { name = "icalendar" },
     { name = "pilk-nogil" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "qrcode" },
     { name = "sqlalchemy" },
@@ -200,6 +201,7 @@ requires-dist = [
     { name = "icalendar", specifier = ">=6,<8" },
     { name = "pilk-nogil", specifier = "==0.4.3" },
     { name = "pydantic", specifier = ">=2.12,<3" },
+    { name = "python-dotenv", specifier = ">=1,<2" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "qrcode", specifier = ">=8,<9" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },

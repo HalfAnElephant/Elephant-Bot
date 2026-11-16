@@ -1,7 +1,7 @@
 """Versioned application permission policy and mutation audit."""
 from alembic import op
 
-from qqbot.storage.permission_schema import PERMISSION_TABLES
+from elephant.storage.permission_schema import PERMISSION_TABLES
 
 revision = "0006"
 down_revision = "0005"

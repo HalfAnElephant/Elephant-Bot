@@ -8,7 +8,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.job_schema import JOB_TABLES
+    from elephant.storage.job_schema import JOB_TABLES
     for table in JOB_TABLES:
         table.create(op.get_bind(), checkfirst=True)
 

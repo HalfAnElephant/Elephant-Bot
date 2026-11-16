@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from qqbot.capabilities import (
+from elephant.capabilities import (
     Action,
     Capability,
     CapabilityRegistry,
@@ -14,9 +14,9 @@ from qqbot.capabilities import (
     classify,
     standard_registry,
 )
-from qqbot.capabilities.process import ProcessService
-from qqbot.storage.action_schema import operations
-from qqbot.storage.db import Database
+from elephant.capabilities.process import ProcessService
+from elephant.storage.action_schema import operations
+from elephant.storage.db import Database
 
 
 @pytest.fixture
@@ -154,7 +154,7 @@ async def test_concurrent_duplicate_dispatch_once(context, ledger):
 
 
 async def test_review_readback_requires_submitted_identity_commit(context):
-    from qqbot.capabilities import GitHubVerifier
+    from elephant.capabilities import GitHubVerifier
     review = {"id": 42, "user": {"login": "actor"}, "state": "APPROVED", "body": "好\n$HOME",
               "commit_id": "reviewed", "submitted_at": "2026-11-09T01:00:00Z"}
     reads = 0
@@ -184,7 +184,7 @@ async def test_review_readback_requires_submitted_identity_commit(context):
 async def test_git_push_uses_sanitized_repo_and_verifies_remote(context, tmp_path, branch):
     import asyncio
 
-    from qqbot.capabilities import GitService
+    from elephant.capabilities import GitService
     process = await asyncio.create_subprocess_exec("git", "init", "--bare", str(tmp_path / ".git"),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     await process.communicate()
@@ -213,7 +213,7 @@ async def test_git_push_uses_sanitized_repo_and_verifies_remote(context, tmp_pat
 async def test_process_launch_isolated_and_cleanup(context, monkeypatch):
     import asyncio
 
-    import qqbot.capabilities.process as module
+    import elephant.capabilities.process as module
     original = asyncio.create_subprocess_exec
     commands = []
     async def spawn(*argv, **kwargs):
@@ -235,7 +235,7 @@ async def test_process_launch_isolated_and_cleanup(context, monkeypatch):
 async def test_create_nonzero_with_remote_object_is_partial(context):
     import json
 
-    from qqbot.capabilities import GitHubVerifier
+    from elephant.capabilities import GitHubVerifier
     created = {"id": 9, "html_url": "https://github.com/owner/repo/issues/7", "user": {"login": "actor"},
                "created_at": "2026-11-09T01:00:01Z", "body": "中文\n`$HOME`"}
     async def cli(arguments, ctx):
@@ -252,7 +252,7 @@ async def test_create_nonzero_with_remote_object_is_partial(context):
 async def test_merge_auto_is_distinct_from_merged(context):
     import json
 
-    from qqbot.capabilities import GitHubVerifier
+    from elephant.capabilities import GitHubVerifier
     pull = {"id": 7, "merged": False, "auto_merge": {"merge_method": "SQUASH"}}
     async def cli(arguments, ctx):
         return {"exit_code": 0, "stdout": json.dumps(pull)}
@@ -323,7 +323,7 @@ async def test_empty_pr_list_is_successful_without_files(context, ledger):
 async def test_local_process_same_command_distinct_ids_dispatch_twice_same_id_once(context, ledger, monkeypatch):
     import asyncio
 
-    import qqbot.capabilities.process as module
+    import elephant.capabilities.process as module
     original = asyncio.create_subprocess_exec
     launches = []
     async def spawn(*argv, **kwargs):
@@ -388,7 +388,7 @@ async def test_repeated_local_git_fetch_is_not_semantically_deduplicated(context
 
 
 async def test_git_clone_followup_fetch_push_use_same_bounded_path(context, tmp_path):
-    from qqbot.capabilities import GitService
+    from elephant.capabilities import GitService
     service = GitService(lambda ctx: {})
     original = service._run
     operations_seen = []
@@ -430,7 +430,7 @@ async def test_cancelled_cli_waits_for_parent_and_kills_descendants(context, tmp
     import asyncio
     import json
 
-    from qqbot.capabilities import GitService
+    from elephant.capabilities import GitService
     marker = tmp_path / "pids.json"
     executable = tmp_path / "fake-cli"
     executable.write_text('#!' + sys.executable + '\nimport os,sys,json,time,subprocess\n'
@@ -474,7 +474,7 @@ async def test_cancelled_cli_waits_for_parent_and_kills_descendants(context, tmp
 async def test_cancel_during_launch_waits_for_spawn_then_reaps(tmp_path, monkeypatch):
     import asyncio
 
-    import qqbot.capabilities.subprocesses as module
+    import elephant.capabilities.subprocesses as module
     original = asyncio.create_subprocess_exec
     started, release = asyncio.Event(), asyncio.Event()
     children = []
@@ -500,7 +500,7 @@ async def test_cancel_during_launch_waits_for_spawn_then_reaps(tmp_path, monkeyp
 async def test_process_wait_cancellation_stops_owned_subprocess(context, monkeypatch):
     import asyncio
 
-    import qqbot.capabilities.process as module
+    import elephant.capabilities.process as module
     original = asyncio.create_subprocess_exec
     children = []
     async def spawn(*argv, **kwargs):
@@ -525,7 +525,7 @@ async def test_process_wait_cancellation_stops_owned_subprocess(context, monkeyp
 async def test_repeated_cancellation_waits_for_subprocess_cleanup():
     import asyncio
 
-    from qqbot.capabilities.subprocesses import stop_process
+    from elephant.capabilities.subprocesses import stop_process
     process = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time;time.sleep(60)",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
     original = process.communicate
@@ -603,7 +603,7 @@ async def test_api_execution_preserves_option_order_and_literal_body(context, tm
 @pytest.mark.parametrize("operation", ["clone", "push"])
 @pytest.mark.parametrize("branch", ["release/1.2.0", "v2.1.0", "feature/topic"])
 async def test_git_branch_selection_uses_native_ref_rules(context, tmp_path, operation, branch):
-    from qqbot.capabilities import GitService
+    from elephant.capabilities import GitService
     service = GitService(lambda ctx: {})
     original = service._run
     calls = []
@@ -627,7 +627,7 @@ async def test_git_branch_selection_uses_native_ref_rules(context, tmp_path, ope
 @pytest.mark.parametrize("operation", ["clone", "push"])
 @pytest.mark.parametrize("branch", ["-main", "bad..ref", "bad@{ref", "bad//ref", "bad.lock", "bad ref", ""])
 async def test_invalid_git_branch_fails_before_network(context, operation, branch):
-    from qqbot.capabilities import GitService
+    from elephant.capabilities import GitService
     service = GitService(lambda ctx: {})
     original = service._run
     async def run(arguments, directory, ctx, authenticate=False):

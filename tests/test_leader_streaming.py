@@ -9,11 +9,11 @@ from test_agent_runtime import leader_complete, root_goal, worker_complete
 from test_agent_runtime import runtime as agent_runtime
 from test_leader_core import finish_leader, make_core
 
-from qqbot.domain import stable_id
-from qqbot.jobs.streaming import StreamDelivery
-from qqbot.storage.schema import outbox, reply_counters
-from qqbot.storage.stream_schema import stream_messages, stream_runs
-from qqbot.storage.task_schema import events, runs, tasks
+from elephant.domain import stable_id
+from elephant.jobs.streaming import StreamDelivery
+from elephant.storage.schema import outbox, reply_counters
+from elephant.storage.stream_schema import stream_messages, stream_runs
+from elephant.storage.task_schema import events, runs, tasks
 
 
 @pytest.fixture
@@ -222,10 +222,10 @@ async def test_locked_pi_leader_delivers_chinese_prefix_before_upstream_finishes
     import asyncio
     from pathlib import Path
 
-    from qqbot.harness.pool import SessionPool
-    from qqbot.jobs.worker import GeneralRun, Spool, Worker
-    from qqbot.providers import ModelCapacity
-    from qqbot.runtime.scheduler import RuntimeClient
+    from elephant.harness.pool import SessionPool
+    from elephant.jobs.worker import GeneralRun, Spool, Worker
+    from elephant.providers import ModelCapacity
+    from elephant.runtime.scheduler import RuntimeClient
 
     pi = Path("node_modules/.bin/pi").resolve()
     if not pi.exists():
@@ -322,7 +322,7 @@ async def test_unknown_leader_host_failure_blocks_source_retry_but_admits_new_in
 
 @pytest.mark.parametrize("unknown", [False, True])
 async def test_recovered_leader_without_result_settles_stream_and_fences_source_retry(leader_stream, unknown):
-    from qqbot.storage.agent_schema import dialogue_inputs
+    from elephant.storage.agent_schema import dialogue_inputs
 
     s = leader_stream
     claim = s.core.sessions.claim("fixture")
@@ -496,7 +496,7 @@ async def test_expired_acknowledged_prefix_allows_final_proactive_result(leader_
 
 
 async def test_protocol_recovery_failure_settles_input_and_delivers_host_report(leader_stream):
-    from qqbot.storage.agent_schema import dialogue_inputs
+    from elephant.storage.agent_schema import dialogue_inputs
 
     s = leader_stream
     adapter = s.core.adapters["qq"]
@@ -519,7 +519,7 @@ async def test_protocol_recovery_failure_settles_input_and_delivers_host_report(
 async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
     from datetime import timedelta
 
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
 
     s = leader_stream
     claim = s.core.sessions.claim("fixture")

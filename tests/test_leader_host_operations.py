@@ -4,9 +4,9 @@ from sqlalchemy import select
 from test_agent_runtime import runtime as runtime  # noqa: PLC0414
 from test_leader_dispatch_recovery import native_pending_submit
 
-from qqbot.adapters.pi.sessions import unfinished_tools
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import runs
+from elephant.adapters.pi.sessions import unfinished_tools
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import runs
 
 
 def prepare(operation_id, digest="same-command"):
@@ -68,7 +68,7 @@ async def test_stopped_direct_turn_preserves_unknown_command_and_scope_across_re
 
 
 async def test_direct_reconcile_uses_original_host_workspace_and_current_authorization(runtime):
-    from qqbot.runtime.recovery import RuntimeRecovery
+    from elephant.runtime.recovery import RuntimeRecovery
 
     r = runtime
     r.sessions.enqueue(r.event, r.access)

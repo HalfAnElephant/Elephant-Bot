@@ -3,11 +3,11 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from qqbot.cli import migrate
-from qqbot.clock import FakeClock
-from qqbot.config import Settings, load_runtime_settings
-from qqbot.domain import ConversationRef, InboundEvent, PrincipalRef, Surface
-from qqbot.storage.db import Database
+from elephant.cli import migrate
+from elephant.clock import FakeClock
+from elephant.config import Settings, load_runtime_settings
+from elephant.domain import ConversationRef, InboundEvent, PrincipalRef, Surface
+from elephant.storage.db import Database
 
 
 def test_namespaces_and_strict_config():

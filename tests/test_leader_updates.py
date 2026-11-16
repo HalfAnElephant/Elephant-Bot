@@ -3,9 +3,9 @@ from sqlalchemy import func, select
 from test_agent_runtime import leader_complete, root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.domain import TextSegment
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.task_schema import inputs, runs, tasks
+from elephant.domain import TextSegment
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.task_schema import inputs, runs, tasks
 
 runtime = agent_runtime
 
@@ -59,7 +59,7 @@ def test_active_tasks_stay_in_selected_dialogue(runtime):
 
 
 def test_original_call_key_replay_keeps_preexisting_revision(runtime):
-    from qqbot.domain import stable_id
+    from elephant.domain import stable_id
 
     root = root_goal(runtime)
     runtime.sessions.enqueue(runtime.event, runtime.access)
@@ -77,7 +77,7 @@ def test_original_call_key_replay_keeps_preexisting_revision(runtime):
 def test_reused_submit_native_recovery_checks_its_committed_intent(runtime):
     from test_leader_dispatch_recovery import native_pending_submit
 
-    from qqbot.adapters.pi.sessions import unfinished_tools
+    from elephant.adapters.pi.sessions import unfinished_tools
 
     runtime.sessions.enqueue(runtime.event, runtime.access)
     claim = runtime.sessions.claim("leader")

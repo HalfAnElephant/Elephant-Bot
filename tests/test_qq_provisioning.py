@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from qqbot.adapters.qq_official.credential_store import load_credential, save_credential
-from qqbot.adapters.qq_official.onboarding import Session
-from qqbot.admin.qq_provisioning import TOKEN_URL, ProvisioningError, provision_owner
-from qqbot.config import AdapterConfig, QQOwnerBinding, Settings
-from qqbot.configuration import ConfigurationStore, version
-from qqbot.permissions import (
+from elephant.adapters.qq_official.credential_store import load_credential, save_credential
+from elephant.adapters.qq_official.onboarding import Session
+from elephant.admin.qq_provisioning import TOKEN_URL, ProvisioningError, provision_owner
+from elephant.config import AdapterConfig, QQOwnerBinding, Settings
+from elephant.configuration import ConfigurationStore, version
+from elephant.permissions import (
     PermissionPolicy,
     PermissionRule,
     PermissionService,
@@ -26,8 +26,8 @@ from qqbot.permissions import (
 
 @pytest.fixture
 async def provisioning(db, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_CREDENTIAL_KEY', base64.b64encode(b'K' * 32).decode())
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'administrator-token')
+    monkeypatch.setenv('ELEPHANT_CREDENTIAL_KEY', base64.b64encode(b'K' * 32).decode())
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'administrator-token')
     policy = PermissionPolicy(rules=(PermissionRule(id='existing-global-denial', priority=30,
         effect='deny', actions=('workspace.delete',)),))
     settings = Settings(database=db.path, permissions=policy)
@@ -224,7 +224,7 @@ async def test_staged_credential_readback_failure_is_cleaned_before_policy_or_co
     fixture = provisioning
     def corrupted(directory, reference, app_id):
         raise ValueError('credential failed authenticated decryption')
-    monkeypatch.setattr('qqbot.admin.qq_provisioning.load_credential', corrupted)
+    monkeypatch.setattr('elephant.admin.qq_provisioning.load_credential', corrupted)
     with pytest.raises(ProvisioningError, match='credential_save_failed'):
         await provision_owner(fixture.core, fixture.session, client=fixture.client, activate=fixture.activate)
     assert not fixture.core.config_store.path.exists() and not stored_files(fixture)

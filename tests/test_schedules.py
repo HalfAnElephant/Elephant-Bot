@@ -8,10 +8,10 @@ from test_agent_runtime import runtime as runtime  # noqa: PLC0414
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 from test_project_scopes import project_core as project_core  # noqa: PLC0414
 
-from qqbot.domain.messages import AccessContext
-from qqbot.runtime.schedules import ScheduleService, ScheduleSpec
-from qqbot.storage.schedule_schema import schedule_fires
-from qqbot.storage.task_schema import tasks
+from elephant.domain.messages import AccessContext
+from elephant.runtime.schedules import ScheduleService, ScheduleSpec
+from elephant.storage.schedule_schema import schedule_fires
+from elephant.storage.task_schema import tasks
 
 
 @pytest.fixture
@@ -112,7 +112,7 @@ def test_revoked_owner_stops_future_firing(timers):
     service.once()
     assert roots(runtime) == []
     with runtime.db.engine.connect() as conn:
-        from qqbot.storage.schedule_schema import schedules
+        from elephant.storage.schedule_schema import schedules
         row = conn.execute(select(schedules).where(schedules.c.id == item["id"])).mappings().one()
         assert not row["enabled"]
         assert row["last_error"] == "PermissionError"
@@ -142,7 +142,7 @@ async def test_real_core_fire_persists_structured_source_and_authorized_project(
     with runtime.core.db.engine.connect() as conn:
         task = conn.execute(select(tasks).where(tasks.c.id == receipt["last_task_id"])).mappings().one()
         context = json.loads(task["context_json"])
-        from qqbot.domain import InboundEvent
+        from elephant.domain import InboundEvent
         event = InboundEvent.model_validate_json(task["event_json"])
     assert context["workspace_id"] == "personal"
     assert context["schedule_fire_id"] == event.event_id
@@ -168,7 +168,7 @@ def test_schedule_operation_rejects_malformed_arguments(timers, operation, argum
 
 
 def project_event(core, name):
-    from qqbot.domain import ConversationRef, InboundEvent, PrincipalRef, Surface, TextSegment
+    from elephant.domain import ConversationRef, InboundEvent, PrincipalRef, Surface, TextSegment
     return InboundEvent(event_id=name, event_type="message.created", platform_message_id=name,
         conversation=ConversationRef(deployment_id=core.settings.deployment_id, adapter_instance_id="qq",
             bot_identity_id="bot", surface=Surface.PRIVATE, remote_conversation_id="300"),
@@ -192,7 +192,7 @@ def test_schedule_creation_freezes_original_claim_project_after_focus_switch(pro
     assert core.sessions.workspace_for(project_event(core, "current-focus")) == "beta"
     assert service.create(source, spec, idempotency_key="alpha-timer")["id"] == item["id"]
     with core.db.engine.connect() as conn:
-        from qqbot.storage.schedule_schema import schedules
+        from elephant.storage.schedule_schema import schedules
         row = conn.execute(select(schedules).where(schedules.c.id == item["id"])).mappings().one()
         assert row["dialogue_id"] == original["dialogue_id"]
     core.clock.advance(60)
@@ -228,7 +228,7 @@ def test_schedule_queries_and_mutations_cannot_cross_frozen_project(project_core
 
 
 def attached_schedule(core, key):
-    from qqbot.domain import MediaSegment
+    from elephant.domain import MediaSegment
     source = project_event(core, key)
     source = source.model_copy(update={"segments": (*source.segments,
         MediaSegment(type="file", attachment_ref="original-sheet", source_url="https://cdn.example/input.xlsx",
@@ -243,7 +243,7 @@ def attached_schedule(core, key):
 
 
 def test_schedule_fire_keeps_original_attachment_source_and_metadata(project_core):
-    from qqbot.domain import InboundEvent, MediaSegment
+    from elephant.domain import InboundEvent, MediaSegment
     core = project_core
     source, service, schedule = attached_schedule(core, "attached-timer")
     core.clock.advance(1)
@@ -273,7 +273,7 @@ def test_schedule_fire_keeps_original_attachment_source_and_metadata(project_cor
 
 @pytest.mark.parametrize("revocation", ["recalled", "forgotten"])
 def test_schedule_attachment_revocation_blocks_later_fires(project_core, revocation):
-    from qqbot.storage.memory_sync_schema import memory_barriers, memory_owners
+    from elephant.storage.memory_sync_schema import memory_barriers, memory_owners
     core = project_core
     source, service, schedule = attached_schedule(core, "revoked-attached-timer")
     core.clock.advance(60)
@@ -301,7 +301,7 @@ def test_schedule_attachment_revocation_blocks_later_fires(project_core, revocat
 
 
 def test_real_qq_missing_original_inbox_source_does_not_create_fake_fire_source(project_core):
-    from qqbot.storage.schema import inbox
+    from elephant.storage.schema import inbox
     core = project_core
     source = project_event(core, "missing-original-upload")
     service = ScheduleService(core)
@@ -314,8 +314,8 @@ def test_real_qq_missing_original_inbox_source_does_not_create_fake_fire_source(
 
 
 def test_schedule_freezes_referenced_upload_before_dialogue_history_rolls_over(project_core):
-    from qqbot.domain import MediaSegment, TextSegment
-    from qqbot.storage.schedule_schema import schedules
+    from elephant.domain import MediaSegment, TextSegment
+    from elephant.storage.schedule_schema import schedules
     core = project_core
     upload = project_event(core, "earlier-scheduled-upload")
     upload = upload.model_copy(update={"segments": (TextSegment(text="这是原始表格"), MediaSegment(type="file",
@@ -353,7 +353,7 @@ def test_schedule_freezes_referenced_upload_before_dialogue_history_rolls_over(p
 
 
 def test_cron_creation_retry_accepts_pre_mail_creation_json(timers):
-    from qqbot.storage.schedule_schema import schedules
+    from elephant.storage.schedule_schema import schedules
 
     service, runtime = timers
     spec = {'goal': '检查项目', 'cron': '0 9 * * *'}
@@ -378,7 +378,7 @@ def test_inactive_mail_draft_cannot_switch_account_or_trigger(timers):
 
 
 async def test_mail_filter_update_still_requires_stored_qq_source(control_runtime):
-    from qqbot.storage.schema import inbox
+    from elephant.storage.schema import inbox
 
     core = control_runtime.core
     source, _ = core.inbox.accept(control_runtime.event('save a mail draft'))

@@ -2,10 +2,10 @@
 from sqlalchemy import select
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414 - Register the shared fixture.
 
-from qqbot.domain import OutboundEnvelope
-from qqbot.storage.agent_schema import leader_inbox
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import notifications, tasks
+from elephant.domain import OutboundEnvelope
+from elephant.storage.agent_schema import leader_inbox
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import notifications, tasks
 
 
 def report_progress(r, worker, key, text):

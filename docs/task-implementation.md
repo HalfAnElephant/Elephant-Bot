@@ -28,7 +28,7 @@ Agent-authored progress, questions, status explanations and final results enter 
 
 ## Daemon execution and recovery
 
-Production starts one daemon with `qqbot serve --config /etc/qqbot/core.yaml`. Its Scheduler claims durable task, Leader and Hermes review runs in-process and creates Pi runs from the persisted model binding. There is no standalone `python -m qqbot.jobs.worker` command or production Worker listener; `deploy/qqbot-worker.service` is retired. See [deployment instructions](../deploy/README.md).
+Production starts one daemon with `elephant serve --config /etc/elephant/core.yaml`. Its Scheduler claims durable task, Leader and Hermes review runs in-process and creates Pi runs from the persisted model binding. There is no standalone `python -m elephant.jobs.worker` command or production Worker listener; `deploy/elephant-worker.service` is retired. See [deployment instructions](../deploy/README.md).
 
 The daemon-owned Worker, spool and Pi runner preserve fsynced result/event replay. Reconciliation must authenticate the run and prove the old process stopped before adopting a result; uncertain external writes still require readback. The spool remains recovery evidence, not another domain database.
 

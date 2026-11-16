@@ -3,7 +3,7 @@ import socket
 
 import pytest
 
-from qqbot.harness.public_web import fetch_public, public_addresses
+from elephant.harness.public_web import fetch_public, public_addresses
 
 
 def test_ssrf_blocked_and_redirect_schemes(monkeypatch):
@@ -39,7 +39,7 @@ def test_embedded_proxy_preserves_supervisor_signal_handlers():
 
     import uvicorn
 
-    from qqbot.jobs.worker import CapabilityServer
+    from elephant.jobs.worker import CapabilityServer
 
     before = signal.getsignal(signal.SIGTERM)
     server = CapabilityServer(uvicorn.Config("unused"))
@@ -54,7 +54,7 @@ def test_root_manifest_mode_survives_supervisor_umask(tmp_path, monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
 
-    from qqbot.harness.launcher import atomic_root_json
+    from elephant.harness.launcher import atomic_root_json
 
     original_stat = Path.stat
 
@@ -80,7 +80,7 @@ def test_workspace_mode_survives_supervisor_umask(tmp_path, monkeypatch):
     import stat
     from types import SimpleNamespace
 
-    from qqbot.harness import launcher
+    from elephant.harness import launcher
 
     monkeypatch.setattr(launcher, "WORKSPACES", tmp_path)
     monkeypatch.setattr(
@@ -98,8 +98,8 @@ def test_workspace_mode_survives_supervisor_umask(tmp_path, monkeypatch):
 async def test_web_redirect_rechecks_domain_policy_before_dns(monkeypatch, tmp_path, allow_redirect):
     from types import SimpleNamespace
 
-    from qqbot.capabilities import ToolContext, ToolGateway, standard_registry
-    from qqbot.harness import public_web
+    from elephant.capabilities import ToolContext, ToolGateway, standard_registry
+    from elephant.harness import public_web
 
     looked_up, requested, checked = [], [], []
 
@@ -144,7 +144,7 @@ async def test_web_redirect_rechecks_domain_policy_before_dns(monkeypatch, tmp_p
 
 
 def test_connect_attempts_are_bounded_and_share_deadline(monkeypatch):
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     now, attempts, timeouts = [0.0], [], []
     class Socket:
@@ -175,7 +175,7 @@ def test_connect_attempts_are_bounded_and_share_deadline(monkeypatch):
 def test_large_public_dns_response_is_accepted(monkeypatch, timeout):
     from types import SimpleNamespace
 
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"8.8.8.{i}", 443)) for i in range(1, 26)]
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: answers)
@@ -197,7 +197,7 @@ def test_absolute_deadline_interrupts_slow_http_framing(monkeypatch, phase):
     import threading
     import time
 
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     client, server = socket.socketpair()
     finished = threading.Event()
@@ -248,7 +248,7 @@ def test_dns_child_is_killed_when_lookup_budget_expires(monkeypatch):
     import sys
     import time
 
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     original = subprocess.run
     timed_out = []
@@ -271,7 +271,7 @@ def test_dns_child_is_killed_when_lookup_budget_expires(monkeypatch):
 def test_deadline_dns_results_keep_full_ssrf_validation(monkeypatch):
     from types import SimpleNamespace
 
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))] * 24
     answers.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)))

@@ -1,4 +1,4 @@
-#!/opt/qqbot/.venv/bin/python -I
+#!/opt/elephant/.venv/bin/python -I
 """Root-only fixed Linux acceptance. Contains no arbitrary-command interface."""
 
 import argparse
@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from qqbot.harness.launcher import (
+from elephant.harness.launcher import (
     POLICY,
     ROOT_MANIFESTS,
     WORKSPACES,
@@ -26,7 +26,7 @@ from qqbot.harness.launcher import (
     unit_stopped,
 )
 
-PROBE = "/opt/qqbot/bin/pi-isolation-probe"
+PROBE = "/opt/elephant/bin/pi-isolation-probe"
 
 
 def bind_port(host, ports):
@@ -60,14 +60,14 @@ def main():
     if policy["isolation_verified"]:
         atomic_root_json(POLICY, {**policy, "isolation_verified": False}, mode=0o644)
     task_id, run_id, other_id = str(uuid4()), str(uuid4()), str(uuid4())
-    worker, runner = pwd.getpwnam("qqbot-worker"), pwd.getpwnam("qqbot-runner")
-    unit = "qqbot-run-" + run_id + ".service"
+    worker, runner = pwd.getpwnam("elephant-worker"), pwd.getpwnam("elephant-runner")
+    unit = "elephant-run-" + run_id + ".service"
     process = helper = approved = forbidden = unix = None
     created = []
     workspace, other = WORKSPACES / run_id, WORKSPACES / other_id
-    private = Path("/var/lib/qqbot") / ("isolation-probe-" + run_id)
-    worker_private = Path("/var/lib/qqbot-worker") / ("isolation-probe-" + run_id + ".env")
-    unix_path = Path("/run/qqbot") / ("isolation-probe-" + run_id + ".sock")
+    private = Path("/var/lib/elephant") / ("isolation-probe-" + run_id)
+    worker_private = Path("/var/lib/elephant-worker") / ("isolation-probe-" + run_id + ".env")
+    unix_path = Path("/run/elephant") / ("isolation-probe-" + run_id + ".sock")
     manifest_path = ROOT_MANIFESTS / (run_id + ".json")
     probe_path = ROOT_MANIFESTS / (run_id + ".probe.json")
     try:
@@ -93,7 +93,7 @@ def main():
             user=worker.pw_uid,
             group=worker.pw_gid,
             extra_groups=[],
-            env={"PATH": "/usr/bin:/bin", "QQBOT_ISOLATION_SENTINEL": run_id},
+            env={"PATH": "/usr/bin:/bin", "ELEPHANT_ISOLATION_SENTINEL": run_id},
         )
         approved, approved_port = bind_port(
             policy["proxy_host"], range(policy["proxy_port_min"], policy["proxy_port_max"] + 1)
@@ -127,12 +127,12 @@ def main():
                     str(private),
                     str(worker_private),
                     str(other_file),
-                    "/etc/qqbot/worker.env",
-                    "/etc/qqbot/worker.token",
+                    "/etc/elephant/worker.env",
+                    "/etc/elephant/worker.token",
                     f"/proc/{helper.pid}/environ",
                     f"/proc/{os.getpid()}/environ",
                 ],
-                "forbidden_sockets": [str(unix_path), "/run/qqbot/internal.sock"],
+                "forbidden_sockets": [str(unix_path), "/run/elephant/internal.sock"],
                 "proxy_host": policy["proxy_host"],
                 "approved_port": approved_port,
                 "forbidden_port": forbidden_port,
@@ -142,7 +142,7 @@ def main():
         argv = systemd_argv(task_id, run_id, policy)
         for index, value in enumerate(argv):
             if value.startswith("--property=BindReadOnlyPaths="):
-                argv[index] += f" {PROBE}:{PROBE} {probe_path}:/run/qqbot/probe.json"
+                argv[index] += f" {PROBE}:{PROBE} {probe_path}:/run/elephant/probe.json"
         argv[-3:] = [PROBE]
         with tempfile.TemporaryFile() as stderr:
             process = subprocess.Popen(

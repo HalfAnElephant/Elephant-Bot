@@ -7,11 +7,11 @@ from sqlalchemy import select, update
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime_fixture
 
-from qqbot.adapters.execution.jobs import UnitReceipt
-from qqbot.adapters.execution.runtime import JobRuntime
-from qqbot.contracts.execution import ExecutionCapabilities
-from qqbot.storage.agent_schema import agent_events, leader_inbox
-from qqbot.storage.task_schema import notifications, tasks, waits
+from elephant.adapters.execution.jobs import UnitReceipt
+from elephant.adapters.execution.runtime import JobRuntime
+from elephant.contracts.execution import ExecutionCapabilities
+from elephant.storage.agent_schema import agent_events, leader_inbox
+from elephant.storage.task_schema import notifications, tasks, waits
 
 runtime = agent_runtime_fixture
 

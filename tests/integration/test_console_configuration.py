@@ -6,14 +6,14 @@ from threading import Barrier
 import pytest
 from fastapi.testclient import TestClient
 
-from qqbot.app import create_app
-from qqbot.config import Settings
+from elephant.app import create_app
+from elephant.config import Settings
 
 
 @pytest.fixture
 def console_settings(tmp_path, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "console-admin-secret")
-    monkeypatch.setenv("QQBOT_MODEL_KEY", "console-model-secret")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "console-admin-secret")
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "console-model-secret")
     return Settings(database=str(tmp_path / "core.db"))
 
 
@@ -77,7 +77,7 @@ def test_console_config_schema_auth_and_secret_status(console_settings, clock):
         assert data["config"]["execution"]["notify_before_tools"] is True
         assert "send_budget_per_minute" in data["hot_fields"]
         credentials = {item["name"]: item["configured"] for item in data["credentials"]}
-        assert credentials["QQBOT_ADMIN_TOKEN"] and credentials["QQBOT_MODEL_KEY"]
+        assert credentials["ELEPHANT_ADMIN_TOKEN"] and credentials["ELEPHANT_MODEL_KEY"]
         assert "console-admin-secret" not in response.text
         assert "console-model-secret" not in response.text
         schema = client.get("/api/v1/config/schema", headers=AUTH).json()

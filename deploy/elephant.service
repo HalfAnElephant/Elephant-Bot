@@ -1,0 +1,32 @@
+[Unit]
+Description=Elephant Leader and Workers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=elephant
+Group=elephant-worker
+SupplementaryGroups=elephant systemd-journal
+WorkingDirectory=/opt/elephant
+Environment=PATH=/opt/elephant-node/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/elephant/core.env
+EnvironmentFile=/etc/elephant/jobs.env
+ExecStart=/opt/elephant/.venv/bin/elephant serve --config /etc/elephant/core.yaml
+ExecStopPost=+/usr/local/libexec/elephant-daemon-stopped
+KillMode=control-group
+Delegate=yes
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=elephant
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

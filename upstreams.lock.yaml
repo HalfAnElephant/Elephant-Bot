@@ -9,7 +9,7 @@ references:
     license_evidence: [THIRD_PARTY_NOTICES.md]
     imported_files:
       - source: personas/dafeiyu.md
-        destination: src/qqbot/runtime/persona.md
+        destination: src/elephant/runtime/persona.md
         source_sha256: 70295531945326e1aa77fe26d01970124e3d011080cdadaa5e68f5f5f9c70f14
         modifications: Bind an adapted dafeiyu persona to every Leader purpose; retain the bot name and host truth, permissions and Markdown delivery requirements.
   aurabot:
@@ -26,7 +26,7 @@ references:
         source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
         modifications: Adapt role and typing habits into separate persona fields with MaiBot-inspired wording and surface prompts; preserve customized appearance and host boundaries.
       - source: src/features/companion.js
-        destination: src/qqbot/speakup.py
+        destination: src/elephant/speakup.py
         source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d
         modifications: Port private timing and nudge policy to existing permissions, SQLite state and durable outbox; no mood port.
   maibot:
@@ -39,37 +39,37 @@ references:
     license_sha256: 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986
     imported_files:
       - source: src/learners/weighted_sampling.py
-        destination: src/qqbot/expressions/weighted_sampling.py
+        destination: src/elephant/expressions/weighted_sampling.py
         source_sha256: fa32354ce0fbcb5dee37ec0b2387ece169c08a11d3ae552374f11ab0a87cce0c
         mode: copied
         modifications: Added provenance/SPDX header, Ruff preservation exemptions; sampling algorithm unchanged.
       - source: src/learners/expression_style_utils.py
-        destination: src/qqbot/expressions/expression_style_utils.py
+        destination: src/elephant/expressions/expression_style_utils.py
         source_sha256: a05e8bca6b2209c90b260492818b9b59f0432ab757e868dc502a9640ef94e6bf
         mode: copied
         modifications: Added provenance/SPDX header, Ruff preservation exemptions; normalization and example filtering unchanged.
       - source: prompts/zh-CN/learn_style.prompt
-        destination: src/qqbot/expressions/prompts/learn_style.prompt
+        destination: src/elephant/expressions/prompts/learn_style.prompt
         source_sha256: 9f323d09bd38e8692242bfef99437e7c499708b557545bc22e13f9f2d28aa2d5
         mode: copied
         modifications: Prompt unchanged.
       - source: prompts/zh-CN/expression_evaluation.prompt
-        destination: src/qqbot/expressions/prompts/expression_evaluation.prompt
+        destination: src/elephant/expressions/prompts/expression_evaluation.prompt
         source_sha256: 1c82474c8fc5cf3678bbcb570bd032d3b049590751b9653020ad1543da8f78d3
         mode: copied
         modifications: Prompt body unchanged; added trailing blank line.
       - source: src/chat/replyer/maisaka_expression_selector.py
-        destination: src/qqbot/expressions/__init__.py
+        destination: src/elephant/expressions/__init__.py
         source_sha256: 64c649b06c0305acff3fd70e92f7ae8020ba8bbb5c540331ebde5ff5dc4e8aef
         mode: adapted
         modifications: Ported fast sampling thresholds, high-count/all-candidate selection, deduplication and habits formatting to Core string IDs, scoped evidence and permissions; no vector selector or upstream runtime.
       - source: src/learners/expression_utils.py
-        destination: src/qqbot/expressions/learner.py
+        destination: src/elephant/expressions/learner.py
         source_sha256: 48814c885c6ca06325d89a3bfbc564bbc0bd7a3b43cd6a721b12b79ca82d66bd
         mode: adapted
         modifications: Reused four expression suitability criteria; HTTP transport, DTO parsing, deadlines and source IDs use project interfaces.
       - source: src/chat/replyer/maisaka_generator_base.py
-        destination: src/qqbot/dialogue/__init__.py
+        destination: src/elephant/dialogue/__init__.py
         source_sha256: 7005c723691da69ffd3523f782e7883b2cadd2c8f6aef5c1eee1f5fb004c5e5b
         mode: adapted
         modifications: Adapted optional probabilistic alternate-style choice and persona composition; gateway fixes one choice per run with legacy configuration compatibility.
@@ -88,7 +88,7 @@ references:
         source_sha256: 8729a5a9712a84307ca62b492a7fc00c476cc5781190db8590ca53e15f5a373e
         modifications: Adapt role and typing habits into separate persona fields with MaiBot-inspired wording and surface prompts; preserve customized appearance and host boundaries.
       - source: src/features/companion.js
-        destination: src/qqbot/speakup.py
+        destination: src/elephant/speakup.py
         source_sha256: 09ad20d43d2b5a59cab1ce2f69d6f3ff66e491eb2f2f564fbc58eb1b752b836d
         modifications: Port private timing and nudge policy to existing permissions, SQLite state and durable outbox; no mood port.
       - source: src/learners/expression_learner.py
@@ -137,10 +137,10 @@ references:
     repository: https://github.com/NousResearch/hermes-agent
     commit: 67664e236ddcc45824b871d575677287599af152
     license: MIT
-    license_evidence: [src/qqbot/adapters/hermes_skills/LICENSE.hermes]
-    imported_files_manifest: src/qqbot/adapters/hermes_skills/_vendor/SOURCES.json
+    license_evidence: [src/elephant/adapters/hermes_skills/LICENSE.hermes]
+    imported_files_manifest: src/elephant/adapters/hermes_skills/_vendor/SOURCES.json
     use: adapted_native_skills_tools_batch_ledger_provenance_and_conditional_review
-    target: src/qqbot/adapters/hermes_skills
+    target: src/elephant/adapters/hermes_skills
     modifications: Owner ContextVar bindings, local imports, host execution and scheduling; no plugin loading, inline shell or automatic dependency installation.
 runtime:
   python: 3.13.9

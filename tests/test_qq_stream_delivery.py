@@ -8,13 +8,13 @@ import pytest
 from conftest import runtime_client_for
 from sqlalchemy import insert, select, update
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, ReplyContext, Surface
-from qqbot.jobs.service import TaskService
-from qqbot.jobs.streaming import StreamDelivery
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox, reply_counters
-from qqbot.storage.stream_schema import stream_messages, stream_runs
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, ReplyContext, Surface
+from elephant.jobs.service import TaskService
+from elephant.jobs.streaming import StreamDelivery
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox, reply_counters
+from elephant.storage.stream_schema import stream_messages, stream_runs
 
 
 @pytest.fixture
@@ -158,7 +158,7 @@ def test_public_payload_is_bounded_and_opt_in(stream_setup):
 
 async def test_reply_sequence_respects_existing_outbox_reservations(stream_setup):
     s = stream_setup
-    from qqbot.domain import stable_id
+    from elephant.domain import stable_id
     with s.core.db.transaction() as c:
         c.execute(insert(reply_counters).values(key=stable_id(s.event.conversation.key, "m"), seq=2))
     append(s, 1, "public_answer_end")
@@ -251,10 +251,10 @@ async def test_locked_pi_worker_to_native_qq_final_without_duplicate(stream_setu
     """Real locked Pi RPC -> durable worker spool -> TaskService -> QQ mock API."""
     from pathlib import Path
 
-    from qqbot.harness.pool import SessionPool
-    from qqbot.jobs.worker import GeneralRun, Spool, Worker
-    from qqbot.providers import ModelCapacity
-    from qqbot.storage.task_schema import events, runs, tasks
+    from elephant.harness.pool import SessionPool
+    from elephant.jobs.worker import GeneralRun, Spool, Worker
+    from elephant.providers import ModelCapacity
+    from elephant.storage.task_schema import events, runs, tasks
 
     s = stream_setup
     pi = Path("node_modules/.bin/pi").resolve()
@@ -338,7 +338,7 @@ async def test_revocation_during_final_throttle_prevents_network_write(stream_se
 
 @pytest.mark.parametrize("terminal", ["CANCELLED", "CANCEL_REQUESTED", "FAILED", "EXPIRED"])
 async def test_terminal_task_closes_acknowledged_prefix(stream_setup, terminal):
-    from qqbot.storage.task_schema import tasks
+    from elephant.storage.task_schema import tasks
     s = stream_setup
     append(s, 1, "public_answer_delta", "Visible")
     await s.bridge.dispatch_once()
@@ -403,7 +403,7 @@ async def test_throttled_prefix_flushes_without_another_event(stream_setup):
 
 
 async def test_typing_preserves_answer_budget_after_other_deliveries(stream_setup):
-    from qqbot.domain import stable_id
+    from elephant.domain import stable_id
 
     s = stream_setup
     s.core.adapters["qq"].config = s.core.adapters["qq"].config.model_copy(update={"typing_enabled": True})
@@ -464,7 +464,7 @@ async def test_close_receipt_lost_is_unknown_and_not_retried(stream_setup):
 
 
 async def test_cleanup_does_not_bypass_revoked_permission(stream_setup):
-    from qqbot.storage.task_schema import tasks
+    from elephant.storage.task_schema import tasks
     s = stream_setup
     append(s, 1, "public_answer_delta", "Visible")
     await s.bridge.dispatch_once()
@@ -478,9 +478,9 @@ async def test_cleanup_does_not_bypass_revoked_permission(stream_setup):
 
 
 async def test_core_cleanup_gate_requires_persisted_stream_and_current_permission(stream_setup):
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.runtime import Core
-    from qqbot.storage.task_schema import tasks
+    from elephant.domain import OutboundEnvelope
+    from elephant.runtime import Core
+    from elephant.storage.task_schema import tasks
     s = stream_setup
     append(s, 1, "public_answer_delta", "Visible")
     await s.bridge.dispatch_once()

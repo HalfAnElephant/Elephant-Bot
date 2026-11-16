@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from qqbot.adapters.execution.world import LocalExecution
-from qqbot.capabilities.gateway import CapabilityRegistry, ToolGateway
-from qqbot.capabilities.mail import register_mail
-from qqbot.capabilities.types import ToolContext
+from elephant.adapters.execution.world import LocalExecution
+from elephant.capabilities.gateway import CapabilityRegistry, ToolGateway
+from elephant.capabilities.mail import register_mail
+from elephant.capabilities.types import ToolContext
 
 
 @pytest.fixture
@@ -100,8 +100,8 @@ async def test_attachment_download_rechecks_file_authority_before_writing(mail_t
 
 @pytest.mark.parametrize('retry_prepared,expected', [(False, 'FAILED'), (True, 'VERIFIED')])
 async def test_send_verification_distinguishes_undispatched_draft_and_prepared_retry(mail_tools, retry_prepared, expected):
-    from qqbot.capabilities.types import Action
-    from qqbot.harness.gateway import RunGateway
+    from elephant.capabilities.types import Action
+    from elephant.harness.gateway import RunGateway
 
     call = AsyncMock(return_value={'id': 'draft', 'state': 'DRAFT'})
     gateway = RunGateway(mail_tools.root, 'model', '', 'https://model.invalid', call=call)

@@ -6,9 +6,9 @@ from sqlalchemy import select, update
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as runtime  # noqa: PLC0414
 
-from qqbot.domain.execution import ExecutionPlan
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.task_schema import tasks
+from elephant.domain.execution import ExecutionPlan
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.task_schema import tasks
 
 
 def test_defaults_and_nested_environment_boundaries(runtime):
@@ -81,7 +81,7 @@ def test_leader_input_persists_environment_before_claim(runtime):
 
 
 def test_environment_is_exposed_in_prompt():
-    from qqbot.runtime.prompting import assemble_prompt
+    from elephant.runtime.prompting import assemble_prompt
 
     assert "本轮实际执行环境：host" in assemble_prompt("leader", environment="host")
     assert "本轮实际执行环境：sandbox" in assemble_prompt("worker", environment="sandbox")

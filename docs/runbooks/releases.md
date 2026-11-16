@@ -10,7 +10,7 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 - `DeepSeek dialogue` 使用官方 `deepseek-flash` API 检查真实模型的对话决策、主动确认、持久会话复用与任务派发。
 - 控制台 Node 测试、Ruff 和配置 schema 一致性。
 - wheel、sdist 与完整源码归档构建。
-- 在归档解压目录中安装生产依赖和 wheel，执行配置校验、数据库迁移/FTS5 检查、人格加载及 HTTP/静态资源冒烟检查。
+- 在归档解压目录中安装生产依赖和 wheel，执行配置校验、普通与脱敏诊断、HTTP/静态资源检查。用合成管理员令牌提交任务，重新启动应用后检查任务仍可查询且重复提交不新增任务；这一步不执行模型。
 - 从 Actions 重新下载上传的发布附件，校验内容校验和与提交号。
 
 `correctness-results` 保存环境、原始日志与 JUnit，`release-assets` 保存构建产物，
@@ -92,10 +92,14 @@ uv sync --locked --no-dev --no-editable
 npm ci --ignore-scripts
 ```
 
-随后按 [Ubuntu 部署说明](../../deploy/README.md) 准备 root 控制的 `/opt/qqbot`。
-使用发布包时，将已校验的 `elephant-bot` 完整目录放到 `/opt/qqbot`，继续部署说明中的依赖安装、账号、配置和服务初始化步骤。
+macOS 自带的 `shasum` 没有 `--ignore-missing`。在解压前执行
+`shasum -a 256 elephant-bot.tar.gz REVISION`，将两行摘要分别与 `SHA256SUMS`
+内的同名条目核对；任一条目缺失或不一致都不要解压。然后从上述 `tar` 命令继续。
+
+随后按 [Ubuntu 部署说明](../../deploy/README.md) 准备 root 控制的 `/opt/elephant`。
+使用发布包时，将已校验的 `elephant-bot` 完整目录放到 `/opt/elephant`，继续部署说明中的依赖安装、账号、配置和服务初始化步骤。
 更新已有主机前核对任务状态并备份，沿用主机上的配置、凭据和运行数据。
-邮箱更新同时保留数据库旁的私有 `mail-credentials/` 和原 `QQBOT_CREDENTIAL_KEY`，
+邮箱更新同时保留数据库旁的私有 `mail-credentials/` 和原 `ELEPHANT_CREDENTIAL_KEY`，
 恢复后通过账号测试核对当前修订的 IMAP/SMTP 认证状态。配置与启用步骤见[邮箱与收信任务](../mail-trigger-drafts.md)。
 部署后检查 `/health/live`、`/health/ready`、Worker 状态和目标主机隔离。
 QQ 收发与真实供应商调用按各自环境验收。

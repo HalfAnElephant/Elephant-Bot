@@ -22,19 +22,19 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import select
 
-from qqbot.app import create_app
-from qqbot.capabilities.gateway import CapabilityRegistry
-from qqbot.capabilities.types import Action, Capability
-from qqbot.config import Settings
-from qqbot.harness.gateway import RunGateway
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.runtime.scheduler import RuntimeClient
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.mail_schema import mail_accounts
-from qqbot.storage.mail_trigger_schema import mail_rule_receipts
-from qqbot.storage.schedule_schema import schedules
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.capabilities.gateway import CapabilityRegistry
+from elephant.capabilities.types import Action, Capability
+from elephant.config import Settings
+from elephant.harness.gateway import RunGateway
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.runtime.scheduler import RuntimeClient
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.mail_schema import mail_accounts
+from elephant.storage.mail_trigger_schema import mail_rule_receipts
+from elephant.storage.schedule_schema import schedules
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import tasks
 
 MODEL = "deepseek-flash"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -294,7 +294,7 @@ class DialogueSuite:
                                      if row["id"] not in prior_schedules]
                             accounts = [dict(row) for row in conn.execute(select(mail_accounts)).mappings()]
                         if label == "mail_draft":
-                            from qqbot.runtime.schedules import ScheduleSpec
+                            from elephant.runtime.schedules import ScheduleSpec
 
                             require(len(saved) == 1, "mail request did not persist exactly one draft")
                             row = saved[0]
@@ -320,7 +320,7 @@ class DialogueSuite:
                         else:
                             require(not saved, "mail clarification unexpectedly saved an invented configuration")
                             if label in {"mail_config", "mail_update", "mail_test_missing_credential"}:
-                                from qqbot.mail.models import MailAccountSpec
+                                from elephant.mail.models import MailAccountSpec
 
                                 require(len(accounts) == 1 and accounts[0]["account_id"] == "weekly-demo",
                                         "mail configuration did not persist the selected account exactly once")
@@ -488,8 +488,8 @@ class DialogueSuite:
 
         with patch.object(RunGateway, "__init__", gateway_init), patch.object(PiRunnerAdapter, "start", start), \
                 patch.object(RuntimeClient, "invoke", invoke), patch.dict(os.environ, {
-                    "QQBOT_ADMIN_TOKEN": "synthetic-mail-admin",
-                    "QQBOT_CREDENTIAL_KEY": base64.b64encode(os.urandom(32)).decode()}):
+                    "ELEPHANT_ADMIN_TOKEN": "synthetic-mail-admin",
+                    "ELEPHANT_CREDENTIAL_KEY": base64.b64encode(os.urandom(32)).decode()}):
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.receiver)) as receiver:
                 app = create_app(settings, official_client=receiver)
                 async with app.router.lifespan_context(app):
@@ -556,7 +556,7 @@ async def self_check():
     """Check fixtures and native history construction without credentials or any HTTP request."""
     from types import SimpleNamespace
 
-    from qqbot.adapters.pi.sessions import load_entries, unfinished_tools
+    from elephant.adapters.pi.sessions import load_entries, unfinished_tools
 
     with tempfile.TemporaryDirectory(prefix="elephant-dialogue-self-check-") as directory:
         root = Path(directory)

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from qqbot.observability.supervision import LoopSupervisor
+from elephant.observability.supervision import LoopSupervisor
 
 
 async def until(condition):
@@ -84,8 +84,8 @@ def test_readiness_reflects_critical_loop_state_and_database_failure(tmp_path, m
     from fastapi.testclient import TestClient
     from sqlalchemy.exc import OperationalError
 
-    from qqbot.app import create_app
-    from qqbot.config import Settings
+    from elephant.app import create_app
+    from elephant.config import Settings
 
     app = create_app(Settings(database=str(tmp_path / "health.db")), run_background=False)
     states = {"execution": {"critical": True, "healthy": True, "failures": 0},

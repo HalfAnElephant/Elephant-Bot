@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select, update
 
-from qqbot.domain import ConversationRef, InboundEvent, PrincipalRef, Surface, TextSegment
-from qqbot.mail.sending import MailSender, SMTPTransport
-from qqbot.storage.mail_send_schema import mail_outgoing
+from elephant.domain import ConversationRef, InboundEvent, PrincipalRef, Surface, TextSegment
+from elephant.mail.sending import MailSender, SMTPTransport
+from elephant.storage.mail_send_schema import mail_outgoing
 
 
 @pytest.fixture
@@ -254,8 +254,8 @@ def test_smtp_partial_recipients_and_data_results_are_recorded_without_server_te
         def close(self):
             calls.append('close')
 
-    monkeypatch.setattr('qqbot.mail.sending.smtplib.SMTP_SSL', SMTP)
-    monkeypatch.setattr('qqbot.mail.sending.smtplib.SMTP', SMTP)
+    monkeypatch.setattr('elephant.mail.sending.smtplib.SMTP_SSL', SMTP)
+    monkeypatch.setattr('elephant.mail.sending.smtplib.SMTP', SMTP)
     result = SMTPTransport().send(SimpleNamespace(smtp_host='smtp.example.org', smtp_port=465,
         smtp_security=security, username='user'), 'TOP_SECRET_PASSWORD', b'message', 'owner@example.org',
         ['accepted@example.org', 'rejected@example.org'], lambda: calls.append('authorize'))
@@ -299,7 +299,7 @@ def test_smtp_revocation_after_recipient_checks_prevents_data(outgoing, monkeypa
         def close(self):
             pass
 
-    monkeypatch.setattr('qqbot.mail.sending.smtplib.SMTP_SSL', SMTP)
+    monkeypatch.setattr('elephant.mail.sending.smtplib.SMTP_SSL', SMTP)
     r.sender.transport = SMTPTransport()
     with pytest.raises(PermissionError, match='disabled|no longer available'):
         send(r, draft)
@@ -545,7 +545,7 @@ def test_smtp_unicode_authentication_failure_is_definite_before_data(monkeypatch
         def close(self):
             pass
 
-    monkeypatch.setattr('qqbot.mail.sending.smtplib.SMTP_SSL', SMTP)
+    monkeypatch.setattr('elephant.mail.sending.smtplib.SMTP_SSL', SMTP)
     receipt = SMTPTransport().send(SimpleNamespace(smtp_host='smtp.example.org', smtp_port=465,
         smtp_security='ssl', username='user'), '密码', b'message', 'owner@example.org',
         ['recipient@example.org'], lambda: None)

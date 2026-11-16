@@ -11,18 +11,18 @@ from test_agent_runtime import runtime as agent_runtime
 from test_leader_dispatch_recovery import native_pending_submit
 from test_openviking import Viking
 
-from qqbot.adapters.openviking import OpenVikingMemory
-from qqbot.adapters.pi.sessions import mutation_calls
-from qqbot.contracts.memory import MemoryBinding, MemoryScope
-from qqbot.domain import OutboundEnvelope, stable_id
-from qqbot.harness.gateway import RunGateway
-from qqbot.memory.openviking_config import OpenVikingConfig
-from qqbot.runtime.core import Core
-from qqbot.runtime.knowledge import KnowledgeRuntime
-from qqbot.storage.agent_schema import dialogue_inputs, dialogues
-from qqbot.storage.memory_sync_schema import memory_operations
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import processes, runs
+from elephant.adapters.openviking import OpenVikingMemory
+from elephant.adapters.pi.sessions import mutation_calls
+from elephant.contracts.memory import MemoryBinding, MemoryScope
+from elephant.domain import OutboundEnvelope, stable_id
+from elephant.harness.gateway import RunGateway
+from elephant.memory.openviking_config import OpenVikingConfig
+from elephant.runtime.core import Core
+from elephant.runtime.knowledge import KnowledgeRuntime
+from elephant.storage.agent_schema import dialogue_inputs, dialogues
+from elephant.storage.memory_sync_schema import memory_operations
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import processes, runs
 
 runtime = agent_runtime
 
@@ -154,7 +154,7 @@ async def test_unmatched_mutation_never_gets_a_host_confirmation(host, conflict)
         if conflict in {"hash", "scope"}:
             conn.execute(update(memory_operations).values(**{"payload_hash" if conflict == "hash" else "scope_id": "wrong"}))
         elif conflict == "owner_restore":
-            from qqbot.storage.memory_sync_schema import memory_owners
+            from elephant.storage.memory_sync_schema import memory_owners
             conn.execute(update(memory_owners).values(state="RESTORE_REQUIRED"))
     if conflict == "native_call":
         host.path.write_text(host.path.read_text().replace("native-submit-call", "other-native-call"))
@@ -225,8 +225,8 @@ async def test_committed_correction_recovery_matches_original_source_and_uses_ba
     host.path = native_pending_submit(r, host.claim, {"uri": host.uri}, tool_name="memory_correct")
     request = host.core.knowledge.mutation_request(host.scope, host.claim, "native-submit-call", "memory_correct",
         {"uri": host.uri}, host.path, projection_version=projection)
-    from qqbot.adapters.openviking.service import digest
-    from qqbot.storage.memory_sync_schema import memory_documents
+    from elephant.adapters.openviking.service import digest
+    from elephant.storage.memory_sync_schema import memory_documents
     with r.db.transaction() as conn:
         conn.execute(insert(memory_documents).values(id=stable_id(host.scope.key, host.uri), scope_id=host.scope.key, uri=host.uri,
             content_hash=digest(host.remote.files[host.uri]), epoch=0, state="ACTIVE", index_state="INDEXED",

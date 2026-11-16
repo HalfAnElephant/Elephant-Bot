@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 
-from qqbot.capabilities.types import ToolResult
+from elephant.capabilities.types import ToolResult
 
 spec = importlib.util.spec_from_file_location(
     "deepseek_tools_live", Path(__file__).parents[1] / "evals/deepseek_tools_live.py"

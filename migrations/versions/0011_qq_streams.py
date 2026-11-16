@@ -1,7 +1,7 @@
 """Persist native QQ C2C stream delivery intent and reconciliation state."""
 from alembic import op
 
-from qqbot.storage.stream_schema import stream_messages, stream_runs
+from elephant.storage.stream_schema import stream_messages, stream_runs
 
 revision = "0011"
 down_revision = "0010"

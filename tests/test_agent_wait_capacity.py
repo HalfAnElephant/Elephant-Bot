@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.storage.agent_schema import agent_events
-from qqbot.storage.task_schema import processes, runs, tasks
+from elephant.storage.agent_schema import agent_events
+from elephant.storage.task_schema import processes, runs, tasks
 
 runtime = agent_runtime
 

@@ -3,8 +3,8 @@ import os
 import pytest
 from sqlalchemy import insert
 
-from qqbot.adapters.qq_official.local_media import LocalMediaStore, read_workspace_file, sniff_media
-from qqbot.storage.schema import outbox
+from elephant.adapters.qq_official.local_media import LocalMediaStore, read_workspace_file, sniff_media
+from elephant.storage.schema import outbox
 
 SCOPE = {"task_id": "task", "conversation_id": "conversation", "principal_key": "owner"}
 PNG = b"\x89PNG\r\n\x1a\nexample"
@@ -191,7 +191,7 @@ def test_multibyte_filename_byte_limit(db, clock):
 def test_official_exact_boundaries_are_streamed(db, clock, kind, name, prefix):
     import tempfile
 
-    from qqbot.adapters.qq_official.local_limits import limit_for
+    from elephant.adapters.qq_official.local_limits import limit_for
     store = LocalMediaStore(db, clock)
     maximum = limit_for(kind)
     with tempfile.TemporaryFile("w+b") as source:
@@ -210,7 +210,7 @@ def test_official_exact_boundaries_are_streamed(db, clock, kind, name, prefix):
 
 
 def test_workspace_snapshot_detaches_mutable_original(tmp_path):
-    from qqbot.adapters.qq_official.local_media import snapshot_workspace_file
+    from elephant.adapters.qq_official.local_media import snapshot_workspace_file
     (tmp_path / "outputs").mkdir()
     original = tmp_path / "outputs" / "file.txt"
     original.write_bytes(b"original bytes")
@@ -226,7 +226,7 @@ def test_workspace_snapshot_detaches_mutable_original(tmp_path):
 def test_file_sniff_reads_bounded_chunks_and_json_is_lexical():
     import io
 
-    from qqbot.adapters.qq_official.local_media import sniff_media_file
+    from elephant.adapters.qq_official.local_media import sniff_media_file
     class Bounded(io.BytesIO):
         def read(self, size=-1):
             assert 0 <= size <= 65536
@@ -243,7 +243,7 @@ def test_office_directory_guard_runs_before_zip_parser(monkeypatch, mutation):
     import struct
     import zipfile
 
-    from qqbot.adapters.qq_official.local_media import sniff_media_file
+    from elephant.adapters.qq_official.local_media import sniff_media_file
     raw = io.BytesIO()
     with zipfile.ZipFile(raw, "w") as archive:
         archive.writestr("[Content_Types].xml", b"<xml/>")
@@ -270,7 +270,7 @@ def test_office_directory_guard_runs_before_zip_parser(monkeypatch, mutation):
 def test_office_guard_does_not_cap_document_body(tmp_path):
     import zipfile
 
-    from qqbot.adapters.qq_official.local_media import sniff_media_file
+    from elephant.adapters.qq_official.local_media import sniff_media_file
     path = tmp_path / "large.docx"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("[Content_Types].xml", b"<xml/>")

@@ -6,10 +6,10 @@ import httpx
 import pytest
 from sqlalchemy import insert, select, update
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import OutboundEnvelope, SendReceipt, stable_id
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox, reply_counters
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.domain import OutboundEnvelope, SendReceipt, stable_id
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox, reply_counters
 
 
 def result(service, db, event, clock, origin, **changes):

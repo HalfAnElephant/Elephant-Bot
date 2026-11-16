@@ -8,12 +8,12 @@ from sqlalchemy import insert, select, update
 from test_agent_runtime import leader_complete, memory_runtime, root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.adapters.openviking.service import OpenVikingMemory, affected_sources
-from qqbot.adapters.pi.sessions import export_session
-from qqbot.contracts.memory import MemoryBinding, MutationReceipt
-from qqbot.runtime.knowledge import KnowledgeRuntime
-from qqbot.storage.memory_sync_schema import memory_barriers, memory_sources, memory_streams
-from qqbot.storage.task_schema import observations, sessions, tasks
+from elephant.adapters.openviking.service import OpenVikingMemory, affected_sources
+from elephant.adapters.pi.sessions import export_session
+from elephant.contracts.memory import MemoryBinding, MutationReceipt
+from elephant.runtime.knowledge import KnowledgeRuntime
+from elephant.storage.memory_sync_schema import memory_barriers, memory_sources, memory_streams
+from elephant.storage.task_schema import observations, sessions, tasks
 
 runtime = agent_runtime
 

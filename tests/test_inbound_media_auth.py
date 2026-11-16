@@ -7,9 +7,9 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
-from qqbot.adapters.qq_official.media_download import inbound_media_headers
-from qqbot.harness import images
-from qqbot.permissions import PermissionRule
+from elephant.adapters.qq_official.media_download import inbound_media_headers
+from elephant.harness import images
+from elephant.permissions import PermissionRule
 
 CDN = "multimedia.nt.qq.com.cn"
 URL = "https://" + CDN + "/download?attachment=signed"

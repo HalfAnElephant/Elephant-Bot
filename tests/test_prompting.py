@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from qqbot.harness.gateway import RunGateway
-from qqbot.runtime.prompting import PERSONA, PUBLIC_REPLY, assemble_prompt
+from elephant.harness.gateway import RunGateway
+from elephant.runtime.prompting import PERSONA, PUBLIC_REPLY, assemble_prompt
 
 
 @pytest.mark.parametrize("purpose", ["user", "progress", "question", "finalize", "attention"])

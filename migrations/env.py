@@ -1,6 +1,6 @@
 from alembic import context
 from sqlalchemy import create_engine
-from qqbot.storage.schema import metadata
+from elephant.storage.schema import metadata
 
 engine = create_engine(context.config.get_main_option("sqlalchemy.url"))
 with engine.connect() as connection:

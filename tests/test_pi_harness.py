@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from qqbot.harness.artifacts import export_artifacts
-from qqbot.harness.pi import PiHarness
-from qqbot.jobs.worker import Spool
+from elephant.harness.artifacts import export_artifacts
+from elephant.harness.pi import PiHarness
+from elephant.jobs.worker import Spool
 
 
 def test_artifact_boundaries(tmp_path):

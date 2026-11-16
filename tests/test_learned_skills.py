@@ -3,12 +3,12 @@ import json
 import pytest
 from sqlalchemy import update
 
-from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
-from qqbot.domain.execution import ExecutionPlan
-from qqbot.jobs.service import TaskService
-from qqbot.outbox.service import Outbox
-from qqbot.skills import skill_operation
-from qqbot.storage.skill_schema import learned_skills
+from elephant.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+from elephant.domain.execution import ExecutionPlan
+from elephant.jobs.service import TaskService
+from elephant.outbox.service import Outbox
+from elephant.skills import skill_operation
+from elephant.storage.skill_schema import learned_skills
 
 DOC = {"name": "verify-public-data", "description": "核对公开数据并产出可复用对照结果",
            "when_to_use": "需要复查公开数据来源、类型和结果时使用。",
@@ -50,7 +50,7 @@ def test_legacy_candidate_api_is_explicitly_retired(setup):
 
 @pytest.mark.parametrize("receipt", [{}, {"call_id": "native-call"}])
 def test_native_route_authenticates_and_binds_owner(setup, tmp_path, receipt):
-    from qqbot.adapters.hermes_skills import HermesSkills
+    from elephant.adapters.hermes_skills import HermesSkills
     service, event = setup
     _, args = start(service, event, "native")
     adapter = HermesSkills(tmp_path)
@@ -62,8 +62,8 @@ def test_native_route_authenticates_and_binds_owner(setup, tmp_path, receipt):
 
 
 def test_constructor_skills_use_current_settings_and_owner_scope(setup, tmp_path):
-    from qqbot.adapters.hermes_skills import HermesSkills
-    from qqbot.skills.config import SkillsConfig
+    from elephant.adapters.hermes_skills import HermesSkills
+    from elephant.skills.config import SkillsConfig
 
     previous, event = setup
     options = SkillsConfig(enabled=True)
@@ -97,9 +97,9 @@ def test_unconfigured_service_does_not_fabricate_skill_provider(setup):
 def test_legacy_migration_is_idempotent_and_preserves_archived_audit(setup, tmp_path):
     from sqlalchemy import insert
 
-    from qqbot.adapters.hermes_skills import HermesSkills
-    from qqbot.domain import stable_id
-    from qqbot.skills.migration import migrate_legacy_skills
+    from elephant.adapters.hermes_skills import HermesSkills
+    from elephant.domain import stable_id
+    from elephant.skills.migration import migrate_legacy_skills
     service, event = setup
     task, args = start(service, event, "migrate")
     complete(service, args)
@@ -126,8 +126,8 @@ def test_legacy_migration_is_idempotent_and_preserves_archived_audit(setup, tmp_
 def test_failed_new_candidate_does_not_hide_older_successful_skill(setup, tmp_path):
     from sqlalchemy import insert
 
-    from qqbot.adapters.hermes_skills import HermesSkills
-    from qqbot.skills.migration import migrate_legacy_skills
+    from elephant.adapters.hermes_skills import HermesSkills
+    from elephant.skills.migration import migrate_legacy_skills
     service, event = setup
     old_task, old_args = start(service, event, 'older-success')
     complete(service, old_args)

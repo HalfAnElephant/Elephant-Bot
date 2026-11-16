@@ -4,15 +4,15 @@ import json
 import pytest
 from sqlalchemy import select
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.domain import Surface, TextSegment
-from qqbot.storage.agent_schema import dialogue_inputs, dialogues
-from qqbot.storage.task_schema import runs, tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.domain import Surface, TextSegment
+from elephant.storage.agent_schema import dialogue_inputs, dialogues
+from elephant.storage.task_schema import runs, tasks
 
 
 def make_core(tmp_path, official_config, clock):
-    from qqbot.config import OwnerConfig, QQOwnerBinding
+    from elephant.config import OwnerConfig, QQOwnerBinding
     settings = Settings(database=str(tmp_path / "leader.db"), adapters=(official_config,), tasks_enabled=True,
         owner=OwnerConfig(qq_bindings=(QQOwnerBinding(app_id="app", user_openid="300", verified_at=clock.now().isoformat()),)))
     return create_app(settings, clock=clock, run_background=False).state.core
@@ -49,7 +49,7 @@ async def test_status_does_not_need_free_execution_capacity(tmp_path, official_c
         with core.db.engine.connect() as conn:
             assert not conn.execute(select(runs)).first()
             assert not conn.execute(select(dialogue_inputs)).first()
-        from qqbot.storage.schema import outbox
+        from elephant.storage.schema import outbox
         with core.db.engine.connect() as conn:
             assert len(conn.execute(select(outbox).where(outbox.c.state == "PENDING")).all()) == 1
     finally:
@@ -96,7 +96,7 @@ async def test_recalled_source_blocks_old_task_context(tmp_path, official_config
 async def test_followup_keeps_only_same_dialogue_live_images(tmp_path, official_config, official_event, clock):
     from conftest import official_payload
 
-    from qqbot.domain import MediaSegment
+    from elephant.domain import MediaSegment
     core = make_core(tmp_path, official_config, clock)
     try:
         image = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="图片", message_id="pic"))
@@ -119,8 +119,8 @@ async def test_followup_keeps_only_same_dialogue_live_images(tmp_path, official_
 async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_config, official_event, clock):
     from unittest.mock import AsyncMock
 
-    from qqbot.contracts.memory import MemoryScope, MemorySearchResult
-    from qqbot.storage.memory_sync_schema import memory_owners
+    from elephant.contracts.memory import MemoryScope, MemorySearchResult
+    from elephant.storage.memory_sync_schema import memory_owners
     core = make_core(tmp_path, official_config, clock)
     try:
         scope = MemoryScope(owner_id=core.settings.owner.id)
@@ -148,8 +148,8 @@ async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_con
 
 
 async def test_retired_transport_inputs_and_tasks_cannot_execute(tmp_path, official_config, official_event, clock):
-    from qqbot.domain import AccessContext
-    from qqbot.storage.schema import inbox
+    from elephant.domain import AccessContext
+    from elephant.storage.schema import inbox
     core = make_core(tmp_path, official_config, clock)
     try:
         event = core.adapters["qq"].normalize(official_event)
@@ -172,8 +172,8 @@ async def test_retired_transport_inputs_and_tasks_cannot_execute(tmp_path, offic
 async def test_reply_image_and_source_permission_preserve_dialogue_boundary(tmp_path, official_config, official_event, clock):
     from conftest import official_payload
 
-    from qqbot.domain import MediaSegment
-    from qqbot.permissions import PermissionRule
+    from elephant.domain import MediaSegment
+    from elephant.permissions import PermissionRule
     core = make_core(tmp_path, official_config, clock)
     try:
         image = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="", message_id="old-pic"))
@@ -199,7 +199,7 @@ async def test_reply_image_and_source_permission_preserve_dialogue_boundary(tmp_
 
 def test_admin_task_has_host_identity_explicit_contract_and_idempotency(tmp_path, official_config, clock, monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-fixture")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-fixture")
     app = create_app(Settings(database=str(tmp_path / "admin.db"), adapters=(official_config,), tasks_enabled=True),
         clock=clock, run_background=False)
     auth = {"Authorization": "Bearer admin-fixture", "Idempotency-Key": "host-contract"}
@@ -241,7 +241,7 @@ async def test_recovery_has_job_quiescence_guard_before_any_admission(tmp_path, 
 
 
 async def test_idle_direct_transport_serializes_no_claim_as_json_null(tmp_path, official_config, clock):
-    from qqbot.runtime.scheduler import Scheduler
+    from elephant.runtime.scheduler import Scheduler
     core = make_core(tmp_path, official_config, clock)
     core.scheduler = Scheduler(core, core.leader)
     try:
@@ -266,8 +266,8 @@ async def test_fast_final_prevents_delayed_dispatch_ack_and_unknown_result_resen
     from conftest import official_payload
     from sqlalchemy import update
 
-    from qqbot.domain import DeliveryCheck, OutboundEnvelope, SendReceipt
-    from qqbot.storage.schema import outbox
+    from elephant.domain import DeliveryCheck, OutboundEnvelope, SendReceipt
+    from elephant.storage.schema import outbox
     core = make_core(tmp_path, official_config, clock)
     sent = []
     class Adapter:
@@ -327,10 +327,10 @@ async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official
     from conftest import official_payload
     from sqlalchemy import insert, update
 
-    from qqbot.contracts.memory import MemoryScope
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.storage.memory_sync_schema import memory_owners
-    from qqbot.storage.schema import outbox
+    from elephant.contracts.memory import MemoryScope
+    from elephant.domain import OutboundEnvelope
+    from elephant.storage.memory_sync_schema import memory_owners
+    from elephant.storage.schema import outbox
     core = make_core(tmp_path, official_config, clock)
     try:
         event = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="解释项目偏好", message_id="memory-chat"))
@@ -346,7 +346,7 @@ async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official
                 binding_hash="fixture", remote_identity="fixture", epoch=1, state="READY", updated_at=clock.now().isoformat()))
         claim = core.sessions.claim("fixture")
         if mutation:
-            from qqbot.contracts.memory import MutationReceipt
+            from elephant.contracts.memory import MutationReceipt
             core.knowledge.rotate(scope, (claim["run_id"], claim["fencing_token"], "fixture"),
                 MutationReceipt(operation_id="verified-forget", state="COMPLETED", completed=True, memory_epoch=2))
         finish_leader(core, claim, "目前偏好为旧值。")
@@ -369,8 +369,8 @@ async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official
 async def test_leader_can_acknowledge_mid_turn_and_late_progress_is_fenced(tmp_path, official_config, official_event, clock):
     from conftest import official_payload
 
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.storage.schema import outbox
+    from elephant.domain import OutboundEnvelope
+    from elephant.storage.schema import outbox
 
     core = make_core(tmp_path, official_config, clock)
     try:
@@ -410,9 +410,9 @@ def test_admin_can_manage_verified_legacy_tasks_without_stored_owner(tmp_path, o
     from fastapi.testclient import TestClient
     from sqlalchemy import update
 
-    from qqbot.domain import InboundEvent
+    from elephant.domain import InboundEvent
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-fixture")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-fixture")
     app = create_app(Settings(database=str(tmp_path / "legacy-admin.db"), tasks_enabled=True),
         clock=clock, run_background=False)
     core = app.state.core

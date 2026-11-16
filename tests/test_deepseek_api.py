@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from qqbot.adapters.deepseek import DeepSeekAPI, DeepSeekError
+from elephant.adapters.deepseek import DeepSeekAPI, DeepSeekError
 
 
 @pytest.mark.parametrize("endpoint", [

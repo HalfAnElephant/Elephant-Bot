@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from qqbot.adapters.execution.jobs import JobService, SystemdJobProvider
-from qqbot.adapters.execution.world import LocalExecution
-from qqbot.capabilities.process import ProcessService
-from qqbot.capabilities.types import ToolContext
-from qqbot.contracts.execution import JobScope, JobStart
+from elephant.adapters.execution.jobs import JobService, SystemdJobProvider
+from elephant.adapters.execution.world import LocalExecution
+from elephant.capabilities.process import ProcessService
+from elephant.capabilities.types import ToolContext
+from elephant.contracts.execution import JobScope, JobStart
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def context(tmp_path):
 
 
 async def test_host_process_command_and_credentials_with_cgroup_launcher(context, tmp_path, monkeypatch):
-    from qqbot.capabilities import process, subprocesses
+    from elephant.capabilities import process, subprocesses
 
     group = tmp_path / "fake-cgroup"
     group.mkdir()
@@ -31,7 +31,7 @@ async def test_host_process_command_and_credentials_with_cgroup_launcher(context
         shutil.rmtree(group)
     monkeypatch.setattr(process, "create_host_cgroup", lambda: group)
     monkeypatch.setattr(subprocesses, "stop_host_cgroup", stop_group)
-    monkeypatch.setenv("QQBOT_MODEL_KEY", "model-secret")
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "model-secret")
     monkeypatch.setenv("GH_TOKEN", "github-secret")
     marker = tmp_path / "host-file"
     marker.write_text("host data")
@@ -40,7 +40,7 @@ async def test_host_process_command_and_credentials_with_cgroup_launcher(context
     script = (
         "import json, os, pathlib; "
         "print(json.dumps([pathlib.Path('host-file').read_text(), "
-        "os.getenv('QQBOT_MODEL_KEY'), os.getenv('GH_TOKEN')]))"
+        "os.getenv('ELEPHANT_MODEL_KEY'), os.getenv('GH_TOKEN')]))"
     )
     started = await processes.start({"argv": [sys.executable, "-c", script], "cwd": str(tmp_path)}, host)
     try:
@@ -56,7 +56,7 @@ async def test_host_process_command_and_credentials_with_cgroup_launcher(context
 
 
 async def test_host_process_rejects_platform_without_cgroups(context, monkeypatch):
-    from qqbot.capabilities import subprocesses
+    from elephant.capabilities import subprocesses
 
     monkeypatch.setattr(subprocesses.sys, "platform", "darwin")
     with pytest.raises(RuntimeError, match="delegated cgroup"):
@@ -66,7 +66,7 @@ async def test_host_process_rejects_platform_without_cgroups(context, monkeypatc
 async def test_failed_host_cleanup_keeps_process_active(context, monkeypatch):
     from unittest.mock import AsyncMock
 
-    from qqbot.capabilities import process
+    from elephant.capabilities import process
 
     record = {"owner": (context.task_id, context.run_id, context.fence), "process": object(),
               "cgroup": Path("/unavailable"), "cleanup_done": False}
@@ -82,7 +82,7 @@ async def test_cancelled_host_launch_retains_failed_cleanup_for_retry(context, m
     import asyncio
     from unittest.mock import AsyncMock
 
-    from qqbot.capabilities import process
+    from elephant.capabilities import process
 
     host = replace(context, environment="host")
     service = ProcessService()
@@ -99,7 +99,7 @@ async def test_cancelled_host_launch_retains_failed_cleanup_for_retry(context, m
 
 
 async def test_sandbox_cannot_fall_back_to_host(context, monkeypatch):
-    from qqbot.capabilities import process
+    from elephant.capabilities import process
 
     monkeypatch.setattr(process.shutil, "which", lambda _: None)
     with pytest.raises(RuntimeError, match="bubblewrap"):
@@ -118,7 +118,7 @@ def test_sandbox_command_keeps_namespaces_and_workspace_cwd(context):
 
 
 async def test_sandbox_process_rejects_host_cwd(context, tmp_path, monkeypatch):
-    from qqbot.capabilities import process
+    from elephant.capabilities import process
 
     monkeypatch.setattr(process.sys, "platform", "linux")
     monkeypatch.setattr(process.shutil, "which", lambda _: "/usr/bin/bwrap")

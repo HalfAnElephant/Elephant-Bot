@@ -6,8 +6,8 @@ from sqlalchemy import func, select, update
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.storage.agent_schema import leader_inbox
-from qqbot.storage.task_schema import runs, tasks, waits
+from elephant.storage.agent_schema import leader_inbox
+from elephant.storage.task_schema import runs, tasks, waits
 
 runtime = agent_runtime
 
@@ -101,7 +101,7 @@ def test_explicit_wait_timeout_escalates_without_expiring_root(runtime):
 
 
 def test_historical_detached_task_ignores_its_old_deadline(runtime):
-    from qqbot.domain.execution import ExecutionPlan
+    from elephant.domain.execution import ExecutionPlan
 
     old = runtime.service.accept(runtime.event, runtime.access, "历史后台事项",
         plan=ExecutionPlan(initial_delivery="DETACHED"))
@@ -113,7 +113,7 @@ def test_historical_detached_task_ignores_its_old_deadline(runtime):
 
 
 def test_root_question_early_answer_resumes_leader_and_never_worker(runtime):
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
 
     root = root_goal(runtime)
     worker = runtime.service.claim("worker")

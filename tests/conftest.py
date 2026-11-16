@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from qqbot.cli import migrate
-from qqbot.clock import FakeClock
-from qqbot.config import AdapterConfig
-from qqbot.ingress.service import Inbox
-from qqbot.storage.db import Database
+from elephant.cli import migrate
+from elephant.clock import FakeClock
+from elephant.config import AdapterConfig
+from elephant.ingress.service import Inbox
+from elephant.storage.db import Database
 
 
 def runtime_client_for(service):
@@ -15,7 +15,7 @@ def runtime_client_for(service):
     These fixtures intentionally have no Leader queue or learned-memory backend.
     Tests of those behaviors construct the real Core instead.
     """
-    from qqbot.runtime.scheduler import RuntimeClient
+    from elephant.runtime.scheduler import RuntimeClient
 
     core = SimpleNamespace(tasks=service, knowledge=SimpleNamespace(recover_mutations=lambda: None),
                            recovery=SimpleNamespace(epoch=""))

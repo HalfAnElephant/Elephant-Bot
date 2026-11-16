@@ -6,11 +6,11 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import select
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
-from qqbot.domain.official import OfficialContent, TemplateMarkdown
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
+from elephant.domain.official import OfficialContent, TemplateMarkdown
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox
 
 
 def message(clock, *, instance="qq", bot="bot", **kwargs):
@@ -58,11 +58,11 @@ async def test_template_obeys_markdown_flag(clock, official_config, incoming):
 
 
 async def test_signed_callback_ack_recovery_and_outer_reply_id(tmp_path, clock, official_config, monkeypatch):
-    from qqbot.app import create_app
-    from qqbot.config import Settings
-    from qqbot.domain import PrincipalRef
+    from elephant.app import create_app
+    from elephant.config import Settings
+    from elephant.domain import PrincipalRef
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test")
     calls = []
     ack_count = 0
 
@@ -116,11 +116,11 @@ async def test_signed_callback_ack_recovery_and_outer_reply_id(tmp_path, clock, 
 
 async def test_admin_rich_endpoint_auth_validation_and_idempotence(tmp_path, clock, official_config,
                                                                   official_event, monkeypatch):
-    from qqbot.app import create_app
-    from qqbot.config import Settings
-    from qqbot.ingress.service import Inbox
+    from elephant.app import create_app
+    from elephant.config import Settings
+    from elephant.ingress.service import Inbox
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test")
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as platform:
         app = create_app(Settings(deployment_id="d", database=str(tmp_path / "admin-rich.db"),
             adapters=(official_config,)), clock=clock, run_background=False, official_client=platform)

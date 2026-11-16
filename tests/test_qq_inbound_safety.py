@@ -4,10 +4,10 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.adapters.qq_official.events import extra_segments
-from qqbot.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
-from qqbot.domain.official import OfficialContent, OfficialMedia
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.adapters.qq_official.events import extra_segments
+from elephant.domain import ConversationRef, OutboundEnvelope, ReplyContext, Surface
+from elephant.domain.official import OfficialContent, OfficialMedia
 
 
 def test_semantic_recursive_projection_retains_raw_and_transcript():

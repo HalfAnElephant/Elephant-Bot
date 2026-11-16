@@ -509,7 +509,7 @@
           "$ref": "#/$defs/OpenVikingConfig",
           "default": {
             "endpoint": null,
-            "api_key_env": "QQBOT_OPENVIKING_KEY",
+            "api_key_env": "ELEPHANT_OPENVIKING_KEY",
             "namespace": "elephant",
             "bindings": [],
             "expected_version": "v0.5.4.1",
@@ -553,7 +553,7 @@
           "title": "Model"
         },
         "api_key_env": {
-          "default": "QQBOT_MODEL_KEY",
+          "default": "ELEPHANT_MODEL_KEY",
           "title": "Api Key Env",
           "type": "string"
         },
@@ -591,7 +591,7 @@
           "title": "Endpoint"
         },
         "api_key_env": {
-          "default": "QQBOT_OPENVIKING_KEY",
+          "default": "ELEPHANT_OPENVIKING_KEY",
           "title": "Api Key Env",
           "type": "string"
         },
@@ -1104,12 +1104,12 @@
       "type": "array"
     },
     "admin_token_env": {
-      "default": "QQBOT_ADMIN_TOKEN",
+      "default": "ELEPHANT_ADMIN_TOKEN",
       "title": "Admin Token Env",
       "type": "string"
     },
     "internal_token_env": {
-      "default": "QQBOT_INTERNAL_TOKEN",
+      "default": "ELEPHANT_INTERNAL_TOKEN",
       "title": "Internal Token Env",
       "type": "string"
     },
@@ -1118,7 +1118,7 @@
       "default": {
         "endpoint": null,
         "model": null,
-        "api_key_env": "QQBOT_MODEL_KEY",
+        "api_key_env": "ELEPHANT_MODEL_KEY",
         "timeout_seconds": 30,
         "context_window": 32768
       }
@@ -1234,7 +1234,7 @@
       "$ref": "#/$defs/MemoryConfig",
       "default": {
         "openviking": {
-          "api_key_env": "QQBOT_OPENVIKING_KEY",
+          "api_key_env": "ELEPHANT_OPENVIKING_KEY",
           "bindings": [],
           "endpoint": null,
           "expected_version": "v0.5.4.1",

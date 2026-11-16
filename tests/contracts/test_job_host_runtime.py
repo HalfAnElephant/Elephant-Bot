@@ -5,12 +5,12 @@ import pytest
 from sqlalchemy import select
 from test_jobs import job_runtime as job_runtime  # noqa: PLC0414
 
-from qqbot.adapters.execution.runtime import JobRuntime
-from qqbot.adapters.execution.world import execution_workspace
-from qqbot.contracts.execution import ExecutionCapabilities
-from qqbot.domain import TextSegment
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import runs, tasks
+from elephant.adapters.execution.runtime import JobRuntime
+from elephant.adapters.execution.world import execution_workspace
+from elephant.contracts.execution import ExecutionCapabilities
+from elephant.domain import TextSegment
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import runs, tasks
 
 
 async def both_modes():

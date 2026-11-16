@@ -8,12 +8,12 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import insert, select, update
 
-from qqbot.app import create_app
-from qqbot.config import OwnerConfig, QQOwnerBinding, Settings
-from qqbot.permissions import PermissionRule
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.schema import audit_events, outbox
-from qqbot.storage.task_schema import inputs, model_requests, notifications, tasks, waits
+from elephant.app import create_app
+from elephant.config import OwnerConfig, QQOwnerBinding, Settings
+from elephant.permissions import PermissionRule
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.schema import audit_events, outbox
+from elephant.storage.task_schema import inputs, model_requests, notifications, tasks, waits
 
 
 @pytest.fixture
@@ -402,7 +402,7 @@ async def test_help_service_status_and_dialogues_hide_internal_details(control_r
     assert await r.core.command(r.event("/对话")) == "研究资料"
     assert await r.core.command(r.event("/切换对话 研究资料")) == "当前对话：研究资料"
     with r.core.db.engine.connect() as conn:
-        from qqbot.storage.agent_schema import dialogues
+        from elephant.storage.agent_schema import dialogues
         identifier = conn.execute(select(dialogues.c.id)).scalar_one()
     assert await r.core.command(r.event("/切换对话 " + identifier)) == "当前对话：研究资料"
 
@@ -410,7 +410,7 @@ async def test_help_service_status_and_dialogues_hide_internal_details(control_r
 @pytest.mark.parametrize(("error", "expected"), [
     (PermissionError("task:T-private belongs to another subject"), "无法操作"),
     (KeyError("T-internal"), "没有找到"),
-    (ValueError("capacity_full: /var/lib/qqbot/private"), "暂时无法处理"),
+    (ValueError("capacity_full: /var/lib/elephant/private"), "暂时无法处理"),
 ])
 async def test_rejected_private_input_hides_internal_errors(control_runtime, monkeypatch, error, expected):
     r = control_runtime

@@ -36,6 +36,6 @@ skills:
 
 只有该复盘执行使用 `adapter.review_context()`；普通异步 Worker 仍为 foreground。分散的工具 HTTP 调用可通过同一个宿主保存的 read marks 对象恢复 `review_context(marks)`，强制本次复盘先读后改。复盘不允许删除技能；主任务结果、技能保存和通知投递分别记录。
 
-迁移前冻结旧写入口。`qqbot.skills.migration.migrate_legacy_skills(db, provider_for_scope)` 接受宿主核实过的旧 scope 到 owner 映射，只导入仍有效且成功源任务的最新技能。归档、失败、未绑定范围及历史版本保留状态和正文哈希清单，不自动混入 owner 技能；同名冲突使用稳定后缀，不覆盖现有文件。重复执行核对同内容，不重复创建。迁移后旧接口和旧配额配置明确报迁移错误。
+迁移前冻结旧写入口。`elephant.skills.migration.migrate_legacy_skills(db, provider_for_scope)` 接受宿主核实过的旧 scope 到 owner 映射，只导入仍有效且成功源任务的最新技能。归档、失败、未绑定范围及历史版本保留状态和正文哈希清单，不自动混入 owner 技能；同名冲突使用稳定后缀，不覆盖现有文件。重复执行核对同内容，不重复创建。迁移后旧接口和旧配额配置明确报迁移错误。
 
-采用的上游提交、原文件哈希、本地适配和完整 MIT 许可见 `upstreams.lock.yaml` 及 `src/qqbot/adapters/hermes_skills/`。Curator 的定时维护不在首期启用范围。
+采用的上游提交、原文件哈希、本地适配和完整 MIT 许可见 `upstreams.lock.yaml` 及 `src/elephant/adapters/hermes_skills/`。Curator 的定时维护不在首期启用范围。

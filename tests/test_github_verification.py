@@ -5,8 +5,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from qqbot.capabilities import Action, GitHubCLI, GitHubVerifier, ToolContext, classify
-from qqbot.capabilities.github import api_payload, normalize_argv
+from elephant.capabilities import Action, GitHubCLI, GitHubVerifier, ToolContext, classify
+from elephant.capabilities.github import api_payload, normalize_argv
 
 
 @pytest.fixture

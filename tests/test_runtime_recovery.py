@@ -14,15 +14,15 @@ from sqlalchemy import select, update
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime_fixture
 
-from qqbot.capabilities.ledger import SQLiteActionLedger
-from qqbot.capabilities.types import Action, ToolContext
-from qqbot.capabilities.verification import GitHubVerifier
-from qqbot.permissions import PermissionRule
-from qqbot.runtime.recovery import RuntimeRecovery
-from qqbot.storage.action_schema import operations
-from qqbot.storage.agent_schema import leader_inbox
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import inputs, processes, runs, tasks, waits
+from elephant.capabilities.ledger import SQLiteActionLedger
+from elephant.capabilities.types import Action, ToolContext
+from elephant.capabilities.verification import GitHubVerifier
+from elephant.permissions import PermissionRule
+from elephant.runtime.recovery import RuntimeRecovery
+from elephant.storage.action_schema import operations
+from elephant.storage.agent_schema import leader_inbox
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import inputs, processes, runs, tasks, waits
 
 runtime = agent_runtime_fixture
 
@@ -41,7 +41,7 @@ def recovery(runtime, monkeypatch):
         if path.stem not in receipts:
             raise FileNotFoundError(path)
         return receipts[path.stem]
-    monkeypatch.setattr("qqbot.runtime.recovery.trusted_json", root_receipt)
+    monkeypatch.setattr("elephant.runtime.recovery.trusted_json", root_receipt)
     value = RuntimeRecovery(core, directory=runtime.path / "root-stops")
     runtime.service.stop_verifier = value.stopped
     return SimpleNamespace(runtime=runtime, core=core, service=value, receipts=receipts)
@@ -207,7 +207,7 @@ def test_legacy_worker_cannot_query_tasks_without_a_root(recovery):
 
 
 async def test_maintenance_recovery_leaves_event_loop_available():
-    from qqbot.runtime.core import Core
+    from elephant.runtime.core import Core
 
     entered, release = threading.Event(), threading.Event()
     loop_thread = threading.get_ident()
@@ -243,7 +243,7 @@ async def test_maintenance_recovery_leaves_event_loop_available():
 
 @pytest.mark.parametrize("operation", ["maintenance", "cleanup_artifacts"])
 async def test_background_file_work_finishes_before_shutdown(operation, monkeypatch, tmp_path):
-    from qqbot.runtime.core import Core
+    from elephant.runtime.core import Core
 
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
@@ -255,8 +255,8 @@ async def test_background_file_work_finishes_before_shutdown(operation, monkeypa
     async def sync():
         pass
 
-    monkeypatch.setattr("qqbot.harness.artifacts.cleanup_artifacts", blocking)
-    monkeypatch.setattr("qqbot.harness.attachments.cleanup_attachment_cache", blocking)
+    monkeypatch.setattr("elephant.harness.artifacts.cleanup_artifacts", blocking)
+    monkeypatch.setattr("elephant.harness.attachments.cleanup_attachment_cache", blocking)
     core = SimpleNamespace(recovery=SimpleNamespace(recover_workers=blocking),
         leader=SimpleNamespace(recover=lambda: None),
         knowledge=SimpleNamespace(recover_mutations=lambda: None, sync=sync),
@@ -309,8 +309,8 @@ def test_native_partial_outcome_is_not_promoted_to_success(recovery):
 
 
 def test_validated_result_spool_wins_without_regenerating_artifact_ids(recovery):
-    from qqbot.harness.artifacts import export_artifacts
-    from qqbot.jobs.worker import Spool
+    from elephant.harness.artifacts import export_artifacts
+    from elephant.jobs.worker import Spool
 
     runtime = recovery.runtime
     claim = bound_worker(recovery)
@@ -414,7 +414,7 @@ async def test_readback_uses_existing_verifier_gets_and_preserves_unknown_until_
 
 
 async def test_unknown_delivery_readback_confirms_only_durable_enqueue_and_never_resends(recovery):
-    from qqbot.domain import stable_id
+    from elephant.domain import stable_id
 
     runtime = recovery.runtime
     claim = bound_worker(recovery)
@@ -555,7 +555,7 @@ async def test_rework_readback_uses_the_executing_run_workspace(recovery, new_ma
 
 
 def test_late_native_result_cannot_consume_a_newer_revision(recovery):
-    from qqbot.domain.messages import TextSegment
+    from elephant.domain.messages import TextSegment
 
     runtime = recovery.runtime
     claim = bound_worker(recovery)

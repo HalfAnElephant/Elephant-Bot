@@ -9,15 +9,15 @@ from test_host_controls import control_runtime as control_runtime  # noqa: PLC04
 from test_project_scopes import host_event
 from test_project_scopes import project_core as project_core  # noqa: PLC0414
 
-from qqbot.admin.mail import build_mail_router
-from qqbot.mail.accounts import MailAccounts
-from qqbot.mail.models import MailAccountSpec
-from qqbot.storage.mail_schema import mail_accounts
+from elephant.admin.mail import build_mail_router
+from elephant.mail.accounts import MailAccounts
+from elephant.mail.models import MailAccountSpec
+from elephant.storage.mail_schema import mail_accounts
 
 
 @pytest.fixture
 def accounts(control_runtime, monkeypatch):
-    monkeypatch.setenv('QQBOT_CREDENTIAL_KEY', base64.b64encode(b'r' * 32).decode())
+    monkeypatch.setenv('ELEPHANT_CREDENTIAL_KEY', base64.b64encode(b'r' * 32).decode())
     core = control_runtime.core
     mail_accounts.create(core.db.engine, checkfirst=True)
     transport = SimpleNamespace(test=lambda spec, secret: {'imap': 'authenticated', 'smtp': 'authenticated', 'sent': False})
@@ -179,7 +179,7 @@ async def test_setup_shell_and_credential_api_protect_credentials(accounts):
 
 
 async def test_manual_setup_can_bind_only_to_an_active_verified_owner_dialogue(accounts):
-    from qqbot.permissions import PermissionPolicy, PermissionRule, SubjectSelector
+    from elephant.permissions import PermissionPolicy, PermissionRule, SubjectSelector
 
     service, event = accounts
     core = service.core

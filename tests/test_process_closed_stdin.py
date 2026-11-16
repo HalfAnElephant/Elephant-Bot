@@ -3,12 +3,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from qqbot.capabilities.process import ProcessService
+from elephant.capabilities.process import ProcessService
 
 
 @pytest.mark.parametrize('stdin', ['', 'input after exit'])
 async def test_already_closed_child_stdin_does_not_fail_supervisor(monkeypatch, tmp_path, stdin):
-    import qqbot.capabilities.process as module
+    import elephant.capabilities.process as module
 
     writer = Mock()
     writer.write.side_effect = RuntimeError('uvloop transport is closed')

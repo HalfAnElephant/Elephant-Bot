@@ -926,18 +926,18 @@ PREPARED 表示本地已记录意图，DISPATCHED 表示已开始可能产生效
 
 | 路径 | 负责内容 |
 | --- | --- |
-| `src/qqbot/domain/` | Task、Attempt、Input、Event、Operation、Delivery 与状态规则 |
-| `src/qqbot/contracts/` | Harness、Memory、Skills、Execution、Channel 的类型与接口 |
-| `src/qqbot/runtime/` | 任务服务、调度、会话服务、提示词组装、通知与监督 |
-| `src/qqbot/runtime/leader.py` | 短轮次准入、LeaderInbox 合并、question/finalize 调用；只编排现有服务，不另写 Agent Loop |
-| `src/qqbot/runtime/prompting.py` | 共同规则、Leader/Worker 角色模板与来源登记的一处组装 |
-| `src/qqbot/adapters/qq_official/` | 官方协议、媒体、流式、交互、关系和凭据 |
-| `src/qqbot/adapters/pi/` | Pi 进程、RPC、事件转换、持久 Session 桥接 |
-| `src/qqbot/adapters/openviking/` | HTTP API、来源同步、异步结果、修正和删除 |
-| `src/qqbot/adapters/hermes_skills/` | Hermes 技能工具、目录、配置及学习钩子的必要适配 |
-| `src/qqbot/adapters/execution/` | 文件、短命令、后台 Job 及执行环境 |
-| `src/qqbot/adapters/storage/` | SQLite repository 与文件状态索引 |
-| `src/qqbot/bootstrap.py` | 配置解析、实现选择与依赖装配 |
+| `src/elephant/domain/` | Task、Attempt、Input、Event、Operation、Delivery 与状态规则 |
+| `src/elephant/contracts/` | Harness、Memory、Skills、Execution、Channel 的类型与接口 |
+| `src/elephant/runtime/` | 任务服务、调度、会话服务、提示词组装、通知与监督 |
+| `src/elephant/runtime/leader.py` | 短轮次准入、LeaderInbox 合并、question/finalize 调用；只编排现有服务，不另写 Agent Loop |
+| `src/elephant/runtime/prompting.py` | 共同规则、Leader/Worker 角色模板与来源登记的一处组装 |
+| `src/elephant/adapters/qq_official/` | 官方协议、媒体、流式、交互、关系和凭据 |
+| `src/elephant/adapters/pi/` | Pi 进程、RPC、事件转换、持久 Session 桥接 |
+| `src/elephant/adapters/openviking/` | HTTP API、来源同步、异步结果、修正和删除 |
+| `src/elephant/adapters/hermes_skills/` | Hermes 技能工具、目录、配置及学习钩子的必要适配 |
+| `src/elephant/adapters/execution/` | 文件、短命令、后台 Job 及执行环境 |
+| `src/elephant/adapters/storage/` | SQLite repository 与文件状态索引 |
+| `src/elephant/bootstrap.py` | 配置解析、实现选择与依赖装配 |
 | `tests/contracts/` | 适配器一致性、输入确认、取消、流式和故障语义 |
 | `tests/scenarios/` | 用户任务、QQ、记忆、技能和恢复场景 |
 | `docs/` | 设计、配置、迁移、运行和真实验收记录 |

@@ -7,9 +7,9 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from qqbot.capabilities import Action, Capability
-from qqbot.harness.gateway import RunGateway
-from qqbot.providers import ProviderAdapter, normalize_usage, validate_transactions
+from elephant.capabilities import Action, Capability
+from elephant.harness.gateway import RunGateway
+from elephant.providers import ProviderAdapter, normalize_usage, validate_transactions
 
 
 class ProviderFixture:
@@ -670,8 +670,8 @@ async def test_unlimited_output_omits_client_token_limits_upstream(body, streami
 
 
 def test_unlimited_output_is_default_and_old_explicit_limits_remain_readable():
-    from qqbot.config import Settings
-    from qqbot.domain.execution import ExecutionPlan
+    from elephant.config import Settings
+    from elephant.domain.execution import ExecutionPlan
 
     settings = Settings()
     assert settings.execution.interactive_budget.output_tokens_per_call is None

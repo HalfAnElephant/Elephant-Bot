@@ -4,15 +4,15 @@ import json
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select, update
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.skills import record_skill_result
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.skills import record_skill_result
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import tasks
 
 
 def test_runtime_status_projects_queues_calls_failures_and_unknowns(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'metrics-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'metrics-token')
     settings = Settings(database=str(tmp_path / 'metrics.db'))
     app = create_app(settings, clock=clock, run_background=False)
     core = app.state.core
@@ -52,7 +52,7 @@ def test_runtime_status_projects_queues_calls_failures_and_unknowns(tmp_path, cl
 
 
 def test_runtime_status_handles_empty_queues_and_usage(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'metrics-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'metrics-token')
     app = create_app(Settings(database=str(tmp_path / 'empty.db')), clock=clock, run_background=False)
     with TestClient(app) as client:
         body = client.get('/api/v1/status', headers={'Authorization': 'Bearer metrics-token'}).json()
@@ -63,7 +63,7 @@ def test_runtime_status_handles_empty_queues_and_usage(tmp_path, clock, monkeypa
 
 
 def test_runtime_status_accepts_legacy_utc_dates(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'metrics-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'metrics-token')
     app = create_app(Settings(database=str(tmp_path / 'legacy.db')), clock=clock, run_background=False)
     with TestClient(app) as client:
         app.state.core.enqueue_admin_task('旧任务', idempotency_key='legacy')

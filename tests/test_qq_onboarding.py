@@ -9,11 +9,11 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI, HTTPException, Request
 
-from qqbot.adapters.qq_official.credential_store import load_credential, save_credential
-from qqbot.adapters.qq_official.onboarding import Onboarding
-from qqbot.admin.qq_onboarding import install_qq_onboarding
-from qqbot.config import Settings
-from qqbot.configuration import ConfigurationStore, version
+from elephant.adapters.qq_official.credential_store import load_credential, save_credential
+from elephant.adapters.qq_official.onboarding import Onboarding
+from elephant.admin.qq_onboarding import install_qq_onboarding
+from elephant.config import Settings
+from elephant.configuration import ConfigurationStore, version
 
 
 def encrypted(key, secret="private-client-secret"):
@@ -109,7 +109,7 @@ async def test_cancel_while_request_in_flight_never_finishes_binding():
 
 
 def test_encrypted_store_is_app_bound_private_and_has_no_plaintext(tmp_path, monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     directory=tmp_path / "private"
     reference=save_credential(directory,"app","private-client-secret")
     path=directory / (reference + ".json")
@@ -119,13 +119,13 @@ def test_encrypted_store_is_app_bound_private_and_has_no_plaintext(tmp_path, mon
     assert load_credential(directory,reference,"app") == "private-client-secret"
     with pytest.raises(ValueError): load_credential(directory,reference,"other")
     with pytest.raises(ValueError): load_credential(directory,"../escape","app")
-    monkeypatch.delenv("QQBOT_CREDENTIAL_KEY")
+    monkeypatch.delenv("ELEPHANT_CREDENTIAL_KEY")
     with pytest.raises(ValueError): load_credential(directory,reference,"app")
 
 
 @pytest.mark.asyncio
 async def test_admin_routes_two_phase_apply_and_auth(tmp_path, monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     settings=Settings(database=str(tmp_path / "core.db"))
     core=SimpleNamespace(config_store=ConfigurationStore(settings),permissions=SimpleNamespace(require=lambda *a:None))
     def auth(request:Request):
@@ -157,7 +157,7 @@ async def test_admin_routes_two_phase_apply_and_auth(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_missing_key_prevents_external_request(tmp_path, monkeypatch):
-    monkeypatch.delenv("QQBOT_CREDENTIAL_KEY",raising=False)
+    monkeypatch.delenv("ELEPHANT_CREDENTIAL_KEY",raising=False)
     settings=Settings(database=str(tmp_path / "core.db"))
     core=SimpleNamespace(config_store=ConfigurationStore(settings),permissions=SimpleNamespace(require=lambda *a:None))
     def handler(request):
@@ -173,7 +173,7 @@ async def test_missing_key_prevents_external_request(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancellation_during_validation_prevents_persistence(tmp_path, monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     started,release=asyncio.Event(),asyncio.Event()
     async def handler(request):
         started.set()
@@ -186,7 +186,7 @@ async def test_cancellation_during_validation_prevents_persistence(tmp_path, mon
         service=install_qq_onboarding(app,core,lambda:None,client=official)
         import hashlib
 
-        from qqbot.adapters.qq_official.onboarding import Session
+        from elephant.adapters.qq_official.onboarding import Session
         session=Session("id",hashlib.sha256(b"").hexdigest(),"qq",service.now(),service.now()+300,
                         state="ready",app_id="123",secret="secret")
         service.sessions[session.id]=session
@@ -204,7 +204,7 @@ async def test_cancellation_during_validation_prevents_persistence(tmp_path, mon
 
 
 def test_credential_file_symlinks_and_public_permissions_rejected(tmp_path,monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     directory=tmp_path/"store"
     reference=save_credential(directory,"app","secret")
     path=directory/(reference+".json")
@@ -218,7 +218,7 @@ def test_credential_file_symlinks_and_public_permissions_rejected(tmp_path,monke
 
 @pytest.mark.asyncio
 async def test_qr_is_authenticated_and_local_svg(tmp_path,monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     settings=Settings(database=str(tmp_path/"core.db"))
     core=SimpleNamespace(config_store=ConfigurationStore(settings),permissions=SimpleNamespace(require=lambda *a:None))
     def auth(request:Request):
@@ -244,7 +244,7 @@ async def test_qr_is_authenticated_and_local_svg(tmp_path,monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stale_config_no_write_and_permission_deny(tmp_path,monkeypatch):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY",base64.b64encode(os.urandom(32)).decode())
     settings=Settings(database=str(tmp_path/"core.db"))
     core=SimpleNamespace(config_store=ConfigurationStore(settings),permissions=SimpleNamespace(require=lambda *a:None))
     app=FastAPI()
@@ -287,8 +287,8 @@ async def test_portal_create_and_poll_request_json_headers():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled,running,expected", [(True, False, 409), (False, True, 409), (False, False, 200)])
 async def test_rotation_requires_stopped_disabled_same_identity(tmp_path, monkeypatch, enabled, running, expected):
-    from qqbot.config import AdapterConfig
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY", base64.b64encode(os.urandom(32)).decode())
+    from elephant.config import AdapterConfig
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY", base64.b64encode(os.urandom(32)).decode())
     cfg = AdapterConfig(instance_id="qq", kind="official", bot_id="1231", app_id="1231",
                         secret_env="OLD_QQ_SECRET", enabled=enabled, streaming_enabled=True)
     settings = Settings(database=str(tmp_path / "core.db"), adapters=(cfg,))
@@ -318,8 +318,8 @@ async def test_rotation_requires_stopped_disabled_same_identity(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_rotation_rejects_different_scanned_app(tmp_path, monkeypatch):
-    from qqbot.config import AdapterConfig
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY", base64.b64encode(os.urandom(32)).decode())
+    from elephant.config import AdapterConfig
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY", base64.b64encode(os.urandom(32)).decode())
     cfg = AdapterConfig(instance_id="qq", kind="official", bot_id="old", app_id="old",
                         secret_env="OLD_QQ_SECRET", enabled=False)
     settings = Settings(database=str(tmp_path / "core.db"), adapters=(cfg,))

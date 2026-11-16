@@ -10,10 +10,10 @@ from sqlalchemy import func, select
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
-from qqbot.adapters.qq_official import gateway as module
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.config import AdapterConfig
-from qqbot.storage.schema import inbox
+from elephant.adapters.qq_official import gateway as module
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.config import AdapterConfig
+from elephant.storage.schema import inbox
 
 
 class Socket:

@@ -2,7 +2,7 @@
 
 from alembic import op
 
-from qqbot.storage.task_schema import events, runs, tasks
+from elephant.storage.task_schema import events, runs, tasks
 
 revision = "0003"
 down_revision = "0002"

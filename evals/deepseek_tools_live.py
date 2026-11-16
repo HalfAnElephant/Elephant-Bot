@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 
-from qqbot.harness.gateway import RunGateway
+from elephant.harness.gateway import RunGateway
 
 MODEL = "deepseek-flash"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -125,7 +125,7 @@ async def exercise(report):
                 gateway.claim["context"]["files"] = [{"source": "voice-fixture", "message_id": "voice",
                     "kind": "audio", "filename": "voice.silk", "url": "https://fixture.example/voice.silk",
                     "is_current_input": True, "quoted": False}]
-                with patch("qqbot.harness.gateway.fetch_public_bytes", return_value=speech):
+                with patch("elephant.harness.gateway.fetch_public_bytes", return_value=speech):
                     binding = await client.post("/binding", headers={
                         "Authorization": "Bearer " + gateway.process_token}, json={"binding_id": gateway.binding})
                     require(binding.status_code == 200, "voice input preparation failed")

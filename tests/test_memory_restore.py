@@ -1,11 +1,16 @@
 """A database snapshot cannot reopen Pi history or recalls predating a forget."""
 from sqlalchemy import insert, select
 
-from qqbot.contracts.memory import MemoryScope
-from qqbot.storage.agent_schema import dialogues
-from qqbot.storage.db import Database
-from qqbot.storage.memory_sync_schema import memory_barriers, memory_documents, memory_owners, memory_sources
-from qqbot.storage.operations import backup, export_deletions, restore
+from elephant.contracts.memory import MemoryScope
+from elephant.storage.agent_schema import dialogues
+from elephant.storage.db import Database
+from elephant.storage.memory_sync_schema import (
+    memory_barriers,
+    memory_documents,
+    memory_owners,
+    memory_sources,
+)
+from elephant.storage.operations import backup, export_deletions, restore
 
 
 def test_restore_replays_latest_memory_epoch_and_rotates_native_session(db, tmp_path, clock):

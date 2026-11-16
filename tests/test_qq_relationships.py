@@ -6,9 +6,9 @@ import pytest
 from sqlalchemy import select
 from test_qq_rich_messages import envelope, target
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.domain import Surface
-from qqbot.storage.relationship_schema import qq_relationships
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.domain import Surface
+from elephant.storage.relationship_schema import qq_relationships
 
 
 def callback(qq, clock, kind, *, stamp=None, remote="300", event_id=None):

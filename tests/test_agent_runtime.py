@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select, update
 
-from qqbot.clock import FakeClock
-from qqbot.config import Settings
-from qqbot.domain.messages import (
+from elephant.clock import FakeClock
+from elephant.config import Settings
+from elephant.domain.messages import (
     AccessContext,
     ConversationRef,
     InboundEvent,
@@ -14,15 +14,15 @@ from qqbot.domain.messages import (
     Surface,
     TextSegment,
 )
-from qqbot.jobs.service import TaskService
-from qqbot.outbox.service import Outbox
-from qqbot.runtime.leader import LeaderRuntime
-from qqbot.runtime.sessions import SessionService
-from qqbot.runtime.task_graph import TaskGraph
-from qqbot.storage.agent_schema import dialogue_inputs, leader_inbox
-from qqbot.storage.db import Database
-from qqbot.storage.schema import metadata, outbox
-from qqbot.storage.task_schema import inputs, runs, tasks
+from elephant.jobs.service import TaskService
+from elephant.outbox.service import Outbox
+from elephant.runtime.leader import LeaderRuntime
+from elephant.runtime.sessions import SessionService
+from elephant.runtime.task_graph import TaskGraph
+from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
+from elephant.storage.db import Database
+from elephant.storage.schema import metadata, outbox
+from elephant.storage.task_schema import inputs, runs, tasks
 
 
 @pytest.fixture
@@ -323,7 +323,7 @@ async def prepare_conditional_review(runtime):
 
 
 async def test_conditional_review_is_durable_per_agent_and_uses_a_frozen_snapshot(runtime):
-    from qqbot.storage.learning_schema import learning_events, learning_sessions
+    from elephant.storage.learning_schema import learning_events, learning_sessions
 
     source = await prepare_conditional_review(runtime)
     with runtime.db.engine.connect() as conn:
@@ -345,9 +345,9 @@ async def test_conditional_review_is_durable_per_agent_and_uses_a_frozen_snapsho
 
 
 async def test_review_tools_share_read_marks_enforce_origin_and_cannot_recurse(runtime):
-    from qqbot.adapters.hermes_skills import HermesSkills
-    from qqbot.runtime.tools import native_tools
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.adapters.hermes_skills import HermesSkills
+    from elephant.runtime.tools import native_tools
+    from elephant.storage.learning_schema import learning_sessions
 
     await prepare_conditional_review(runtime)
     review = runtime.leader.claim_review("leader")
@@ -382,7 +382,7 @@ async def test_review_tools_share_read_marks_enforce_origin_and_cannot_recurse(r
 
 
 async def test_worker_iterations_do_not_accumulate_on_the_owner_leader(runtime):
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.storage.learning_schema import learning_sessions
 
     enable_short_learning_interval(runtime)
     root_goal(runtime)
@@ -410,8 +410,8 @@ async def test_worker_iterations_do_not_accumulate_on_the_owner_leader(runtime):
 
 
 async def test_foreground_skill_manage_resets_the_source_counter(runtime):
-    from qqbot.adapters.hermes_skills import HermesSkills
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.adapters.hermes_skills import HermesSkills
+    from elephant.storage.learning_schema import learning_sessions
 
     enable_short_learning_interval(runtime)
     runtime.sessions.enqueue(runtime.event, runtime.access)
@@ -436,7 +436,7 @@ async def test_foreground_skill_manage_resets_the_source_counter(runtime):
 
 
 async def test_crashed_review_resumes_its_own_session_and_preserves_pending(runtime):
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.storage.learning_schema import learning_sessions
 
     source = await prepare_conditional_review(runtime)
     old = runtime.leader.claim_review("leader")
@@ -451,7 +451,7 @@ async def test_crashed_review_resumes_its_own_session_and_preserves_pending(runt
 
 
 def test_learning_tables_are_created_by_the_normal_migration(db):
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.storage.learning_schema import learning_sessions
 
     with db.engine.connect() as conn:
         assert conn.execute(select(learning_sessions)).all() == []
@@ -469,9 +469,9 @@ def test_same_input_id_cannot_be_replayed_with_another_authenticated_subject(run
 def memory_runtime(runtime):
     from sqlalchemy import insert
 
-    from qqbot.contracts.memory import MemoryBinding, MemoryScope, MemorySearchResult
-    from qqbot.runtime.knowledge import KnowledgeRuntime
-    from qqbot.storage.memory_sync_schema import memory_owners
+    from elephant.contracts.memory import MemoryBinding, MemoryScope, MemorySearchResult
+    from elephant.runtime.knowledge import KnowledgeRuntime
+    from elephant.storage.memory_sync_schema import memory_owners
 
     scope = MemoryScope(owner_id=runtime.sessions.settings.owner.id)
     binding = MemoryBinding(owner_id=scope.owner_id, account_id="elephant", user_id="owner", api_key_env="UNUSED")
@@ -503,8 +503,8 @@ def memory_runtime(runtime):
 
 
 async def test_memory_change_cleanly_replans_linked_work_and_fences_queued_delivery(runtime):
-    from qqbot.contracts.memory import MutationReceipt
-    from qqbot.storage.task_schema import notifications
+    from elephant.contracts.memory import MutationReceipt
+    from elephant.storage.task_schema import notifications
 
     knowledge, scope = memory_runtime(runtime)
     runtime.sessions.enqueue(runtime.event, runtime.access)
@@ -565,7 +565,7 @@ async def test_memory_change_cleanly_replans_linked_work_and_fences_queued_deliv
 
 
 async def test_memory_change_blocks_replanning_when_original_business_source_is_forgotten(runtime):
-    from qqbot.contracts.memory import MutationReceipt
+    from elephant.contracts.memory import MutationReceipt
 
     knowledge, scope = memory_runtime(runtime)
     runtime.sessions.enqueue(runtime.event, runtime.access)
@@ -586,8 +586,8 @@ async def test_memory_change_blocks_replanning_when_original_business_source_is_
 
 
 async def test_memory_replan_waits_for_worker_stop_and_preserves_uncertain_delivery(runtime):
-    from qqbot.contracts.memory import MutationReceipt
-    from qqbot.storage.task_schema import notifications
+    from elephant.contracts.memory import MutationReceipt
+    from elephant.storage.task_schema import notifications
 
     knowledge, scope = memory_runtime(runtime)
     runtime.sessions.enqueue(runtime.event, runtime.access)
@@ -625,7 +625,7 @@ async def test_memory_replan_waits_for_worker_stop_and_preserves_uncertain_deliv
 async def test_restored_epoch_barrier_automatically_schedules_clean_replanning(runtime):
     from sqlalchemy import insert
 
-    from qqbot.storage.memory_sync_schema import memory_barriers
+    from elephant.storage.memory_sync_schema import memory_barriers
 
     knowledge, scope = memory_runtime(runtime)
     root_id = root_goal(runtime)["task_id"]
@@ -651,7 +651,7 @@ async def test_restored_epoch_barrier_automatically_schedules_clean_replanning(r
     ("研究两种方案，给我报告结论", None, [], []),
 ])
 async def test_memory_replan_rebuilds_explicit_contract_from_retained_user_sources(runtime, original, followup, outputs, checks):
-    from qqbot.contracts.memory import MutationReceipt
+    from elephant.contracts.memory import MutationReceipt
 
     runtime.event = runtime.event.model_copy(update={"segments": (TextSegment(text=original),)})
     knowledge, scope = memory_runtime(runtime)
@@ -683,7 +683,7 @@ async def test_memory_replan_rebuilds_explicit_contract_from_retained_user_sourc
 
 
 def test_new_user_revision_blocks_old_worker_write_and_stale_result(runtime):
-    from qqbot.storage.action_schema import operations
+    from elephant.storage.action_schema import operations
     root = root_goal(runtime)
     claim = runtime.service.claim("worker")
     identity = (claim["run_id"], claim["fencing_token"], "worker")
@@ -751,7 +751,7 @@ def test_worker_result_instructions_cannot_authorize_other_goals(runtime):
 
 @pytest.mark.parametrize("changed", ["user", "app"])
 def test_foreign_subject_cannot_answer_actual_open_worker_question(runtime, changed):
-    from qqbot.storage.task_schema import waits
+    from elephant.storage.task_schema import waits
     root_goal(runtime)
     worker = runtime.service.claim("worker")
     question_id = "actual-question"
@@ -774,9 +774,9 @@ def test_foreign_subject_cannot_answer_actual_open_worker_question(runtime, chan
 def test_progress_flood_final_and_new_trigger_keep_one_current_notification(runtime):
     from datetime import timedelta
 
-    from qqbot.domain import ReplyContext
-    from qqbot.storage.agent_schema import agent_events
-    from qqbot.storage.task_schema import notifications
+    from elephant.domain import ReplyContext
+    from elephant.storage.agent_schema import agent_events
+    from elephant.storage.task_schema import notifications
     root = root_goal(runtime)
     runtime.clock.advance(61)
     worker = runtime.service.claim("worker")
@@ -895,7 +895,7 @@ def test_consumed_revision_can_progress_while_a_sibling_starts_independently(run
 
 
 def test_old_worker_result_keeps_its_dialogue_after_focus_switch(runtime):
-    from qqbot.storage.agent_schema import dialogues
+    from elephant.storage.agent_schema import dialogues
     first = runtime.sessions.enqueue(runtime.event, runtime.access)
     root = root_goal(runtime)
     user = runtime.sessions.claim("leader")
@@ -919,7 +919,7 @@ def test_old_worker_result_keeps_its_dialogue_after_focus_switch(runtime):
 
 
 async def test_review_without_reusable_content_finishes_without_business_or_delivery(runtime):
-    from qqbot.storage.learning_schema import learning_sessions
+    from elephant.storage.learning_schema import learning_sessions
     source = await prepare_conditional_review(runtime)
     with runtime.db.engine.connect() as conn:
         original = conn.execute(select(runs.c.result_json).where(runs.c.id == source["run_id"])).scalar_one()

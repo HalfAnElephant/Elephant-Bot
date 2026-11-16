@@ -6,9 +6,9 @@ from sqlalchemy import insert, select, update
 from test_agent_runtime import root_goal, worker_complete
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.domain.tasks import TaskResult
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import observations, tasks
+from elephant.domain.tasks import TaskResult
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import observations, tasks
 
 runtime = agent_runtime
 

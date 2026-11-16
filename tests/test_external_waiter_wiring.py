@@ -4,9 +4,9 @@ import pytest
 from sqlalchemy import func, select
 from test_leader_core import make_core
 
-from qqbot.domain.execution import TaskGoal
-from qqbot.runtime.scheduler import Scheduler
-from qqbot.storage.task_schema import inputs, model_requests, tasks, waits
+from elephant.domain.execution import TaskGoal
+from elephant.runtime.scheduler import Scheduler
+from elephant.storage.task_schema import inputs, model_requests, tasks, waits
 
 
 def external_wait(core, payload, *, capability="gh.exec", arguments=None):
@@ -36,7 +36,7 @@ async def test_scheduler_wired_waiter_wakes_persistent_task_via_runtime_client_w
     def configured_github(args):
         configured.append(args.github_host)
         return github
-    monkeypatch.setattr("qqbot.runtime.scheduler.configured_github", configured_github)
+    monkeypatch.setattr("elephant.runtime.scheduler.configured_github", configured_github)
     task, first = external_wait(core, official_event)
     core.scheduler = Scheduler(core, core.leader)
     try:
@@ -90,7 +90,7 @@ async def test_wired_waiter_preserves_remote_read_allowlist(
     async def github(arguments, context):
         executed.append(arguments)
         return {"exit_code": 0, "stdout": json.dumps({"status": "completed"})}
-    monkeypatch.setattr("qqbot.runtime.scheduler.configured_github", lambda _args: github)
+    monkeypatch.setattr("elephant.runtime.scheduler.configured_github", lambda _args: github)
     task, _first = external_wait(core, official_event, capability=capability, arguments=arguments)
     core.scheduler = Scheduler(core, core.leader)
     try:

@@ -1,7 +1,7 @@
 """Track scoped OpenViking snapshots and uncertain message writes."""
 from alembic import op
 
-from qqbot.storage.openviking_schema import openviking_scopes
+from elephant.storage.openviking_schema import openviking_scopes
 
 revision = "0015"
 down_revision = "0014"

@@ -4,11 +4,11 @@ import json
 from sqlalchemy import func, insert, select
 from test_leader_core import make_core
 
-from qqbot.contracts.memory import MemoryScope
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.memory_sync_schema import memory_owners
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import model_requests, processes, runs
+from elephant.contracts.memory import MemoryScope
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.memory_sync_schema import memory_owners
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import model_requests, processes, runs
 
 
 async def test_invalid_memory_epoch_closes_once_before_claim_and_allows_other_input(

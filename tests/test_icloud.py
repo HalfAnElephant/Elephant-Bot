@@ -8,11 +8,11 @@ import httpx
 import pytest
 from icalendar import Calendar
 
-from qqbot.capabilities import CapabilityRegistry, SQLiteActionLedger, ToolContext, ToolGateway
-from qqbot.capabilities.icloud import ICloudCalendarService, safe_url
-from qqbot.harness.gateway import RunGateway
-from qqbot.storage.action_schema import operations
-from qqbot.storage.db import Database
+from elephant.capabilities import CapabilityRegistry, SQLiteActionLedger, ToolContext, ToolGateway
+from elephant.capabilities.icloud import ICloudCalendarService, safe_url
+from elephant.harness.gateway import RunGateway
+from elephant.storage.action_schema import operations
+from elephant.storage.db import Database
 
 OWNER = {"adapter_instance_id": "fixture_adapter", "identity_namespace": "qq", "remote_user_id": "owner-user"}
 CALENDAR_ID = "/123/calendars/work/"
@@ -262,7 +262,7 @@ async def test_gateway_catalog_and_durable_write_routing(calendar, tmp_path):
             return {"recorded": True}
         if operation == "ledger":
             if payload["operation"] == "prepare":
-                from qqbot.capabilities import Action
+                from elephant.capabilities import Action
                 return await ledger.prepare(payload["operation_id"], gateway.context,
                     Action(**payload["action"]), payload["arguments_hash"], payload["arguments"])
             if payload["operation"] == "transition":

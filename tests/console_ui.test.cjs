@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const {equal, changes, resolve, defaultValue, errorPath} = require('../src/qqbot/admin/console.js');
+const {equal, changes, resolve, defaultValue, errorPath} = require('../src/elephant/admin/console.js');
 
 test('draft equality ignores object key order but preserves null, empty and list order', () => {
   assert.equal(equal({model: {name: 'small', endpoint: null}, adapters: []}, {adapters: [], model: {endpoint: null, name: 'small'}}), true);
@@ -59,7 +59,7 @@ test('backend errors resolve to form fields across config and policy payloads', 
 });
 
 test('invalid JSON structure is rejected before replacing any editor draft', () => {
-  const {assertShape} = require('../src/qqbot/admin/console.js');
+  const {assertShape} = require('../src/elephant/admin/console.js');
   const schema = {type: 'object', properties: {
     adapters: {type: 'array', items: {type: 'object', properties: {id: {type: 'string'}, kind: {type: 'string', enum: ['official']}}}},
     endpoint: {anyOf: [{type: 'string'}, {type: 'null'}]}, style: {type: 'object', additionalProperties: true}
@@ -75,7 +75,7 @@ test('invalid JSON structure is rejected before replacing any editor draft', () 
 });
 
 test('permission actions retain unknown patterns and selecting a specific action narrows wildcard deliberately', () => {
-  const {updateAction} = require('../src/qqbot/admin/console.js');
+  const {updateAction} = require('../src/elephant/admin/console.js');
   const original = ['*', 'future.tool', 'github.*'];
   const updated = updateAction(original, 'conversation.receive', true);
   assert.deepEqual(updated, ['future.tool', 'github.*', 'conversation.receive']);
@@ -85,7 +85,7 @@ test('permission actions retain unknown patterns and selecting a specific action
 });
 
 test('new permission rules target a named user and do not deny every operation globally', () => {
-  const {newPermissionRule, validatePolicy} = require('../src/qqbot/admin/console.js');
+  const {newPermissionRule, validatePolicy} = require('../src/elephant/admin/console.js');
   const rule = newPermissionRule('example', {adapter_instance_id: null, user_id: null, identity_namespace: null});
   assert.equal(rule.subject.kind, 'person');
   assert.deepEqual(rule.actions, ['conversation.receive']);
@@ -94,7 +94,7 @@ test('new permission rules target a named user and do not deny every operation g
 });
 
 test('namespace inference uses known adapter identities and preserves explicit custom namespaces', () => {
-  const {subjectNamespace} = require('../src/qqbot/admin/console.js');
+  const {subjectNamespace} = require('../src/elephant/admin/console.js');
   const adapters = [{instance_id: 'official', kind: 'official', app_id: '123'}, {instance_id: 'unknown', kind: 'official'}];
   assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'qq'}, adapters, 'qq'), 'qq_app:123');
   assert.equal(subjectNamespace({kind: 'person', adapter_instance_id: 'official', identity_namespace: 'custom'}, adapters, 'qq'), 'custom');
@@ -103,7 +103,7 @@ test('namespace inference uses known adapter identities and preserves explicit c
 });
 
 test('policy validation preserves preset, unknown actions and additional selector constraints', () => {
-  const {validatePolicy, ruleTarget} = require('../src/qqbot/admin/console.js');
+  const {validatePolicy, ruleTarget} = require('../src/elephant/admin/console.js');
   const policy = {preset: 'allow_all', default_effect: 'deny', rules: [{id: 'future', effect: 'allow', actions: ['future.operation'], resources: ['*'], subject: {kind: 'global', user_id: '123', identity_namespace: 'special'}}]};
   const before = structuredClone(policy);
   assert.equal(validatePolicy(policy), policy);
@@ -112,7 +112,7 @@ test('policy validation preserves preset, unknown actions and additional selecto
 });
 
 test('permission validation locates missing member identities, empty action lists and duplicate rule IDs', () => {
-  const {validatePolicy} = require('../src/qqbot/admin/console.js');
+  const {validatePolicy} = require('../src/elephant/admin/console.js');
   const rule = {id: 'a', subject: {kind: 'group_member', adapter_instance_id: 'official', identity_namespace: 'qq', group_id: '456', user_id: null}, actions: ['*'], resources: ['*']};
   assert.throws(() => validatePolicy({rules: [rule]}), error => error.path === 'rules.0.subject.user_id');
   rule.subject.user_id = '123'; rule.actions = [];
@@ -122,7 +122,7 @@ test('permission validation locates missing member identities, empty action list
 });
 
 test('style type helpers distinguish null from objects and preserve false and zero defaults', () => {
-  const {valueType, emptyValue} = require('../src/qqbot/admin/console.js');
+  const {valueType, emptyValue} = require('../src/elephant/admin/console.js');
   assert.equal(valueType(null), 'null'); assert.equal(valueType([]), 'array');
   assert.equal(valueType(false), 'boolean'); assert.equal(valueType(0), 'number');
   assert.equal(emptyValue('boolean'), false); assert.equal(emptyValue('number'), 0);
@@ -130,7 +130,7 @@ test('style type helpers distinguish null from objects and preserve false and ze
 });
 
 test('JSON imports reject missing required fields before replacing a populated form', () => {
-  const {assertShape} = require('../src/qqbot/admin/console.js');
+  const {assertShape} = require('../src/elephant/admin/console.js');
   const schema = {type: 'object', required: ['name', 'style'], properties: {name: {type: 'string'}, style: {type: 'object', additionalProperties: true}}};
   assert.throws(() => assertShape({style: {}}, schema), error => error.path === 'name');
   const untouched = {name: '小象', style: {tone: '自然', unknown: {enabled: false, value: null}}};
@@ -140,7 +140,7 @@ test('JSON imports reject missing required fields before replacing a populated f
 
 
 test('permission explanation identifies matching rule or fallback without requiring JSON', () => {
-  const {permissionExplanation} = require('../src/qqbot/admin/console.js');
+  const {permissionExplanation} = require('../src/elephant/admin/console.js');
   assert.match(permissionExplanation({effect: 'allow', matched_rule: null, policy_version: 2}), /允许此操作。没有规则匹配，使用默认处理方式/);
   const text = permissionExplanation({effect: 'deny', matched_rule: {priority: 3, subject: {kind: 'person', user_id: '123'}}, policy_version: 4});
   assert.match(text, /禁止此操作。命中规则：指定用户 · 用户 123；优先级 3/);
@@ -148,7 +148,7 @@ test('permission explanation identifies matching rule or fallback without requir
 });
 
 test('console contains only current host-task and configuration workflows', () => {
-  const source = fs.readFileSync('src/qqbot/admin/console.js', 'utf8');
+  const source = fs.readFileSync('src/elephant/admin/console.js', 'utf8');
   for (const retired of ['/api/v1/persona', '/api/v1/memories', '/api/v1/jargon', '/api/v1/expressions',
     '/decision-logs', '/api/v1/conversations', 'speak_up', 'social_evaluated_conversations', 'judge.', 'expression.']) {
     assert.equal(source.includes(retired), false, retired);
@@ -159,7 +159,7 @@ test('console contains only current host-task and configuration workflows', () =
 });
 
 function mailboxPage() {
-  const html = fs.readFileSync('src/qqbot/admin/mail.html', 'utf8');
+  const html = fs.readFileSync('src/elephant/admin/mail.html', 'utf8');
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(match => ['#' + match[1], {value: ''}]));
   const fields = new Map([...html.matchAll(/name="([^"]+)"/g)].map(match => [match[1], {value: ''}]));
   fields.set('scope_event_id', elements.get('#scopes'));
