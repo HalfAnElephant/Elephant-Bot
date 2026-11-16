@@ -30,7 +30,9 @@ The installer prepares system dependencies, the locked runtime, the unprivileged
 service account, and `elephant.service`. Run the installer without `--apply` to
 print its plan without changing the system. The setup wizard collects the model
 configuration, optionally displays the official QQ QR code in the terminal, and
-asks whether to start the installed service and enable it at boot. The terminal
+asks whether to start the installed service and enable it at boot. No shell commands or config
+paths are shown in the routine wizard. For managed service failures see
+[Acceptance](#acceptance). The terminal
 scan uses the service identity and the same database lock as the daemon. If the
 daemon is already running, use its management page instead; setup does not stop
 or restart it. The daemon listens on loopback. For manual QQ administration over

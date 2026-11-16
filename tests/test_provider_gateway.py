@@ -679,3 +679,17 @@ def test_unlimited_output_is_default_and_old_explicit_limits_remain_readable():
     settings.context.limits(settings.model.context_window, None)
     old_plan = ExecutionPlan.model_validate_json('{"budget":{"output_tokens_per_call":4096}}')
     assert old_plan.budget.output_tokens_per_call == 4096
+
+
+@pytest.mark.parametrize("endpoint,field", [
+    ("https://api.openai.com/v1/chat/completions", "max_completion_tokens"),
+    ("https://api.openai.com.fixture.invalid/v1/chat/completions", "max_tokens"),
+    ("https://openrouter.ai/api/v1/chat/completions", "max_tokens"),
+])
+async def test_trusted_output_limit_uses_provider_parameter(body, endpoint, field):
+    fixture = ProviderFixture(output_tokens=512)
+    fixture.adapter.endpoint = endpoint
+    await fixture.adapter.complete(body)
+    request, = fixture.requests
+    assert request[field] == 512
+    assert not {"max_tokens", "max_completion_tokens"}.difference({field}).intersection(request)

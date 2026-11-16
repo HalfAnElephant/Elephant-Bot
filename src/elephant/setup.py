@@ -7,11 +7,8 @@ import json
 import os
 import re
 import secrets
-import shlex
 import stat
-import sys
 import tempfile
-import warnings
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
@@ -19,16 +16,20 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
+from alembic.util import CommandError
 from dotenv import dotenv_values
+from sqlalchemy.exc import SQLAlchemyError
 
 from elephant.config import Settings, load_runtime_settings
+from elephant.providers import output_limit_parameter
+from elephant.setup_providers import MODEL_PROVIDERS
+from elephant.setup_ui import SetupUI
 
 MODEL_KEY = "ELEPHANT_MODEL_KEY"
 ADMIN_TOKEN = "ELEPHANT_ADMIN_TOKEN"
 CREDENTIAL_KEY = "ELEPHANT_CREDENTIAL_KEY"
 LOOPBACK = "http://127.0.0.1:8080"
 ONBOARDING = "/api/v1/qq/onboarding"
-DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
 SCAN_TIMEOUT = 180.0
 
 
@@ -111,33 +112,93 @@ def _add_credentials(raw, updates):
     return value
 
 
-def _ask(label, default):
-    return input(f"{label} [{default}]: ").strip() or default
-
-
 def _valid_endpoint(endpoint):
     try:
+        if not endpoint or any(char.isspace() or ord(char) < 32 or char in "\\?#" for char in endpoint):
+            return False
         parts = urlsplit(endpoint)
-        return bool(parts.hostname and parts.username is None and parts.password is None
-            and not parts.query and not parts.fragment and (
-                parts.scheme == "https" or parts.scheme == "http" and parts.hostname in {"127.0.0.1", "::1", "localhost"}
-            ))
+        _ = parts.port
+        return bool(parts.hostname and parts.username is None and parts.password is None and (
+            parts.scheme == "https" or parts.scheme == "http" and parts.hostname in {"127.0.0.1", "::1", "localhost"}
+        ))
     except ValueError:
         return False
 
 
-def _configure_model(config):
-    model_config = config.setdefault("model", {})
-    if not isinstance(model_config, dict):
-        raise TypeError("invalid model settings")
-    if not model_config.get("endpoint"):
-        endpoint = _ask("模型 Chat Completions 地址", DEFAULT_ENDPOINT)
-        if not _valid_endpoint(endpoint):
-            raise ValueError("模型地址必须使用 HTTPS（仅本地回环可用 HTTP），且不得嵌入凭据")
-        model_config["endpoint"] = endpoint
-    if not model_config.get("model"):
-        model_config["model"] = _ask("模型名称", "deepseek-flash")
-    model_config.setdefault("api_key_env", MODEL_KEY)
+def _custom_endpoint(ui):
+    while True:
+        endpoint = ui.ask("服务地址")
+        if _valid_endpoint(endpoint):
+            endpoint = endpoint.rstrip("/")
+            return endpoint if urlsplit(endpoint).path.endswith("/chat/completions") else endpoint + "/chat/completions"
+        ui.status("warn", "请输入 HTTPS 地址。本机服务可以使用 HTTP；地址中不要包含密钥。")
+
+
+def _custom_model(ui):
+    while True:
+        name = ui.ask("模型名称")
+        if re.fullmatch(r"[A-Za-z0-9_.:/@+-]{1,200}", name):
+            return name
+        ui.status("warn", "请填写服务商提供的模型名称。")
+
+
+def _model_label(endpoint):
+    return next((provider.label for provider in MODEL_PROVIDERS if provider.endpoint == endpoint), "自定义服务")
+
+
+def _pick_model(ui, model, *, replace=False):
+    """Fill gaps in existing settings; never silently change an existing destination."""
+    if model.get("endpoint") and not replace:
+        if not model.get("model"):
+            model["model"] = _custom_model(ui)
+        return
+    providers = [provider.label for provider in MODEL_PROVIDERS]
+    default = next((i for i, entry in enumerate(MODEL_PROVIDERS)
+                    if entry.endpoint == model.get("endpoint")), 0)
+    while True:
+        choice = ui.choose("你想使用哪个模型服务？", [*providers, "自定义服务 · 兼容接口"], default=default)
+        if choice == len(providers):
+            ui.section("自定义服务", "只需填写服务商提供的地址和模型名称。")
+            endpoint, name = _custom_endpoint(ui), model.get("model") if not replace else None
+            name = name or _custom_model(ui)
+        else:
+            provider = MODEL_PROVIDERS[choice]
+            endpoint = provider.endpoint
+            name = model.get("model") if not replace else None
+            if not name:
+                options = [provider.models[0] + "（推荐）", *provider.models[1:], "填写其他模型", "返回服务列表"]
+                idx = ui.choose("选择模型", options)
+                if idx == len(options) - 1:
+                    default = choice
+                    continue
+                name = provider.models[idx] if idx < len(provider.models) else _custom_model(ui)
+        model.update(endpoint=endpoint, model=name)
+        return
+
+
+def _enter_key(ui):
+    while True:
+        secret = ui.ask("输入 API 密钥", secret=True).strip()
+        if re.fullmatch(r"[A-Za-z0-9._~+/=:@%#,!-]{1,8192}", secret):
+            return secret
+        ui.status("warn", "密钥为空或格式不支持，请重新粘贴。")
+
+
+def _collect_credentials(values, names):
+    updates = {}
+    standard_keys = (MODEL_KEY, ADMIN_TOKEN, CREDENTIAL_KEY)
+    for name in names:
+        if values.get(name):
+            continue
+        if name in standard_keys:
+            alternate = "QQBOT_" + name.removeprefix("ELEPHANT_")
+        elif name.startswith("QQBOT_") and "ELEPHANT_" + name.removeprefix("QQBOT_") in standard_keys:
+            alternate = "ELEPHANT_" + name.removeprefix("QQBOT_")
+        else:
+            continue
+        if values.get(alternate):
+            updates[name] = values[alternate]
+    return updates
 
 
 @contextmanager
@@ -175,8 +236,9 @@ def _setup_environment(values, names):
                 os.environ[key] = value
 
 
-async def scan_qq(client, *, timeout=SCAN_TIMEOUT):
+async def scan_qq(client, *, timeout=SCAN_TIMEOUT, ui=None):
     """Use the same authenticated onboarding API as the setup page."""
+    ui = SetupUI() if ui is None else ui
     session_route = None
     completed = False
     provisioned = False
@@ -186,10 +248,10 @@ async def scan_qq(client, *, timeout=SCAN_TIMEOUT):
             response.raise_for_status()
             info = response.json()
             if info["adapters"]:
-                print("已有 QQ 适配器，保留现有配置，不重新绑定。")
+                ui.status("ok", "已配置 QQ，保留原有连接。")
                 return 0
             if not info["credential_key_ready"] or not info["automatic_available"]:
-                print("QQ 扫码未就绪；保留配置，可稍后重试。")
+                ui.status("warn", "目前无法生成二维码，可以稍后重试。")
                 return 1
             response = await client.post(
                 ONBOARDING + "/sessions", json={"instance_id": "qq-official", "automatic": True})
@@ -203,26 +265,26 @@ async def scan_qq(client, *, timeout=SCAN_TIMEOUT):
             while True:
                 state = session["state"]
                 if state == "connected":
-                    print("QQ 扫码绑定完成，已验证本次临时连接。")
+                    ui.status("ok", "已完成扫码，并验证本次 QQ 连接。")
                     completed = True
                     return 0
                 provisioned = provisioned or bool(session.get("provisioned"))
                 if state in {"failed", "cancelled", "expired"}:
-                    print("QQ 扫码未完成；已保存的配置不会被覆盖。")
+                    ui.status("warn", "未完成扫码，已保存的设置不受影响。")
                     return 1
                 if not shown and state == "waiting" and session.get("connect_url"):
                     import qrcode
                     code = qrcode.QRCode(border=2)
                     code.add_data(session["connect_url"])
                     code.print_ascii(tty=False, invert=True)
-                    print("请用手机 QQ 扫码并确认。")
+                    ui.status("info", "请用手机 QQ 扫码并确认。")
                     shown = True
                 await asyncio.sleep(1)
                 response = await client.get(session_route)
                 response.raise_for_status()
                 session = response.json()
     except (TimeoutError, httpx.HTTPError, ValueError, KeyError):
-        print("QQ 扫码未完成或已超时；配置保留，可稍后重试。")
+        ui.status("warn", "未完成扫码，请稍后重试。")
         return 1
     finally:
         if session_route is not None and not completed and not provisioned:
@@ -232,7 +294,7 @@ async def scan_qq(client, *, timeout=SCAN_TIMEOUT):
                 pass
 
 
-async def _scan_local(settings, token):
+async def _scan_local(settings, token, *, ui=None):
     from elephant.app import create_app
     with _exclusive_database(settings.database):
         app = create_app(settings, run_background=False)
@@ -240,7 +302,7 @@ async def _scan_local(settings, token):
             transport=httpx.ASGITransport(app=app), base_url=LOOPBACK,
             headers={"Authorization": "Bearer " + token}, trust_env=False,
         ) as client:
-            return await scan_qq(client)
+            return await scan_qq(client, ui=ui)
 
 
 def _new_local_configuration(directory):
@@ -279,7 +341,7 @@ async def probe_model(model, key, *, transport=None):
                 trust_env=False, follow_redirects=False) as client, client.stream("POST", model.endpoint,
                 headers={"Authorization": "Bearer " + key},
                 json={"model": model.model, "messages": [{"role": "user", "content": "Reply with OK."}],
-                      "stream": False, "max_tokens": 24}) as response:
+                      "stream": False, output_limit_parameter(model.endpoint): 512}) as response:
             response.raise_for_status()
             data = bytearray()
             async for chunk in response.aiter_bytes(chunk_size=8192):
@@ -292,70 +354,148 @@ async def probe_model(model, key, *, transport=None):
         return False
 
 
-def run_setup(directory: Path | str, *, system: bool = False) -> int:
-    """Generate protected setup files without overwriting existing settings."""
-    directory = Path(directory).expanduser().absolute()
+def _load_wizard_model(ui, initial, values):
+    """Choose and optionally verify model settings before any persistent write."""
+    persisted = initial.get("model") or {}
+    model = dict(persisted)
+    replace = False
+    if model.get("endpoint") and model.get("model"):
+        ui.status("info", f"当前使用 {_model_label(model['endpoint'])}。")
+        replace = ui.choose("要保留当前模型服务吗？", ("保留当前设置", "更换模型服务或模型")) == 1
+    _pick_model(ui, model, replace=replace)
+
+    # A key may only be reused for its existing endpoint. A new slot keeps
+    # interrupted writes safe and leaves older credentials available for rollback.
+    old_key = persisted.get("api_key_env", MODEL_KEY)
+    old_keys = {old_key, MODEL_KEY, "QQBOT_MODEL_KEY"}
+    if model["endpoint"] != persisted.get("endpoint") and (
+        persisted.get("endpoint") or any(values.get(name) for name in old_keys)
+    ):
+        model["api_key_env"] = "ELEPHANT_MODEL_KEY_" + secrets.token_hex(8).upper()
+    model.setdefault("api_key_env", MODEL_KEY)
+
+    force_key = False
+    while True:
+        candidate = {**initial, "model": model}
+        settings = Settings.model_validate_json(json.dumps(candidate), strict=False)
+        model_key = settings.model.api_key_env
+        names = (model_key, settings.admin_token_env, CREDENTIAL_KEY)
+        if len(set(names)) != 3 or any(not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in names):
+            raise ValueError("invalid credential variable names")
+        updates = _collect_credentials(values, names)
+        if force_key or not (values.get(model_key) or updates.get(model_key)):
+            updates[model_key] = _enter_key(ui)
+        else:
+            ui.status("ok", "沿用已有密钥。")
+
+        ui.section("2/4  连接检测", "可发送一条简短的测试消息，不会发送聊天记录。")
+        if not ui.confirm("现在检测模型连接？"):
+            ui.status("info", "已跳过检测，可稍后回来验证。")
+            return candidate, settings, updates, False
+        with ui.progress("正在等待模型响应…"):
+            verified = asyncio.run(probe_model(settings.model, updates.get(model_key) or values[model_key]))
+        if verified:
+            ui.status("ok", "模型已响应。")
+            return candidate, settings, updates, True
+        ui.status("warn", "未收到可用的模型回复。当前设置未保存。")
+        retry = ui.choose("接下来怎么做？", ("退出设置", "重选模型服务", "重新输入密钥"))
+        if not retry:
+            return None
+        ui.section("1/4  模型服务", "调整后可以再试一次。")
+        if retry == 1:
+            before = model["endpoint"]
+            _pick_model(ui, model, replace=True)
+            if model["endpoint"] == persisted.get("endpoint"):
+                model["api_key_env"] = old_key
+            elif model["endpoint"] != before:
+                model["api_key_env"] = "ELEPHANT_MODEL_KEY_" + secrets.token_hex(8).upper()
+            force_key = False
+        else:
+            # Keep the original credential intact until the new setup is saved.
+            if model_key in values or model["endpoint"] == persisted.get("endpoint"):
+                model["api_key_env"] = "ELEPHANT_MODEL_KEY_" + secrets.token_hex(8).upper()
+            force_key = True
+
+
+def _bind_qq(ui, settings, values, *, system):
+    if system:
+        from elephant.setup_system import scan_as_service_account
+        return scan_as_service_account(settings, values)
+    token = values.get(settings.admin_token_env, "")
+    resolved = load_runtime_settings(settings)
+    if (not token or resolved.database != settings.database
+            or resolved.admin_token_env != settings.admin_token_env):
+        ui.status("warn", "当前设置不支持临时扫码，可通过正在运行的管理页完成。")
+        return 1
+    if resolved.adapters:
+        ui.status("ok", "已配置 QQ，保留原有连接。")
+        return 0
+    names = (settings.model.api_key_env, settings.admin_token_env, CREDENTIAL_KEY)
+    with _setup_environment(values, names):
+        return asyncio.run(_scan_local(settings, token, ui=ui))
+
+
+def _start_local(settings, values, *, on_ready):
+    from elephant.cli import serve_local
+    with _setup_environment(values, values):
+        serve_local(settings, load_runtime_settings(settings), on_ready=on_ready)
+
+
+@contextmanager
+def _configuration_lock(directory):
+    fd = os.open(directory / ".setup.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
-        if system and (directory != Path("/etc/elephant") or os.geteuid() != 0):
-            raise ValueError("系统初始化须由管理员在 /etc/elephant 运行")
-        if not system and os.geteuid() == 0:
-            raise ValueError("本地试用请使用普通用户，不要使用 sudo")
-        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-        dstat = directory.lstat()
-        if (not stat.S_ISDIR(dstat.st_mode) or dstat.st_uid != os.geteuid()
-                or dstat.st_mode & (0o027 if system else 0o077)):
-            raise ValueError("请选择当前用户拥有的私有目录")
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("invalid setup lock")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _prepare_configuration(ui, directory, *, system):
+    with _configuration_lock(directory):
         cfg = directory / ("core.yaml" if system else "config.yaml")
         env = directory / ("core.env" if system else "credentials.env")
         existing_config = _read_if_present(cfg, system_config=system)
         existing_env = _read_if_present(env)
         if system and existing_config is None:
-            raise ValueError("未找到受管系统配置；先安装服务")
+            ui.status("error", "未找到受管安装，请先完成 Ubuntu 安装。")
+            return None
         values = _credentials(existing_env)
         original = yaml.safe_load(existing_config) if existing_config is not None else None
         if original is None and existing_config is not None:
             original = {}
         if original is not None and not isinstance(original, dict):
             raise ValueError("invalid existing setup file")
-        config = json.loads(json.dumps(original)) if original is not None else _new_local_configuration(directory)
+        config = dict(original) if original is not None else _new_local_configuration(directory)
         config.setdefault("admin_token_env", ADMIN_TOKEN)
-        _configure_model(config)
-        settings = Settings.model_validate_json(json.dumps(config), strict=False)
-        model_key = settings.model.api_key_env
-        names = (model_key, settings.admin_token_env, CREDENTIAL_KEY)
-        if len(set(names)) != 3 or any(not re.fullmatch("[A-Z_][A-Z_0-9]*", key) for key in names):
+        startup = Settings.model_validate_json(json.dumps(config), strict=False)
+        setting_names = (startup.model.api_key_env, startup.admin_token_env, CREDENTIAL_KEY)
+        if len(set(setting_names)) != 3 or any(
+            not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in setting_names
+        ):
             raise ValueError("invalid credential variable names")
-        updates = {}
-        standard_keys = (MODEL_KEY, ADMIN_TOKEN, CREDENTIAL_KEY)
-        for name in names:
-            if values.get(name):
-                continue
-            if name in standard_keys:
-                alternate = "QQBOT_" + name.removeprefix("ELEPHANT_")
-            elif name.startswith("QQBOT_") and "ELEPHANT_" + name.removeprefix("QQBOT_") in standard_keys:
-                alternate = "ELEPHANT_" + name.removeprefix("QQBOT_")
-            else:
-                continue
-            if values.get(alternate):
-                updates[name] = values[alternate]
-        if not (values.get(model_key) or updates.get(model_key)):
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                secret = getpass.getpass("模型 API Key（不回显）: ").strip()
-            if not re.fullmatch(r"[A-Za-z0-9._~+/=:@%#,!-]{1,8192}", secret):
-                raise ValueError("模型凭据为空或含不支持的字符；未保存")
-            updates[model_key] = secret
+        runtime = load_runtime_settings(startup)
+
+        ui.banner()
+        ui.section("1/4  模型服务", "从常用服务中选择，地址会自动配置。")
+        if runtime.model != startup.model or runtime.admin_token_env != startup.admin_token_env:
+            ui.status("warn", "正在使用管理页里的模型设置。请在管理页调整，向导不会覆盖它。")
+            settings, verified = startup, False
+            names = (startup.admin_token_env, CREDENTIAL_KEY)
+            updates = _collect_credentials(values, names)
+            ui.section("2/4  连接检测", "已保留当前模型，不重新验证。")
+        else:
+            selection = _load_wizard_model(ui, config, values)
+            if selection is None:
+                return None
+            config, settings, updates, verified = selection
         if not (values.get(settings.admin_token_env) or updates.get(settings.admin_token_env)):
             updates[settings.admin_token_env] = secrets.token_urlsafe(32)
         if not (values.get(CREDENTIAL_KEY) or updates.get(CREDENTIAL_KEY)):
             updates[CREDENTIAL_KEY] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-        if input("向所配置的模型地址发送一次合成消息以验证联通？[y/N]: ").strip().lower() in {"y", "yes"}:
-            if not asyncio.run(probe_model(settings.model, updates.get(model_key) or values[model_key])):
-                print("模型验证未通过，未写入本次配置。请检查地址、模型名或 API Key 后重试。")
-                return 1
-            print("模型响应已验证。")
-        else:
-            print("未调用模型验证。")
         if updates:
             updated_env = _add_credentials(existing_env, updates)
             _replace_private(env, existing_env, updated_env)
@@ -363,37 +503,87 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
         if original != config:
             _replace_private(cfg, existing_config, json.dumps(config, ensure_ascii=False, indent=2) + "\n",
                              system_config=system)
-        print("模型配置已保留或完成。")
-        outcome = 0
-        if system:
-            from elephant.setup_system import scan_as_service_account, start_installed_service
+        ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
 
-            if input("现在通过官方 QQ 扫码接入？[y/N]: ").strip().lower() in {"y", "yes"}:
-                outcome = max(outcome, int(scan_as_service_account(settings, values) != 0))
-            if not outcome and input("现在启动服务并设为开机启动？[y/N]: ").strip().lower() in {"y", "yes"}:
-                outcome = int(start_installed_service() != 0)
-                if not outcome:
-                    print("已请求 systemd 启动；使用 systemctl status elephant.service 检查。")
+        return settings, values, verified, _model_label(
+            runtime.model.endpoint if runtime.model != startup.model else settings.model.endpoint
+        )
+
+
+def run_setup(directory: Path | str, *, system: bool = False) -> int:
+    """Guide setup while retaining protected writes and explicit side effects."""
+    directory = Path(directory).expanduser().absolute()
+    ui = SetupUI()
+    try:
+        if system and (directory != Path("/etc/elephant") or os.geteuid() != 0):
+            raise ValueError("system setup requires the managed installation")
+        if not system and os.geteuid() == 0:
+            ui.status("error", "本地试用请用普通用户打开向导。")
+            return 1
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        dstat = directory.lstat()
+        if (not stat.S_ISDIR(dstat.st_mode) or dstat.st_uid != os.geteuid()
+                or dstat.st_mode & (0o027 if system else 0o077)):
+            raise ValueError("setup requires a private directory")
+        prepared = _prepare_configuration(ui, directory, system=system)
+        if prepared is None:
+            return 1
+        settings, values, verified, model_label = prepared
+
+        ui.section("3/4  连接 QQ", "接入后，可以直接用手机和 Elephant 对话。")
+        qq = "未检测"
+        outcome = 0
+        if ui.confirm("现在用手机 QQ 扫码？"):
+            try:
+                with ui.progress("正在准备 QQ 二维码…"):
+                    outcome = _bind_qq(ui, settings, values, system=system)
+            except (OSError, ValueError, RuntimeError, ImportError, CommandError, SQLAlchemyError):
+                ui.status("warn", "现在无法扫码。如果服务已在运行，可从管理页连接。")
+                outcome = 1
+            qq = "已配置" if not outcome else "待完成"
+        else:
+            ui.status("info", "已跳过，之后可以重新打开向导接入。")
+
+        ui.section("4/4  开始使用", "按需要启动，也可以先退出，已保存的设置不会丢失。")
+        if system:
+            start = ui.choose("启动方式", ("稍后启动", "现在启动，并设为开机启动")) == 1
+        else:
+            start = ui.choose("启动方式", ("稍后启动", "在当前窗口启动")) == 1
+        status = "已通过检测" if verified else "未检测"
+        ui.section("设置已保存", f"模型：{model_label}"
+                   f" · {status}    |    QQ：{qq}")
+        if start:
+            if system and outcome:
+                ui.status("warn", "扫码未完成，暂不启动系统服务。")
+                return 1
+            if system:
+                from elephant.setup_system import start_installed_service
+                with ui.progress("正在启动系统服务…"):
+                    result = start_installed_service(quiet=True)
+                if result:
+                    ui.status("error", "未能启动系统服务。设置仍已保存，请查看部署文档的排查说明。")
+                    return 1
+                ui.status("ok", "已提交启动请求，并设为开机启动。")
             else:
-                print("未启动服务。稍后运行 sudo systemctl enable --now elephant.service。")
-        elif input("现在通过官方 QQ 扫码接入？[y/N]: ").strip().lower() in {"y", "yes"}:
-            token = values.get(settings.admin_token_env, "")
-            if not token:
-                raise ValueError("受保护的凭据文件缺少管理员令牌")
-            resolved = load_runtime_settings(settings)
-            if resolved.database != settings.database or resolved.admin_token_env != settings.admin_token_env:
-                raise ValueError("运行时配置更改了数据库或管理凭据来源；本次不会启动临时实例")
-            if resolved.adapters:
-                print("已有 QQ 适配器，保留现有配置，不重新绑定。")
-            else:
-                with _setup_environment(values, names):
-                    outcome = max(outcome, asyncio.run(_scan_local(settings, token)))
-        if not system:
-            print(f"启动：uv run elephant serve --config {shlex.quote(str(cfg))} --env-file {shlex.quote(str(env))}")
-        return outcome
-    except (OSError, TypeError, ValueError, EOFError, getpass.GetPassWarning, yaml.YAMLError):
-        print("初始化未完成。已保存的设置可保留；请检查私有目录、模型配置或终端输入。", file=sys.stderr)
+                ui.status("info", "正在启动，请保持当前窗口打开。按 Ctrl+C 可停止。")
+                def on_ready():
+                    tip = "现在可以去 QQ 发一条消息。" if qq == "已配置" else ""
+                    ui.status("ok", "Elephant 已运行。" + tip)
+
+                try:
+                    _start_local(settings, values, on_ready=on_ready)
+                except CommandError:
+                    ui.status("error", "未能启动。请从 Elephant 安装目录打开向导。")
+                    return 1
+                except (OSError, RuntimeError, ImportError, SQLAlchemyError, SystemExit):
+                    ui.status("error", "未能启动。请确认没有另一个 Elephant 实例，或查阅部署文档。")
+                    return 1
+        else:
+            ui.status("info", "准备好后，重新打开向导即可启动。")
+        return int(outcome != 0)
+    except (OSError, TypeError, ValueError, RuntimeError, EOFError, getpass.GetPassWarning, yaml.YAMLError):
+        ui.status("error", "设置未完成。请检查安装环境，或从部署文档查看排查说明。")
         return 1
     except KeyboardInterrupt:
-        print("\n已取消初始化。", file=sys.stderr)
+        ui.status("info", "已退出向导。先前保存的设置仍会保留。")
         return 130

@@ -19,7 +19,7 @@ UNIT = Path("/etc/systemd/system/elephant.service")
 STAMP = CONFIG.with_name(".installed-unit.sha256")
 
 
-def start_installed_service():
+def start_installed_service(*, quiet=False):
     """Called only after the terminal operator explicitly opts in to enable/start."""
     if os.geteuid() != 0 or any(
         path.is_symlink() or not path.is_file() or path.stat().st_uid != 0 or path.stat().st_mode & 0o022
@@ -28,9 +28,10 @@ def start_installed_service():
         raise ValueError("Elephant service is not managed by this installer")
     if hashlib.sha256(UNIT.read_bytes()).hexdigest() != STAMP.read_text().strip():
         raise ValueError("Elephant system unit differs from the installed copy")
+    output = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if quiet else {}
     return subprocess.run(
         ["/usr/bin/systemctl", "enable", "--now", "elephant.service"],
-        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, check=False,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, check=False, **output,
     ).returncode
 
 
@@ -53,6 +54,9 @@ def scan_as_service_account(settings, values):
         "PATH": "/opt/elephant-node/bin:/usr/bin:/bin", "HOME": str(STATE), "LANG": "C.UTF-8",
         ADMIN_TOKEN: token, CREDENTIAL_KEY: key,
     }
+    env["TERM"] = os.environ.get("TERM", "dumb")
+    if "NO_COLOR" in os.environ:
+        env["NO_COLOR"] = ""
     return subprocess.run(
         ["/usr/sbin/runuser", "-u", ACCOUNT, "-g", GROUP, "--", str(source), "-I", "-m", "elephant.setup_system"],
         cwd=ROOT, env=env, check=False,
@@ -80,7 +84,7 @@ def _child_main():
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError, KeyError):
-        print("无法启动终端扫码。若 elephant.service 正在运行，请通过现有管理页扫码，或在停机窗口重试。")
+        print("无法启动终端扫码。如果服务正在运行，请用管理页扫码，或稍后重试。")
         return 1
 
 

@@ -9,6 +9,7 @@ import math
 import re
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import anyio
@@ -22,6 +23,14 @@ COMPLETION_INSTRUCTION = (
     "不要宣称未验证的操作成功，也不要编造结果。"
 )
 logger = logging.getLogger(__name__)
+
+
+def output_limit_parameter(endpoint: str) -> str:
+    """Use the current limit field on OpenAI's own endpoint; keep compatibility elsewhere."""
+    parts = urlsplit(endpoint)
+    if parts.scheme == "https" and parts.hostname == "api.openai.com" and parts.port in {None, 443}:
+        return "max_completion_tokens"
+    return "max_tokens"
 
 
 def estimate_tokens(value):
@@ -185,7 +194,7 @@ class ProviderAdapter:
             payload["messages"] = [{"role": "system", "content": COMPLETION_INSTRUCTION}, *payload["messages"]]
         payload["stream"] = bool(body.get("stream"))
         if output is not None:
-            payload["max_tokens"] = output
+            payload[output_limit_parameter(self.endpoint)] = output
         if payload["stream"]:
             payload["stream_options"] = {"include_usage": True}
         self._check_size(payload)

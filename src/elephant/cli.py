@@ -237,21 +237,41 @@ def main():
             )
         )
     else:
-        import uvicorn
-
-        from elephant.app import create_app
-
         for warning in legacy_warnings:
             print("warning: " + warning, file=sys.stderr)
-        Path(settings.database).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock = os.open(settings.database + ".core.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if settings.tasks_enabled or settings.interactive_execution_enabled:
-                clean_stale_socket(settings.internal_socket)
-            uvicorn.run(create_app(startup_settings), host=SERVE_HOST, port=SERVE_PORT)
-        finally:
-            os.close(lock)
+        serve_local(startup_settings, settings)
+
+
+def serve_local(startup_settings, settings, *, on_ready=None):
+    """Shared server launch for the direct CLI and the interactive setup."""
+    import uvicorn
+
+    from elephant.app import create_app
+
+    Path(settings.database).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = os.open(settings.database + ".core.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if settings.tasks_enabled or settings.interactive_execution_enabled:
+            clean_stale_socket(settings.internal_socket)
+        app = create_app(startup_settings)
+        if on_ready is None:
+            uvicorn.run(app, host=SERVE_HOST, port=SERVE_PORT)
+        else:
+            class GuidedServer(uvicorn.Server):
+                async def startup(self, sockets=None):
+                    await super().startup(sockets=sockets)
+                    if self.started:
+                        on_ready()
+
+            server = GuidedServer(uvicorn.Config(
+                app, host=SERVE_HOST, port=SERVE_PORT, log_level="critical", access_log=False,
+            ))
+            server.run()
+            if not server.started:
+                raise RuntimeError("Elephant did not start")
+    finally:
+        os.close(lock)
 
 
 def clean_stale_socket(path):
