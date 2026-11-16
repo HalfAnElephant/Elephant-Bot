@@ -13,7 +13,7 @@ from uuid import uuid4
 from sqlalchemy import func, insert, select, update
 
 from qqbot.adapters.qq_official.streaming import OfficialStream, send_typing
-from qqbot.domain import InboundEvent, OutboundEnvelope, Surface, stable_id
+from qqbot.domain import InboundEvent, OutboundEnvelope, SendReceipt, Surface, stable_id
 from qqbot.domain.tasks import validate_user_facing_text
 from qqbot.storage.schema import outbox, reply_counters
 from qqbot.storage.stream_schema import stream_messages, stream_runs
@@ -87,7 +87,7 @@ class StreamDelivery:
         task = conn.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one() if task_id else None
         return InboundEvent.model_validate_json(event_json or task["event_json"]), task
 
-    def _create(self, run_id, message_key, *, kind="answer"):
+    def _create(self, run_id, message_key, *, kind="answer", final=False):
         with self.db.transaction() as c:
             old = c.execute(select(stream_messages).where(stream_messages.c.run_id == run_id,
                 stream_messages.c.message_key == message_key, stream_messages.c.kind == kind)).mappings().first()
@@ -101,9 +101,9 @@ class StreamDelivery:
             counter_key = stable_id(event.conversation.key, reply.platform_message_id)
             seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar_one_or_none()
             next_seq = (seq or 0) + 1
-            limit = reply.max_replies - 1 if kind == "typing" else reply.max_replies
+            limit = reply.max_replies if final else reply.max_replies - 1
             if next_seq > limit:
-                raise ValueError("stream reply budget exhausted")
+                return None
             if seq is None:
                 c.execute(insert(reply_counters).values(key=counter_key, seq=next_seq))
             else:
@@ -207,9 +207,14 @@ class StreamDelivery:
             if payload.get("error"):
                 self._disable(gate["run_id"], "PUBLIC_ANSWER_ERROR")
             return
-        row = self._create(gate["run_id"], message_key)
+        row = self._create(gate["run_id"], message_key, final=kind == "public_answer_final")
+        if row is None:
+            return
         if kind == "public_answer_final":
             # Only agent_settled identifies which ended message is the final answer.
+            if row["state"] == "NEW":
+                await self._send(row, text, final=True)
+                row = self._create(gate["run_id"], message_key, final=True)
             if text != row["text"]:
                 raise ValueError("final marker does not match public answer")
             with self.db.transaction() as c:
@@ -265,8 +270,11 @@ class StreamDelivery:
                 stream_messages.c.final_marker == 1, stream_messages.c.state == "FINISHED",
                 stream_messages.c.sent_text == result["summary"])).mappings().first()
             if final:
-                c.execute(update(outbox).where(pending, outbox.c.state == "STREAM_PENDING").values(
-                    state="SENT", platform_message_id=final["stream_id"], sent_at=self.clock.now().isoformat()))
+                deliveries = c.execute(select(outbox.c.id).where(pending,
+                    outbox.c.state == "STREAM_PENDING")).scalars().all()
+                for delivery_id in deliveries:
+                    self.core.outbox._receipt(delivery_id, SendReceipt(state="SENT",
+                        platform_message_id=final["stream_id"]), connection=c)
                 if origin_kind == "task":
                     c.execute(update(notifications).where(notifications.c.id == origin_id).values(state="DELIVERED"))
             else:
@@ -317,6 +325,12 @@ class StreamDelivery:
             if not row["stream_id"]:
                 with self.db.transaction() as c:
                     c.execute(update(stream_messages).where(stream_messages.c.id == row["id"]).values(state="CANCELLED"))
+                continue
+            if envelope.reply_context.expires_at <= self.clock.now():
+                # The acknowledged prefix is known; expiry cannot make a later final delivery uncertain.
+                with self.db.transaction() as c:
+                    c.execute(update(stream_messages).where(stream_messages.c.id == row["id"]).values(
+                        state="ABANDONED", error="REPLY_WINDOW_EXPIRED", text=row["sent_text"]))
                 continue
             try:
                 transport = self._transport(row)
@@ -383,6 +397,8 @@ class StreamDelivery:
         try:
             row = self._create(gate["run_id"], f"typing:{count}", kind="typing")
         except ValueError:
+            return
+        if row is None:
             return
         envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
         if not self.core.pre_send(envelope):

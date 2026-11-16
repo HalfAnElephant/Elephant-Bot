@@ -2,6 +2,8 @@ import hashlib
 import json
 from uuid import uuid4
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
@@ -9,6 +11,75 @@ from qqbot.app import create_app
 from qqbot.config import Settings
 from qqbot.domain import AccessContext, InboundEvent
 from qqbot.storage.task_schema import tasks
+
+
+@pytest.mark.parametrize('workspace_id', ['personal', 'alpha'])
+async def test_admin_mail_filter_update_persists_source_atomically(tmp_path, clock, monkeypatch, workspace_id):
+    from qqbot.storage.agent_schema import dialogue_inputs
+    from qqbot.storage.schedule_schema import schedules
+    from qqbot.storage.schema import inbox
+
+    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
+    app = create_app(Settings(database=str(tmp_path / 'mail.db'), orchestration={
+        'workspace_bindings': {'alpha': str(tmp_path / 'alpha'), 'beta': str(tmp_path / 'beta')}}),
+        clock=clock, run_background=False)
+    core = app.state.core
+    auth = {'Authorization': 'Bearer admin-test-token', 'Idempotency-Key': 'mail-draft'}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            created = await client.post('/api/v1/schedules', headers=auth, json={
+                'goal': 'save summary', 'enabled': False, 'workspace_id': workspace_id,
+                'mail': {'account_id': 'demo'}})
+            assert created.status_code == 200, created.text
+            schedule_id = created.json()['id']
+            other = await client.post('/api/v1/schedules', headers=auth | {'Idempotency-Key': 'beta-timer'},
+                json={'goal': 'check beta', 'enabled': False, 'workspace_id': 'beta', 'cron': '0 9 * * *'})
+            assert other.status_code == 200, other.text
+            url = '/api/v1/schedules/' + schedule_id
+            changes = {'mail': {'account_id': 'demo', 'all': [
+                {'field': 'subject', 'op': 'contains', 'value': 'weekly'}]}}
+            body = {'expected_revision': 1, 'changes': changes}
+            assert (await client.patch(url, json=body)).status_code == 401
+            updated = await client.patch(url, headers=auth, json=body)
+            assert updated.status_code == 200, updated.text
+            assert updated.json()['revision'] == 2
+            assert updated.json()['spec']['mail']['all'] == changes['mail']['all']
+            assert updated.json()['spec']['workspace_id'] == workspace_id
+            assert not updated.json()['enabled']
+            with core.db.engine.connect() as conn:
+                row = conn.execute(select(schedules).where(schedules.c.id == schedule_id)).mappings().one()
+                context = json.loads(row['source_context_json'])
+                assert len(context['source_manifest']) == 2
+                core.schedules._validate_sources(conn, InboundEvent.model_validate_json(row['event_json']), context)
+                sources = conn.execute(select(inbox).where(inbox.c.id.in_(
+                    source['id'] for source in context['source_manifest']))).mappings().all()
+                assert all(source['state'] == 'DONE' for source in sources)
+                assert all(core.sessions.workspace_for(InboundEvent.model_validate_json(source['event_json']), conn)
+                    == workspace_id for source in sources)
+                handled = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == row['dialogue_id'])).mappings().all()
+                assert len(handled) == 1 and handled[0]['state'] == 'HANDLED' and handled[0]['handled_at']
+                requests = [segment for source in sources
+                    for segment in json.loads(source['event_json'])['segments']
+                    if segment.get('original_type') == 'schedule_update']
+                assert len(requests) == 1
+                assert requests[0]['payload']['spec_sha256'] == hashlib.sha256(row['spec_json'].encode()).hexdigest()
+                before = conn.execute(select(inbox.c.id)).all()
+            assert (await client.patch(url, headers=auth, json=body)).status_code == 422
+
+            def fail_merge(*args):
+                raise ValueError('source merge failed')
+
+            with monkeypatch.context() as patch:
+                patch.setattr(core.schedules, '_merge_sources', fail_merge)
+                failed = await client.patch(url, headers=auth, json=body | {'expected_revision': 2})
+                assert failed.status_code == 422
+            with core.db.engine.connect() as conn:
+                assert conn.execute(select(inbox.c.id)).all() == before
+                assert conn.execute(select(schedules.c.revision).where(schedules.c.id == schedule_id)).scalar_one() == 2
+                assert len(conn.execute(select(dialogue_inputs.c.id)).all()) == 1
+    finally:
+        await core.stop()
+        core.db.close()
 
 
 def test_conversation_policy_only_allows_addressed_or_silent(tmp_path, official_config, official_event, clock, monkeypatch):

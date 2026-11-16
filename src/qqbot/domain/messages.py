@@ -125,7 +125,8 @@ class InboundEvent(DTO):
     event_id: str
     platform_event_id: str | None = None
     event_type: Literal[
-        "message.created", "message.recalled", "member.changed", "mute.changed", "connection.changed"
+        "message.created", "message.recalled", "member.changed", "mute.changed", "connection.changed",
+        "host.schedule.updated"
     ]
     conversation: ConversationRef
     principal: PrincipalRef

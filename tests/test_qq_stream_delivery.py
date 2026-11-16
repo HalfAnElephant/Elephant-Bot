@@ -40,6 +40,7 @@ def stream_setup(db, clock, incoming, official_config):
     service = TaskService(db, clock, Outbox(db, clock), stream_eligibility=bridge.eligible)
     task = service.accept(event, AccessContext(principal=principal, conversation=conversation), "hello")
     claim = service.claim("worker")
+    core.outbox = service.outbox
     assert claim["public_answer_events"] is True
     return SimpleNamespace(core=core, bridge=bridge, service=service, task=task, claim=claim,
                            calls=calls, client=client, event=event)
@@ -382,6 +383,9 @@ async def test_typing_renews_but_preserves_answer_sequence(stream_setup):
     assert [call["msg_seq"] for call in s.calls] == [1, 2, 3]
     append(s, 1, "public_answer_end", "Answer")
     await s.bridge.dispatch_once()
+    assert len(s.calls) == 3
+    append(s, 2, "public_answer_final", "Answer")
+    await s.bridge.dispatch_once()
     assert s.calls[-1]["msg_seq"] == 4
 
 
@@ -414,6 +418,9 @@ async def test_typing_preserves_answer_budget_after_other_deliveries(stream_setu
     await s.bridge.dispatch_once()
     assert not s.calls
     append(s, 1, "public_answer_end", "Answer")
+    await s.bridge.dispatch_once()
+    assert not s.calls
+    append(s, 2, "public_answer_final", "Answer")
     await s.bridge.dispatch_once()
     assert s.calls[0]["msg_seq"] == 4
     await s.client.aclose()

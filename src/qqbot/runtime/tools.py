@@ -51,7 +51,13 @@ def native_tools(role, purpose):
         if purpose == "user":
             from qqbot.runtime.schedules import ScheduleSpec
             result["schedules.create"] = {"name": "schedules.create",
-                "description": "Schedule this user's authorized goal at an aware date/time or a five-field cron in an IANA timezone. Persist once and report the returned next fire time.",
+                "description": ("Schedule this user's goal at an aware date/time or five-field cron in an IANA timezone. "
+                    "For mail triggers put the selected account ID, folder and all/any/none filters in mail, "
+                    "and keep execution requirements in goal. Record the user's authorized action/resource patterns "
+                    "in mail_permissions. A configured account with protected credentials can be enabled. "
+                    "Use enabled=false for a draft. Ask for a missing account ID. Activation starts at the current "
+                    "mailbox watermark unless the user explicitly requests mail_replay_from_uid. "
+                    "Report the persisted state. For timers report the returned next fire time."),
                 "parameters": ScheduleSpec.model_json_schema()}
             for operation, description, fields, required in (
                 ("list", "List this authenticated user's schedules.", {}, []),

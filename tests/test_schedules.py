@@ -350,3 +350,44 @@ def test_schedule_freezes_referenced_upload_before_dialogue_history_rolls_over(p
     assert context["files"][0]["attachment_ref"] == "earlier-sheet"
     assert {item["id"] for item in context["source_manifest"]} == {
         upload.event_id, request.event_id, context["schedule_fire_id"]}
+
+
+def test_cron_creation_retry_accepts_pre_mail_creation_json(timers):
+    from qqbot.storage.schedule_schema import schedules
+
+    service, runtime = timers
+    spec = {'goal': '检查项目', 'cron': '0 9 * * *'}
+    item = service.create(runtime.event, spec, idempotency_key='old-row')
+    legacy = ScheduleSpec.model_validate(spec).model_dump_json(exclude={'mail'})
+    with runtime.db.transaction() as conn:
+        conn.execute(update(schedules).where(schedules.c.id == item['id']).values(creation_json=legacy))
+    assert service.create(runtime.event, spec, idempotency_key='old-row')['id'] == item['id']
+
+
+def test_inactive_mail_draft_cannot_switch_account_or_trigger(timers):
+    service, runtime = timers
+    item = service.create(runtime.event, {'goal': '记录摘要', 'enabled': False,
+        'mail': {'account_id': 'demo'}}, idempotency_key='mail')
+    with pytest.raises(ValueError, match='account or folder'):
+        service.update(runtime.event, item['id'], {'mail': {'account_id': 'other'}}, expected_revision=1)
+    with pytest.raises(ValueError, match='between time and mail'):
+        service.update(runtime.event, item['id'], {'mail': None, 'cron': '0 9 * * *'}, expected_revision=1)
+    with pytest.raises(ValueError, match='require enabled=false'):
+        service.update(runtime.event, item['id'], {'enabled': True}, expected_revision=1)
+    assert service.get(runtime.event, item['id']) == item
+
+
+async def test_mail_filter_update_still_requires_stored_qq_source(control_runtime):
+    from qqbot.storage.schema import inbox
+
+    core = control_runtime.core
+    source, _ = core.inbox.accept(control_runtime.event('save a mail draft'))
+    item = core.schedules.create(source, {'goal': 'save summary', 'enabled': False,
+        'mail': {'account_id': 'demo'}}, idempotency_key='mail-update-source')
+    unstored = control_runtime.event('only weekly mail')
+    with pytest.raises(PermissionError, match='verified user message'):
+        core.schedules.update(unstored, item['id'], {'mail': {'account_id': 'demo', 'all': [
+            {'field': 'subject', 'op': 'contains', 'value': 'weekly'}]}}, expected_revision=1)
+    with core.db.engine.connect() as conn:
+        assert not conn.execute(select(inbox.c.id).where(inbox.c.id == unstored.event_id)).first()
+    assert core.schedules.get(source, item['id']) == item

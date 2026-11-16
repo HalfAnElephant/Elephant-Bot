@@ -154,6 +154,10 @@ def create_app(settings, *, clock=None, run_background=True, official_client=Non
 
     app.include_router(admin_router(core, admin))
     app.include_router(build_schedule_router(core, admin))
+    from qqbot.admin.mail import build_mail_router
+    app.include_router(build_mail_router(core, admin))
+    from qqbot.admin.mail_delivery import build_mail_delivery_router
+    app.include_router(build_mail_delivery_router(core, admin))
     app.include_router(build_skills_router(core, admin))
     interaction_store = InteractionStore(db, clock)
     app.state.qq_interactions = interaction_store

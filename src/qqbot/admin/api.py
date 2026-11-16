@@ -42,6 +42,7 @@ class PolicyPatch(BaseModel):
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     goal: str = Field(min_length=1, max_length=16000)
+    requested_actions: tuple[str, ...] = Field(default=(), max_length=32)
     success_checks: tuple[str, ...] = Field(default=(), max_length=20)
     requested_outputs: tuple[str, ...] = Field(default=(), max_length=20)
     workspace_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -272,6 +273,7 @@ def router(core, authenticate):
         try:
             return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
                 success_checks=body.success_checks, requested_outputs=body.requested_outputs,
+                requested_actions=body.requested_actions,
                 workspace_id=body.workspace_id)
         except (ValueError, PermissionError) as error:
             raise HTTPException(422, str(error)) from error
