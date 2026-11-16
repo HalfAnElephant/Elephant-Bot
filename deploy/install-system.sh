@@ -91,6 +91,7 @@ python=/opt/elephant-python
 unit=elephant.service
 unit_path=/etc/systemd/system/$unit
 stamp=/etc/elephant/.installed-unit.sha256
+pending=/etc/elephant/.pending-unit.sha256
 uv=/usr/local/libexec/elephant-tools/uv
 helper=/usr/local/libexec/elephant-daemon-stopped
 for tool in flock runuser; do
@@ -144,7 +145,7 @@ done
 unsafe=$(find "$app" -xdev \( -path "$app/.venv" -o -path "$app/node_modules" -o -path "$app/.git" \) -prune -o \
     \( ! -user root -o -perm /022 -o -type l \) -print -quit)
 [ -z "$unsafe" ] || fail "Untrusted release path: $unsafe"
-for path in "$app/.venv" "$app/node_modules" "$config" "$stops" "$node" "$python" "$stamp" "$unit_path" "$helper" "$uv" \
+for path in "$app/.venv" "$app/node_modules" "$config" "$stops" "$node" "$python" "$stamp" "$pending" "$unit_path" "$helper" "$uv" \
     "$unit_path.d" "$unit_path.d/jobs.conf" /usr/local/libexec/elephant-tools; do
     [ ! -L "$path" ] || fail "Refusing symbolic link: $path"
     [ ! -e "$path" ] || trusted "$path" || fail "Not a trusted root-owned path: $path"
@@ -166,7 +167,7 @@ fi
 # pre-existing setup; stop before mutation if the existing setup is incomplete.
 if [ -e "$config/jobs.env" ] || [ -e "$unit_path.d/jobs.conf" ]; then
     [ -f "$config/jobs.env" ] && [ -f "$unit_path.d/jobs.conf" ] ||
-        fail 'Existing Job provisioning is incomplete. Review existing jobs.env and jobs.conf manually.'
+        fail 'Existing Job provisioning is incomplete. If the existing file is installer-generated, rerun deploy/elephant-job-user-setup.sh elephant elephant.service as root to complete it; custom files require manual review.'
     provision_jobs=no
 else
     provision_jobs=yes
@@ -177,17 +178,48 @@ for file in uv.lock package-lock.json configs/production.yaml .env.example deplo
     [ -f "$app/$file" ] || fail "Missing release file: $file"
 done
 
-active=$(systemctl show -p ActiveState --value "$unit") || fail 'Could not inspect the existing unit.'
-case "$active" in inactive|failed) ;; *) fail "Stop $unit and drain tasks before provisioning." ;; esac
+require_inactive() {
+    active=$(systemctl show -p ActiveState --value "$unit") || fail 'Could not inspect the existing unit.'
+    case "$active" in inactive|failed) ;; *) fail "Stop $unit and drain tasks before provisioning." ;; esac
+}
+require_inactive
 fragment=$(systemctl show -p FragmentPath --value "$unit") || fail 'Could not inspect the unit fragment.'
 [ -z "$fragment" ] || [ "$fragment" = "$unit_path" ] || fail 'An unmanaged Elephant unit already exists.'
+
+unit_hash() {
+    digest=$(sha256sum -- "$1") || return 1
+    printf '%s\n' "${digest%% *}"
+}
+trusted_digest() {
+    [ -f "$1" ] && [ "$(wc -c < "$1")" -eq 65 ] && grep -Ex '[0-9a-f]{64}' "$1"
+}
+# The private pending digest is written before the unit is published. If the
+# previous install stopped between renames, accept only the exact intended unit.
+managed_unit=no
+[ ! -e "$stamp" ] || [ -f "$stamp" ] || fail 'Installed unit digest is not a regular file.'
+if [ -e "$pending" ]; then
+    pending_hash=$(trusted_digest "$pending") ||
+        fail 'Pending installer unit digest is invalid. Review it manually; no unit was changed.'
+else
+    pending_hash=
+fi
 if [ -e "$unit_path" ]; then
-    [ -f "$unit_path" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$(sha256sum "$unit_path" | cut -d ' ' -f 1)" ] ||
+    [ -f "$unit_path" ] || fail 'Existing unit is not a regular file.'
+    installed_hash=$(unit_hash "$unit_path") || fail 'Could not hash the existing unit.'
+    if [ -e "$stamp" ]; then
+        stamped_hash=$(trusted_digest "$stamp") || stamped_hash=
+    else
+        stamped_hash=
+    fi
+    if [ "$installed_hash" = "$stamped_hash" ] || [ "$installed_hash" = "$pending_hash" ]; then
+        managed_unit=yes
+    else
         fail 'Existing unit is unmanaged or locally edited. Review it manually; it was not changed.'
+    fi
 fi
 
 if [ -e "$helper" ]; then
-    [ -f "$helper" ] && { [ -f "$stamp" ] || cmp -s "$helper" "$app/scripts/elephant-daemon-stopped"; } ||
+    [ -f "$helper" ] && { [ "$managed_unit" = yes ] || cmp -s "$helper" "$app/scripts/elephant-daemon-stopped"; } ||
         fail 'An unmanaged stop helper already exists; review it manually.'
 fi
 if getent passwd elephant >/dev/null; then
@@ -213,7 +245,11 @@ for path in "$app/.venv" "$app/node_modules" "$node" "$python" /usr/local/libexe
 done
 
 stage=$(mktemp -d /run/elephant-install.XXXXXX)
-trap 'rm -rf -- "$stage"' EXIT
+new_unit=
+new_digest=
+trap 'rm -rf -- "$stage"; [ -z "$new_unit" ] || rm -f -- "$new_unit"; [ -z "$new_digest" ] || rm -f -- "$new_digest"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 case "$os_id" in
     ubuntu|debian)
         env -i PATH="$PATH" HOME=/root apt-get update
@@ -239,6 +275,7 @@ env -i PATH="$PATH" HOME=/root curl --disable -fLsS "$node_url/$archive" -o "$st
 env -i PATH="$PATH" HOME=/root curl --disable -fLsS "$node_url/SHASUMS256.txt" -o "$stage/SHASUMS256.txt"
 (cd "$stage" && awk -v f="$archive" '$2==f { print; n++ } END { if(n!=1) exit 1 }' SHASUMS256.txt > node.sha256 &&
     sha256sum --check --strict node.sha256)
+require_inactive
 install -d -o root -g root -m 0755 "$node" "$python" /usr/local/libexec/elephant-tools
 tar -xJf "$stage/$archive" -C "$node" --strip-components=1 --no-same-owner --no-same-permissions
 chmod -R a+rX "$node"
@@ -247,6 +284,7 @@ env -i PATH="$PATH" HOME=/root UV_INSTALL_DIR=/usr/local/libexec/elephant-tools 
 PATH=$node/bin:$PATH
 export PATH
 cd "$app"
+require_inactive
 chmod 0755 "$app"
 env -i PATH="$PATH" HOME=/root UV_PYTHON_INSTALL_DIR="$python" "$uv" --no-config sync --locked --no-dev --no-editable --python 3.13.9
 getent group elephant-worker >/dev/null || groupadd --system elephant-worker
@@ -281,12 +319,23 @@ done
 as_service -x "$state" && as_service -w "$state" ||
     fail "Service account cannot use $state. The daemon unit was not changed."
 
+require_inactive
+# Finish an interrupted unit publication before replacing its pending intent.
+if [ "$managed_unit" = yes ] && [ "$installed_hash" = "$pending_hash" ]; then
+    mv -f -- "$pending" "$stamp"
+fi
+# Publish helper and unit only after the account checks above. Keep the unit and
+# digest staging files on their respective destination filesystems.
 install -o root -g root -m 0755 scripts/elephant-daemon-stopped "$helper"
-# Install the bundle unit and record its digest, without changing other unit drop-ins.
 new_unit=$(mktemp /etc/systemd/system/.elephant.service.XXXXXX)
 install -o root -g root -m 0644 deploy/elephant.service "$new_unit"
+new_digest=$(mktemp "$config/.unit-digest.XXXXXX")
+unit_hash "$new_unit" > "$new_digest" || fail 'Could not hash the new unit.'
+mv -f -- "$new_digest" "$pending"
+new_digest=
 mv -f -- "$new_unit" "$unit_path"
-sha256sum "$unit_path" | cut -d ' ' -f 1 > "$stamp"
+new_unit=
+mv -f -- "$pending" "$stamp"
 [ "$provision_jobs" = no ] || env -i PATH="$PATH" HOME=/root deploy/elephant-job-user-setup.sh elephant "$unit"
 systemctl daemon-reload
 echo 'Installed. The Elephant daemon was not started.'

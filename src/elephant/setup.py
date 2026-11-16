@@ -525,6 +525,36 @@ def _persist_setup_files(cfg, env, *, existing_config, config, original, existin
                          system_config=system)
 
 
+def _stored_encrypted_credentials(startup, runtime):
+    if any(adapter.credential_ref for adapter in (*startup.adapters, *runtime.adapters)):
+        return True
+    databases = (Path(startup.database), Path(runtime.database))
+    roots = {root for path in databases for root in (path.absolute().parent, path.resolve().parent)}
+    for root in roots:
+        for name in ("qq-credentials", "mail-credentials"):
+            try:
+                if next((root / name).iterdir(), None) is not None:
+                    return True
+            except FileNotFoundError:
+                continue
+    return False
+
+
+def _vault_can_resume(ui, startup, runtime, values):
+    # Explicitly blank canonical keys disable alias fallback.
+    key = values.get(CREDENTIAL_KEY, values.get("QQBOT_CREDENTIAL_KEY", ""))
+    if key:
+        try:
+            if len(base64.b64decode(key, validate=True)) == 32:
+                return True
+        except ValueError:
+            pass
+    elif not _stored_encrypted_credentials(startup, runtime):
+        return True
+    ui.status("error", "凭据加密密钥缺失或无效。请从备份恢复原密钥后重开向导；不会生成新密钥替换它。")
+    return False
+
+
 def _prepare_configuration(ui, directory, *, system):
     with _configuration_lock(directory):
         cfg = directory / ("core.yaml" if system else "config.yaml")
@@ -544,9 +574,11 @@ def _prepare_configuration(ui, directory, *, system):
         config.setdefault("admin_token_env", ADMIN_TOKEN)
         startup = Settings.model_validate_json(json.dumps(config), strict=False)
         _validate_credential_roles(startup)
-        snapshot_path, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
+        _, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
         runtime = overlay_runtime_settings(startup, overrides)
         _validate_credential_roles(runtime)
+        if not _vault_can_resume(ui, startup, runtime, values):
+            return None
         snapshot_owns_model = "model" in overrides
         edit_model = (runtime.admin_token_env == startup.admin_token_env
                       and (not system or not snapshot_owns_model))
@@ -576,37 +608,40 @@ def _prepare_configuration(ui, directory, *, system):
         if not (values.get(CREDENTIAL_KEY) or updates.get(CREDENTIAL_KEY)):
             updates[CREDENTIAL_KEY] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
 
-        def save_files():
-            _persist_setup_files(
-                cfg, env, existing_config=existing_config, config=config, original=original, existing_env=existing_env,
-                values=values, updates=updates, system=system,
-            )
         changed_model = effective.model != runtime.model
-        if not system and changed_model and (snapshot_owns_model or existing_config is not None):
+        if updates or original != config or changed_model:
+            if not system and runtime.database != startup.database:
+                # A saved database move may leave a live daemon on the old
+                # database; holding just the new lock cannot fence it.
+                ui.status("warn", "检测到管理页保存了不同的数据库位置。请先在管理页处理，向导不会改写当前配置。")
+                return None
             try:
-                with _exclusive_database(runtime.database):
-                    if _read_if_present(snapshot_path) != saved_snapshot:
+                if system:
+                    from elephant.setup_system import system_configuration_lock
+
+                    lock = system_configuration_lock(runtime)
+                else:
+                    lock = _exclusive_database(runtime.database)
+                with lock:
+                    if _read_setup_overrides(startup, system=system)[1] != saved_snapshot:
                         ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
                         return None
-                    # New credential slots don't replace prior keys; write them
-                    # first so a failed snapshot update leaves the old model usable.
-                    save_files()
+                    # Recheck the old key and vault after fencing the daemon,
+                    # before writes in case credentials were stored during a prompt.
+                    if not _vault_can_resume(ui, startup, runtime, values):
+                        return None
+                    _persist_setup_files(
+                        cfg, env, existing_config=existing_config, config=config, original=original,
+                        existing_env=existing_env, values=values, updates=updates, system=system,
+                    )
                     store = ConfigurationStore(settings)
-                    if snapshot_owns_model:
+                    if snapshot_owns_model and changed_model:
                         store.save_model_while_stopped(runtime, effective, overrides)
                     if store.read().model != effective.model:
-                        ui.status("error", "未能确认模型设置生效，请检查管理页。")
+                        ui.status("error", "未能确认模型设置已保存，请检查管理页。")
                         return None
             except _DatabaseBusy:
-                ui.status("warn", "Elephant 正在运行。请先停止服务再更换模型，或使用管理页。")
-                return None
-        else:
-            if system and changed_model and _read_setup_overrides(startup, system=True)[1] != saved_snapshot:
-                ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
-                return None
-            save_files()
-            if system and changed_model and load_runtime_settings(settings).model != effective.model:
-                ui.status("warn", "管理页有更新的模型设置，向导未能切换当前模型。")
+                ui.status("warn", "Elephant 正在运行。请先停止服务再修改模型或凭据；向导不会自动重启。")
                 return None
         ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
         return settings, values, verified, _model_label(effective.model.endpoint)
@@ -668,7 +703,7 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
                 if result:
                     ui.status("error", "未能启动系统服务。设置仍已保存，请查看部署文档的排查说明。")
                     return 1
-                ui.status("ok", "已提交启动请求，并设为开机启动。")
+                ui.status("ok", "已提交启动请求，并设为开机启动；不会重启已运行的服务。")
             elif macos and start == 2:
                 from elephant.setup_macos import LaunchAgentError, install_launch_agent
                 try:

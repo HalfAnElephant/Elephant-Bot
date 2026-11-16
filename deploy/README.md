@@ -63,12 +63,32 @@ If none are suitable, you are asked before installing the locked private copy.
 The default answer is no. Noninteractive deployments must pre-authorize that
 fallback with `--install-pi`; it does not force a download when an existing Pi
 is compatible, and never modifies a global Pi. The private install needs npm.
-Rerun the installer after changing or updating the externally supplied Pi.
-An explicitly configured custom executable remains authoritative.
+After changing the externally supplied Pi, repeat the compatibility check by
+installing into a fresh personal release directory, or rerunning the system
+installer with the service stopped. An explicitly configured custom executable
+remains authoritative.
 
 The default installation action is a preview. Without `--setup`, a successful
 install stops before the wizard. `./elephant` opens setup again. The core listener
 remains loopback-only on all supported paths.
+
+### Upgrade or reinstall a personal bundle
+
+Do not unpack a release over an installed bundle or rerun the installer there:
+the installer refuses to change a directory that already contains `.venv`.
+This protects foreground and macOS login processes that may be using its
+libraries, even if they were started by an older version. Use `./elephant`
+to reopen the wizard without reinstalling.
+
+Back up settings and data, let active tasks finish, and stop the old process.
+On macOS unload its login item and remove the managed plist using the procedure
+above if you intend to re-enable login for the replacement release. Keep the
+old bundle intact, unpack a verified release into a fresh persistent directory,
+and run setup there. The default profile remains in `~/.config/elephant`; retain
+the same `--setup-dir` if you use a separate profile. Do not open the old bundle
+against data migrated by the new one; follow the backup/restore runbook for that
+rollback. An interrupted install may be retried in place only if it did not
+create `.venv`.
 
 ## Guided Linux installation
 
@@ -104,6 +124,16 @@ It does not widen existing configuration permissions: if the service account
 cannot load the configuration, it stops before changing the unit. The kernel
 interface check does not prove the live service has delegation; verify that on
 the deployment host before enabling isolated host tools.
+
+Keep the service stopped throughout the upgrade. Do not start it manually or
+through external automation until the installer exits. The installer checks
+the service state again before writing the runtime and unit. An interrupted
+installer unit update can be retried when its recorded unit digest matches.
+If only one generated Job file was published, use the repair command printed
+by the installer; it fills in the missing file only if the survivor matches
+its generated configuration. Inspect operator-customized files before repairing
+them manually. Reopening setup while the daemon is active does not restart it;
+stop the service before changing model or credential settings.
 
 ## Fresh Ubuntu installation (manual)
 

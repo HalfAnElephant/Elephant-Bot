@@ -32,7 +32,8 @@ def fake_mac(tmp_path):
     fake_brew_bin = tmp_path / "homebrew" / "bin"
     fake_brew_bin.mkdir(parents=True)
     script.write_text(SOURCE.read_text().replace("/opt/homebrew/bin", str(fake_brew_bin)))
-    shutil.copyfile(SOURCE.with_name("pi-install.sh"), deploy / "pi-install.sh")
+    for name in ("pi-install.sh", "install-local-linux.sh"):
+        shutil.copyfile(SOURCE.with_name(name), deploy / name)
     for name in ("pyproject.toml", "uv.lock", "package.json", "package-lock.json"):
         (tmp_path / name).touch()
     (tmp_path / ".python-version").write_text("3.13.9\n")
@@ -49,10 +50,11 @@ def fake_mac(tmp_path):
         "TRACE": str(trace),
         "VIRTUAL_ENV": "/wrong-venv",
     }
-    for command in ("awk", "chmod", "cp", "dirname", "env", "grep", "mkdir", "mktemp", "mv", "rm", "rmdir", "touch"):
+    for command in ("awk", "cat", "chmod", "cp", "dirname", "env", "grep", "mkdir", "mktemp", "mv", "rm", "rmdir", "touch"):
         (tools / command).symlink_to(shutil.which(command))
     for tool, body in {
-        "uname": '[ "$1" = -s ] && echo Darwin || echo "${TEST_ARCH:-arm64}"',
+        "uname": '[ "$1" = -s ] && echo "${TEST_PLATFORM:-Darwin}" || echo "${TEST_ARCH:-arm64}"',
+        "getconf": 'test "$1" = GNU_LIBC_VERSION',
         "id": 'echo "${TEST_UID:-501}"',
         "sysctl": 'echo "${TEST_TRANSLATED:-0}"',
         "node": (
@@ -75,6 +77,7 @@ def fake_mac(tmp_path):
         "uv": (
             '[ -z "${VIRTUAL_ENV:-}" ] || exit 22\n'
             'echo "uv $*" >>"$TRACE"\n'
+            '[ "${TEST_FAIL_UV:-0}" = 1 ] && exit 23\n'
             "mkdir -p .venv/bin\ntouch .venv/bin/elephant\nchmod +x .venv/bin/elephant"
         ),
         "xcode-select": "exit 1",
@@ -100,8 +103,9 @@ def fake_mac(tmp_path):
         shutil.copy2(tools / name, tools / (name + "-template"))
 
     def run(*args, **variables):
+        entry = deploy / "install-local-linux.sh" if variables.get("TEST_PLATFORM") == "Linux" else script
         result = subprocess.run(
-            ["/bin/sh", str(script), *args],
+            ["/bin/sh", str(entry), *args],
             cwd=tmp_path.parent,
             env={**env, **variables},
             text=True,
@@ -379,13 +383,60 @@ def test_unapproved_private_pi_is_not_installed_or_recorded(fake_mac):
     assert not trace.exists()
 
 
-def test_compatible_private_pi_is_reused_without_reinstall(fake_mac):
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+def test_compatible_private_pi_is_reused_after_failure_before_venv_creation(fake_mac, platform):
     root, trace, run = fake_mac
-    assert run("--apply", "--install-pi").returncode == 0
+    env = {"TEST_PLATFORM": platform, "TEST_ARCH": "aarch64" if platform == "Linux" else "arm64"}
+    assert run("--apply", "--install-pi", TEST_FAIL_UV="1", **env).returncode == 23
+    assert not (root / ".venv").exists()
     trace.unlink()
-    assert run("--apply").returncode == 0
+    assert run("--apply", **env).returncode == 0
     assert (root / ".elephant-pi").read_text().strip() == "bundled"
     assert trace.read_text().splitlines() == ["uv sync --locked --no-dev --no-editable --python 3.13.9"]
+
+
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+@pytest.mark.parametrize("existing", ["ready", "incomplete", "broken-link"])
+def test_personal_install_does_not_modify_an_existing_runtime(fake_mac, platform, existing):
+    root, trace, run = fake_mac
+    venv = root / ".venv"
+    if existing == "ready":
+        (venv / "bin").mkdir(parents=True)
+        command = venv / "bin/elephant"
+        command.write_text("#!/bin/sh\nexit 0\n")
+        command.chmod(0o700)
+    elif existing == "broken-link":
+        venv.symlink_to(root / "missing")
+    else:
+        venv.mkdir()
+    marker = root / ".elephant-pi"
+    marker.write_text("previous Pi\n")
+    # Missing Node would cause --with-deps to install Homebrew Node, if reached.
+    (root / "fake-tools/node").unlink()
+    (root / "fake-tools/npm").unlink()
+    deployment = ("--with-deps",) if platform == "Darwin" else ()
+    env = {"TEST_PLATFORM": platform, "TEST_ARCH": "aarch64" if platform == "Linux" else "arm64"}
+    assert run("--dry-run", **env).returncode == 0
+    result = run("--apply", "--install-pi", *deployment, **env)
+    assert result.returncode == 1
+    assert "不会就地覆盖" in result.stderr
+    assert marker.read_text() == "previous Pi\n"
+    assert not trace.exists()
+    assert not (root / ".elephant-install.lock").exists()
+
+
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+def test_personal_install_refuses_an_install_already_in_progress(fake_mac, platform):
+    root, trace, run = fake_mac
+    lock = root / ".elephant-install.lock"
+    lock.mkdir()
+    arch = "aarch64" if platform == "Linux" else "arm64"
+    result = run("--apply", "--install-pi", TEST_PLATFORM=platform, TEST_ARCH=arch)
+    assert result.returncode == 1
+    assert "安装" in result.stderr
+    assert lock.is_dir()
+    assert not trace.exists()
+    assert not (root / ".elephant-pi").exists()
 
 
 def test_matching_version_without_rpc_is_not_compatible(fake_mac):

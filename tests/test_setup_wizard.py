@@ -1,4 +1,5 @@
 """Offline wizard behavior with synthetic providers and disposable private files."""
+import base64
 import json
 from io import StringIO
 from pathlib import Path
@@ -189,8 +190,9 @@ def test_existing_legacy_keys_are_carried_forward_without_rotation_on_same_servi
                       encoding="utf8")
     config.chmod(0o600)
     credentials = directory / "credentials.env"
+    legacy_key = base64.b64encode(b"l" * 32).decode()
     credentials.write_text("QQBOT_MODEL_KEY=old-model-key\nQQBOT_ADMIN_TOKEN=old-admin-token\n"
-                           "QQBOT_CREDENTIAL_KEY=old-credential-key\n", encoding="utf8")
+                           f"QQBOT_CREDENTIAL_KEY={legacy_key}\n", encoding="utf8")
     credentials.chmod(0o600)
     answers(monkeypatch, "", "", "", "")
     monkeypatch.setattr(setup.getpass, "getpass", lambda _prompt, **_opts: pytest.fail("legacy key must be reused"))
@@ -537,3 +539,139 @@ def test_snapshot_durability_error_distinguishes_already_published(tmp_path, mon
         atomic_write(path, "published")
     assert path.read_text() == "published"
     assert list(tmp_path.iterdir()) == [path]
+
+
+
+@pytest.mark.parametrize("vault", ["qq-credentials", "mail-credentials"])
+@pytest.mark.parametrize("canonical", [None, ""])
+def test_existing_vault_without_effective_key_blocks_before_probe(tmp_path, monkeypatch, capsys, vault, canonical):
+    from elephant.adapters.qq_official.credential_store import load_credential, save_credential
+
+    directory = tmp_path / "private"
+    answers(monkeypatch, "", "", "", "", "")
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "model-fixture")
+    assert setup.run_setup(directory) == 0
+    env = directory / "credentials.env"
+    cfg = directory / "config.yaml"
+    original_key = base64.b64encode(b"v" * 32).decode()
+    prior_env = env.read_text()
+    if canonical is None:
+        # No canonical or legacy key at all.
+        env.write_text("".join(line for line in prior_env.splitlines(keepends=True)
+                               if not line.startswith(setup.CREDENTIAL_KEY + "=")))
+    else:
+        env.write_text(setup._add_credentials(prior_env, {setup.CREDENTIAL_KEY: canonical})
+                       + f"QQBOT_CREDENTIAL_KEY={original_key}\n")
+    with setup._setup_environment({setup.CREDENTIAL_KEY: original_key}, (setup.CREDENTIAL_KEY,)):
+        reference = save_credential(directory / vault, "app-fixture", "sealed-fixture")
+    before = (cfg.read_bytes(), env.read_bytes())
+    monkeypatch.setattr(setup, "_load_wizard_model", lambda *_: pytest.fail("must reject prior to model prompt"))
+    assert setup.run_setup(directory) == 1
+    assert (cfg.read_bytes(), env.read_bytes()) == before
+    assert "从备份恢复原密钥" in capsys.readouterr().out
+    with setup._setup_environment({setup.CREDENTIAL_KEY: original_key}, (setup.CREDENTIAL_KEY,)):
+        assert load_credential(directory / vault, reference, "app-fixture") == "sealed-fixture"
+
+
+def test_vault_created_after_prompt_is_rechecked_under_database_lock(tmp_path, monkeypatch):
+    directory = tmp_path / "private"
+    original = setup._load_wizard_model
+
+    def storage_appeared(*args, **kwargs):
+        selection = original(*args, **kwargs)
+        vault = directory / "mail-credentials"
+        vault.mkdir()
+        (vault / "existing.json").write_text("synthetic existing encrypted blob")
+        return selection
+
+    monkeypatch.setattr(setup, "_load_wizard_model", storage_appeared)
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "fixture-key")
+    answers(monkeypatch, "", "", "")
+    assert setup.run_setup(directory) == 1
+    assert not (directory / "config.yaml").exists()
+    assert not (directory / "credentials.env").exists()
+
+
+def test_wizard_fences_credential_only_edits_while_core_is_running(tmp_path, monkeypatch, capsys):
+    directory = tmp_path / "private"
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "new-fixture-key")
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    cfg = directory / "config.yaml"
+    env = directory / "credentials.env"
+    before_settings = load_settings(cfg)
+    raw = setup._add_credentials(env.read_text(), {before_settings.model.api_key_env: ""})
+    env.write_text(raw)
+    before = (cfg.read_bytes(), env.read_bytes())
+    with setup._exclusive_database(before_settings.database):
+        answers(monkeypatch, "", "")
+        assert setup.run_setup(directory) == 1
+    assert (cfg.read_bytes(), env.read_bytes()) == before
+    assert "向导不会自动重启" in capsys.readouterr().out
+
+
+def test_system_setup_checks_unit_and_fences_with_unprivileged_holder(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from elephant import setup_system
+
+    monkeypatch.setattr(setup_system, "STATE", tmp_path)
+    monkeypatch.setattr(setup_system, "ROOT", tmp_path)
+    db = tmp_path / "core.db"
+    settings = SimpleNamespace(database=str(db))
+    cases = iter((False, True, True))
+    monkeypatch.setattr(setup_system, "_service_is_stopped", lambda: next(cases))
+
+    # Use a controlled child process and real file locking/pipe lifetime; never
+    # invoke local runuser, systemctl, or an actual Elephant service.
+    def child(command, database):
+        assert command == "lock" and database == str(db)
+        return [
+            sys.executable, "-I", "-c", """
+import fcntl, os, sys
+fd = os.open(sys.argv[1] + '.core.lock', os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.buffer.write(b'K')
+sys.stdout.buffer.flush()
+sys.stdin.buffer.read(1)
+""", database,
+        ]
+
+    monkeypatch.setattr(setup_system, "_service_command", child)
+    with pytest.raises(setup._DatabaseBusy), setup_system.system_configuration_lock(settings):
+        pytest.fail("active system service must not be edited")
+    assert not (tmp_path / "core.db.core.lock").exists()
+    with (
+        setup_system.system_configuration_lock(settings),
+        pytest.raises(setup._DatabaseBusy),
+        setup._exclusive_database(db),
+    ):
+        pytest.fail("the child must hold the same lock as Core")
+    with setup._exclusive_database(db):
+        pass
+
+
+def test_pending_database_move_keeps_read_only_reopen_and_blocks_edit(tmp_path, monkeypatch, capsys):
+    from elephant.configuration import ConfigurationStore
+
+    directory = tmp_path / "private"
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "fixture-key")
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    cfg = directory / "config.yaml"
+    env = directory / "credentials.env"
+    base = load_settings(cfg)
+    store = ConfigurationStore(base)
+    store.save(base, base.model_copy(update={"database": str(directory / "pending-next.db")}))
+    watched = (cfg, env, store.path)
+    before = [path.read_bytes() for path in watched]
+
+    # A read-only repeat is fine even when the existing daemon is on the old DB.
+    with setup._exclusive_database(base.database):
+        answers(monkeypatch, "", "", "", "")
+        assert setup.run_setup(directory) == 0
+        answers(monkeypatch, "3", "")
+        assert setup.run_setup(directory) == 1
+    assert [path.read_bytes() for path in watched] == before
+    assert "管理页保存了不同的数据库位置" in capsys.readouterr().out

@@ -43,6 +43,8 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 
 Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）和 FFmpeg 6 或以上。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
 
+个人版升级时，先备份、排空任务并停止旧进程，再把新发布包解压到一个新目录安装。安装器不会覆盖已有运行环境；默认配置和数据不随发布目录改变。
+
 安装时优先复用与项目锁定版本一致的系统 Pi；如果没有，也没有可用的 Elephant 私有副本，安装器会先询问。默认不安装，不覆盖系统 Pi。无人值守安装时，可明确加上 `--install-pi` 允许在需要时安装私有副本。
 
 Linux 常驻服务支持 Ubuntu、Debian、Fedora 和官方 Arch Linux；macOS 可选择当前窗口运行，或登录当前用户时运行。版本、架构、限制与升级流程见[各平台部署](deploy/README.md)。不要把新安装当作旧数据迁移。

@@ -56,11 +56,20 @@ cd -- "$root"
 for path in .python-version pyproject.toml uv.lock package.json package-lock.json; do
     [ -f "$path" ] && [ ! -L "$path" ] || fail "缺少可信发布文件：${path}。"
 done
-for path in .venv node_modules; do
-    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-        fail "拒绝写入非目录或符号链接：${path}。"
-    fi
-done
+umask 077
+lock=.elephant-install.lock
+mkdir "$lock" 2>/dev/null || fail '本目录已有安装在进行；若上次异常退出，请确认无安装进程后删除 .elephant-install.lock。'
+trap 'rmdir "$lock"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# A previous version of the daemon need not hold any installer lock. Never
+# rewrite a bundle that may already supply a foreground or login daemon.
+if [ -e .venv ] || [ -L .venv ]; then
+    fail '此目录已有 Python 运行环境，不会就地覆盖。请先停止旧实例（含登录启动项），再在新目录安装已校验的发布包。'
+fi
+if [ -L node_modules ] || { [ -e node_modules ] && [ ! -d node_modules ]; }; then
+    fail '拒绝写入非目录或符号链接：node_modules。'
+fi
 
 # The version check follows package.json and rejects an architecture-mismatched
 # Node runtime. npm is checked only if the operator chooses a private Pi.
@@ -125,12 +134,6 @@ esac
 
 # Keep installation scoped to this source tree, not a shell's activated venv.
 unset VIRTUAL_ENV CONDA_PREFIX UV_PROJECT_ENVIRONMENT UV_WORKING_DIRECTORY UV_PROJECT
-umask 077
-lock=.elephant-install.lock
-mkdir "$lock" 2>/dev/null || fail '本目录已有安装在进行；若上次异常退出，请确认无安装进程后删除 .elephant-install.lock。'
-trap 'rmdir "$lock"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 # shellcheck source=deploy/pi-install.sh
 . "$root/deploy/pi-install.sh"

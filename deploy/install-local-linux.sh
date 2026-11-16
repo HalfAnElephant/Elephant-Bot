@@ -23,6 +23,23 @@ case "$(uname -m)" in
 esac
 getconf GNU_LIBC_VERSION >/dev/null 2>&1 ||
     fail '通用个人安装目前需要 glibc。基于 musl 的系统尚未验收。'
+base=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+cd -- "$base"
+[ -f .python-version ] && [ -f uv.lock ] && [ -f package-lock.json ] ||
+    fail '安装文件不完整，请使用已校验的完整发布包。'
+umask 077
+lock=.elephant-install.lock
+mkdir "$lock" 2>/dev/null || fail '此目录中已有安装未结束。'
+trap 'rmdir "$lock"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# A previous version of the daemon need not hold any installer lock. Never
+# rewrite a bundle that may already supply a foreground or login daemon.
+if [ -e .venv ] || [ -L .venv ]; then
+    fail '此目录已有 Python 运行环境，不会就地覆盖。请先停止旧实例（含登录启动项），再在新目录安装已校验的发布包。'
+fi
+[ ! -L node_modules ] && { [ ! -e node_modules ] || [ -d node_modules ]; } ||
+    fail '发现非目录的安装目标，未修改现有文件。'
 for tool in uv node ffmpeg; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "缺少 ${tool}，请按部署文档补齐系统依赖后重试。"
@@ -31,21 +48,7 @@ node -e 'const [m,n] = process.versions.node.split(".").map(Number); process.exi
     fail 'Node.js 版本过低，需要 22.19 或更新版本。'
 ffmpeg -version | awk '/^ffmpeg version / { v=$3; sub(/^n/,"",v); split(v,a,"."); ok=(a[1]+0>=6) } END {exit !ok}' ||
     fail 'FFmpeg 版本过低，需要 6 或更新版本。'
-base=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
-cd -- "$base"
-[ -f .python-version ] && [ -f uv.lock ] && [ -f package-lock.json ] ||
-    fail '安装文件不完整，请使用已校验的完整发布包。'
-for output in .venv node_modules; do
-    [ ! -L "$output" ] && { [ ! -e "$output" ] || [ -d "$output" ]; } ||
-        fail '发现非目录的安装目标，未修改现有文件。'
-done
 unset VIRTUAL_ENV CONDA_PREFIX UV_PROJECT_ENVIRONMENT UV_WORKING_DIRECTORY UV_PROJECT
-umask 077
-lock=.elephant-install.lock
-mkdir "$lock" 2>/dev/null || fail '此目录中已有安装未结束。'
-trap 'rmdir "$lock"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 # shellcheck source=deploy/pi-install.sh
 . "$base/deploy/pi-install.sh"
 elephant_prepare_pi "$base" "$allow_pi" personal
