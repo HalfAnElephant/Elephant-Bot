@@ -6,7 +6,7 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +57,7 @@ class TaskService:
         qq_adapters: Mapping[str, object] | None = None,
         skills_settings: Callable[[], SkillsConfig] | SkillsConfig | None = None,
         skills_provider: Callable[..., HermesSkills | None] | None = None,
+        action_authorizer: Callable[[AccessContext, dict, str, Sequence[str]], None] | None = None,
     ):
         self.db, self.clock, self.outbox = db, clock, outbox
         self.permissions = permissions or PermissionService(db, clock)
@@ -68,6 +69,7 @@ class TaskService:
         self.qq_adapters = qq_adapters if qq_adapters is not None else {}
         self.skills_settings = skills_settings
         self.skills_provider = skills_provider
+        self.action_authorizer = action_authorizer
         self.wakeup = _TaskWakeup()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"
@@ -1086,7 +1088,7 @@ class TaskService:
             waiting = c.execute(select(waits.c.id).where(waits.c.run_id == run_id)).first()
             if waiting and action not in {"model.request", "task.execute", "notification.send"}:
                 raise PermissionError("wait intent blocks further business tools")
-            if getattr(self, "action_authorizer", None):
+            if self.action_authorizer:
                 self.action_authorizer(access, context, action, resources)
             for resource in resources:
                 decision = self.permissions.require(access, action, resource)
@@ -1364,7 +1366,7 @@ class TaskService:
                 raise PermissionError("waiter action is not a remote observation")
             if action == "github.graphql.read" and self.permissions.has_restrictions(access):
                 raise PermissionError("GraphQL observation cannot prove restricted resource scope")
-            if getattr(self, "action_authorizer", None):
+            if self.action_authorizer:
                 self.action_authorizer(access, context, action, payload["resources"])
             for resource in payload["resources"]:
                 self.permissions.require(access, action, resource)

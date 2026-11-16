@@ -9,13 +9,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from conftest import runtime_client_for
 from sqlalchemy import select, update
 
 from qqbot.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
 from qqbot.harness.pi import PiRunnerAdapter
 from qqbot.harness.pool import SessionPool
-from qqbot.jobs.api import internal_router
 from qqbot.jobs.service import TaskService
 from qqbot.jobs.worker import Spool, Worker
 from qqbot.outbox.service import Outbox
@@ -33,9 +32,7 @@ def environment(db, clock):
                          principal=principal, platform_message_id="m", occurred_at=clock.now(),
                          received_at=clock.now(), trace_id="t")
     task = service.accept(event, AccessContext(principal=principal, conversation=conversation), "Original goal")
-    app = FastAPI()
-    app.include_router(internal_router(service, "x" * 32))
-    return service, task, app
+    return service, task, runtime_client_for(service)
 
 
 async def test_threaded_recovery_wakes_a_waiting_debug_loop(environment):
@@ -126,122 +123,110 @@ def pool_for(tmp_path, service, error="413 context exceeds application budget", 
 
 @pytest.mark.parametrize("error", ["413 context exceeds application budget", "plain"])
 async def test_actual_pi_failure_slow_stop_commits_and_queues_natural_notice(environment, tmp_path, caplog, error):
-    service, task, app = environment
+    service, task, client = environment
     pool, created = pool_for(tmp_path, service, error)
     caplog.set_level(logging.ERROR)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert await worker.once()
-        with service.db.engine.connect() as conn:
-            failed_run = conn.execute(select(runs)).mappings().one()
-            saved = conn.execute(select(tasks)).mappings().one()
-            assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
-            assert conn.execute(select(outbox.c.id)).first() is None
-        assert failed_run["slot_reserved"] == 0 and failed_run["runner_stopped_at"]
-        assert json.loads(failed_run["result_json"])["status"] == "failed"
-        assert saved["state"] == "QUEUED" and saved["failure_notice_json"]
-        assert all(deadline is None for deadline in created[0].stop_states)
-        assert list(worker.spool.directory.glob("*.json")) == []
-        assert failed_run["id"] in caplog.text and task["id"] in caplog.text
-        assert await worker.once()
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(tasks.c.state)).scalar_one() == "FAILED"
-            assert "任务未完成" in json.loads(conn.execute(select(outbox.c.envelope_json)).scalar_one())["text"]
-        await pool.close()
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert await worker.once()
+    with service.db.engine.connect() as conn:
+        failed_run = conn.execute(select(runs)).mappings().one()
+        saved = conn.execute(select(tasks)).mappings().one()
+        assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
+        assert conn.execute(select(outbox.c.id)).first() is None
+    assert failed_run["slot_reserved"] == 0 and failed_run["runner_stopped_at"]
+    assert json.loads(failed_run["result_json"])["status"] == "failed"
+    assert saved["state"] == "QUEUED" and saved["failure_notice_json"]
+    assert all(deadline is None for deadline in created[0].stop_states)
+    assert list(worker.spool.directory.glob("*.json")) == []
+    assert failed_run["id"] in caplog.text and task["id"] in caplog.text
+    assert await worker.once()
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.state)).scalar_one() == "FAILED"
+        assert "任务未完成" in json.loads(conn.execute(select(outbox.c.envelope_json)).scalar_one())["text"]
+    await pool.close()
 
 
 async def test_supervisor_error_stops_run_and_persists_failure(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     pool, created = pool_for(tmp_path, service, error="wait")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        class FailingControl:
-            async def post(self, path, **kwargs):
-                if path.endswith("/control"):
-                    raise httpx.ReadTimeout("control connection lost")
-                return await client.post(path, **kwargs)
-        worker = Worker(FailingControl(), "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert await worker.once()
-        with service.db.engine.connect() as conn:
-            row = conn.execute(select(runs)).mappings().one()
-            assert row["slot_reserved"] == 0 and json.loads(row["result_json"])["status"] == "failed"
-        assert created[0].stopped_verified
+    class FailingControl:
+        async def post(self, path, **kwargs):
+            if path.endswith("/control"):
+                raise httpx.ReadTimeout("control connection lost")
+            return await client.post(path, **kwargs)
+    worker = Worker(FailingControl(), "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert await worker.once()
+    with service.db.engine.connect() as conn:
+        row = conn.execute(select(runs)).mappings().one()
+        assert row["slot_reserved"] == 0 and json.loads(row["result_json"])["status"] == "failed"
+    assert created[0].stopped_verified
 
 
 async def test_unknown_stop_retains_slot_and_durable_reconciliation_evidence(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     pool, _created = pool_for(tmp_path, service, verified=False)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert not await worker.once()
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
-            assert conn.execute(select(tasks.c.state)).scalar_one() == "NEEDS_RECONCILIATION"
-        files = list(worker.spool.directory.glob("*.json"))
-        assert len(files) == 1
-        evidence = json.loads(files[0].read_text())
-        assert evidence["stopped"] is False and evidence["quiescent"] is False
-        assert evidence["result"]["status"] == "failed"
-        assert next(iter(pool.entries.values()))["state"] == "UNKNOWN"
-        await worker.replay()
-        assert files[0].exists()
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert not await worker.once()
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
+        assert conn.execute(select(tasks.c.state)).scalar_one() == "NEEDS_RECONCILIATION"
+    files = list(worker.spool.directory.glob("*.json"))
+    assert len(files) == 1
+    evidence = json.loads(files[0].read_text())
+    assert evidence["stopped"] is False and evidence["quiescent"] is False
+    assert evidence["result"]["status"] == "failed"
+    assert next(iter(pool.entries.values()))["state"] == "UNKNOWN"
+    await worker.replay()
+    assert files[0].exists()
 
 
 async def test_expired_control_stops_harness_and_preserves_result(environment, tmp_path, clock):
-    service, _task, app = environment
+    service, _task, client = environment
     pool, created = pool_for(tmp_path, service, error="wait")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        class ExpiredControl:
-            async def post(self, path, **kwargs):
-                if path.endswith("/control"):
-                    clock.advance(31)
-                return await client.post(path, **kwargs)
+    class ExpiredControl:
+        async def post(self, path, **kwargs):
+            if path.endswith("/control"):
+                clock.advance(31)
+            return await client.post(path, **kwargs)
 
-        worker = Worker(ExpiredControl(), "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        with pytest.raises(httpx.HTTPStatusError) as failure:
-            await worker.once()
-        assert failure.value.response.status_code == 409
-        assert created[0].stopped_verified
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
-        evidence = json.loads(next(worker.spool.directory.glob("*.json")).read_text())
-        assert evidence["stopped"] is True
-        assert evidence["result"]["status"] == "failed"
+    worker = Worker(ExpiredControl(), "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    with pytest.raises(httpx.HTTPStatusError) as failure:
+        await worker.once()
+    assert failure.value.response.status_code == 409
+    assert created[0].stopped_verified
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
+    evidence = json.loads(next(worker.spool.directory.glob("*.json")).read_text())
+    assert evidence["stopped"] is True
+    assert evidence["result"]["status"] == "failed"
 
 
 async def test_stop_heartbeat_logs_lost_lease_and_leaves_recovery_evidence(environment, tmp_path, clock, caplog):
-    service, _task, app = environment
+    service, _task, client = environment
     claim = service.claim("worker")
     clock.advance(31)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None)
-        await worker.lease_heartbeat({key: claim[key] for key in ("run_id", "fencing_token")})
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None)
+    await worker.lease_heartbeat({key: claim[key] for key in ("run_id", "fencing_token")})
     assert "Lease ownership lost" in caplog.text
     with service.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
 
 
 async def test_cancellation_records_failure_after_verified_stop(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     pool, created = pool_for(tmp_path, service, error="wait")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        execution = asyncio.create_task(worker.once())
-        while not created:
-            await asyncio.sleep(0)
-        await created[0].started.wait()
-        execution.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await execution
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
-            assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
-        assert list(worker.spool.directory.glob("*.json")) == []
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    execution = asyncio.create_task(worker.once())
+    while not created:
+        await asyncio.sleep(0)
+    await created[0].started.wait()
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
+        assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
+    assert list(worker.spool.directory.glob("*.json")) == []
 
 
 @pytest.mark.parametrize("exhaustion", ["deadline", "active", "models"])
@@ -307,43 +292,39 @@ def test_notification_wall_bound_preserves_original_failure_and_cancellation(env
 
 
 async def test_partial_bind_without_verified_stop_is_not_released(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     class BadBinding(SlowStopRunner):
         async def bind(self, claim):
             await super().bind(claim)
             raise RuntimeError("binding failed after registration")
     pool = SessionPool(lambda claim, process_id, _sid: BadBinding(tmp_path / process_id, claim, service, process_id, verified=False))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert not await worker.once()
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
-            assert conn.execute(select(tasks.c.state)).scalar_one() == "NEEDS_RECONCILIATION"
-        assert json.loads(next(worker.spool.directory.glob("*.json")).read_text())["stopped"] is False
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert not await worker.once()
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 1
+        assert conn.execute(select(tasks.c.state)).scalar_one() == "NEEDS_RECONCILIATION"
+    assert json.loads(next(worker.spool.directory.glob("*.json")).read_text())["stopped"] is False
 
 
 async def test_event_persistence_error_does_not_drop_failure_result(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     pool, _created = pool_for(tmp_path, service)
     class BrokenEventSpool(Spool):
         def save(self, payload, **kwargs):
             if "seq" in kwargs:
                 raise OSError("event spool unavailable")
             return super().save(payload, **kwargs)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", BrokenEventSpool(tmp_path / "spool"), None, pool=pool)
-        assert await worker.once()
-        with service.db.engine.connect() as conn:
-            assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
-            assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
+    worker = Worker(client, "worker", BrokenEventSpool(tmp_path / "spool"), None, pool=pool)
+    assert await worker.once()
+    with service.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
+        assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
 
 
 async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp_path, clock, monkeypatch):
     from qqbot.jobs import worker as worker_module
 
-    service, _task, app = environment
+    service, _task, client = environment
     sleeping, ticks = asyncio.Queue(), asyncio.Queue()
     renewals = []
     original_expiry = None
@@ -385,10 +366,8 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
             return await super().stop()
 
     pool = SessionPool(lambda claim, pid, _sid: LongStop(tmp_path / pid, claim, service, pid, error="plain"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert await worker.once()
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert await worker.once()
     assert clock.now().isoformat() > original_expiry
     assert len(renewals) == 10
     assert all(a < b for a, b in pairwise(renewals))
@@ -401,7 +380,7 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
 async def test_rejected_live_result_preserves_original_and_queues_failure(environment, tmp_path):
     from qqbot.domain.tasks import TaskResult
 
-    service, _task, app = environment
+    service, _task, client = environment
 
     class InvalidResult(SlowStopRunner):
         async def run(self, *args, **kwargs):
@@ -411,11 +390,9 @@ async def test_rejected_live_result_preserves_original_and_queues_failure(enviro
             return TaskResult(status="failed", summary="Original model result", effect_refs=("unknown-operation",))
 
     pool = SessionPool(lambda claim, pid, _sid: InvalidResult(tmp_path / pid, claim, service, pid))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        assert await worker.once()
-        assert await worker.once()  # The rejected result cannot poison the queued failure explanation.
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    assert await worker.once()
+    assert await worker.once()  # The rejected result cannot poison the queued failure explanation.
     rejected = list((worker.spool.directory / "rejected").glob("*.json"))
     assert len(rejected) == 1
     assert json.loads(rejected[0].read_text())["result"]["effect_refs"] == ["unknown-operation"]
@@ -425,7 +402,7 @@ async def test_rejected_live_result_preserves_original_and_queues_failure(enviro
 
 
 async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path):
-    service, _task, app = environment
+    service, _task, client = environment
     claim = service.claim("worker")
     spool = Spool(tmp_path / "spool")
     spool.save({"run_id": claim["run_id"], "fencing_token": claim["fencing_token"],
@@ -436,10 +413,8 @@ async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path
     event = InboundEvent.model_validate_json(original["event_json"]).model_copy(update={"event_id": "new-event"})
     new_task = service.accept(event, AccessContext(principal=event.principal, conversation=event.conversation), "Another goal")
     pool, _created = pool_for(tmp_path, service)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", spool, None, pool=pool)
-        assert await worker.once()
+    worker = Worker(client, "worker", spool, None, pool=pool)
+    assert await worker.once()
     assert len(list((spool.directory / "rejected").glob("*.json"))) == 1
     with service.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == claim["task_id"])).scalar_one() == "NEEDS_RECONCILIATION"
@@ -448,24 +423,22 @@ async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path
 
 async def test_finalizer_does_not_reexport_child_paths_from_its_workspace(environment, tmp_path):
     from qqbot.domain.tasks import TaskResult
-    service, task, app = environment
+    service, task, client = environment
     class FinalizerRunner(SlowStopRunner):
         async def run(self, goal, **kwargs):
             self.quiescent_verified = True
             return TaskResult(status="completed", summary="Verified child artifact is ready.")
     pool = SessionPool(lambda claim, pid, sid: FinalizerRunner(tmp_path / pid, claim, service, pid, error="wait"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        original = worker.call
-        async def finalizer(operation, **payload):
-            value = await original(operation, **payload)
-            if operation == "claim" and value:
-                value.update(role="leader", purpose="finalize", goal_spec={"requested_outputs": ["outputs/child.txt"]})
-            return value
-        worker.call = finalizer
-        try:
-            assert await worker.once()
-            assert service.get(task["public_id"], service._access_for(task))["state"] == "SUCCEEDED"
-        finally:
-            await pool.close()
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    original = worker.call
+    async def finalizer(operation, **payload):
+        value = await original(operation, **payload)
+        if operation == "claim" and value:
+            value.update(role="leader", purpose="finalize", goal_spec={"requested_outputs": ["outputs/child.txt"]})
+        return value
+    worker.call = finalizer
+    try:
+        assert await worker.once()
+        assert service.get(task["public_id"], service._access_for(task))["state"] == "SUCCEEDED"
+    finally:
+        await pool.close()

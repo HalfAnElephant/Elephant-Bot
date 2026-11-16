@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from conftest import runtime_client_for
 from pydantic import ValidationError
 from sqlalchemy import select, update
 
@@ -11,7 +11,6 @@ from qqbot.adapters.qq_official.adapter import OfficialAdapter
 from qqbot.capabilities.gateway import CapabilityRegistry
 from qqbot.capabilities.qq import register_qq
 from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, ReplyContext, Surface
-from qqbot.jobs.api import internal_router
 from qqbot.jobs.rich_delivery import RichMessage, rich_send, rich_status
 from qqbot.jobs.service import TaskService
 from qqbot.outbox.service import Outbox
@@ -72,25 +71,27 @@ async def test_cancelled_task_cannot_enqueue_and_model_cannot_select_target(rich
         assert not c.execute(select(outbox)).first()
 
 
-async def test_worker_http_auth_and_qq_capability_routing(rich_setup):
+async def test_worker_lease_and_qq_capability_routing(rich_setup):
     service, args, _task, _calls = rich_setup
-    app = FastAPI()
-    app.include_router(internal_router(service, "t" * 32))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core") as client:
-        async def call(op, payload):
-            body = {"run_id": args[0], "fencing_token": args[1], "worker_id": args[2], "payload": payload}
-            response = await client.post("/internal/tasks/" + op, json=body,
-                headers={"Authorization": "Bearer " + "t" * 32})
-            response.raise_for_status()
-            return response.json()
-        registry = CapabilityRegistry()
-        register_qq(registry, call)
-        capability, execute, _action = registry.entries["qq.message.send"]
-        assert "official_content" in capability.parameters["properties"]
-        result = await execute({"request_id": "one", "text": "hello"}, None)
-        assert result["delivered"] is False
-        response = await client.post("/internal/tasks/qq-status", json={"worker_id": "worker"})
-        assert response.status_code == 401
+    client = runtime_client_for(service)
+
+    async def call(op, payload):
+        body = {"run_id": args[0], "fencing_token": args[1], "worker_id": args[2], "payload": payload}
+        response = await client.post("/internal/tasks/" + op, json=body)
+        response.raise_for_status()
+        return response.json()
+
+    registry = CapabilityRegistry()
+    register_qq(registry, call)
+    capability, execute, _action = registry.entries["qq.message.send"]
+    assert "official_content" in capability.parameters["properties"]
+    result = await execute({"request_id": "one", "text": "hello"}, None)
+    assert result["delivered"] is False
+    response = await client.post("/internal/tasks/qq-status", json={
+        "run_id": args[0], "fencing_token": args[1] + 1, "worker_id": args[2],
+        "payload": {"delivery_id": result["delivery_id"]},
+    })
+    assert response.status_code == 409
 
 
 @pytest.mark.parametrize("content", [{"media": {"type": "file", "url": "file:///etc/passwd"}},

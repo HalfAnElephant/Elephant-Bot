@@ -38,4 +38,24 @@ app.create_app
 
 把已存在的 QQ 适配器、Skills 设置读取与 Skills provider 从 `Core` 构造后补属性改为 `TaskService` 构造参数。传入的是单一现有适配器集合和宿主函数，不建立另一个注册中心。Skills 设置读取保持按需，以便仍按当前配置与 scope 检查；没有注入的独立 TaskService 保持无相应能力的默认行为。TaskGraph 的建立、租约事务、取消、权限模型、邮件授权和停止证明不在这一切片变更。
 
-验收：核对一体化构造和独立服务默认行为，再跑原 QQ 富消息/文件、Skills、任务 claim/renew/result、停止/恢复和邮件相关权限回归。以后迁移旧 HTTP 测试入口时，先逐项对照请求 codec、限制、鉴权、去重与流式语义；验证前不移除旧路由。不把 #18 的合成控制面时间拿来证明这些业务链路等价。
+随后将 `MailRuntime.authorize_context` 也作为宿主构造参数传入。MailRuntime 构造时不执行 I/O 或请求 TaskService；构造顺序变化不替代实际调用时的两处授权复核。Recovery 构造需要已存在的 TaskService，因而停止证明仍在 Recovery 就绪后绑定，不为消除所有后赋值引入协调层。
+
+验收：核对一体化构造和独立服务默认行为，再跑 QQ 富消息/文件、Skills、任务 claim/renew/result、停止/恢复和邮件相关权限回归。不把 #18 的合成控制面时间拿来证明这些业务链路等价。
+
+## Worker 调用边界
+
+`WorkerRequest` 是进程内请求格式，不是 HTTP 服务。旧 `internal_router` 未被生产 App 挂载，只为测试保留，已随测试迁移删除。测试仍调用实际的 `RuntimeClient`，没有另建兼容调度器；独立 TaskService 用例只替换没有启动的 Leader 队列等宿主依赖。
+
+| 面 | 可共享 | 必须单独验证或保留 |
+| --- | --- | --- |
+| 已领取 Worker 的常用操作 | 请求字段、TaskService 的 fence/lease 校验、结果和副作用规则。 | 进程内测试覆盖有效、旧 fence 和错误执行者；公开 HTTP 入口返回 404，不再测试废弃路由的 bearer。 |
+| 领取与等待 | 已存在的 Worker claim 服务与生产轮换。 | 保留 Worker 原生协议字段与状态；不把旧 HTTP 长轮询当作调度需求。 |
+| QQ 文件 | `local_file_upload` 检查任务和内容并走现有存储。 | 保留大小、MIME、去重、取消清理、过期 lease 与分块上传回归；旧 HTTP 请求头、专属并发门禁和超时不是现行生产约束。 |
+
+## 兼容项处置清单
+
+| 配置 / 工件 | 当前用途 | 去留规则 |
+| --- | --- | --- |
+| `execution.max_active`、`execution.sustained_limit`、`orchestration.pending_inputs_per_owner`、`orchestration.pending_root_tasks_per_owner`、`orchestration.child_parallelism`、`orchestration.max_task_depth`、`orchestration.max_nodes_per_root` | 配置模型标注废弃；不能把这些值当成当前真实准入上限。 | `validate/doctor/serve` 仅对启动 YAML 中显式填写的旧字段告警，指向仍有效的模型容量/任务预算；旧配置保留解析。发布确定的迁移窗口后再删除。 |
+| `internal_token_env`、`internal_socket` | 旧 Worker 监听不挂载，但管理配置仍展示字段，CLI 也借用旧 socket 路径清理残留。 | 先核对清理兼容、管理界面和升级脚本。未确认没有部署依赖前不删，不把内部命名理解为应启动新监听。 |
+| `tasks_enabled`、`interactive_execution_enabled`、Worker protocol 版本、Alembic 和旧运行回执 | 当前启用边界或旧数据能否恢复所需。 | 不当作冗余字段删除；修改要有升级/回滚和旧回执读取证明。 |

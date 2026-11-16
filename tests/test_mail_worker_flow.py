@@ -10,7 +10,7 @@ from test_mail_runtime import mail as mail  # noqa: PLC0414
 
 from qqbot.domain.tasks import TaskResult
 from qqbot.harness.gateway import RunGateway
-from qqbot.jobs.api import WorkerRequest
+from qqbot.jobs.protocol import WorkerRequest
 from qqbot.jobs.worker import Spool, Worker
 from qqbot.runtime.scheduler import RuntimeClient
 from qqbot.storage.action_schema import operations

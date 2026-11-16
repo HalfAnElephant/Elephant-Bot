@@ -847,7 +847,7 @@ def _job_leader(fixture, *, user=False):
 
 
 async def test_leader_finalizer_inspects_actual_child_job_and_logs_without_worker_scope(job_runtime):
-    from qqbot.jobs.api import WorkerRequest
+    from qqbot.jobs.protocol import WorkerRequest
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'leader-read', 'argv': ['true']}})

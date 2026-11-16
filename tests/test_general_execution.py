@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from conftest import runtime_client_for
 from sqlalchemy import select
 
 from qqbot.domain.execution import ExecutionPlan, TaskGoal
@@ -19,7 +19,6 @@ from qqbot.domain.messages import (
     Surface,
 )
 from qqbot.harness.pool import SessionPool
-from qqbot.jobs.api import internal_router
 from qqbot.jobs.service import TaskService
 from qqbot.jobs.worker import GeneralRun, Spool, Worker
 from qqbot.outbox.service import Outbox
@@ -167,44 +166,41 @@ async def test_locked_pi_separate_tasks_keep_isolated_sessions(execution, tmp_pa
         requests.append(json.loads(request.content))
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
             text=sse({"role": "assistant", "content": "Hello from pi"}))
-    app = FastAPI()
-    app.include_router(internal_router(service, "t" * 32))
     args = SimpleNamespace(workspace=str(tmp_path / "workers"), archive=str(tmp_path / "artifacts"),
         pi=str(pi), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="w")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-        headers={"Authorization": "Bearer " + "t" * 32}) as client:
-        def factory(claim, process_id, session_id):
-            runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
-            runner.gateway.transport = httpx.MockTransport(upstream)
-            return runner
-        pool = SessionPool(factory)
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
-        try:
-            first = service.accept(event, access, "hello", context={"key": "same-topic", "seed": "bounded background"})
-            assert await worker.once()
-            assert service.get(first["public_id"], access)["state"] == "SUCCEEDED"
-            entry = next(iter(pool.entries.values()))
-            pid = entry["runner"].process.pid
-            old_token = entry["runner"].gateway.model_token
-            assert entry["state"] == "IDLE"
-            second = service.accept(event.model_copy(update={"event_id": "second"}), access, "again",
-                context={"key": "same-topic", "seed": "bounded background"})
-            assert await worker.once()
-            assert service.get(second["public_id"], access)["state"] == "SUCCEEDED"
-            assert entry["runner"].process.pid == pid
-            second_entry = next(item for item in pool.entries.values() if item is not entry)
-            assert second_entry["runner"].gateway.model_token != old_token
-            assert second_entry["runner"].process.pid != pid
-            assert len(requests) == 2
-            assert "个人助手大象" in requests[0]["messages"][0]["content"]
-            assert "个人助手大象" in requests[1]["messages"][0]["content"]
-            assert all("bounded background" not in str(message) for message in requests[1]["messages"])
-            with service.db.engine.connect() as c:
-                rows = c.execute(select(runs)).mappings().all()
-                assert len(rows) == 2 and all(r["quiescent_at"] and r["runner_stopped_at"] is None for r in rows)
-                assert c.execute(select(processes.c.state)).scalars().all() == ["IDLE", "IDLE"]
-        finally:
-            await pool.close()
+    client = runtime_client_for(service)
+    def factory(claim, process_id, session_id):
+        runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
+        runner.gateway.transport = httpx.MockTransport(upstream)
+        return runner
+    pool = SessionPool(factory)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
+    try:
+        first = service.accept(event, access, "hello", context={"key": "same-topic", "seed": "bounded background"})
+        assert await worker.once()
+        assert service.get(first["public_id"], access)["state"] == "SUCCEEDED"
+        entry = next(iter(pool.entries.values()))
+        pid = entry["runner"].process.pid
+        old_token = entry["runner"].gateway.model_token
+        assert entry["state"] == "IDLE"
+        second = service.accept(event.model_copy(update={"event_id": "second"}), access, "again",
+            context={"key": "same-topic", "seed": "bounded background"})
+        assert await worker.once()
+        assert service.get(second["public_id"], access)["state"] == "SUCCEEDED"
+        assert entry["runner"].process.pid == pid
+        second_entry = next(item for item in pool.entries.values() if item is not entry)
+        assert second_entry["runner"].gateway.model_token != old_token
+        assert second_entry["runner"].process.pid != pid
+        assert len(requests) == 2
+        assert "个人助手大象" in requests[0]["messages"][0]["content"]
+        assert "个人助手大象" in requests[1]["messages"][0]["content"]
+        assert all("bounded background" not in str(message) for message in requests[1]["messages"])
+        with service.db.engine.connect() as c:
+            rows = c.execute(select(runs)).mappings().all()
+            assert len(rows) == 2 and all(r["quiescent_at"] and r["runner_stopped_at"] is None for r in rows)
+            assert c.execute(select(processes.c.state)).scalars().all() == ["IDLE", "IDLE"]
+    finally:
+        await pool.close()
 
 @pytest.mark.asyncio
 async def test_twelve_second_tool_detaches_same_run_and_short_chat_starts(execution, tmp_path, clock):
@@ -232,45 +228,42 @@ async def test_twelve_second_tool_detaches_same_run_and_short_chat_starts(execut
             message = {"role": "assistant", "content": None, "tool_calls": [{"id": "slow-call", "type": "function",
                 "function": {"name": "capability_invoke", "arguments": json.dumps({"name": "test.slow", "arguments": {}})}}]}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse(message))
-    app = FastAPI()
-    app.include_router(internal_router(service, "t" * 32))
     args = SimpleNamespace(workspace=str(tmp_path / "workers"), archive=str(tmp_path / "artifacts"),
         pi=str(pi), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="w")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-        headers={"Authorization": "Bearer " + "t" * 32}) as client:
-        def factory(claim, process_id, session_id):
-            runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
-            runner.gateway.transport = httpx.MockTransport(upstream)
-            runner.gateway.registry.register(Capability("test.slow", "Delayed observation", timeout_seconds=15),
-                slow, lambda a, c: Action("test.slow.read", ("test:slow",)))
-            return runner
-        pool = SessionPool(factory)
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
-        first = service.accept(event, access, "slow request", context={"key": "slow"})
-        long_run = asyncio.create_task(worker.once())
-        try:
-            await asyncio.wait_for(started.wait(), 10)
-            original = next(iter(pool.entries.values()))["runner"]
-            identity = (original.claim["run_id"], original.process.pid, original.session_id)
-            await asyncio.sleep(5.1)
-            clock.advance(6)
-            service.detach_due()
-            with service.db.engine.connect() as c:
-                assert c.execute(select(tasks.c.delivery).where(tasks.c.id == first["id"])).scalar_one() == "DETACHED"
-            second = service.accept(event.model_copy(update={"event_id": "short"}), access,
-                "short unrelated chat", context={"key": "short"})
-            before = time.monotonic()
-            assert await asyncio.wait_for(worker.once(), 4)
-            assert time.monotonic() - before < 4 and not long_run.done()
-            assert service.get(second["public_id"], access)["state"] == "SUCCEEDED"
-            assert await asyncio.wait_for(long_run, 10)
-            assert service.get(first["public_id"], access)["state"] == "SUCCEEDED"
-            assert invocations == [(first["id"], identity[0])]
-            assert (original.claim["run_id"], original.process.pid, original.session_id) == identity
-        finally:
-            long_run.cancel()
-            await asyncio.gather(long_run, return_exceptions=True)
-            await pool.close()
+    client = runtime_client_for(service)
+    def factory(claim, process_id, session_id):
+        runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
+        runner.gateway.transport = httpx.MockTransport(upstream)
+        runner.gateway.registry.register(Capability("test.slow", "Delayed observation", timeout_seconds=15),
+            slow, lambda a, c: Action("test.slow.read", ("test:slow",)))
+        return runner
+    pool = SessionPool(factory)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
+    first = service.accept(event, access, "slow request", context={"key": "slow"})
+    long_run = asyncio.create_task(worker.once())
+    try:
+        await asyncio.wait_for(started.wait(), 10)
+        original = next(iter(pool.entries.values()))["runner"]
+        identity = (original.claim["run_id"], original.process.pid, original.session_id)
+        await asyncio.sleep(5.1)
+        clock.advance(6)
+        service.detach_due()
+        with service.db.engine.connect() as c:
+            assert c.execute(select(tasks.c.delivery).where(tasks.c.id == first["id"])).scalar_one() == "DETACHED"
+        second = service.accept(event.model_copy(update={"event_id": "short"}), access,
+            "short unrelated chat", context={"key": "short"})
+        before = time.monotonic()
+        assert await asyncio.wait_for(worker.once(), 4)
+        assert time.monotonic() - before < 4 and not long_run.done()
+        assert service.get(second["public_id"], access)["state"] == "SUCCEEDED"
+        assert await asyncio.wait_for(long_run, 10)
+        assert service.get(first["public_id"], access)["state"] == "SUCCEEDED"
+        assert invocations == [(first["id"], identity[0])]
+        assert (original.claim["run_id"], original.process.pid, original.session_id) == identity
+    finally:
+        long_run.cancel()
+        await asyncio.gather(long_run, return_exceptions=True)
+        await pool.close()
 
 
 @pytest.mark.asyncio
@@ -398,55 +391,52 @@ async def test_locked_pi_late_input_survives_settled_boundary(execution, tmp_pat
             await release.wait()
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
             text=sse({"role": "assistant", "content": "Checked"}))
-    app = FastAPI()
-    app.include_router(internal_router(service, "t" * 32))
     args = SimpleNamespace(workspace=str(tmp_path / "workers"), archive=str(tmp_path / "artifacts"),
         pi=str(pi), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="w")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-        headers={"Authorization": "Bearer " + "t" * 32}) as client:
-        def factory(claim, process_id, session_id):
-            runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
-            runner.gateway.transport = httpx.MockTransport(upstream)
-            original = runner.rpc
-            async def gated_rpc(kind, **kwargs):
-                value = await original(kind, **kwargs)
-                if injection == "settled" and kind == "get_state" and not checked.is_set():
-                    checked.set()
-                    await release.wait()
-                return value
-            runner.rpc = gated_rpc
-            return runner
-        pool = SessionPool(factory)
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
-        task = service.accept(event, access, "check", context={"key": "topic"})
-        running = asyncio.create_task(worker.once())
-        try:
-            await asyncio.wait_for(checked.wait(), 10)
-            runner = next(iter(pool.entries.values()))["runner"]
-            extra = service.add_input(task["public_id"], event.model_copy(update={"event_id": "late"}), access, "and check the second item")
-            if injection == "settled":
-                with pytest.raises(RuntimeError, match="not accepting"):
-                    await runner.append_input(extra["input_id"], "and check the second item")
-            else:
+    client = runtime_client_for(service)
+    def factory(claim, process_id, session_id):
+        runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
+        runner.gateway.transport = httpx.MockTransport(upstream)
+        original = runner.rpc
+        async def gated_rpc(kind, **kwargs):
+            value = await original(kind, **kwargs)
+            if injection == "settled" and kind == "get_state" and not checked.is_set():
+                checked.set()
+                await release.wait()
+            return value
+        runner.rpc = gated_rpc
+        return runner
+    pool = SessionPool(factory)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), None, pool=pool)
+    task = service.accept(event, access, "check", context={"key": "topic"})
+    running = asyncio.create_task(worker.once())
+    try:
+        await asyncio.wait_for(checked.wait(), 10)
+        runner = next(iter(pool.entries.values()))["runner"]
+        extra = service.add_input(task["public_id"], event.model_copy(update={"event_id": "late"}), access, "and check the second item")
+        if injection == "settled":
+            with pytest.raises(RuntimeError, match="not accepting"):
                 await runner.append_input(extra["input_id"], "and check the second item")
-            release.set()
-            assert await running
-            if injection == "settled":
-                assert service.get(task["public_id"], access)["state"] == "QUEUED"
-                assert await worker.once()
-            assert service.get(task["public_id"], access)["state"] == "SUCCEEDED"
-            assert len(requests) == 2
-            assert "and check the second item" in json.dumps(requests[1], ensure_ascii=False)
-            with service.db.engine.connect() as c:
-                assert c.execute(select(inputs.c.state)).scalar_one() == "CONSUMED"
-                identity = json.loads(c.execute(select(processes.c.identity_json)).scalar_one())
-                assert identity["actual_session_id"] and identity["actual_session_file"]
-        finally:
-            release.set()
-            if not running.done():
-                running.cancel()
-                await asyncio.gather(running, return_exceptions=True)
-            await pool.close()
+        else:
+            await runner.append_input(extra["input_id"], "and check the second item")
+        release.set()
+        assert await running
+        if injection == "settled":
+            assert service.get(task["public_id"], access)["state"] == "QUEUED"
+            assert await worker.once()
+        assert service.get(task["public_id"], access)["state"] == "SUCCEEDED"
+        assert len(requests) == 2
+        assert "and check the second item" in json.dumps(requests[1], ensure_ascii=False)
+        with service.db.engine.connect() as c:
+            assert c.execute(select(inputs.c.state)).scalar_one() == "CONSUMED"
+            identity = json.loads(c.execute(select(processes.c.identity_json)).scalar_one())
+            assert identity["actual_session_id"] and identity["actual_session_file"]
+    finally:
+        release.set()
+        if not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await pool.close()
 
 
 def test_root_pi_marker_does_not_prove_host_tools_stopped(execution, clock):
@@ -521,8 +511,6 @@ async def test_worker_exports_requested_binary_without_text_write_tool(execution
     document = b"%PDF-1.7\nfixture\x00\xff\n%%EOF"
     (workspace / "outputs" / "result.pdf").write_bytes(document)
     service.archive_root.mkdir()
-    app = FastAPI()
-    app.include_router(internal_router(service, "t" * 32))
     class Harness:
         stopped_verified = True
         gateway = SimpleNamespace(workspace=workspace, artifacts=[], evidence=[])
@@ -532,10 +520,9 @@ async def test_worker_exports_requested_binary_without_text_write_tool(execution
         async def stop(self):
             return True
     task = service.accept(event, access, TaskGoal(text="make PDF", requested_outputs=("outputs/result.pdf",)))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-        headers={"Authorization": "Bearer " + "t" * 32}) as client:
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: Harness())
-        assert await worker.once()
+    client = runtime_client_for(service)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: Harness())
+    assert await worker.once()
     result = json.loads(service.get(task["public_id"], access)["result_json"])
     artifact = result["artifacts"][0]
     assert artifact["mime_type"] == "application/pdf"
