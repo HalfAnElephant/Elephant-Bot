@@ -73,12 +73,18 @@ def require(condition, message):
 
 # Match a request for the identifier itself, not a generic question about mail.
 _MAIL_ACCOUNT_ID = r"(?:邮箱)?(?:账号|账户|帐号)(?:标识|ID|编号)|邮箱标识"
+_MAIL_ACCOUNT_REQUEST_CUE = (
+    r"(?:请(?:先)?(?:提供|告诉我|发给我|给我|补充|确认)|(?:麻烦|能否|可以)(?:先)?"
+    r"(?:提供|告诉我|补充|确认)|你(?:先)?(?:告诉我|确认)|"
+    r"(?<![不无毋])(?:得|需要|须)(?:先)?(?:知道|提供|告诉我|确认)|"
+    r"还需要|还差|我还缺|我想确认)"
+)
+# Keep the cue and the requested field in the same clause without a negated request between them.
+_MAIL_ACCOUNT_REQUEST_GAP = r"(?:(?!不(?:需要|用|必|要)|无需|无须|毋须|别(?:提供|告诉|补充))[^。！？!?；;，,、\n])"
 _MAIL_ACCOUNT_REQUEST = re.compile(
-    rf"(?:请(?:先)?(?:提供|告诉我|发给我|给我|补充|确认)|(?:麻烦|能否|可以)(?:先)?"
-    rf"(?:提供|告诉我|补充|确认)|(?:你)?(?<![不无毋])(?:得|需要|须)(?:先)?(?:知道|提供|告诉我|确认)|"
-    rf"(?:还需要|还差|我还缺|我想确认|我得先知道))[，,]?[^。！？!?；;，,\n]{{0,32}}?"
-    rf"(?:{_MAIL_ACCOUNT_ID})"
-    rf"|(?:{_MAIL_ACCOUNT_ID})[^。！？!?；;\n]{{0,12}}?(?:是什么|是哪个|叫什么)"
+    rf"{_MAIL_ACCOUNT_REQUEST_CUE}[，,]?{_MAIL_ACCOUNT_REQUEST_GAP}{{0,32}}?"
+    rf"(?:{_MAIL_ACCOUNT_ID}|哪(?:一)?个(?:邮箱)?(?:账号|账户|帐号))"
+    rf"|(?:{_MAIL_ACCOUNT_ID}){_MAIL_ACCOUNT_REQUEST_GAP}{{0,12}}?(?:是什么|是哪个|叫什么)"
     rf"|(?:要用|用的是|指的是)哪个邮箱(?:账号|账户|帐号)",
     re.IGNORECASE,
 )
