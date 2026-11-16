@@ -40,6 +40,15 @@ class Outbox:
         old = c.execute(select(outbox.c.id).where(outbox.c.dedupe_key == key)).scalar()
         if old:
             return old
+        if envelope.origin_kind == "chat" and envelope.purpose == "result" and envelope.origin_id.startswith("turn:"):
+            prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
+            c.execute(update(outbox).where(outbox.c.conversation_id == envelope.target.key,
+                outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
+                outbox.c.origin_id != envelope.origin_id,
+                func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
+                func.json_extract(outbox.c.envelope_json, "$.text") == envelope.text,
+                outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
+                .values(state="SUPERSEDED"))
         if defer_reply and envelope.reply_context:
             envelope = envelope.model_copy(update={
                 "reply_context": envelope.reply_context.model_copy(update={"msg_seq": None})})
@@ -65,10 +74,13 @@ class Outbox:
 
     def _reserve_reply(self, c, envelope):
         reply = envelope.reply_context
-        if reply and reply.expires_at:
+        if reply and reply.expires_at and reply.expires_at > self.clock.now():
             counter_key = stable_id(envelope.target.key, reply.platform_message_id)
             seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar()
             next_seq = (seq or 0) + 1
+            limit = reply.max_replies - int(envelope.purpose in {"progress", "status"})
+            if next_seq > limit:
+                return envelope.model_copy(update={"reply_context": reply.model_copy(update={"msg_seq": None})})
             if seq is None:
                 c.execute(insert(reply_counters).values(key=counter_key, seq=next_seq))
             else:
@@ -78,6 +90,8 @@ class Outbox:
             envelope = envelope.model_copy(
                 update={"reply_context": reply.model_copy(update={"msg_seq": next_seq})}
             )
+        elif reply:
+            envelope = envelope.model_copy(update={"reply_context": reply.model_copy(update={"msg_seq": None})})
         return envelope
 
     def enqueue_text(
@@ -173,29 +187,72 @@ class Outbox:
     def recover(self):
         with self.db.transaction() as c:
             c.execute(update(outbox).where(outbox.c.state == "SENDING").values(state="UNKNOWN"))
+            candidates = c.execute(select(outbox).where(
+                outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+                func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
+                outbox.c.created_at > (self.clock.now() - timedelta(days=1)).isoformat())).mappings().all()
+            for row in candidates:
+                envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
+                if envelope.origin_kind == "chat":
+                    if not envelope.origin_id.startswith("turn:"):
+                        continue
+                    prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
+                    newer = c.execute(select(outbox.c.envelope_json).where(
+                        outbox.c.conversation_id == envelope.target.key, outbox.c.origin_kind == "chat",
+                        outbox.c.origin_id.startswith(prefix), outbox.c.origin_id != envelope.origin_id,
+                        outbox.c.created_at > row["created_at"], outbox.c.state == "SENT",
+                        func.json_extract(outbox.c.envelope_json, "$.purpose") == "result")
+                        .order_by(outbox.c.created_at.desc()).limit(1)).scalar_one_or_none()
+                    if newer:
+                        if OutboundEnvelope.model_validate_json(newer).text == envelope.text:
+                            c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="SUPERSEDED"))
+                        continue
+                    envelope = envelope.model_copy(update={"expires_at": max(envelope.expires_at,
+                        datetime.fromisoformat(row["created_at"]) + timedelta(days=1))})
+                if envelope.origin_kind not in {"chat", "task"}:
+                    continue
+                envelope = envelope.model_copy(update={"allow_proactive": True})
+                c.execute(update(outbox).where(outbox.c.id == row["id"]).values(
+                    envelope_json=envelope.model_dump_json(),
+                    state="PENDING" if row["state"] == "WAITING_FOR_TRIGGER" else row["state"]))
 
     def retrigger(self, c, event):
-        # Only an addressed trigger in the same audience may renew a task reply credential.
-        if not event.reply_context or not (event.mentions_bot or event.conversation.surface == "private"):
-            return
+        # The triggering user retains one reply slot for their current request.
+        reply = event.reply_context
+        if (not reply or not reply.expires_at or reply.expires_at <= self.clock.now()
+                or not (event.mentions_bot or event.conversation.surface == "private")):
+            return []
+        renewed = []
         rows = (
             c.execute(
                 select(outbox).where(
                     outbox.c.conversation_id == event.conversation.key,
                     outbox.c.state == "WAITING_FOR_TRIGGER",
-                )
+                ).order_by(outbox.c.created_at, outbox.c.part_no, outbox.c.id)
             )
             .mappings()
             .all()
         )
         for row in rows:
             envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
-            if envelope.origin_kind != "task":
+            if envelope.requester is not None and envelope.requester != event.principal:
                 continue
-            reply = event.reply_context
+            if envelope.origin_kind == "chat":
+                if (envelope.purpose != "result" or not envelope.origin_id.startswith("turn:")
+                        or envelope.requester is None or envelope.expires_at <= self.clock.now()):
+                    continue
+                if not envelope.allow_proactive and not (event.reply_to and event.reply_to == envelope.anchor_message_id):
+                    prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
+                    if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
+                            outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
+                            outbox.c.created_at > row["created_at"], outbox.c.state == "SENT",
+                            func.json_extract(outbox.c.envelope_json, "$.purpose") == "result")).first():
+                        continue
+            elif envelope.origin_kind != "task":
+                continue
             counter_key = stable_id(envelope.target.key, reply.platform_message_id)
             seq = c.execute(select(reply_counters.c.seq).where(reply_counters.c.key == counter_key)).scalar()
-            if (seq or 0) >= reply.max_replies:
+            if (seq or 0) >= reply.max_replies - 1:
                 break
             next_seq = (seq or 0) + 1
             if seq is None:
@@ -207,7 +264,7 @@ class Outbox:
             envelope = envelope.model_copy(
                 update={
                     "reply_context": reply.model_copy(update={"msg_seq": next_seq}),
-                    "expires_at": self.clock.now() + timedelta(seconds=300),
+                    "expires_at": max(envelope.expires_at, self.clock.now() + timedelta(seconds=300)),
                 }
             )
             c.execute(
@@ -215,13 +272,20 @@ class Outbox:
                 .where(outbox.c.id == row["id"])
                 .values(state="PENDING", envelope_json=envelope.model_dump_json())
             )
+            renewed.append(row["id"])
+        return renewed
 
     async def dispatch_once(self, adapters, budget=0, pre_send=None):
+        proactive = [name for name, adapter in adapters.items()
+                     if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
         with self.db.engine.connect() as c:
             rows = (
                 c.execute(
                     select(outbox)
-                    .where(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
+                    .where(or_(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
+                               and_(outbox.c.state == "WAITING_FOR_TRIGGER",
+                                    func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
+                                    func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
                            or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()))
                     .order_by(outbox.c.created_at, outbox.c.conversation_id, outbox.c.origin_id,
                               outbox.c.part_no, outbox.c.id)
@@ -233,9 +297,11 @@ class Outbox:
         for row in rows:
             with self.db.transaction() as c:
                 current = c.execute(select(outbox).where(outbox.c.id == row["id"],
-                    outbox.c.state.in_(["PENDING", "RETRYABLE"]))).mappings().first()
+                    outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))).mappings().first()
                 if not current:
                     continue
+                if current["state"] == "WAITING_FOR_TRIGGER":
+                    c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="PENDING"))
                 try:
                     envelope = self._prepare_pending(c, current)
                 except ValueError:
@@ -356,7 +422,8 @@ class Outbox:
 
     def _receipt(self, delivery_id, receipt, *, connection=None):
         with self.db.transaction() if connection is None else nullcontext(connection) as c:
-            previous = c.execute(select(outbox.c.state, outbox.c.conversation_id).where(
+            previous = c.execute(select(outbox.c.state, outbox.c.conversation_id, outbox.c.envelope_json,
+                outbox.c.created_at).where(
                 outbox.c.id == delivery_id)).mappings().one()
             c.execute(
                 update(outbox)
@@ -387,6 +454,18 @@ class Outbox:
                     outbox.c.state != "SENT")).first()
                 if not remaining:
                     now = self.clock.now()
+                    envelope = OutboundEnvelope.model_validate_json(previous["envelope_json"])
+                    if (envelope.origin_kind == "chat" and envelope.purpose == "result"
+                            and envelope.origin_id.startswith("turn:")):
+                        prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
+                        c.execute(update(outbox).where(outbox.c.conversation_id == envelope.target.key,
+                            outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
+                            outbox.c.origin_id != envelope.origin_id,
+                            outbox.c.created_at < previous["created_at"],
+                            func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
+                            func.json_extract(outbox.c.envelope_json, "$.text") == envelope.text,
+                            outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
+                            .values(state="SUPERSEDED"))
                     c.execute(update(notifications).where(notifications.c.id == origin).values(state="SENT"))
                     c.execute(update(waits).where(waits.c.notification_id == origin,
                         waits.c.delivered_at.is_(None)).values(delivered_at=now.isoformat(),

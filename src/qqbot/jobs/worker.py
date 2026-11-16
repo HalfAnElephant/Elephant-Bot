@@ -266,6 +266,8 @@ class Worker:
                 logger.error("Failure diagnostic unavailable run_id=%s", claim["run_id"])
         logger.error("Worker run failed worker_id=%s task_id=%s run_id=%s fence=%s error=%s",
                      self.worker_id, claim["task_id"], claim["run_id"], claim["fencing_token"], summary)
+        if getattr(harness, "protocol_recovery_attempted", False):
+            return harness.protocol_failure_result().model_dump(mode="json")
         return {"status": "failed", "agent_authored": False, "summary": summary}
 
     async def stop_execution(self, harness, execution):

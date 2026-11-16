@@ -448,3 +448,93 @@ async def test_rejected_native_stream_reuses_unused_last_sequence_for_normal_fal
     assert (body["markdown"]["content"] if markdown else body["content"]) == answer
     with s.core.db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_leader_final_result_uses_proactive_delivery_after_reply_unavailable(leader_stream, expired):
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"proactive_verified": True})
+    claim = s.core.sessions.claim("fixture")
+    finish_leader(s.core, claim, "安装已完成，验证通过。")
+    if expired:
+        s.core.clock.advance(301)
+    else:
+        with s.core.db.transaction() as conn:
+            conn.execute(reply_counters.insert().values(key=stable_id(s.event.conversation.key,
+                s.event.platform_message_id), seq=4))
+    await s.core.deliver()
+    await s.core.deliver()
+    assert len(s.calls) == 1 and s.calls[0].url.path.endswith("/messages")
+    body = json.loads(s.calls[0].content)
+    assert "msg_id" not in body and "msg_seq" not in body
+    with s.core.db.engine.connect() as conn:
+        row = conn.execute(select(outbox)).mappings().one()
+        envelope = json.loads(row["envelope_json"])
+        assert row["state"] == "SENT" and envelope["allow_proactive"]
+        assert (envelope["expires_at"] > row["created_at"])
+
+
+async def test_expired_acknowledged_prefix_allows_final_proactive_result(leader_stream):
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"proactive_verified": True})
+    claim = s.core.sessions.claim("fixture")
+    await append(s.core, claim, 1, "public_answer_delta", "正在核验")
+    await s.core.stream_delivery.dispatch_once()
+    finish_leader(s.core, claim, "安装完成，实际核验通过。")
+    s.core.clock.advance(301)
+    await s.core.deliver()
+    await s.core.deliver()
+    assert len(s.calls) == 2
+    assert s.calls[0].url.path.endswith("/stream_messages")
+    assert s.calls[1].url.path.endswith("/messages")
+    assert "msg_id" not in json.loads(s.calls[1].content)
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
+        assert conn.execute(select(stream_messages.c.state)).scalar_one() == "ABANDONED"
+
+
+async def test_protocol_recovery_failure_settles_input_and_delivers_host_report(leader_stream):
+    from qqbot.storage.agent_schema import dialogue_inputs
+
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"proactive_verified": True})
+    claim = s.core.sessions.claim("fixture")
+    with s.core.db.transaction() as conn:
+        conn.execute(reply_counters.insert().values(key=stable_id(s.event.conversation.key,
+            s.event.platform_message_id), seq=4))
+    s.core.leader.complete(claim["run_id"], claim["fencing_token"], "fixture",
+        {"status": "failed", "agent_authored": False, "summary": "工具记录已保存，模型纠正失败。",
+         "limitations": ["model_tool_protocol_recovery_failed"]}, stopped=True, quiescent=False)
+    assert s.core.sessions.claim("fixture") is None
+    await s.core.deliver()
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(dialogue_inputs.c.handled_at)).scalar_one()
+        assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
+    assert len(s.calls) == 1 and "msg_id" not in json.loads(s.calls[0].content)
+
+
+async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
+    from datetime import timedelta
+
+    from qqbot.domain import TextSegment
+
+    s = leader_stream
+    claim = s.core.sessions.claim("fixture")
+    finish_leader(s.core, claim, "安装完成")
+    s.core.clock.advance(301)
+    await s.core.deliver()
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state)).scalar_one() == "WAITING_FOR_TRIGGER"
+    trigger = s.event.model_copy(update={"event_id": "followup", "platform_message_id": "followup-message",
+        "occurred_at": s.core.clock.now(), "received_at": s.core.clock.now(),
+        "segments": (TextSegment(text="好了吗"),), "reply_context": s.event.reply_context.model_copy(update={
+            "platform_message_id": "followup-message", "expires_at": s.core.clock.now() + timedelta(minutes=5)})})
+    trigger, _ = s.core.inbox.accept(trigger)
+    await s.core.process(trigger)
+    await s.core.deliver()
+    assert len(s.calls) == 1 and json.loads(s.calls[0].content)["msg_id"] == "followup-message"
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"

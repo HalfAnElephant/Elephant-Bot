@@ -182,8 +182,8 @@ class SessionService:
             self.service.outbox.enqueue_text(conn, target=event.conversation,
                 text="这次暂时没能处理完，可以重新告诉我需要做什么。", origin_kind="chat",
                 origin_id="turn:" + dialogue["session_id"] + ":" + user["id"],
-                reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-                anchor_message_id=event.platform_message_id, purpose="result")
+                reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
+                anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True)
 
     def claim(self, worker_id):
         now = self.clock.now()

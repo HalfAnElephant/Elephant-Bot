@@ -478,6 +478,9 @@ class Core:
                 text = await self.command(event)
                 if text:
                     self.reply(event, text)
+                if self.state(event.conversation.key)["mode"] != "silent":
+                    with self.db.transaction() as conn:
+                        self.outbox.retrigger(conn, event)
                 return
             if self.state(event.conversation.key)["mode"] == "silent":
                 return
@@ -487,11 +490,15 @@ class Core:
             controlled = self.controls.route(event)
             if controlled is not None:
                 self.reply(event, controlled)
+                with self.db.transaction() as conn:
+                    self.outbox.retrigger(conn, event)
                 return
             if not self.settings.interactive_execution_enabled:
                 return
             context = await self.knowledge.prepare(event, self.context_for(event))
             self.sessions.enqueue(event, access=self.access(event), context=context)
+            with self.db.transaction() as conn:
+                self.outbox.retrigger(conn, event)
         except (PermissionError, ValueError, LookupError) as error:
             logger.warning("Input rejected", extra={"data": {"error_type": type(error).__name__}})
             if event.conversation.surface == Surface.PRIVATE:

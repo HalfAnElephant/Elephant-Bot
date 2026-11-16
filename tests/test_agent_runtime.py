@@ -100,6 +100,22 @@ def test_dispatch_replay_conflict_and_worker_results_finalize_once(runtime):
         assert all(conn.execute(select(leader_inbox.c.handled_at)).scalars())
 
 
+def test_protocol_failure_blocks_settled_goal_and_delivers_report_once(runtime):
+    root = root_goal(runtime)
+    worker_complete(runtime)
+    claim = runtime.sessions.claim("leader")
+    result = {"status": "failed", "agent_authored": False, "summary": "子任务记录已保存，模型汇总纠正失败。",
+        "limitations": ["model_tool_protocol_recovery_failed"]}
+    runtime.leader.complete(claim["run_id"], claim["fencing_token"], "leader", result,
+        stopped=True, quiescent=False)
+    assert runtime.sessions.claim("leader") is None
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.state).where(tasks.c.id == root["task_id"])).scalar_one() == "BLOCKED"
+        delivery = conn.execute(select(outbox)).mappings().one()
+        assert json.loads(delivery["envelope_json"])["allow_proactive"]
+        assert all(conn.execute(select(leader_inbox.c.handled_at)).scalars())
+
+
 def test_root_followup_after_children_settle_reaches_finalize_and_is_consumed(runtime):
     root = root_goal(runtime)
     worker_complete(runtime)

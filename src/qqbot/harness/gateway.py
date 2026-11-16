@@ -143,6 +143,7 @@ class RunGateway:
         self.image_key = None
         self.image_lock = asyncio.Lock()
         self.business_exhausted = False
+        self.protocol_recovery_attempted = False
         self.system_prompt = assemble_prompt(claim.get("role", "worker"),
             purpose=claim.get("purpose", "work"), preferences=claim.get("context", {}).get("preferences", ""),
             skills_guidance=SKILLS_GUIDANCE, environment=claim.get("plan", {}).get("environment", "sandbox"))
@@ -379,6 +380,10 @@ class RunGateway:
 
     def budget_exhausted(self):
         self.business_exhausted = True
+        if self.protocol_recovery_attempted and (self.outcome or {}).get("status", "completed") == "completed":
+            self.outcome = {**(self.outcome or {}), "status": "partial", "unresolved_items": [
+                *(self.outcome or {}).get("unresolved_items", []),
+                "model_tool_protocol_recovery_budget_exhausted"]}
 
     async def authority(self):
         if self.revoked:
