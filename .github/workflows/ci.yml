@@ -187,6 +187,7 @@ jobs:
           git -c tar.umask=0022 archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
           sudo /opt/elephant/install.sh --apply --system --install-pi
           test -z "$(sudo find -P /opt/elephant/node_modules -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
+          test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
           test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
           test "$(systemctl is-enabled elephant.service || true)" = disabled
           cd /opt/elephant
@@ -238,7 +239,7 @@ jobs:
         run: |
           systemctl status elephant.service --no-pager || true
           sudo journalctl -u elephant.service --no-pager -n 100
-          sudo namei -l /opt/elephant/node_modules/.bin/pi /opt/elephant-node/bin/node || true
+          sudo namei -l /opt/elephant/node_modules/.bin/pi /opt/elephant-node/bin/node /opt/elephant/.venv/bin/python || true
 
   install-macos:
     name: macOS installation (${{ matrix.arch }})

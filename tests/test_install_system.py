@@ -1,6 +1,7 @@
 """Installer tests never use real commands, accounts, network or systemd writes."""
 
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -376,3 +377,65 @@ def test_job_helper_never_replaces_custom_existing_file(staged_jobs):
     assert "differs from generated defaults" in result.stderr
     assert env.read_text() == "# operator-owned\n"
     assert not dropin.exists() and not linger.exists()
+
+@pytest.mark.parametrize(("fixture", "message"), [
+    ("managed", "interpreter verified"),
+    ("external", "does not resolve into the managed runtime"),
+    ("preexisting_external", "does not resolve into the managed runtime"),
+    ("hardlink", "Hard-linked managed Python file"),
+    ("sync_failure", "Managed Python installation failed"),
+])
+def test_generated_python_is_private_until_trusted_runtime_is_normalized(tmp_path, fixture, message):
+    app = tmp_path / "app"
+    python = tmp_path / "managed-python"
+    external = tmp_path / "external-python"
+    uv = tmp_path / "fake-uv"
+    app.mkdir(mode=0o755)
+    python.mkdir(mode=0o755)
+    external.write_text("not managed")
+    external.chmod(0o775)
+    if fixture == "preexisting_external":
+        (app / ".venv/bin").mkdir(parents=True)
+        (app / ".venv/bin/python").symlink_to(external)
+    uv.write_text(
+        "#!/bin/sh\nset -eu\n"
+        '[ "$(stat -c %a .)" = 700 ] && [ "$(stat -c %a "$UV_PYTHON_INSTALL_DIR")" = 700 ]\n'
+        'printf "UV_ARGS=%s\\n" "$*"\n'
+        'case "$*" in *"--managed-python --link-mode copy --reinstall"*) ;; *) exit 85 ;; esac\n'
+        + ("exit 84\n" if fixture == "sync_failure" else "")
+        + 'mkdir -p .venv/bin "$UV_PYTHON_INSTALL_DIR/runtime"\n'
+        'chmod 0700 .venv .venv/bin "$UV_PYTHON_INSTALL_DIR/runtime"\n'
+        'interpreter="$UV_PYTHON_INSTALL_DIR/runtime/python"\n'
+        'touch "$interpreter"; chmod 0775 "$interpreter"\n'
+        + (f'ln {shlex.quote(str(external))} "$UV_PYTHON_INSTALL_DIR/runtime/linked"\n'
+           if fixture == "hardlink" else "")
+        + (f'ln -s {shlex.quote(str(external))} .venv/bin/python\n' if fixture == "external"
+           else 'ln -s "$interpreter" .venv/bin/python\n')
+    )
+    uv.chmod(0o700)
+    # Execute only the corresponding production shell block against temporary
+    # files. The test uid substitutes for root ownership to avoid host changes.
+    source = INSTALLER.read_text()
+    _, start, rest = source.partition("# uv's platform archive")
+    body, end, _ = rest.partition("getent group elephant-worker")
+    assert start and end
+    script = (
+        'set -eu\nfail() { echo "$*" >&2; exit 1; }\n'
+        'trusted() { [ "$(stat -c %u -- "$1")" = "$(id -u)" ] '
+        '&& [ -z "$(find "$1" -maxdepth 0 -perm /022 -print)" ]; }\n'
+        f"app={shlex.quote(str(app))}\npython={shlex.quote(str(python))}\n"
+        f"uv={shlex.quote(str(uv))}\ncd \"$app\"\n"
+        + start + body.replace("! -user root", f"! -uid {os.getuid()}")
+    )
+    result = subprocess.run(["/bin/sh", "-c", script], check=False, capture_output=True, text=True)
+    assert message in result.stdout + result.stderr, result
+    assert ("UV_ARGS=" in result.stdout) == (fixture != "preexisting_external"), result
+    assert external.stat().st_mode & 0o777 == 0o775
+    if fixture == "managed":
+        assert result.returncode == 0
+        assert (app / ".venv/bin/python").stat().st_mode & 0o777 == 0o755
+        assert (app / ".venv").stat().st_mode & 0o777 == 0o755
+        assert app.stat().st_mode & 0o777 == python.stat().st_mode & 0o777 == 0o755
+    else:
+        assert result.returncode == 1
+        assert app.stat().st_mode & 0o777 == python.stat().st_mode & 0o777 == 0o700

@@ -239,7 +239,7 @@ fi
 # Reject existing external runtime paths writable by an unprivileged account.
 for path in "$app/.venv" "$app/node_modules" "$node" "$python" /usr/local/libexec/elephant-tools; do
     if [ -d "$path" ]; then
-        unsafe=$(find -P "$path" -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)
+        unsafe=$(find -P "$path" -xdev \( ! -user root -o \( ! -type l -perm /022 \) \) -print -quit)
         [ -z "$unsafe" ] || fail "Untrusted existing runtime path: $unsafe"
     fi
 done
@@ -276,7 +276,7 @@ env -i PATH="$PATH" HOME=/root curl --disable -fLsS "$node_url/SHASUMS256.txt" -
 (cd "$stage" && awk -v f="$archive" '$2==f { print; n++ } END { if(n!=1) exit 1 }' SHASUMS256.txt > node.sha256 &&
     sha256sum --check --strict node.sha256)
 require_inactive
-install -d -o root -g root -m 0755 "$node" "$python" /usr/local/libexec/elephant-tools
+install -d -o root -g root -m 0755 "$node" /usr/local/libexec/elephant-tools
 tar -xJf "$stage/$archive" -C "$node" --strip-components=1 --no-same-owner --no-same-permissions
 chmod -R a+rX "$node"
 env -i PATH="$PATH" HOME=/root curl --disable -fLsS https://astral.sh/uv/0.11.8/install.sh -o "$stage/uv-install.sh"
@@ -285,8 +285,55 @@ PATH=$node/bin:$PATH
 export PATH
 cd "$app"
 require_inactive
-chmod 0755 "$app"
-env -i PATH="$PATH" HOME=/root UV_PYTHON_INSTALL_DIR="$python" "$uv" --no-config sync --locked --no-dev --no-editable --python 3.13.9
+# uv's platform archive and wheel modes are not a deployment permissions
+# policy. Keep both trusted parents inaccessible while generating files;
+# the two trees stay closed if installation or verification fails.
+[ -e "$python" ] || install -d -o root -g root -m 0700 "$python"
+chmod 0700 "$app" "$python"
+verify_managed_interpreter() {
+    interpreter=$(realpath -e -- "$app/.venv/bin/python") || fail 'Could not resolve the installed Python interpreter.'
+    case "$interpreter" in
+        "$python"/*) ;;
+        *) fail 'Installed Python interpreter does not resolve into the managed runtime.' ;;
+    esac
+    [ -f "$interpreter" ] && [ -x "$interpreter" ] && trusted "$interpreter" ||
+        fail 'Installed Python interpreter is not a trusted root-owned executable.'
+}
+# uv may inspect the pre-existing venv interpreter during sync. Do not
+# execute a symlink to an outside or writable interpreter even as root.
+if [ -e "$app/.venv/bin/python" ] || [ -L "$app/.venv/bin/python" ]; then
+    verify_managed_interpreter
+fi
+echo 'Preparing private managed Python and virtual environment.'
+env -i PATH="$PATH" HOME=/root UV_PYTHON_INSTALL_DIR="$python" "$uv" --no-config sync \
+    --locked --no-dev --no-editable --managed-python --link-mode copy --reinstall --python 3.13.9 ||
+    fail 'Managed Python installation failed. Runtime directories remain private; review the installer diagnostics before retrying.'
+
+# Verify ownership before changing mode, and never chmod a symlink target or
+# a file hard-linked into a cache/other installation. Copy mode + reinstall
+# replaces older uv cache hardlinks before this normalization.
+for directory in "$python" "$app/.venv"; do
+    [ -d "$directory" ] && [ ! -L "$directory" ] || fail "Missing managed runtime directory: $directory"
+    unsafe=$(find -P "$directory" -xdev ! -user root -print -quit) ||
+        fail "Could not inspect managed Python ownership: $directory"
+    [ -z "$unsafe" ] || fail "Non-root-owned managed Python path: $unsafe"
+    unsafe=$(find -P "$directory" -xdev -type f -links +1 -print -quit) ||
+        fail "Could not inspect managed Python file links: $directory"
+    [ -z "$unsafe" ] || fail "Hard-linked managed Python file cannot be normalized safely: $unsafe"
+    # Operate on children explicitly, leaving the public interpreter root
+    # closed until the full verification has succeeded.
+    find -P "$directory" -xdev -mindepth 1 ! -type l -exec chmod a+rX,go-w -- {} + ||
+        fail "Could not normalize managed runtime modes: $directory"
+    if [ "$directory" != "$python" ]; then
+        chmod a+rX,go-w -- "$directory"
+    fi
+    unsafe=$(find -P "$directory" -xdev ! -type l -perm /022 -print -quit) ||
+        fail "Could not verify managed runtime modes: $directory"
+    [ -z "$unsafe" ] || fail "Group/world-writable managed Python path: $unsafe"
+done
+verify_managed_interpreter
+chmod 0755 "$python" "$app"
+echo 'Managed Python interpreter verified and made available to the service account.'
 getent group elephant-worker >/dev/null || groupadd --system elephant-worker
 getent group elephant >/dev/null || groupadd --system elephant
 getent passwd elephant >/dev/null || useradd --system --gid elephant-worker --home-dir "$state" --shell /usr/sbin/nologin elephant
@@ -300,7 +347,6 @@ case "$selected_pi" in
     /*) ;;
     *) fail 'The Pi installation selection is invalid.' ;;
 esac
-chmod -R a+rX "$python" "$app/.venv"
 [ ! -d "$app/node_modules" ] || chmod -R a+rX "$app/node_modules"
 
 [ -e "$state" ] || install -d -o elephant -g elephant-worker -m 0700 "$state"
