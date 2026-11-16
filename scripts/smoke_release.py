@@ -21,7 +21,9 @@ def main():
     for name in ("alembic.ini", "uv.lock", "package-lock.json", "deploy/elephant.service",
                  "configs/production.yaml", ".env.example"):
         assert Path(name).is_file(), f"Source bundle is missing {name}"
-    assert os.access("scripts/pi-runner-launch", os.X_OK)
+    for executable in ("scripts/pi-runner-launch", "install.sh", "elephant", "deploy/install-local-linux.sh",
+                       "deploy/install-macos.sh", "deploy/install-system.sh"):
+        assert os.access(executable, os.X_OK), f"Source bundle is missing executable {executable}"
 
     settings = load_settings("configs/example.yaml")
     assert settings.tasks_enabled, "The first-run example must accept admin tasks"

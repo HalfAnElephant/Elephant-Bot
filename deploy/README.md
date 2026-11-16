@@ -1,4 +1,4 @@
-# Ubuntu daemon deployment
+# Elephant deployment
 
 The supported runtime is one Python daemon under `elephant`, its on-demand Pi processes,
 SQLite and OpenViking. QQ uses the official adapter. There is no separate Worker
@@ -11,38 +11,82 @@ backpressure, and individual tools and external waits retain their timeouts.
 Interrupted or blocked Workers preserve results for a Leader decision. A Leader
 takeover requires stopped related execution and reconciled external operations.
 
-## Guided Ubuntu installation
+## Platforms at a glance
 
-Use Ubuntu 24.04 or newer with systemd and cgroup v2. Download the complete
-release bundle and verify its checksums and revision using the
-[release instructions](../docs/runbooks/releases.md#手动部署). For a **new**
-installation, stage the verified bundle as root under `/opt/elephant`; do not
-extract over an existing install. From the directory containing the verified archive:
+| Platform | Personal installation | Background operation |
+|---|---|---|
+| Ubuntu 24.04+, Debian 13+, Fedora 43+ (x86-64 and arm64) | Dedicated or generic installer | systemd system service, cgroup v2 |
+| Official Arch Linux, up-to-date x86-64 | Dedicated or generic installer | systemd system service, cgroup v2 |
+| Other glibc Linux (x86-64 and arm64, such as Linux Mint or openSUSE) | Generic installer with distro-provided prerequisites | Foreground; no managed system service |
+| macOS Apple Silicon or Intel | Native installer; Intel requires a source build | Foreground or user LaunchAgent at desktop login |
+
+Do not use the Linux system service installer on derivatives just because they use the same package manager. Alpine/musl, Windows, macOS running under Rosetta, and architectures outside the table are not covered. The macOS login option starts at user login, not before login; it does not provide Linux isolation. Shell-process supervision, isolated credentialed GitHub CLI, and durable Jobs retain their Linux prerequisites. An unavailable capability does not fall back to less isolated execution.
+
+## Personal installation
+
+Use a persistent directory containing the complete, verified bundle or a trusted
+checkout; do not run from a temporary archive directory. See
+[release verification](../docs/runbooks/releases.md#手动部署).
+
+```sh
+./install.sh --apply --setup
+```
+
+- **Linux:** install uv, Node.js 22.19+ with npm, and FFmpeg 6+ using your
+  distribution or the upstream official packages. The installer does not
+  run a package manager in personal mode. It installs the locked Python and
+  Pi runtime into the bundle, not the system.
+- **macOS:** use a native terminal. With an existing Homebrew installation,
+  pass `--with-deps` to install the missing formulae. Otherwise supply uv,
+  native Node.js/npm and FFmpeg yourself. Intel also needs Apple Command Line
+  Tools; `pilk-nogil` is built from the locked source because no Intel wheel
+  is supplied. The installer never installs Homebrew or uses sudo.
+- The optional macOS login item is proposed in the final setup step. Nothing
+  is loaded unless you select it. This creates one current-user LaunchAgent
+  and does not replace a different job or restart one that is already loaded.
+  Stop it before moving the bundle. To remove it, use the commands below from
+  a terminal in the same desktop account; they do not remove settings or data.
+
+```sh
+launchctl bootout "gui/$(id -u)/dev.elephant.bot"
+# After confirming the job is unloaded and that this is the Elephant-managed file:
+rm "$HOME/Library/LaunchAgents/dev.elephant.bot.plist"
+```
+
+The default installation action is a preview. Without `--setup`, a successful
+install stops before the wizard. `./elephant` opens setup again. The core listener
+remains loopback-only on all supported paths.
+
+## Guided Linux installation
+
+Supported system versions and architectures are in the table above. The
+installer requires active systemd with **cgroup v2**, a root-owned release under
+`/opt/elephant` and the distribution's package repositories. Fedora uses
+`ffmpeg-free`; it does not enable third-party repositories. Bring official
+Arch fully up to date before running the installer; it does not issue a
+partial refresh or upgrade the entire OS.
+
+For a **new** installation, verify the archive first. From the directory
+containing the verified archive:
 
 ```sh
 sudo mkdir -m 0755 /opt/elephant &&
   sudo tar -xzf elephant-bot.tar.gz -C /opt/elephant --strip-components=1 --no-same-owner &&
-  sudo /opt/elephant/deploy/install-system.sh --apply
-sudo /opt/elephant/.venv/bin/elephant setup --system
+  sudo /opt/elephant/install.sh --apply --system --setup
 ```
 
-The installer prepares system dependencies, the locked runtime, the unprivileged
-service account, and `elephant.service`. Run the installer without `--apply` to
-print its plan without changing the system. The setup wizard collects the model
-configuration, optionally displays the official QQ QR code in the terminal, and
-asks whether to start the installed service and enable it at boot. No shell commands or config
-paths are shown in the routine wizard. For managed service failures see
-[Acceptance](#acceptance). The terminal
-scan uses the service identity and the same database lock as the daemon. If the
-daemon is already running, use its management page instead; setup does not stop
-or restart it. The daemon listens on loopback. For manual QQ administration over
-SSH, forward port 8080 as shown below, not through a public management listener.
+The installer prepares system packages, the locked runtime, an unprivileged
+service account and `elephant.service`. It does not start or enable the service
+unless the operator separately chooses that in the wizard. The optional QQ
+scan uses the runtime account and holds the same SQLite lock as the daemon.
+If the daemon is already running, use its management page to scan. For remote
+access, use an SSH port forward as described below rather than binding a public
+management listener.
 
-For a supported update to an installer-managed unit, drain and stop it first,
-back up its data, then rerun the installer from a verified replacement release at
-`/opt/elephant`. Locally edited and unknown units are refused, not overwritten;
-the installer retains private configuration and data. See the existing-installation
-notes below before staging the replacement. macOS uses the local CLI and has no systemd setup.
+To update an installer-managed unit, drain and stop it first, back up data,
+then rerun the installer from a verified replacement release. Existing
+configuration and state files are retained. The installer refuses unknown or
+locally edited unit files and does not automatically migrate legacy installs.
 
 ## Fresh Ubuntu installation (manual)
 

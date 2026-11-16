@@ -5,7 +5,8 @@ set -eu
 usage() {
     printf '%s\n' 'Usage: deploy/install-system.sh [--dry-run | --apply]' \
         'Dry run (default): print the plan without changing this host.' \
-        'Apply: on Ubuntu 24.04+, provision dependencies and elephant.service from /opt/elephant.' \
+        'Apply: provision system dependencies and elephant.service from /opt/elephant.' \
+        'Linux: Ubuntu 24.04+, Debian 13+, Fedora 43+, official Arch rolling.' \
         'The service is not enabled, started, restarted or migrated by this command.'
 }
 
@@ -17,7 +18,7 @@ case "$mode" in
     *) usage >&2; exit 2 ;;
 esac
 
-echo 'Plan: ensure Ubuntu dependencies, Elephant service account, locked runtime and elephant.service.'
+echo 'Plan: ensure distribution dependencies, Elephant service account, locked runtime and elephant.service.'
 echo 'Keep /etc/elephant/core.yaml, /etc/elephant/core.env and /var/lib/elephant intact.'
 echo 'Do not import legacy qqbot services or data. Validate configuration before starting the service.'
 [ "$mode" = --apply ] || exit 0
@@ -29,11 +30,43 @@ unset ENV BASH_ENV CDPATH PYTHONPATH PYTHONHOME UV_CONFIG_FILE NPM_CONFIG_USERCO
 umask 077
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || fail 'Run --apply as root.'
-[ "$(uname -s)" = Linux ] || fail 'Only Ubuntu Linux is supported.'
-grep -Eq '^ID=(ubuntu|"ubuntu")$' /etc/os-release || fail 'Only Ubuntu is supported.'
+[ "$(uname -s)" = Linux ] || fail 'Only Linux is supported by this system installer.'
+# Read metadata, never source a file as shell code or treat derivatives as tested.
+os_id=$(awk -F= '$1=="ID" {gsub(/"/,"",$2); print $2}' /etc/os-release)
 version=$(awk -F= '$1=="VERSION_ID" {gsub(/"/,"",$2); print $2}' /etc/os-release)
-case "$version" in ''|*[!0-9.]*) fail 'Cannot detect Ubuntu version.' ;; esac
-dpkg --compare-versions "$version" ge 24.04 || fail 'Ubuntu 24.04 or newer is required.'
+case "$os_id" in
+    ubuntu|debian|fedora)
+        case "$version" in ''|*[!0-9.]*|.*|*.) fail "Cannot detect supported $os_id version." ;; esac
+        ;;
+    arch) ;;
+    *) fail 'Unsupported distribution. Use Ubuntu, Debian, Fedora or official Arch Linux.' ;;
+esac
+case "$os_id" in
+    ubuntu)
+        command -v apt-get >/dev/null && command -v dpkg >/dev/null || fail 'Ubuntu requires apt-get and dpkg.'
+        dpkg --compare-versions "$version" ge 24.04 || fail 'Ubuntu 24.04 or newer is required.'
+        ;;
+    debian)
+        command -v apt-get >/dev/null && command -v dpkg >/dev/null || fail 'Debian requires apt-get and dpkg.'
+        dpkg --compare-versions "$version" ge 13 || fail 'Debian 13 or newer is required.'
+        ;;
+    fedora)
+        case "$version" in *.*) fail 'Expected a numbered Fedora release.' ;; esac
+        [ "$version" -ge 43 ] || fail 'Fedora 43 or newer is required.'
+        command -v dnf >/dev/null || fail 'Fedora requires dnf.'
+        ;;
+    arch)
+        command -v pacman >/dev/null || fail 'Arch requires pacman.'
+        ;;
+esac
+case "$(uname -m)" in
+    x86_64) arch=x64 ;;
+    aarch64|arm64)
+        [ "$os_id" != arch ] || fail 'Official Arch Linux installation requires x86_64.'
+        arch=arm64
+        ;;
+    *) fail 'Unsupported CPU architecture. Use x86_64 or arm64.' ;;
+esac
 [ -d /run/systemd/system ] || fail 'A running systemd instance is required.'
 [ -e /sys/fs/cgroup/cgroup.controllers ] || fail 'cgroup v2 is required.'
 
@@ -146,12 +179,27 @@ for path in "$app/.venv" "$app/node_modules" "$node" "$python" /usr/local/libexe
         [ -z "$unsafe" ] || fail "Untrusted existing runtime path: $unsafe"
     fi
 done
-case "$(dpkg --print-architecture)" in amd64) arch=x64 ;; arm64) arch=arm64 ;; *) fail 'Unsupported CPU architecture.' ;; esac
 
 stage=$(mktemp -d /run/elephant-install.XXXXXX)
 trap 'rm -rf -- "$stage"' EXIT
-env -i PATH="$PATH" HOME=/root apt-get update
-env -i PATH="$PATH" HOME=/root apt-get install -y ca-certificates curl xz-utils bubblewrap ffmpeg dbus-user-session openssl sudo
+case "$os_id" in
+    ubuntu|debian)
+        env -i PATH="$PATH" HOME=/root apt-get update
+        env -i PATH="$PATH" HOME=/root apt-get install -y \
+            ca-certificates curl xz-utils bubblewrap ffmpeg dbus-user-session openssl sudo
+        ;;
+    fedora)
+        env -i PATH="$PATH" HOME=/root dnf install -y \
+            ca-certificates curl xz bubblewrap ffmpeg-free openssl sudo
+        ;;
+    arch)
+        # Never perform a partial database refresh or silently upgrade the OS.
+        # The operator must begin with a fully updated official Arch installation.
+        env -i PATH="$PATH" HOME=/root pacman -S --needed --noconfirm \
+            ca-certificates curl xz bubblewrap ffmpeg openssl sudo ||
+            fail 'Arch package installation failed. Update the whole system first using the official Arch process.'
+        ;;
+esac
 
 archive="node-v22.19.0-linux-$arch.tar.xz"
 node_url=https://nodejs.org/dist/v22.19.0
@@ -193,4 +241,4 @@ echo 'Installed. The Elephant daemon was not started.'
 if [ -d "$unit_path.d" ]; then
     echo 'Review this unit and any existing overrides with: systemctl cat elephant.service'
 fi
-echo 'Next: sudo /opt/elephant/.venv/bin/elephant setup --system'
+echo 'Installation complete; open the Elephant setup wizard when ready.'

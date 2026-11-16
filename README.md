@@ -2,7 +2,7 @@
 
 QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 对话、根目标和按需 Worker；Pi 管理各 Agent 的原生历史与压缩，OpenViking 管理长期记忆，Hermes 原生工具管理标准 `SKILL.md`。
 
-首次使用从[本地启动](#本地启动)开始，Ubuntu 常驻服务使用[生产部署步骤](deploy/README.md)。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
+首次使用从[本地启动](#本地启动)开始，各平台的[安装和后台运行方式](deploy/README.md)见部署说明。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
 
 - 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。
 - 任务、输入、操作回执和投递状态保存在 SQLite。等待会让出执行资格，取消与恢复需要真实停止证明。
@@ -15,7 +15,7 @@ QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 
 - 使用官方 DeepSeek 模型地址及已配置的模型密钥时，联网工具调用 DeepSeek Search／Fetch。`deepseek-flash` 还可按需调用 `document.parse`，以文字或图文方式解析工作区文档，并将文件引用交给当前对话。上传回执按用户、会话和项目隔离，供重试及重启复用，远端文件设置 30 天有效期。
 - QQ 语音优先使用平台转写，否则通过 DeepSeek ASR 自动转写为本轮口述请求，转写随 Pi 输入持久保存。支持 SILK 及 FFmpeg 可解码的常见音频，单条上限 8 MiB、120 秒。历史和转发语音保留资料来源，识别失败时要求重发或改用文字。
 
-需要 Python 3.13、uv、Node.js >= 22.19.0、npm 和 FFmpeg >= 6。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
+个人安装支持 Linux 和 macOS；Python 由 uv 按锁定版本准备，Pi 使用 Node.js 22.19.0 或更新版本。完整的系统隔离及持久 Job 需要 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
 
 ## 架构与代码入口
 
@@ -35,24 +35,15 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 
 ## 本地启动
 
-准备 Python 3.13、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Node.js](https://nodejs.org/en/download) >= 22.19.0（含 npm）和 FFmpeg >= 6。macOS 可用 `brew install uv node ffmpeg`，Ubuntu 的完整安装命令见[部署说明](deploy/README.md)。
-
-想在 Ubuntu 上常驻运行，使用[系统依赖和 systemd 安装器](deploy/README.md#guided-ubuntu-installation)。已有安装先按[升级说明](deploy/README.md#existing-installations)保留配置、凭据和数据，不把新路径当作旧数据迁移。
+推荐使用已校验的 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 完整发布包；也可在可信的源码检出目录安装。解压后保留完整目录。在目录内运行：
 
 ```sh
-git clone https://github.com/HalfAnElephant/Elephant-Bot.git
-cd Elephant-Bot
+./install.sh --apply --setup
 ```
 
-也可从 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 下载完整源码包 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`，按[发布包校验步骤](docs/runbooks/releases.md#手动部署)解压后进入 `elephant-bot` 目录。
+Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）和 FFmpeg 6 或以上。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
 
-在项目根目录安装锁定依赖，运行终端向导：
-
-```sh
-uv sync --locked
-npm ci --ignore-scripts
-uv run elephant setup
-```
+Linux 常驻服务支持 Ubuntu、Debian、Fedora 和官方 Arch Linux；macOS 可选择当前窗口运行，或登录当前用户时运行。版本、架构、限制与升级流程见[各平台部署](deploy/README.md)。不要把新安装当作旧数据迁移。
 
 向导分四步：选择模型服务和推荐模型、按需检测连接、用手机 QQ 扫码、选择是否直接启动。普通终端用方向键和回车操作，窄终端或不支持彩色菜单的终端可用编号。常用服务不需要填写接口地址；仅自定义服务需要提供地址与模型名称。密钥输入不回显。
 
@@ -125,7 +116,7 @@ curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks/PUBLIC_ID \
   -H "Authorization: Bearer $ELEPHANT_ADMIN_TOKEN"
 ```
 
-任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。Linux 工具执行需按生产说明准备 cgroup、bubblewrap 和 user manager；macOS 本地调试工具时可显式将 `execution.worker_environment` 设为 `host`，以当前账号权限执行。
+任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。受隔离的命令、凭据 GitHub CLI 与持久 Job 依赖 Linux 对应能力。macOS 和缺少这些组件的 Linux 不会因此切换到不隔离的宿主执行。
 
 ### 接入 QQ 与长期记忆
 
@@ -166,7 +157,7 @@ Worker 超时、阻塞或一次尝试无法继续时会保存已有结果并通�
 
 ## 部署和恢复
 
-按 [Ubuntu 部署说明](deploy/README.md) 安装单 daemon、root 停止证明 helper、Job user manager 和 OpenViking。现有部署升级需先停止旧服务，保留数据库中的输入、操作回执、未知投递和删除屏障。普通启动默认保留迁移前备份；明确要求不备份的部署可调用 `migrate(path, backup=False)`。
+按 [Linux 系统部署说明](deploy/README.md#guided-linux-installation) 安装单 daemon、root 停止证明 helper、Job user manager 和 OpenViking。现有部署升级需先停止旧服务，保留数据库中的输入、操作回执、未知投递和删除屏障。普通启动默认保留迁移前备份；明确要求不备份的部署可调用 `migrate(path, backup=False)`。
 
 - [实现与完整验收矩阵](docs/elephant-agent-implementation-plan.md)
 - [持久 Job](docs/operations/persistent-jobs.md)

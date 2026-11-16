@@ -5,6 +5,7 @@ import fcntl
 import getpass
 import json
 import os
+import platform
 import re
 import secrets
 import stat
@@ -310,7 +311,8 @@ def _new_local_configuration(directory):
              "user_id": "owner"}
     task_principal = dict(admin, user_id=Settings().owner.id)
     return {
-        "deployment_id": "elephant-local", "database": str(directory / "core.db"), "adapters": [],
+        "deployment_id": "elephant-local", "database": str(directory / "core.db"),
+        "internal_socket": str(directory / "internal.sock"), "adapters": [],
         "tasks_enabled": True, "execution": {"leader_environment": "sandbox", "worker_environment": "sandbox"},
         "permissions": {"preset": "custom", "default_effect": "deny", "rules": [
             {"id": "setup-admin-console", "subject": admin, "actions": ["admin.*"],
@@ -545,17 +547,20 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
             ui.status("info", "已跳过，之后可以重新打开向导接入。")
 
         ui.section("4/4  开始使用", "按需要启动，也可以先退出，已保存的设置不会丢失。")
-        if system:
-            start = ui.choose("启动方式", ("稍后启动", "现在启动，并设为开机启动")) == 1
+        macos = not system and platform.system() == "Darwin"
+        if system and not outcome:
+            choices = ("稍后启动", "现在启动，并设为开机启动")
+        elif system:
+            choices = ("稍后启动",)
+        elif macos:
+            choices = ("稍后启动", "在当前窗口启动", "现在启动，并在登录 Mac 时自动运行")
         else:
-            start = ui.choose("启动方式", ("稍后启动", "在当前窗口启动")) == 1
+            choices = ("稍后启动", "在当前窗口启动")
+        start = ui.choose("启动方式", choices)
         status = "已通过检测" if verified else "未检测"
         ui.section("设置已保存", f"模型：{model_label}"
                    f" · {status}    |    QQ：{qq}")
         if start:
-            if system and outcome:
-                ui.status("warn", "扫码未完成，暂不启动系统服务。")
-                return 1
             if system:
                 from elephant.setup_system import start_installed_service
                 with ui.progress("正在启动系统服务…"):
@@ -564,6 +569,18 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
                     ui.status("error", "未能启动系统服务。设置仍已保存，请查看部署文档的排查说明。")
                     return 1
                 ui.status("ok", "已提交启动请求，并设为开机启动。")
+            elif macos and start == 2:
+                from elephant.setup_macos import LaunchAgentError, install_launch_agent
+                try:
+                    with ui.progress("正在设置登录后自动运行…"):
+                        loaded = install_launch_agent(directory)
+                except LaunchAgentError as error:
+                    ui.status("warn", str(error))
+                    return 1
+                if loaded:
+                    ui.status("ok", "已设置登录后自动运行，已向 macOS 提交启动请求。")
+                else:
+                    ui.status("ok", "已有相同的登录启动项，未重新启动。")
             else:
                 ui.status("info", "正在启动，请保持当前窗口打开。按 Ctrl+C 可停止。")
                 def on_ready():

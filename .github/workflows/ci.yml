@@ -102,16 +102,18 @@ jobs:
           uv build --no-sources
           git archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
           git rev-parse HEAD > dist/REVISION
+      - name: Install local audio dependency
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install and check the extracted release
         run: |
           mkdir "$RUNNER_TEMP/release"
           tar -xzf dist/elephant-bot.tar.gz -C "$RUNNER_TEMP/release"
           cd "$RUNNER_TEMP/release/elephant-bot"
-          uv sync --no-dev --no-editable --python "$(cat .python-version)"
+          ./install.sh --dry-run
+          ./install.sh --apply
           uv pip install --python .venv/bin/python --no-deps --reinstall "$GITHUB_WORKSPACE"/dist/*.whl
-          npm ci --ignore-scripts
           node_modules/.bin/pi --version
-          .venv/bin/elephant validate
+          ./elephant validate
           .venv/bin/elephant doctor
           .venv/bin/elephant doctor --share-safe
           .venv/bin/python scripts/smoke_release.py
@@ -135,6 +137,39 @@ jobs:
         run: |
           sha256sum --check SHA256SUMS
           test "$(cat REVISION)" = "$EXPECTED_SHA"
+
+  install-macos:
+    name: macOS installation (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: Apple Silicon
+          - runner: macos-15-intel
+            arch: Intel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.19.0'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.11.8'
+      - name: Install from a clean source bundle
+        run: |
+          git archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/elephant-bot"
+          ./install.sh --dry-run
+          ./install.sh --apply
+          node_modules/.bin/pi --version
+          ./elephant doctor --share-safe
+          .venv/bin/python -c 'from pilk_nogil import decode'
+          .venv/bin/python scripts/smoke_release.py
 
   dialogue:
     name: DeepSeek dialogue

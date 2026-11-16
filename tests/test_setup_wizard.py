@@ -337,3 +337,26 @@ def test_can_return_from_model_picker_to_service_list(tmp_path, monkeypatch):
     answers(monkeypatch, "1", "4", "2", "", "", "", "")
     assert setup.run_setup(directory) == 0
     assert load_settings(directory / "config.yaml").model.model == "gpt-5.4-mini"
+
+
+def test_macos_login_start_is_explicit(tmp_path, monkeypatch, capsys):
+    from elephant import setup_macos
+
+    directory = tmp_path / "private"
+    monkeypatch.setattr(setup.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(setup.getpass, "getpass", lambda _prompt, **_opts: "synthetic-key")
+    starts = []
+
+    def start(profile):
+        assert (profile / "config.yaml").exists()
+        starts.append(profile)
+        return True
+
+    monkeypatch.setattr(setup_macos, "install_launch_agent", start)
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    assert not starts
+    answers(monkeypatch, "", "", "", "3")
+    assert setup.run_setup(directory) == 0
+    assert starts == [directory]
+    assert "已向 macOS 提交启动请求" in capsys.readouterr().out
