@@ -18,6 +18,19 @@ def test_schedule_schemas_are_only_available_to_user_leader():
         assert not any(name.startswith('schedules.') for name in native_tools(role, purpose))
 
 
+def test_mail_schedule_tool_schema_explains_literal_filter_operators():
+    schema = native_tools('leader', 'user')['schedules.create']['parameters']['$defs']
+    mail = schema['MailTrigger']['properties']
+    condition = schema['MailCondition']['properties']
+    assert 'AND' in mail['all']['description']
+    assert 'OR' in mail['any']['description']
+    assert 'body does not contain X' in mail['none']['description']
+    assert 'op=contains' in mail['none']['description']
+    assert 'without @' in condition['field']['description']
+    assert 'exact match' in condition['op']['description']
+    assert 'literal text' in condition['value']['description']
+
+
 async def test_schedule_native_tool_reaches_host_operation(tmp_path):
     call = AsyncMock(return_value={'allowed': True, 'id': 'saved-schedule'})
     gateway = RunGateway(tmp_path, 'model', '', 'https://model.invalid', call=call)

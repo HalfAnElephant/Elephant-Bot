@@ -71,6 +71,25 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def verify_weekly_mail_filter(trigger):
+    positives = (
+        {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"},
+        {"sender_address": "project@example.org", "subject": "本周周报（更新）", "body": "当前版本"},
+    )
+    for mail in positives:
+        require(trigger.matches(**mail), "mail draft does not match the requested weekly report")
+    mail = positives[0]
+    for label, changed in (
+        ("exact sender domain", {"sender_address": "office@sub.example.org"}),
+        ("unrelated sender domain", {"sender_address": "office@elsewhere.org"}),
+        ("subject substring", {"subject": "通知"}),
+        ("body exclusion", {"body": "旧稿"}),
+        ("body substring exclusion", {"body": "请不要使用旧稿附件"}),
+        ("incomplete body", {"body_complete": False}),
+    ):
+        require(not trigger.matches(**(mail | changed)), f"mail draft did not enforce {label}")
+
+
 class LiveModelTransport(httpx.AsyncBaseTransport):
     """Allow only the official model endpoint and explicitly disable thinking for this suite."""
 
@@ -299,24 +318,21 @@ class DialogueSuite:
                             require(len(saved) == 1, "mail request did not persist exactly one draft")
                             row = saved[0]
                             spec = ScheduleSpec.model_validate_json(row["spec_json"])
+                            # This suite uses synthetic mail. Preserve the saved rule even on failure.
+                            case["mail_draft"] = {"enabled": bool(row["enabled"]), "spec": spec.model_dump(mode="json")}
+                            if spec.mail:
+                                case["mail_draft"].update(account_id=spec.mail.account_id, folder=spec.mail.folder)
                             require(not row["enabled"] and not spec.enabled and row["next_fire_at"] is None,
                                     "mail draft was enabled or scheduled as a timer")
                             identifiers = {"weekly-demo", *(row["id"] for row in accounts if row["account_id"] == "weekly-demo")}
                             require(spec.mail and spec.mail.account_id in identifiers and spec.mail.folder == "INBOX",
                                     "mail draft changed the user's account or folder")
-                            mail = {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"}
-                            require(spec.mail.matches(**mail), "mail draft does not match the requested weekly report")
-                            require(not spec.mail.matches(**{**mail, "sender_address": "office@elsewhere.org"})
-                                    and not spec.mail.matches(**{**mail, "subject": "通知"})
-                                    and not spec.mail.matches(**{**mail, "body": "旧稿"}),
-                                    "mail draft lost the requested sender, subject or exclusion")
+                            verify_weekly_mail_filter(spec.mail)
                             require(any(Path(path).name == "summary.md" for path in spec.requested_outputs)
                                     and re.search(r"三|3", spec.goal),
                                     "mail draft lost the requested output or summary requirement")
                             require(re.search(r"(?:未|没(?:有)?)启用|禁用|停用|不.*扫描|不会.*扫描", final_text),
                                     "mail draft reply omitted its inactive state")
-                            case["mail_draft"] = {"enabled": False, "account_id": spec.mail.account_id,
-                                                  "folder": spec.mail.folder, "spec": spec.model_dump(mode="json")}
                         else:
                             require(not saved, "mail clarification unexpectedly saved an invented configuration")
                             if label in {"mail_config", "mail_update", "mail_test_missing_credential"}:

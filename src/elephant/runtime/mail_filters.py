@@ -8,9 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class MailCondition(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True)
 
-    field: Literal['sender_address', 'sender_domain', 'subject', 'body']
-    op: Literal['equals', 'contains']
-    value: str = Field(min_length=1, max_length=4096)
+    field: Literal['sender_address', 'sender_domain', 'subject', 'body'] = Field(
+        description="sender_address is the full address; sender_domain is only the part after @, without @.")
+    op: Literal['equals', 'contains'] = Field(
+        description="Use equals for an exact match and contains for a substring. Put negated conditions in none.")
+    value: str = Field(min_length=1, max_length=4096,
+        description="Only the literal text to compare, without adding quotation marks or operator words.")
 
     @field_validator('value')
     @classmethod
@@ -25,9 +28,9 @@ class MailTrigger(BaseModel):
 
     account_id: str = Field(min_length=1, max_length=256)
     folder: str = Field(default='INBOX', min_length=1, max_length=256)
-    all: tuple[MailCondition, ...] = Field(default=(), max_length=32)
-    any: tuple[MailCondition, ...] = Field(default=(), max_length=32)
-    none: tuple[MailCondition, ...] = Field(default=(), max_length=32)
+    all: tuple[MailCondition, ...] = Field(default=(), max_length=32, description="Every condition must match (AND).")
+    any: tuple[MailCondition, ...] = Field(default=(), max_length=32, description="At least one condition must match (OR); omit when there is no OR group.")
+    none: tuple[MailCondition, ...] = Field(default=(), max_length=32, description="No condition may match. For body does not contain X, use field=body, op=contains, value=X here.")
 
     @field_validator('account_id', 'folder')
     @classmethod
