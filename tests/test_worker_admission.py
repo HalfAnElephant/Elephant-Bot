@@ -12,7 +12,7 @@ from elephant.domain.messages import TextSegment
 from elephant.harness.pool import SessionPool
 from elephant.runtime.scheduler import Scheduler
 from elephant.storage.agent_schema import agent_events, leader_inbox
-from elephant.storage.task_schema import tasks
+from elephant.storage.task_schema import processes, tasks
 
 
 def submit(r, index=0, children=1):
@@ -45,6 +45,20 @@ def test_legacy_root_node_depth_and_parallelism_values_do_not_restrict_workers(r
     assert len(GoalSpec.model_validate({"goal": "many", "children": [
         {"goal": "child", "delegation_key": str(i)} for i in range(40)]}).children) == 40
     assert len(WaitSpec(children=[claim["task_id"] for claim in claims]).children) == 47
+
+
+def test_default_service_binds_every_claimed_worker_beyond_legacy_limit(runtime):
+    r = runtime
+    submit(r, children=10)
+    claims = [r.service.claim("worker") for _ in range(10)]
+    for claim in claims:
+        assert r.service.bind_process(claim["run_id"], claim["fencing_token"], "worker", {
+            "process_id": str(uuid4()), "session_id": claim["session_id"], "epoch": 1, "generation": 1,
+            "scope_key": claim["session_id"], "session_file": str(r.path / (claim["session_id"] + ".jsonl")),
+        }) == {"bound": True}
+    with r.db.engine.connect() as conn:
+        states = conn.execute(select(processes.c.state)).scalars().all()
+    assert states == ["BUSY"] * 10
 
 
 class Runner:

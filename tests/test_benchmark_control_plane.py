@@ -69,6 +69,11 @@ def test_offline_control_plane_benchmark_drains_and_preserves_historical_report(
     assert report['drain']['completed'] is True
     assert report['drain']['timed_out'] is False
     assert report['latency_ms']['ingress']['count'] == report['events']
+    assert report['process_tree_peak_rss_kib'] > 0
+    assert report['cpu_self_seconds'] > 0
+    assert report['writer_hold_ms'] == 0
+    for phase in ('event_loop_lag', 'sqlite_begin_wait', 'sqlite_transaction_body', 'sqlite_commit'):
+        assert report['latency_ms'][phase]['count'] > 0
     for phase in ('task_accept', 'task_query', 'task_cancel'):
         assert report['latency_ms'][phase]['count'] > 0
     for phase in report['latency_ms'].values():
@@ -87,3 +92,13 @@ def test_offline_benchmark_writes_only_new_output(tmp_path):
     second = run_benchmark(tmp_path, '--output', output)
     assert second.returncode != 0
     assert output.read_bytes() == saved
+
+
+def test_offline_benchmark_drains_with_a_competing_sqlite_writer(tmp_path):
+    run = run_benchmark(tmp_path, '--writer-hold-ms', '20')
+    assert run.returncode == 0, run.stderr + run.stdout
+    report = json.loads(run.stdout)
+    assert report['passed'] is True
+    assert report['writer_hold_ms'] == 20
+    assert report['latency_ms']['sqlite_begin_wait']['count'] > 0
+    assert report['latency_ms']['event_loop_lag']['count'] > 0

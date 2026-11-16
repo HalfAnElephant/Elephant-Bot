@@ -6,6 +6,10 @@
 
 [安装与首任务](#本地启动) · [文档索引](docs/index.md) · [贡献](CONTRIBUTING.md) · [安全报告](SECURITY.md)
 
+![合成任务的目标、Worker 与结果状态](docs/images/task-console-synthetic.png)
+
+图为合成数据演示。任务通过实际 Core、Pi 与文件读取工具执行，模型和 QQ 协议使用受控夹具。管理台可在目标与 Worker 间跳转，并显示执行结果和消息投递状态。
+
 首次使用从[本地启动](#本地启动)开始，各平台的[安装和后台运行方式](deploy/README.md)见部署说明。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
 
 - 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。

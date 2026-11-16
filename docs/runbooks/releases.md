@@ -11,15 +11,30 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 - 控制台 Node 测试、Ruff 和配置 schema 一致性。
 - wheel、sdist 与完整源码归档构建。
 - 在归档解压目录中安装生产依赖和 wheel，执行配置校验、普通与脱敏诊断、HTTP/静态资源检查。用合成管理员令牌提交任务，重新启动应用后检查任务仍可查询且重复提交不新增任务；这一步不执行模型。
-- macOS（Intel 和 Apple Silicon）检查 Pi 安装确认、私有安装和复用，并用真实 Pi 和本地合成模型执行任务，核对重启后的结果。这不是 macOS 登录自启验收。
-- Ubuntu 24.04 的 GitHub 托管 VM 验收 systemd 新装、拒绝运行中重装、停机重装保留配置及 SQLite 文件、重新启动就绪。不代表其他发行版或主机工具隔离已通过。
+- macOS（Intel 和 Apple Silicon）下载 Build 上传的同一制品 ID，校验 SHA-256 与 REVISION，检查 Pi 安装确认、私有安装和复用。真实 Pi 与本地合成模型完成首任务、正常重启读回、同键重试、CLI 备份及新路径恢复。登录自启在真实桌面会话中验收。
+- Ubuntu 24.04 的 GitHub 托管 VM 从同一已校验制品完成 systemd 新装、拒绝运行中重装、停机重装和重新就绪。随后以实际服务执行合成模型首任务，核对停止、重启后的原结果与同键唯一性，恢复原配置和文件权限。其他发行版及主机工具隔离按对应环境验收。
 - 通过上传返回的产物 ID 下载同一份发布包，校验 SHA-256 和提交号；标签发布复用该 ID，不按名称重新选包。
+- `Controlled runtime baseline` 记录三次控制面、SQLite 写竞争、0/1/10 后台任务混合负载，以及 Pi 冷热、长日志和 OpenViking 同步/召回分段。可复跑条件见[基线手册](control-plane-baseline.md)。
 
 `correctness-results` 保存环境、原始日志与 JUnit，`release-assets` 保存构建产物，
-均保留 14 天。任一前置检查失败会阻止后续构建或发布。
+均保留 14 天。`controlled-baseline-results` 和 `installation-*-results` 保留 90 天。安装结果包含同一 REVISION、SHA256SUMS 及首任务、重启、恢复的耗时 JSON。任一前置检查失败会阻止后续构建或发布。
 CodeQL 在 PR、`main` 推送和每周一扫描 Python 与 JavaScript/TypeScript。
 Dependabot 每周分别检查 uv、npm 和 Actions 更新，更新通过 PR 接受同一套检查。
 第三方 Actions 使用完整提交 SHA 固定，普通检查令牌仅授予源码读取权限。
+
+### 制品验收矩阵
+
+每次验收使用该次 Actions 的任务结果与附件确认通过状态。Build 只构建一份源码包，后续安装任务通过其不可变产物 ID 下载。
+
+| 环境与入口 | 同一源码包内的实际执行 | 证据与边界 |
+| --- | --- | --- |
+| Ubuntu 24.04，个人安装 | 安装 Python/Pi、wheel，校验与诊断，实际 Pi 首任务、重启和同键重试、CLI 备份与隔离恢复 | `Build and smoke test`，`installation-linux-results`。模型响应由本地程序生成。 |
+| Ubuntu 24.04，systemd | 实际专用账号和服务单元、运行中重装拒绝、停机重装保留原文件、实际 Pi 首任务和重启读回 | `Ubuntu systemd installation`，`installation-systemd-results`。临时配置仅用于空的托管 VM，脚本最后停止服务并恢复原文件。 |
+| macOS 15，Apple Silicon | 私有 Pi 安装及已有 Pi 复用两条入口，实际 Pi 首任务、重启、备份和隔离恢复 | `macOS installation (Apple Silicon)`，`installation-macos-15-results`。使用本机原生依赖。 |
+| macOS 15，Intel | 同上，并从锁定源包构建 Intel 音频依赖 | `macOS installation (Intel)`，`installation-macos-15-intel-results`。 |
+| 官方 DeepSeek API | 合成对话及工具链路、文件/语音 API | `DeepSeek dialogue`，`dialogue-live-results`。QQ 下行和邮箱协议使用受控夹具。 |
+
+`smoke_guided_install.py` 使用向导共享默认配置后启动公开 CLI 与 HTTP 入口。交互菜单由向导测试覆盖，实际扫码和手机端收件由操作者完成。Debian、Fedora、Arch、其他 Linux 及 macOS 登录项的目标环境验收，应记录具体版本、SHA、安装方式和结果。QQ、邮箱与远端 OpenViking 的真实服务状态各自记录。
 
 ### 真实模型对话回归
 
