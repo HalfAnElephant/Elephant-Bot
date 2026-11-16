@@ -71,6 +71,24 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+# Match a request for the identifier itself, not a generic question about mail.
+_MAIL_ACCOUNT_ID = r"(?:邮箱)?(?:账号|账户|帐号)(?:标识|ID|编号)|邮箱标识"
+_MAIL_ACCOUNT_REQUEST = re.compile(
+    rf"(?:请(?:先)?(?:提供|告诉我|发给我|给我|补充|确认)|(?:麻烦|能否|可以)(?:先)?"
+    rf"(?:提供|告诉我|补充|确认)|(?:你)?(?<![不无毋])(?:得|需要|须)(?:先)?(?:知道|提供|告诉我|确认)|"
+    rf"(?:还需要|还差|我还缺|我想确认|我得先知道))[，,]?[^。！？!?；;，,\n]{{0,32}}?"
+    rf"(?:{_MAIL_ACCOUNT_ID})"
+    rf"|(?:{_MAIL_ACCOUNT_ID})[^。！？!?；;\n]{{0,12}}?(?:是什么|是哪个|叫什么)"
+    rf"|(?:要用|用的是|指的是)哪个邮箱(?:账号|账户|帐号)",
+    re.IGNORECASE,
+)
+
+
+def asks_for_mail_account_id(text):
+    # Markdown in model replies should not split a field name or alter punctuation.
+    return _MAIL_ACCOUNT_REQUEST.search(re.sub(r"[\x60*_]|[^\S\n]+", "", text)) is not None
+
+
 def verify_weekly_mail_filter(trigger):
     positives = (
         {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"},
@@ -370,8 +388,7 @@ class DialogueSuite:
                             if label == "mail_missing_account":
                                 require({row["id"] for row in accounts} == prior_accounts,
                                         "mail clarification invented a new account")
-                                require(re.search(r"邮箱|账号|标识", final_text)
-                                        and re.search(r"[？?]|提供|告诉|哪个|给我|还差|缺少|缺.*账号|账号.*未知|尚未.*指定", final_text),
+                                require(asks_for_mail_account_id(final_text),
                                         "mail request did not ask for its missing account")
                 case["passed"] = True
                 return case
