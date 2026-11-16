@@ -675,3 +675,64 @@ def test_pending_database_move_keeps_read_only_reopen_and_blocks_edit(tmp_path, 
         assert setup.run_setup(directory) == 1
     assert [path.read_bytes() for path in watched] == before
     assert "管理页保存了不同的数据库位置" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("start_mode", ("later", "foreground", "login"))
+def test_profile_lock_covers_scan_and_start_handoff(tmp_path, monkeypatch, start_mode):
+    directory = tmp_path / "private"
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "synthetic-key")
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    before = [(directory / name).read_bytes() for name in ("config.yaml", "credentials.env")]
+    checked = []
+
+    def competing_wizard(stage):
+        # The second wizard must stop before consuming input or changing keys.
+        assert setup.run_setup(directory) == 1
+        assert [(directory / name).read_bytes() for name in ("config.yaml", "credentials.env")] == before
+        checked.append(stage)
+
+    def bind(ui, settings, values, *, system):
+        competing_wizard("scan")
+        return 0
+
+    monkeypatch.setattr(setup, "_bind_qq", bind)
+    original_choose = setup.SetupUI.choose
+
+    def choose(ui, question, options, *, default=0):
+        if question == "启动方式":
+            competing_wizard("start-choice")
+        return original_choose(ui, question, options, default=default)
+
+    monkeypatch.setattr(setup.SetupUI, "choose", choose)
+    if start_mode == "foreground":
+        def start(settings, values, *, on_ready):
+            competing_wizard("foreground")
+            with setup._exclusive_database(settings.database):
+                on_ready()
+                # A running daemon permits a read-only wizard after handoff.
+                with setup._configuration_lock(directory):
+                    checked.append("released-after-ready")
+                with pytest.raises(setup._DatabaseBusy), setup._exclusive_database(settings.database):
+                    pytest.fail("the daemon must retain its database lock")
+
+        monkeypatch.setattr(setup, "_start_local", start)
+    elif start_mode == "login":
+        from elephant import setup_macos
+
+        monkeypatch.setattr(setup.platform, "system", lambda: "Darwin")
+
+        def install(directory, **kwargs):
+            competing_wizard("login")
+            return True
+
+        monkeypatch.setattr(setup_macos, "install_launch_agent", install)
+    answers(monkeypatch, "", "", "1", {"later": "1", "foreground": "2", "login": "3"}[start_mode])
+    assert setup.run_setup(directory) == 0
+    assert checked[:2] == ["scan", "start-choice"]
+    if start_mode == "foreground":
+        assert checked[2:] == ["foreground", "released-after-ready"]
+    elif start_mode == "login":
+        assert checked[2:] == ["login"]
+    with setup._configuration_lock(directory):
+        pass

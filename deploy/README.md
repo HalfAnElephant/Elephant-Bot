@@ -58,7 +58,11 @@ Pi is reused only when its executable reports the exact version locked in
 installed command is preferred over a private copy; run with the intended native
 Node and Pi on your terminal PATH. The privileged Linux installer only considers
 trusted system-owned paths and probes with Elephant's unprivileged service account,
-not root. The probe uses temporary configuration and does not call a model.
+not root. Before any probe, it checks the complete enclosing npm `node_modules`
+tree, including hoisted dependencies and every symlink target, for root ownership
+and group/world write access. Custom wrappers or links outside that tree are
+skipped; a verified private copy remains available as the fallback. The probe
+uses temporary configuration and does not call a model.
 If none are suitable, you are asked before installing the locked private copy.
 The default answer is no. Noninteractive deployments must pre-authorize that
 fallback with `--install-pi`; it does not force a download when an existing Pi

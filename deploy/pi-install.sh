@@ -2,20 +2,57 @@
 # Sourced by the installers. Loading this file does not inspect or change the host.
 
 elephant_pi_root_path() (
-    path=$1
-    # The system installer runs only on Linux and uses GNU realpath/stat.
-    # Verify both the executable's PATH entry and its resolved target.
-    resolved=$(realpath -e -- "$path") || exit 1
-    for item in "$path" "$resolved"; do
-        while [ "$item" != / ]; do
-            [ "$(stat -c '%u' -- "$item" 2>/dev/null)" = 0 ] || exit 1
-            if [ ! -L "$item" ]; then
-                [ -z "$(find "$item" -maxdepth 0 -perm /022 -print)" ] || exit 1
-            fi
-            item=${item%/*}
-            [ -n "$item" ] || item=/
-        done
-    done
+    # The system installer has already verified this managed interpreter.
+    "$2" -I -B - "$1" <<'PYTHON'
+import os
+import stat
+import sys
+from pathlib import Path
+
+checked = {}
+active = set()
+
+
+def trusted_path(path):
+    if path in checked:
+        return checked[path]
+    if path in active:
+        raise ValueError("cyclic Pi path")
+    active.add(path)
+    parent = path if path == Path("/") else trusted_path(path.parent) / path.name
+    info = parent.lstat()
+    if info.st_uid != 0:
+        raise ValueError("Pi path is not root-owned")
+    if stat.S_ISLNK(info.st_mode):
+        target = Path(os.readlink(parent))
+        resolved = trusted_path(target if target.is_absolute() else parent.parent / target)
+    else:
+        if info.st_mode & 0o022:
+            raise ValueError("Pi path is writable by another account")
+        resolved = Path(os.path.normpath(parent))
+    active.remove(path)
+    checked[path] = resolved
+    return resolved
+
+
+def walk_error(error):
+    raise error
+
+
+try:
+    executable = trusted_path(Path(sys.argv[1]))
+    modules = next(parent for parent in reversed(executable.parents) if parent.name == "node_modules")
+    # npm can hoist imports beside Pi. Check the complete dependency root before
+    # executing anything, including each intermediate link and its ancestors.
+    for directory, directories, files in os.walk(modules, onerror=walk_error):
+        for name in directories + files:
+            target = trusted_path(Path(directory) / name)
+            if not target.is_relative_to(modules):
+                raise ValueError("Pi dependency link leaves its npm tree")
+except (OSError, ValueError, StopIteration, RecursionError) as error:
+    print(f"Pi installation is not trusted: {error}", file=sys.stderr)
+    sys.exit(1)
+PYTHON
 )
 
 elephant_pi_version() (
@@ -30,7 +67,7 @@ elephant_pi_version() (
     # shell directories. The selected native Node is the first runtime entry.
     probe_path=${node_path%/*}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin
     if [ "$scope" = system ]; then
-        elephant_pi_root_path "$candidate" || exit 12
+        elephant_pi_root_path "$candidate" "$base/.venv/bin/python" || exit 12
         candidate=$(realpath -e -- "$candidate") || exit 12
         runuser -u elephant -g elephant-worker -- /usr/bin/test -x "$candidate" || exit 13
         runuser -u elephant -g elephant-worker -- /usr/bin/test -r "$candidate" || exit 13
@@ -204,11 +241,10 @@ elephant_prepare_pi() (
             "$base/node_modules/"*) ;;
             /*)
                 [ -x "$candidate" ] || continue
-                if [ "$scope" = system ]; then
-                    elephant_pi_root_path "$candidate" || continue
-                    candidate=$(realpath -e -- "$candidate") || continue
-                fi
                 if elephant_pi_version "$candidate" "$expected" "$scope"; then
+                    if [ "$scope" = system ]; then
+                        candidate=$(realpath -e -- "$candidate") || continue
+                    fi
                     printf '使用系统已有 Pi %s。\n' "$expected"
                     elephant_pi_write_marker "$base" "$candidate" "$scope"
                     exit $?

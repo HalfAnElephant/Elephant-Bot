@@ -10,7 +10,7 @@ import re
 import secrets
 import stat
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -556,101 +556,102 @@ def _vault_can_resume(ui, startup, runtime, values):
 
 
 def _prepare_configuration(ui, directory, *, system):
-    with _configuration_lock(directory):
-        cfg = directory / ("core.yaml" if system else "config.yaml")
-        env = directory / ("core.env" if system else "credentials.env")
-        existing_config = _read_if_present(cfg, system_config=system)
-        existing_env = _read_if_present(env)
-        if system and existing_config is None:
-            ui.status("error", "未找到受管安装，请先完成 Linux 系统安装。")
-            return None
-        values = _credentials(existing_env)
-        original = yaml.safe_load(existing_config) if existing_config is not None else None
-        if original is None and existing_config is not None:
-            original = {}
-        if original is not None and not isinstance(original, dict):
-            raise ValueError("invalid existing setup file")
-        config = dict(original) if original is not None else _new_local_configuration(directory)
-        config.setdefault("admin_token_env", ADMIN_TOKEN)
-        startup = Settings.model_validate_json(json.dumps(config), strict=False)
-        _validate_credential_roles(startup)
-        _, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
-        runtime = overlay_runtime_settings(startup, overrides)
-        _validate_credential_roles(runtime)
-        if not _vault_can_resume(ui, startup, runtime, values):
-            return None
-        snapshot_owns_model = "model" in overrides
-        edit_model = (runtime.admin_token_env == startup.admin_token_env
-                      and (not system or not snapshot_owns_model))
+    """Prepare settings while the caller holds the profile lock."""
+    cfg = directory / ("core.yaml" if system else "config.yaml")
+    env = directory / ("core.env" if system else "credentials.env")
+    existing_config = _read_if_present(cfg, system_config=system)
+    existing_env = _read_if_present(env)
+    if system and existing_config is None:
+        ui.status("error", "未找到受管安装，请先完成 Linux 系统安装。")
+        return None
+    values = _credentials(existing_env)
+    original = yaml.safe_load(existing_config) if existing_config is not None else None
+    if original is None and existing_config is not None:
+        original = {}
+    if original is not None and not isinstance(original, dict):
+        raise ValueError("invalid existing setup file")
+    config = dict(original) if original is not None else _new_local_configuration(directory)
+    config.setdefault("admin_token_env", ADMIN_TOKEN)
+    startup = Settings.model_validate_json(json.dumps(config), strict=False)
+    _validate_credential_roles(startup)
+    _, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
+    runtime = overlay_runtime_settings(startup, overrides)
+    _validate_credential_roles(runtime)
+    if not _vault_can_resume(ui, startup, runtime, values):
+        return None
+    snapshot_owns_model = "model" in overrides
+    edit_model = (runtime.admin_token_env == startup.admin_token_env
+                  and (not system or not snapshot_owns_model))
 
-        ui.banner()
-        ui.section("1/4  模型服务", "从常用服务中选择，地址会自动配置。")
-        settings, effective = startup, runtime
-        if not edit_model:
-            ui.status("warn", "当前模型由管理页维护；请在管理页更换。向导不会覆盖设置。")
-            verified = False
-            updates = _collect_credentials(values, (startup.admin_token_env, CREDENTIAL_KEY))
-            ui.section("2/4  连接检测", "已保留当前模型，不重新验证。")
+    ui.banner()
+    ui.section("1/4  模型服务", "从常用服务中选择，地址会自动配置。")
+    settings, effective = startup, runtime
+    if not edit_model:
+        ui.status("warn", "当前模型由管理页维护；请在管理页更换。向导不会覆盖设置。")
+        verified = False
+        updates = _collect_credentials(values, (startup.admin_token_env, CREDENTIAL_KEY))
+        ui.section("2/4  连接检测", "已保留当前模型，不重新验证。")
+    else:
+        # Presence, not equality, determines which file owns the model.
+        initial = config if not snapshot_owns_model else {**config, "model": runtime.model.model_dump(mode="json")}
+        selection = _load_wizard_model(ui, initial, values)
+        if selection is None:
+            return None
+        chosen_config, chosen, updates, verified = selection
+        if snapshot_owns_model:
+            effective = overlay_runtime_settings(startup, {**overrides, "model": chosen.model.model_dump(mode="json")})
         else:
-            # Presence, not equality, determines which file owns the model.
-            initial = config if not snapshot_owns_model else {**config, "model": runtime.model.model_dump(mode="json")}
-            selection = _load_wizard_model(ui, initial, values)
-            if selection is None:
-                return None
-            chosen_config, chosen, updates, verified = selection
-            if snapshot_owns_model:
-                effective = overlay_runtime_settings(startup, {**overrides, "model": chosen.model.model_dump(mode="json")})
+            config, settings = chosen_config, chosen
+            effective = overlay_runtime_settings(settings, overrides)
+    if not (values.get(settings.admin_token_env) or updates.get(settings.admin_token_env)):
+        updates[settings.admin_token_env] = secrets.token_urlsafe(32)
+    if not (values.get(CREDENTIAL_KEY) or updates.get(CREDENTIAL_KEY)):
+        updates[CREDENTIAL_KEY] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+    changed_model = effective.model != runtime.model
+    if updates or original != config or changed_model:
+        if not system and runtime.database != startup.database:
+            # A saved database move may leave a live daemon on the old
+            # database; holding just the new lock cannot fence it.
+            ui.status("warn", "检测到管理页保存了不同的数据库位置。请先在管理页处理，向导不会改写当前配置。")
+            return None
+        try:
+            if system:
+                from elephant.setup_system import system_configuration_lock
+
+                lock = system_configuration_lock(runtime)
             else:
-                config, settings = chosen_config, chosen
-                effective = overlay_runtime_settings(settings, overrides)
-        if not (values.get(settings.admin_token_env) or updates.get(settings.admin_token_env)):
-            updates[settings.admin_token_env] = secrets.token_urlsafe(32)
-        if not (values.get(CREDENTIAL_KEY) or updates.get(CREDENTIAL_KEY)):
-            updates[CREDENTIAL_KEY] = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-
-        changed_model = effective.model != runtime.model
-        if updates or original != config or changed_model:
-            if not system and runtime.database != startup.database:
-                # A saved database move may leave a live daemon on the old
-                # database; holding just the new lock cannot fence it.
-                ui.status("warn", "检测到管理页保存了不同的数据库位置。请先在管理页处理，向导不会改写当前配置。")
-                return None
-            try:
-                if system:
-                    from elephant.setup_system import system_configuration_lock
-
-                    lock = system_configuration_lock(runtime)
-                else:
-                    lock = _exclusive_database(runtime.database)
-                with lock:
-                    if _read_setup_overrides(startup, system=system)[1] != saved_snapshot:
-                        ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
-                        return None
-                    # Recheck the old key and vault after fencing the daemon,
-                    # before writes in case credentials were stored during a prompt.
-                    if not _vault_can_resume(ui, startup, runtime, values):
-                        return None
-                    _persist_setup_files(
-                        cfg, env, existing_config=existing_config, config=config, original=original,
-                        existing_env=existing_env, values=values, updates=updates, system=system,
-                    )
-                    store = ConfigurationStore(settings)
-                    if snapshot_owns_model and changed_model:
-                        store.save_model_while_stopped(runtime, effective, overrides)
-                    if store.read().model != effective.model:
-                        ui.status("error", "未能确认模型设置已保存，请检查管理页。")
-                        return None
-            except _DatabaseBusy:
-                ui.status("warn", "Elephant 正在运行。请先停止服务再修改模型或凭据；向导不会自动重启。")
-                return None
-        ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
-        return settings, values, verified, _model_label(effective.model.endpoint)
+                lock = _exclusive_database(runtime.database)
+            with lock:
+                if _read_setup_overrides(startup, system=system)[1] != saved_snapshot:
+                    ui.status("warn", "模型设置刚发生变化，未覆盖。请重新打开向导。")
+                    return None
+                # Recheck the old key and vault after fencing the daemon,
+                # before writes in case credentials were stored during a prompt.
+                if not _vault_can_resume(ui, startup, runtime, values):
+                    return None
+                _persist_setup_files(
+                    cfg, env, existing_config=existing_config, config=config, original=original,
+                    existing_env=existing_env, values=values, updates=updates, system=system,
+                )
+                store = ConfigurationStore(settings)
+                if snapshot_owns_model and changed_model:
+                    store.save_model_while_stopped(runtime, effective, overrides)
+                if store.read().model != effective.model:
+                    ui.status("error", "未能确认模型设置已保存，请检查管理页。")
+                    return None
+        except _DatabaseBusy:
+            ui.status("warn", "Elephant 正在运行。请先停止服务再修改模型或凭据；向导不会自动重启。")
+            return None
+    ui.status("ok", "已保存设置，密钥不会显示在屏幕上。")
+    return settings, values, verified, _model_label(effective.model.endpoint)
 
 
 def run_setup(directory: Path | str, *, system: bool = False) -> int:
     """Guide setup while retaining protected writes and explicit side effects."""
     directory = Path(directory).expanduser().absolute()
     ui = SetupUI()
+    profile_lock = ExitStack()
     try:
         if system and (directory != Path("/etc/elephant") or os.geteuid() != 0):
             raise ValueError("system setup requires the managed installation")
@@ -662,6 +663,7 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
         if (not stat.S_ISDIR(dstat.st_mode) or dstat.st_uid != os.geteuid()
                 or dstat.st_mode & (0o027 if system else 0o077)):
             raise ValueError("setup requires a private directory")
+        profile_lock.enter_context(_configuration_lock(directory))
         prepared = _prepare_configuration(ui, directory, system=system)
         if prepared is None:
             return 1
@@ -721,6 +723,8 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
             else:
                 ui.status("info", "正在启动，请保持当前窗口打开。按 Ctrl+C 可停止。")
                 def on_ready():
+                    # The running daemon now owns the database lock.
+                    profile_lock.close()
                     tip = "现在可以去 QQ 发一条消息。" if qq == "已配置" else ""
                     ui.status("ok", "Elephant 已运行。" + tip)
 
@@ -744,3 +748,5 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
     except KeyboardInterrupt:
         ui.status("info", "已退出向导。先前保存的设置仍会保留。")
         return 130
+    finally:
+        profile_lock.close()

@@ -202,6 +202,33 @@ jobs:
               assert Path(settings.database + ".core.lock").stat().st_uid == pwd.getpwnam("elephant").pw_uid
           PY
           test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
+      - name: Reject writable Pi dependencies before execution
+        run: |
+          sudo /opt/elephant/.venv/bin/python -I -B - <<'PY'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          with tempfile.TemporaryDirectory(prefix=".elephant-pi-trust-", dir="/opt") as folder:
+              root = Path(folder)
+              root.chmod(0o755)
+              modules = root / "node_modules"
+              modules.mkdir(mode=0o755)
+              package = modules / "pi"
+              package.mkdir(mode=0o755)
+              executable = package / "cli.js"
+              executable.write_text("throw new Error('trust check must not execute Pi');\n")
+              executable.chmod(0o755)
+              dependency = package / "dependency.js"
+              dependency.write_text("export default 1;\n")
+              dependency.chmod(0o644)
+              command = ["/bin/sh", "-ec", '. "$1"; elephant_pi_root_path "$2" "$3"',
+                         "_", "/opt/elephant/deploy/pi-install.sh", str(executable), sys.executable]
+              assert subprocess.run(command, check=False).returncode == 0
+              dependency.chmod(0o666)
+              assert subprocess.run(command, check=False).returncode != 0
+          PY
       - name: Start, stop, and verify a managed reinstall
         run: |
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted
