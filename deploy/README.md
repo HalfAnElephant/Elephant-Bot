@@ -20,6 +20,11 @@ takeover requires stopped related execution and reconciled external operations.
 | Other glibc Linux (x86-64 and arm64, such as Linux Mint or openSUSE) | Generic installer with distro-provided prerequisites | Foreground; no managed system service |
 | macOS Apple Silicon or Intel | Native installer; Intel requires a source build | Foreground or user LaunchAgent at desktop login |
 
+This table lists installer entry points. Check the [artifact acceptance matrix](../docs/runbooks/releases.md#制品验收矩阵)
+for the platforms exercised by each build. Ubuntu and native macOS CI use the same
+verified source bundle. Debian, Fedora, Arch and desktop login behavior require
+results from their corresponding target environments.
+
 Do not use the Linux system service installer on derivatives just because they use the same package manager. Alpine/musl, Windows, macOS running under Rosetta, and architectures outside the table are not covered. The macOS login option starts at user login, not before login; it does not provide Linux isolation. Shell-process supervision, isolated credentialed GitHub CLI, and durable Jobs retain their Linux prerequisites. An unavailable capability does not fall back to less isolated execution.
 
 ## Personal installation
@@ -276,7 +281,7 @@ been planned and tested. Existing environment names used for credentials remain
 readable; do not regenerate the encryption key to change an environment variable name.
 
 For a routine upgrade, preserve the installed service account, restrictions
-and drop-ins. Use the [backup and staged restore checklist](../docs/runbooks/operations.md#升级前备份与回退演练)
+and drop-ins. Use the [backup and staged restore checklist](../docs/runbooks/operations.md#备份和隔离恢复演练)
 before replacing code or running migrations. The fresh-install commands are not
 an upgrade script and should not be used to regenerate secrets or overwrite an existing unit.
 

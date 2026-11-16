@@ -62,7 +62,7 @@ class TaskService:
         self.db, self.clock, self.outbox = db, clock, outbox
         self.permissions = permissions or PermissionService(db, clock)
         self.max_active, self.sustained_limit = max_active, sustained_limit
-        self.max_resident = max_resident if max_resident is not None else max_active
+        self.max_resident = max_resident
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.stream_eligibility = stream_eligibility
@@ -1195,10 +1195,11 @@ class TaskService:
                 if changed.rowcount != 1:
                     raise PermissionError("session already active")
             else:
-                resident = c.execute(select(func.count()).select_from(processes).where(
-                    processes.c.state != "STOPPED")).scalar_one()
-                if resident >= self.max_resident:
-                    raise ValueError("resident process limit reached")
+                if self.max_resident is not None:
+                    resident = c.execute(select(func.count()).select_from(processes).where(
+                        processes.c.state != "STOPPED")).scalar_one()
+                    if resident >= self.max_resident:
+                        raise ValueError("resident process limit reached")
                 c.execute(insert(processes).values(id=process_id, session_id=session_id, worker=worker_id,
                     epoch=payload["epoch"], generation=payload["generation"], state="BUSY",
                     identity_json=json.dumps(payload.get("identity", {})), last_used=self.clock.now().isoformat()))

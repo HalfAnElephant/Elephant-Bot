@@ -116,6 +116,7 @@ def verify_result(row, public_id):
 
 
 def run_smoke(local, model_port):
+    started = time.monotonic()
     settings = Settings()
     config = _new_local_configuration(local)
     config["model"] = {"endpoint": f"http://{LOOPBACK}:{model_port}/chat/completions", "model": MODEL}
@@ -129,6 +130,7 @@ def run_smoke(local, model_port):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     payload = {"goal": "Say hello without tools."}
     with running_service(command, env, local / "serve.log", opener):
+        ready_seconds = time.monotonic() - started
         public_id = request(opener, "/api/v1/tasks", payload)["public_id"]
         assert public_id
         path = f"/api/v1/tasks/{public_id}"
@@ -138,10 +140,37 @@ def run_smoke(local, model_port):
             time.sleep(0.25)
             row = request(opener, path)
         verify_result(row, public_id)
+        first_task_seconds = time.monotonic() - started
 
+    restart_started = time.monotonic()
     with running_service(command, env, local / "restart.log", opener):
         verify_result(request(opener, path), public_id)
         assert request(opener, "/api/v1/tasks", payload)["public_id"] == public_id
+        restart_seconds = time.monotonic() - restart_started
+
+    backup_started = time.monotonic()
+    snapshot, ledger = local / "snapshot.db", local / "deletions.json"
+    restored = local / "isolated"
+    restored.mkdir(mode=0o700)
+    restored_database = restored / "core.db"
+    for operation, options in (
+        ("backup", ["--destination", str(snapshot)]),
+        ("export-deletions", ["--destination", str(ledger)]),
+        ("restore", ["--snapshot", str(snapshot), "--deletion-ledger", str(ledger),
+                     "--destination", str(restored_database)]),
+    ):
+        subprocess.run([command[0], operation, "--config", str(cfg), *options],
+                       env=env, check=True, capture_output=True, text=True, timeout=30)
+    restored_config = restored / "config.yaml"
+    restored_config.write_text(yaml.safe_dump({**config, "database": str(restored_database)}), encoding="utf-8")
+    with running_service([command[0], "serve", "--config", str(restored_config)],
+                         env, local / "restore.log", opener):
+        verify_result(request(opener, path), public_id)
+        assert request(opener, "/api/v1/tasks", payload)["public_id"] == public_id
+    return {"ready_seconds": ready_seconds, "first_task_seconds": first_task_seconds,
+            "restart_readback_seconds": restart_seconds,
+            "backup_isolated_restore_seconds": time.monotonic() - backup_started,
+            "passed": True, "scope": "installed release, real Pi, synthetic model, isolated local state"}
 
 
 def main():
@@ -152,7 +181,7 @@ def main():
             thread = threading.Thread(target=model.serve_forever, daemon=True)
             thread.start()
             try:
-                run_smoke(local, model.server_port)
+                report = run_smoke(local, model.server_port)
             except Exception:
                 for log in sorted(local.glob("*.log")):
                     print(f"--- {log.name} ---", file=sys.stderr)
@@ -161,7 +190,7 @@ def main():
             finally:
                 model.shutdown()
                 thread.join()
-    print("Guided install smoke passed (real Pi task and graceful restart readback)")
+    print(json.dumps(report))
 
 
 if __name__ == "__main__":

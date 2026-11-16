@@ -130,7 +130,7 @@ jobs:
           .venv/bin/elephant doctor
           .venv/bin/elephant doctor --share-safe
           .venv/bin/python scripts/smoke_release.py
-          .venv/bin/python scripts/smoke_guided_install.py
+          .venv/bin/python scripts/smoke_guided_install.py | tee "$RUNNER_TEMP/first-task-linux.json"
       - name: Checksum release assets
         working-directory: dist
         run: sha256sum ./*.whl ./*.tar.gz REVISION > SHA256SUMS
@@ -163,15 +163,37 @@ jobs:
         run: |
           sha256sum --check SHA256SUMS
           test "$(cat REVISION)" = "$EXPECTED_SHA"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: installation-linux-results
+          path: |
+            ${{ runner.temp }}/first-task-linux.json
+            dist/REVISION
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
 
   install-systemd:
     name: Ubuntu systemd installation
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.release-artifact-id }}
+          path: ${{ runner.temp }}/release-assets
+      - name: Verify the shared release bundle
+        working-directory: ${{ runner.temp }}/release-assets
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          sha256sum --check SHA256SUMS
+          test "$(cat REVISION)" = "$EXPECTED_SHA"
       - name: Install without starting or enabling the daemon
         run: |
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted
@@ -184,7 +206,7 @@ jobs:
           sudo chmod go-w /opt
           test ! -e /opt/elephant
           sudo install -d -m 0755 /opt/elephant
-          git -c tar.umask=0022 archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
+          sudo tar --no-same-owner --strip-components=1 -xzf "$RUNNER_TEMP/release-assets/elephant-bot.tar.gz" -C /opt/elephant
           sudo /opt/elephant/install.sh --apply --system --install-pi
           test -z "$(sudo find -P /opt/elephant/node_modules -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
           test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
@@ -262,6 +284,20 @@ jobs:
           sudo systemctl start elephant.service
           wait_ready
           sudo systemctl stop elephant.service
+      - name: Complete a real Pi task through the installed service and restart
+        run: |
+          sudo env RUNNER_ENVIRONMENT=github-hosted /opt/elephant/.venv/bin/python -I -B \
+            /opt/elephant/scripts/smoke_systemd_install.py | tee "$RUNNER_TEMP/first-task-systemd.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: installation-systemd-results
+          path: |
+            ${{ runner.temp }}/first-task-systemd.json
+            ${{ runner.temp }}/release-assets/REVISION
+            ${{ runner.temp }}/release-assets/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
       - name: Print service diagnostics if the check failed
         if: ${{ failure() && runner.environment == 'github-hosted' }}
         run: |
@@ -271,6 +307,7 @@ jobs:
 
   install-macos:
     name: macOS installation (${{ matrix.arch }})
+    needs: build
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -291,9 +328,20 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: '0.11.8'
-      - name: Install from a clean source bundle
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.release-artifact-id }}
+          path: ${{ runner.temp }}/release-assets
+      - name: Verify the shared release bundle
+        working-directory: ${{ runner.temp }}/release-assets
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
-          git -c tar.umask=0022 archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          shasum -a 256 --check SHA256SUMS
+          test "$(cat REVISION)" = "$EXPECTED_SHA"
+      - name: Install from the verified release bundle
+        run: |
+          tar -xzf "$RUNNER_TEMP/release-assets/elephant-bot.tar.gz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/elephant-bot"
           ./install.sh --dry-run
           if command -v pi >/dev/null 2>&1; then
@@ -321,17 +369,77 @@ jobs:
           ./elephant doctor --share-safe
           .venv/bin/python -c 'from pilk_nogil import decode'
           .venv/bin/python scripts/smoke_release.py
-          .venv/bin/python scripts/smoke_guided_install.py
+          .venv/bin/python scripts/smoke_guided_install.py | tee "$RUNNER_TEMP/first-task-macos.json"
       - name: Reuse an existing compatible Pi without installing a second copy
         run: |
-          git -c tar.umask=0022 archive --format=tar --prefix=elephant-reuse/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/elephant-reuse"
+          tar --strip-components=1 -xzf "$RUNNER_TEMP/release-assets/elephant-bot.tar.gz" -C "$RUNNER_TEMP/elephant-reuse"
           export PATH="$RUNNER_TEMP/elephant-bot/node_modules/.bin:$PATH"
           cd "$RUNNER_TEMP/elephant-reuse"
           ./install.sh --apply
           test ! -e node_modules
           test ! -L node_modules
           .venv/bin/python -c 'import pathlib, shutil; from elephant.pi_installation import runtime_pi_path; assert pathlib.Path(runtime_pi_path("node_modules/.bin/pi")).resolve() == pathlib.Path(shutil.which("pi")).resolve()'
-          .venv/bin/python scripts/smoke_guided_install.py
+          .venv/bin/python scripts/smoke_guided_install.py | tee "$RUNNER_TEMP/first-task-macos-reuse.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: installation-${{ matrix.runner }}-results
+          path: |
+            ${{ runner.temp }}/first-task-macos.json
+            ${{ runner.temp }}/first-task-macos-reuse.json
+            ${{ runner.temp }}/release-assets/REVISION
+            ${{ runner.temp }}/release-assets/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  baseline:
+    name: Controlled runtime baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.11.8'
+          enable-cache: true
+      - run: uv sync --python "$(cat .python-version)"
+      - run: npm ci --ignore-scripts
+      - name: Record the baseline environment
+        run: |
+          mkdir -p test-results
+          {
+            git rev-parse HEAD
+            uname -a
+            uv run python --version
+            node --version
+            node_modules/.bin/pi --version
+          } > test-results/baseline-environment.log
+      - name: Repeat control-plane and SQLite contention workloads
+        run: |
+          for repeat in 1 2 3; do
+            uv run python scripts/benchmark_control_plane.py --seconds 60 --rate 50 --seed 18 \
+              --output "test-results/control-$repeat.json" > /dev/null
+            uv run python scripts/benchmark_control_plane.py --seconds 10 --rate 50 --seed 18 \
+              --writer-hold-ms 20 --output "test-results/contention-$repeat.json" > /dev/null
+          done
+      - name: Measure real Pi mixed load and native history
+        run: uv run python scripts/benchmark_runtime.py --output test-results/runtime-baseline.json
+      - name: Measure controlled OpenViking sync and recall
+        run: uv run python scripts/benchmark_memory.py --output test-results/memory-baseline.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: controlled-baseline-results
+          path: test-results/
+          if-no-files-found: error
+          retention-days: 90
 
   dialogue:
     name: DeepSeek dialogue

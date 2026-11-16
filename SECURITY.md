@@ -6,7 +6,7 @@
 
 ## 私密报告
 
-登录 GitHub 后访问本仓库的 [Security Advisories](https://github.com/HalfAnElephant/Elephant-Bot/security/advisories)。**如果页面显示 “Report a vulnerability”**，使用该入口私下联系维护者。此入口由仓库设置控制，单独有这份文件不代表已启用。参见 [GitHub 私密报告说明](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)。
+仓库已于 2026-11-16 启用 GitHub 私密漏洞报告，并通过仓库 API 读回确认。登录 GitHub 后，使用 [Report a vulnerability](https://github.com/HalfAnElephant/Elephant-Bot/security/advisories/new) 私下联系维护者。平台使用说明见 [GitHub 私密报告说明](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/report-privately)。
 
 如果入口不可见，请等维护者确认私密渠道。可以通过 [建议改进表单](https://github.com/HalfAnElephant/Elephant-Bot/issues/new?template=feature_request.yml) 只询问如何联系维护者；填“请告知私密安全报告渠道”即可，不要披露漏洞细节、受影响实例或日志。普通安装、配置或使用问题请走 [Issue 模板](https://github.com/HalfAnElephant/Elephant-Bot/issues/new/choose)。
 

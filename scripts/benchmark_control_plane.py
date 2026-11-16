@@ -3,13 +3,17 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import platform
 import random
 import resource
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -24,6 +28,112 @@ from elephant.storage.task_schema import tasks
 CONVERSATIONS = 20
 DUPLICATE_PERIOD = 10
 MAX_EVENTS = 1_000_000
+
+
+@contextmanager
+def sqlite_timings(db, latency):
+    """Time the real BEGIN IMMEDIATE, transaction body, and commit separately."""
+    transaction = db.transaction
+
+    @contextmanager
+    def measured():
+        before = time.perf_counter()
+        with transaction() as conn:
+            entered = time.perf_counter()
+            latency.setdefault("sqlite_begin_wait", []).append((entered - before) * 1000)
+            yield conn
+            commit = time.perf_counter()
+            latency.setdefault("sqlite_transaction_body", []).append((commit - entered) * 1000)
+        latency.setdefault("sqlite_commit", []).append((time.perf_counter() - commit) * 1000)
+
+    db.transaction = measured
+    try:
+        yield
+    finally:
+        db.transaction = transaction
+
+
+def process_tree_rss():
+    """Sample resident KiB for this Python process and its live descendants."""
+    with subprocess.Popen(["ps", "-axo", "pid=,ppid=,rss="], stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True) as process:
+        try:
+            output, error = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+        if process.returncode:
+            raise RuntimeError("cannot sample process-tree RSS: " + error)
+        processes = [tuple(map(int, row.split())) for row in output.splitlines()]
+    descendants = {os.getpid()}
+    while True:
+        children = {pid for pid, parent, _ in processes if parent in descendants}
+        if children <= descendants:
+            break
+        descendants.update(children)
+    return sum(rss for pid, _, rss in processes if pid in descendants and pid != process.pid)
+
+
+async def sample_runtime(latency, samples):
+    """Keep loop delay separate from the slower process-tree sampler."""
+    async def rss():
+        while True:
+            samples.append(await asyncio.to_thread(process_tree_rss))
+            await asyncio.sleep(.5)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + .02
+    sampler = asyncio.create_task(rss())
+    try:
+        while True:
+            await asyncio.sleep(max(0, deadline - loop.time()))
+            now = loop.time()
+            latency.setdefault("event_loop_lag", []).append(max(0, now - deadline) * 1000)
+            deadline = now + .02
+            if sampler.done():
+                sampler.result()
+    finally:
+        sampler.cancel()
+        await asyncio.gather(sampler, return_exceptions=True)
+
+
+@contextmanager
+def competing_writer(path, hold_ms):
+    """A separate SQLite connection holds a real writer lock in a bounded thread."""
+    stopped, ready = threading.Event(), threading.Event()
+    failures = []
+
+    def write():
+        try:
+            with sqlite3.connect(path, timeout=5) as conn:
+                while not stopped.is_set():
+                    conn.execute("BEGIN IMMEDIATE")
+                    ready.set()
+                    stopped.wait(hold_ms / 1000)
+                    conn.commit()
+                    stopped.wait(.1)
+        except Exception as error:  # noqa: BLE001 -- report the thread failure in the benchmark process.
+            failures.append(error)
+            ready.set()
+
+    thread = threading.Thread(target=write, name="benchmark-sqlite-writer")
+    if hold_ms:
+        thread.start()
+        if not ready.wait(6):
+            stopped.set()
+            thread.join()
+            raise RuntimeError("competing SQLite writer did not start")
+    try:
+        yield
+    finally:
+        stopped.set()
+        if hold_ms:
+            thread.join(timeout=6)
+            if thread.is_alive():
+                raise RuntimeError("competing SQLite writer did not stop")
+            if failures:
+                raise RuntimeError("competing SQLite writer failed") from failures[0]
 
 
 def positive_int(raw):
@@ -78,6 +188,8 @@ async def benchmark(args):
     counters = {"accepted": 0, "duplicates_attempted": 0, "duplicates_rejected": 0, "tasks_admitted": 0,
                     "tasks_queried": 0, "tasks_cancelled": 0, "network_attempts": 0}
     rss = []
+    tree_rss = []
+    cpu_before = time.process_time()
 
     def offline(_request):
         counters["network_attempts"] += 1
@@ -102,6 +214,8 @@ async def benchmark(args):
                 official_client=qq_client, model_client=model_client)
             core = app.state.core
             adapter = core.adapters[config.instance_id]
+            with core.db.engine.connect() as connection:
+                journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
             started = time.monotonic()
 
             async def consume():
@@ -113,54 +227,63 @@ async def benchmark(args):
 
             # Never start Scheduler, Worker, adapter listener, or QQ delivery.
             consumer = asyncio.create_task(consume())
+            sampler = asyncio.create_task(sample_runtime(latency, tree_rss))
             try:
-                for index in range(total):
-                    deadline = started + index / args.rate
-                    await asyncio.sleep(max(0, deadline - time.monotonic()))
-                    if consumer.done():
-                        consumer.result()
-                    latency["ingress_lag"].append(max(0, time.monotonic() - deadline) * 1000)
-                    payload = official_fixture(index, rng.randrange(4), clock.now())
-                    event = measure("normalization", adapter.normalize, payload)
-                    accepted, fresh = measure("ingress", core.inbox.accept, event)
-                    counters["accepted"] += int(fresh)
-                    if index % DUPLICATE_PERIOD == 0:
-                        counters["duplicates_attempted"] += 1
-                        _, duplicate_fresh = measure("duplicate", core.inbox.accept, event)
-                        counters["duplicates_rejected"] += int(not duplicate_fresh)
-                    if index % args.rate == 0:
-                        access = core.access(event)
-                        task = measure("task_accept", core.tasks.accept, accepted, access,
-                            "Offline control-plane task admission")
-                        counters["tasks_admitted"] += 1
-                        result = measure("task_query", core.tasks.get, task["public_id"], access)
-                        counters["tasks_queried"] += int(result["id"] == task["id"])
-                        cancelled = measure("task_cancel", core.tasks.cancel, task["public_id"], access)
-                        counters["tasks_cancelled"] += int(cancelled["state"] == "CANCELLED")
-                    if index % (args.rate * 30) == 0:
-                        rss.append({"elapsed_s": round(time.monotonic() - started, 4),
-                            "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss})
-                drain_start = time.monotonic()
-                while True:
-                    if consumer.done():
-                        consumer.result()
-                    if not core.inbox.pending(limit=1):
-                        timed_out = False
-                        break
-                    left = args.drain_timeout - (time.monotonic() - drain_start)
-                    if left <= 0:
-                        timed_out = True
-                        break
-                    await asyncio.sleep(min(.05, left))
-                elapsed = time.monotonic() - started
-                drain_elapsed = time.monotonic() - drain_start
-                with core.db.engine.connect() as connection:
-                    states = dict(connection.execute(select(inbox.c.state, func.count()).group_by(inbox.c.state)).all())
-                    task_states = dict(connection.execute(
-                        select(tasks.c.state, func.count()).group_by(tasks.c.state)).all())
+                with sqlite_timings(core.db, latency), competing_writer(core.db.path, args.writer_hold_ms):
+                    for index in range(total):
+                        deadline = started + index / args.rate
+                        await asyncio.sleep(max(0, deadline - time.monotonic()))
+                        if consumer.done():
+                            consumer.result()
+                        if sampler.done():
+                            sampler.result()
+                        latency["ingress_lag"].append(max(0, time.monotonic() - deadline) * 1000)
+                        payload = official_fixture(index, rng.randrange(4), clock.now())
+                        event = measure("normalization", adapter.normalize, payload)
+                        accepted, fresh = measure("ingress", core.inbox.accept, event)
+                        counters["accepted"] += int(fresh)
+                        if index % DUPLICATE_PERIOD == 0:
+                            counters["duplicates_attempted"] += 1
+                            _, duplicate_fresh = measure("duplicate", core.inbox.accept, event)
+                            counters["duplicates_rejected"] += int(not duplicate_fresh)
+                        if index % args.rate == 0:
+                            access = core.access(event)
+                            task = measure("task_accept", core.tasks.accept, accepted, access,
+                                "Offline control-plane task admission")
+                            counters["tasks_admitted"] += 1
+                            result = measure("task_query", core.tasks.get, task["public_id"], access)
+                            counters["tasks_queried"] += int(result["id"] == task["id"])
+                            cancelled = measure("task_cancel", core.tasks.cancel, task["public_id"], access)
+                            counters["tasks_cancelled"] += int(cancelled["state"] == "CANCELLED")
+                        if index % (args.rate * 30) == 0:
+                            rss.append({"elapsed_s": round(time.monotonic() - started, 4),
+                                "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss})
+                    drain_start = time.monotonic()
+                    while True:
+                        if consumer.done():
+                            consumer.result()
+                        if sampler.done():
+                            sampler.result()
+                        if not core.inbox.pending(limit=1):
+                            timed_out = False
+                            break
+                        left = args.drain_timeout - (time.monotonic() - drain_start)
+                        if left <= 0:
+                            timed_out = True
+                            break
+                        await asyncio.sleep(min(.05, left))
+                    elapsed = time.monotonic() - started
+                    drain_elapsed = time.monotonic() - drain_start
+                    with core.db.engine.connect() as connection:
+                        states = dict(connection.execute(select(inbox.c.state, func.count()).group_by(inbox.c.state)).all())
+                        task_states = dict(connection.execute(
+                            select(tasks.c.state, func.count()).group_by(tasks.c.state)).all())
+                        checkpoint = list(connection.exec_driver_sql("PRAGMA wal_checkpoint(PASSIVE)").one())
             finally:
                 consumer.cancel()
                 await asyncio.gather(consumer, return_exceptions=True)
+                sampler.cancel()
+                await asyncio.gather(sampler, return_exceptions=True)
                 try:
                     await core.stop()
                 finally:
@@ -174,7 +297,12 @@ async def benchmark(args):
     result = {
         "report_version": 2, "scope": "QQ Official synthetic control plane, real local SQLite/Core/TaskService; no model/QQ/Pi",
         "git_commit": git_commit, "git_dirty": git_dirty, "seed": args.seed,
+        "recorded_at": datetime.now(UTC).isoformat(), "cpu_count": os.cpu_count(),
+        "cpu_self_seconds": round(time.process_time() - cpu_before, 4),
+        "process_tree_peak_rss_kib": max(tree_rss, default=None),
+        "writer_hold_ms": args.writer_hold_ms, "prewarm_events": 0,
         "machine": platform.platform(), "python": platform.python_version(), "sqlite": sqlite3.sqlite_version,
+        "sqlite_journal_mode": journal_mode, "wal_checkpoint": checkpoint,
         "events": total, "conversations": min(CONVERSATIONS, total), "rate_per_second": args.rate,
         "scheduled_duration_seconds": args.seconds, "elapsed_seconds": round(elapsed, 4),
         "inbox_states": states, "task_states": task_states, "counters": counters, "latency_ms": timing,
@@ -197,6 +325,8 @@ def main(argv=None):
     parser.add_argument("--rate", type=positive_int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--drain-timeout", type=positive_float, default=30)
+    parser.add_argument("--writer-hold-ms", type=positive_float, default=0,
+                        help="hold a competing SQLite writer lock for this many ms every 100 ms")
     parser.add_argument("--output", type=Path, help="write to a new JSON file (exclusive); stdout is always emitted")
     args = parser.parse_args(argv)
     if args.seconds * args.rate > MAX_EVENTS:
