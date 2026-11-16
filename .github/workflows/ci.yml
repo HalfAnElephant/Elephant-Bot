@@ -237,6 +237,7 @@ jobs:
         run: |
           systemctl status elephant.service --no-pager || true
           sudo journalctl -u elephant.service --no-pager -n 100
+          sudo namei -l /opt/elephant/node_modules/.bin/pi /opt/elephant-node/bin/node || true
 
   install-macos:
     name: macOS installation (${{ matrix.arch }})

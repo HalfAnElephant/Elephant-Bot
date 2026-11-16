@@ -22,24 +22,25 @@ elephant_pi_version() (
     candidate=$1
     expected=$2
     scope=$3
-    case "$candidate" in /*) ;; *) exit 1 ;; esac
-    [ -f "$candidate" ] && [ -x "$candidate" ] || exit 1
-    node_path=$(command -v node) || exit 1
-    case "$node_path" in /*) ;; *) exit 1 ;; esac
+    case "$candidate" in /*) ;; *) exit 10 ;; esac
+    [ -f "$candidate" ] && [ -x "$candidate" ] || exit 10
+    node_path=$(command -v node) || exit 11
+    case "$node_path" in /*) ;; *) exit 11 ;; esac
     # Match the daemon's Pi RPC process environment, not arbitrary interactive
     # shell directories. The selected native Node is the first runtime entry.
     probe_path=${node_path%/*}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin
     if [ "$scope" = system ]; then
-        elephant_pi_root_path "$candidate" || exit 1
-        candidate=$(realpath -e -- "$candidate") || exit 1
-        runuser -u elephant -g elephant-worker -- /usr/bin/test -x "$candidate" || exit 1
-        probe_home=$(mktemp -d /run/elephant-pi-probe.XXXXXX) || exit 1
+        elephant_pi_root_path "$candidate" || exit 12
+        candidate=$(realpath -e -- "$candidate") || exit 12
+        runuser -u elephant -g elephant-worker -- /usr/bin/test -x "$candidate" || exit 13
+        runuser -u elephant -g elephant-worker -- /usr/bin/test -r "$candidate" || exit 13
+        probe_home=$(mktemp -d /run/elephant-pi-probe.XXXXXX) || exit 14
     else
-        probe_home=$(mktemp -d) || exit 1
+        probe_home=$(mktemp -d) || exit 14
     fi
     trap 'rm -rf -- "$probe_home"' EXIT
     if [ "$scope" = system ]; then
-        chown elephant:elephant-worker "$probe_home" || exit 1
+        chown elephant:elephant-worker "$probe_home" || exit 14
         set -- runuser -u elephant -g elephant-worker --
     else
         set --
@@ -54,24 +55,41 @@ const [executable, expected] = process.argv.slice(1);
 const options = { timeout: 5000, maxBuffer: 32768, killSignal: "SIGKILL",
   stdio: ["pipe", "pipe", "ignore"], cwd: process.env.HOME, encoding: "utf-8" };
 const version = spawnSync(executable, ["--offline", "--version"], options);
-if (version.error || version.status !== 0 || version.stdout.trim() !== expected) process.exit(1);
+if (version.error || version.status !== 0) process.exit(21);
+if (version.stdout.trim() !== expected) process.exit(22);
 const request = { id: "elephant-install-check", type: "get_state" };
 const flags = ["--offline", "--no-tools", "--no-extensions", "--no-mcp", "--no-skills",
   "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--mode", "rpc"];
 const rpc = spawnSync(executable, flags, {
   ...options, input: JSON.stringify(request) + "\n",
 });
-if (rpc.error || rpc.status !== 0) process.exit(1);
+if (rpc.error || rpc.status !== 0) process.exit(23);
 try {
   const response = rpc.stdout.split("\n").filter(Boolean).map(JSON.parse)
     .find(value => value.id === request.id && value.type === "response" &&
       value.command === request.type && value.success === true && value.data &&
       Object.hasOwn(value.data, "isStreaming"));
-  process.exit(response ? 0 : 1);
-} catch { process.exit(1); }
+  process.exit(response ? 0 : 24);
+} catch { process.exit(24); }
 ' "$candidate" "$expected" </dev/null >/dev/null 2>&1
 
 )
+
+elephant_pi_probe_reason() {
+    case "$1" in
+        10) reason='未找到可执行文件' ;;
+        11) reason='未找到 Node.js' ;;
+        12) reason='安装路径不满足系统权限要求' ;;
+        13) reason='服务账号无法读取或执行 Pi' ;;
+        14) reason='无法准备临时检查目录' ;;
+        21) reason='离线版本命令未能执行' ;;
+        22) reason='版本与锁定版本不一致' ;;
+        23) reason='离线 RPC 未启动' ;;
+        24) reason='离线 RPC 响应不兼容' ;;
+        *) reason='无法以运行账号启动检查进程' ;;
+    esac
+    printf 'Pi 检查：%s。\n' "$reason" >&2
+}
 
 elephant_pi_write_marker() (
     path=$1/.elephant-pi
@@ -156,6 +174,7 @@ elephant_prepare_pi() (
         npm ci --ignore-scripts --no-audit --no-fund || exit 1
     fi
     elephant_pi_version "$base/node_modules/.bin/pi" "$expected" "$scope" || {
+        elephant_pi_probe_reason "$?"
         printf '%s\n' '未生成锁定版本的可执行 Pi，安装未完成。' >&2
         exit 1
     }
