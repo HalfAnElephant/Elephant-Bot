@@ -1,0 +1,61 @@
+"""The opt-in live evaluator's account setup uses only the local protected Mail API."""
+import base64
+import importlib.util
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI, Header, HTTPException
+from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
+
+from qqbot.admin.mail import build_mail_router
+
+
+def evaluator():
+    path = Path(__file__).resolve().parents[1] / "evals" / "dialogue_live.py"
+    loader = importlib.util.spec_from_file_location("dialogue_live_for_test", path)
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_synthetic_mail_account_credentials_are_prepared_and_reused(
+        control_runtime, monkeypatch, enabled):
+    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY", base64.b64encode(b"r" * 32).decode())
+    core = control_runtime.core
+    service = core.mail.accounts
+    event = control_runtime.event("configure fake mailbox")
+    account = service.invoke(event, "personal", "create", {
+        "account_id": "weekly-demo",
+        "spec": {"provider": "qq", "address": "fake@example.test"},
+        "enabled": enabled,
+    })
+    assert account["enabled"] is enabled
+    assert not account["ready"]
+    assert account["credential_ref"] is None
+    observed = []
+    original_save = service.set_credential
+
+    def record_save(identifier, secret, *, expected_revision):
+        result = original_save(identifier, secret, expected_revision=expected_revision)
+        observed.append((result["enabled"], result["ready"], result["revision"]))
+        return result
+
+    monkeypatch.setattr(service, "set_credential", record_save)
+
+    def authenticate(authorization: str | None = Header(default=None)):
+        if authorization != "Bearer synthetic-mail-admin":
+            raise HTTPException(401)
+
+    app = FastAPI()
+    app.include_router(build_mail_router(core, authenticate))
+    module = evaluator()
+    prepared = await module.prepare_synthetic_mail_account(app, account)
+    assert observed == [(enabled, enabled, account["revision"] + 1)]
+    assert prepared["ready"] and prepared["enabled"] and prepared["credential_ref"]
+    assert prepared["revision"] == account["revision"] + (1 if enabled else 2)
+    assert service.view(service.admin_row(account["id"])) == prepared
+
+    reused = await module.prepare_synthetic_mail_account(app, prepared)
+    assert reused == prepared
+    assert len(observed) == 1
