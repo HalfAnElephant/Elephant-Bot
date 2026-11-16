@@ -106,6 +106,78 @@ elephant_pi_write_marker() (
     mv -f -- "$temp" "$path"
 )
 
+# System npm can publish bin-link directories with permissive modes even
+# under umask 077. Never run it directly in the daemon-readable install.
+elephant_install_private_system_pi() (
+    base=$1
+    expected=$2
+    target=$base/node_modules
+    parent=${base%/*}
+    umask 077
+    stage=$(mktemp -d -- "$parent/.elephant-pi-stage.XXXXXX") || exit 1
+    keep_stage=no
+    trap '[ "$keep_stage" = yes ] || rm -rf -- "$stage"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # Reject separate /opt and application filesystems before provisioning.
+    [ "$(stat -c %d -- "$stage")" = "$(stat -c %d -- "$base")" ] || {
+        printf '%s\n' 'Pi 暂存目录与安装目录不在同一文件系统，未替换运行环境。' >&2
+        exit 1
+    }
+
+    cp -- "$base/package.json" "$base/package-lock.json" "$stage/" || exit 1
+    (
+        cd -- "$stage" || exit 1
+        env -i PATH="$PATH" HOME=/root npm ci --ignore-scripts --no-audit --no-fund
+    ) || exit 1
+    new=$stage/node_modules
+    [ -d "$new" ] && [ ! -L "$new" ] || exit 1
+    foreign=$(find -P "$new" -xdev ! -user root -print -quit) || exit 1
+    [ -z "$foreign" ] || {
+        printf '%s\n' 'Pi 暂存依赖不是 root 所有，未替换运行环境。' >&2
+        exit 1
+    }
+    chmod -R go-w,a+rX -- "$new" || exit 1
+
+    # Allow traversal (not listing) only after sanitizing the tree, so the
+    # normal validation still executes as elephant, not as the installer.
+    chmod 0711 -- "$stage" || exit 1
+    elephant_pi_version "$new/.bin/pi" "$expected" system || {
+        elephant_pi_probe_reason "$?"
+        printf '%s\n' '未生成锁定版本的可执行 Pi，安装未完成。' >&2
+        exit 1
+    }
+
+    [ ! -L "$target" ] && { [ ! -e "$target" ] || [ -d "$target" ]; } || exit 1
+    previous=$stage/previous
+    if [ -d "$target" ]; then
+        # Don't make a retired runtime readable through the staging path.
+        mkdir -m 0700 -- "$previous" || exit 1
+        keep_stage=yes
+        mv -T -- "$target" "$previous/node_modules" || exit 1
+    fi
+    if ! mv -T -- "$new" "$target"; then
+        if [ -d "$previous/node_modules" ]; then
+            mv -T -- "$previous/node_modules" "$target" || {
+                printf '旧 Pi 目录保存在 %s。\n' "$previous/node_modules" >&2
+                exit 1
+            }
+        fi
+        keep_stage=no
+        exit 1
+    fi
+    if ! elephant_pi_write_marker "$base" bundled system; then
+        if ! mv -T -- "$target" "$new" ||
+            { [ -d "$previous/node_modules" ] && ! mv -T -- "$previous/node_modules" "$target"; }; then
+            printf '无法恢复原 Pi 目录，请检查 %s。\n' "$stage" >&2
+            exit 1
+        fi
+        keep_stage=no
+        exit 1
+    fi
+    keep_stage=no
+)
+
 elephant_prepare_pi() (
     base=$1
     allow_pi=$2
@@ -168,11 +240,10 @@ elephant_prepare_pi() (
     fi
     printf '正在安装 Elephant 私有的 Pi %s…\n' "$expected"
     if [ "$scope" = system ]; then
-        env -i PATH="$PATH" HOME=/root npm ci --ignore-scripts --no-audit --no-fund || exit 1
-        chmod -R a+rX "$base/node_modules" || exit 1
-    else
-        npm ci --ignore-scripts --no-audit --no-fund || exit 1
+        elephant_install_private_system_pi "$base" "$expected"
+        exit $?
     fi
+    npm ci --ignore-scripts --no-audit --no-fund || exit 1
     elephant_pi_version "$base/node_modules/.bin/pi" "$expected" "$scope" || {
         elephant_pi_probe_reason "$?"
         printf '%s\n' '未生成锁定版本的可执行 Pi，安装未完成。' >&2

@@ -186,6 +186,7 @@ jobs:
           sudo install -d -m 0755 /opt/elephant
           git -c tar.umask=0022 archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
           sudo /opt/elephant/install.sh --apply --system --install-pi
+          test -z "$(sudo find -P /opt/elephant/node_modules -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
           test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
           test "$(systemctl is-enabled elephant.service || true)" = disabled
           cd /opt/elephant

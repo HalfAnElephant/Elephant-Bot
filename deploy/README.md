@@ -125,6 +125,14 @@ cannot load the configuration, it stops before changing the unit. The kernel
 interface check does not prove the live service has delegation; verify that on
 the deployment host before enabling isolated host tools.
 
+Private Pi dependencies are prepared in a root-only staging directory and
+published only after permissions are tightened and the service-account check
+passes. The staging and install directories must share a filesystem so
+publication can use a rename. If a previous install left dependencies writable by
+other users, do not make that tree trusted by changing its permissions. With
+the service stopped, have an administrator move the old dependency tree aside
+and provision again from the verified release.
+
 Keep the service stopped throughout the upgrade. Do not start it manually or
 through external automation until the installer exits. The installer checks
 the service state again before writing the runtime and unit. An interrupted
