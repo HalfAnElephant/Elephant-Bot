@@ -17,6 +17,20 @@ from alembic.script import ScriptDirectory
 from qqbot.config import Settings, load_runtime_settings, load_settings
 
 
+def deprecated_quota_warnings(settings: Settings) -> list[str]:
+    fields = {
+        "execution": ("max_active", "sustained_limit"),
+        "orchestration": ("pending_inputs_per_owner", "pending_root_tasks_per_owner",
+                          "child_parallelism", "max_task_depth", "max_nodes_per_root"),
+    }
+    return [
+        f"{section}.{field} is deprecated and no longer enforces a quota; remove it from the startup YAML. "
+        "Use orchestration.model_request_limit for model concurrency and execution budgets for task limits."
+        for section, names in fields.items()
+        for field in names if field in getattr(settings, section).model_fields_set
+    ]
+
+
 def configuration_warnings(settings):
     warnings = []
     if not settings.model.endpoint or not settings.model.model:
@@ -77,6 +91,9 @@ def main():
     args = parser.parse_args()
     startup_settings = load_settings(args.config)
     settings = load_runtime_settings(startup_settings)
+    # Persisted runtime snapshots materialize defaults, which do not prove an
+    # operator supplied a legacy setting. Warn from the startup YAML only.
+    legacy_warnings = deprecated_quota_warnings(startup_settings)
     if args.command in {"backup", "restore", "export-deletions"}:
         from qqbot.storage.operations import backup, export_deletions, restore
 
@@ -95,7 +112,7 @@ def main():
         print(json.dumps(Settings.model_json_schema(), ensure_ascii=False, indent=2))
     elif args.command == "validate":
         print("configuration valid")
-        for warning in configuration_warnings(settings):
+        for warning in configuration_warnings(settings) + legacy_warnings:
             print("warning: " + warning, file=sys.stderr)
     elif args.command == "migrate":
         migrate(settings.database)
@@ -112,7 +129,7 @@ def main():
             "pi": shutil.which(settings.orchestration.pi_executable),
             "ffmpeg": shutil.which("ffmpeg"),
         }
-        warnings = configuration_warnings(settings)
+        warnings = configuration_warnings(settings) + legacy_warnings
         warnings.extend(f"Executable {name} was not found; install it or correct its configured path."
                         for name, path in dependencies.items() if path is None)
         print(
@@ -132,6 +149,8 @@ def main():
 
         from qqbot.app import create_app
 
+        for warning in legacy_warnings:
+            print("warning: " + warning, file=sys.stderr)
         Path(settings.database).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock = os.open(settings.database + ".core.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:

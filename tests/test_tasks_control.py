@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from conftest import runtime_client_for
 from sqlalchemy import select, update
 
 from qqbot.clock import FakeClock
@@ -142,38 +143,30 @@ def test_fair_conversation_rotation(setup):
 
 
 @pytest.mark.asyncio
-async def test_internal_worker_http_contract(setup):
-    import httpx
-    from fastapi import FastAPI
-
-    from qqbot.jobs.api import internal_router
-
+async def test_in_process_worker_claim_and_result_contract(setup):
     service, event, access, _clock = setup
     service.accept(event, access, "work")
-    app = FastAPI()
-    app.include_router(internal_router(service, "a" * 32))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core") as client:
-        assert (await client.post("/internal/tasks/claim", json={"worker_id": "w"})).status_code == 401
-        client.headers["Authorization"] = "Bearer " + "a" * 32
-        assert (await client.post("/internal/tasks/claim", json={"worker_id": "w"})).json() is None
-        claim = (
-            await client.post("/internal/tasks/claim", json={"worker_id": "w", "protocol_version": 2})
-        ).json()
-        payload = {
-            "worker_id": "w",
-            "run_id": claim["run_id"],
-            "fencing_token": claim["fencing_token"],
-            "result": {
-                "status": "failed",
-                "summary": "offline failure",
-                "artifacts": [],
-                "evidence": [],
-                "limitations": ["offline"],
-            },
-        }
-        response = await client.post("/internal/tasks/result", json=payload)
-        assert response.status_code == 200
-        assert response.json()["state"] == "FAILED"
+    assert service.claim("w", protocol_version=1) is None
+    client = runtime_client_for(service)
+    claim_response = await client.post("/internal/tasks/claim", json={"worker_id": "w", "protocol_version": 2})
+    claim_response.raise_for_status()
+    claim = claim_response.json()
+    assert claim is not None
+    payload = {
+        "worker_id": "w",
+        "run_id": claim["run_id"],
+        "fencing_token": claim["fencing_token"],
+        "result": {
+            "status": "failed",
+            "summary": "offline failure",
+            "artifacts": [],
+            "evidence": [],
+            "limitations": ["offline"],
+        },
+    }
+    response = await client.post("/internal/tasks/result", json=payload)
+    assert response.status_code == 200
+    assert response.json()["state"] == "FAILED"
 
 
 def test_reconcile_requires_stop_proof_and_new_ownership(setup):
@@ -201,17 +194,13 @@ async def test_worker_lost_result_response_replays_without_model(setup, tmp_path
     import asyncio
 
     import httpx
-    from fastapi import FastAPI
 
     from qqbot.domain.tasks import TaskResult
-    from qqbot.jobs.api import internal_router
     from qqbot.jobs.worker import Spool, Worker
     from qqbot.storage.task_schema import events
 
     service, event, access, _clock = setup
     service.accept(event, access, "work")
-    app = FastAPI()
-    app.include_router(internal_router(service, "a" * 32))
     starts = []
 
     class FakeHarness:
@@ -228,28 +217,24 @@ async def test_worker_lost_result_response_replays_without_model(setup, tmp_path
         async def stop(self):
             return True
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://core",
-        headers={"Authorization": "Bearer " + "a" * 32},
-    ) as client:
+    client = runtime_client_for(service)
 
-        class LoseFirstResponse:
-            lost = False
+    class LoseFirstResponse:
+        lost = False
 
-            async def post(self, path, **kwargs):
-                response = await client.post(path, **kwargs)
-                if path.endswith("/result") and not self.lost:
-                    self.lost = True
-                    raise httpx.ReadTimeout("lost acknowledgement")
-                return response
+        async def post(self, path, **kwargs):
+            response = await client.post(path, **kwargs)
+            if path.endswith("/result") and not self.lost:
+                self.lost = True
+                raise httpx.ReadTimeout("lost acknowledgement")
+            return response
 
-        worker = Worker(LoseFirstResponse(), "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
-        with pytest.raises(httpx.ReadTimeout):
-            await worker.once()
-        assert list(worker.spool.directory.glob("*.json"))
-        assert not await worker.once()
-        assert not list(worker.spool.directory.glob("*.json"))
+    worker = Worker(LoseFirstResponse(), "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
+    with pytest.raises(httpx.ReadTimeout):
+        await worker.once()
+    assert list(worker.spool.directory.glob("*.json"))
+    assert not await worker.once()
+    assert not list(worker.spool.directory.glob("*.json"))
     assert len(starts) == 1
     with service.db.engine.connect() as c:
         assert len(c.execute(select(events)).all()) == 2
@@ -257,17 +242,11 @@ async def test_worker_lost_result_response_replays_without_model(setup, tmp_path
 
 @pytest.mark.asyncio
 async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
-    import httpx
-    from fastapi import FastAPI
-
     from qqbot.domain.tasks import TaskResult
-    from qqbot.jobs.api import internal_router
     from qqbot.jobs.worker import Spool, Worker
 
     service, event, access, _clock = setup
     task = service.accept(event, access, "work")
-    app = FastAPI()
-    app.include_router(internal_router(service, "a" * 32))
 
     class FakeHarness:
         stopped_verified = True
@@ -279,14 +258,10 @@ async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
         async def stop(self):
             return True
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://core",
-        headers={"Authorization": "Bearer " + "a" * 32},
-    ) as client:
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
-        assert await worker.once()
-        assert not list(worker.spool.directory.rglob("*.json"))
+    client = runtime_client_for(service)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
+    assert await worker.once()
+    assert not list(worker.spool.directory.rglob("*.json"))
     assert service.get(task["public_id"], access)["state"] == "CANCELLED"
     with service.db.engine.connect() as c:
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0
@@ -297,16 +272,10 @@ async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
 async def test_supervisor_cancellation_stops_and_commits_failure(setup, tmp_path):
     import asyncio
 
-    import httpx
-    from fastapi import FastAPI
-
-    from qqbot.jobs.api import internal_router
     from qqbot.jobs.worker import Spool, Worker
 
     service, event, access, _clock = setup
     task = service.accept(event, access, "work")
-    app = FastAPI()
-    app.include_router(internal_router(service, "a" * 32))
     started = asyncio.Event()
 
     class FakeHarness:
@@ -320,18 +289,14 @@ async def test_supervisor_cancellation_stops_and_commits_failure(setup, tmp_path
             self.stopped_verified = True
             return True
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://core",
-        headers={"Authorization": "Bearer " + "a" * 32},
-    ) as client:
-        worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
-        execution = asyncio.create_task(worker.once())
-        await started.wait()
-        execution.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await execution
-        assert not list(worker.spool.directory.rglob("*.json"))
+    client = runtime_client_for(service)
+    worker = Worker(client, "w", Spool(tmp_path / "spool"), lambda claim: FakeHarness())
+    execution = asyncio.create_task(worker.once())
+    await started.wait()
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    assert not list(worker.spool.directory.rglob("*.json"))
     assert service.get(task["public_id"], access)["state"] == "QUEUED"
     with service.db.engine.connect() as c:
         assert c.execute(select(runs.c.slot_reserved)).scalar_one() == 0

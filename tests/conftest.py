@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from qqbot.cli import migrate
@@ -5,6 +7,21 @@ from qqbot.clock import FakeClock
 from qqbot.config import AdapterConfig
 from qqbot.ingress.service import Inbox
 from qqbot.storage.db import Database
+
+
+def runtime_client_for(service):
+    """Exercise the production in-process transport over a standalone TaskService.
+
+    These fixtures intentionally have no Leader queue or learned-memory backend.
+    Tests of those behaviors construct the real Core instead.
+    """
+    from qqbot.runtime.scheduler import RuntimeClient
+
+    core = SimpleNamespace(tasks=service, knowledge=SimpleNamespace(recover_mutations=lambda: None),
+                           recovery=SimpleNamespace(epoch=""))
+    leader = SimpleNamespace(sessions=SimpleNamespace(claim=lambda _worker_id: None),
+                             claim_review=lambda _worker_id: None, observe_operation=lambda *_args: None)
+    return RuntimeClient(core, leader)
 
 
 @pytest.fixture

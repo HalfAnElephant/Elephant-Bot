@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from conftest import runtime_client_for
 from sqlalchemy import insert, select, update
 
 from qqbot.adapters.qq_official.adapter import OfficialAdapter
@@ -250,10 +251,7 @@ async def test_locked_pi_worker_to_native_qq_final_without_duplicate(stream_setu
     """Real locked Pi RPC -> durable worker spool -> TaskService -> QQ mock API."""
     from pathlib import Path
 
-    from fastapi import FastAPI
-
     from qqbot.harness.pool import SessionPool
-    from qqbot.jobs.api import internal_router
     from qqbot.jobs.worker import GeneralRun, Spool, Worker
     from qqbot.providers import ModelCapacity
     from qqbot.storage.task_schema import events, runs, tasks
@@ -276,35 +274,31 @@ async def test_locked_pi_worker_to_native_qq_final_without_duplicate(stream_setu
     def upstream(request):
         return httpx.Response(200, headers={"content-type": "text/event-stream"},
             text="data: " + json.dumps(event) + "\n\ndata: " + json.dumps(end) + "\n\ndata: [DONE]\n\n")
-    app = FastAPI()
-    app.include_router(internal_router(s.service, "t" * 32))
+    client = runtime_client_for(s.service)
     args = SimpleNamespace(workspace=str(tmp_path / "workers"), archive=str(tmp_path / "artifacts"),
         pi=str(pi), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="worker")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-        headers={"Authorization": "Bearer " + "t" * 32}) as client:
-        def factory(claim, process_id, session_id):
-            runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
-            runner.gateway.transport = httpx.MockTransport(upstream)
-            return runner
-        pool = SessionPool(factory)
-        worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        try:
-            assert await worker.once()
-            with s.core.db.engine.connect() as c:
-                assert c.execute(select(tasks.c.state)).scalar_one() == "SUCCEEDED"
-                payloads = [json.loads(v) for v in c.execute(select(events.c.payload)).scalars()]
-                assert any(v.get("kind") == "public_answer_final" for v in payloads)
-            assert states(s) == ["STREAM_PENDING"]
-            await s.bridge.dispatch_once()
-            assert states(s) == ["SENT"]
-            assert s.calls[-1]["content_raw"] == response_text and s.calls[-1]["input_state"] == 10
-            count = len(s.calls)
-            await s.bridge.dispatch_once()
-            assert len(s.calls) == count
-        finally:
-            await pool.close()
-            await s.client.aclose()
-
+    def factory(claim, process_id, session_id):
+        runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
+        runner.gateway.transport = httpx.MockTransport(upstream)
+        return runner
+    pool = SessionPool(factory)
+    worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    try:
+        assert await worker.once()
+        with s.core.db.engine.connect() as c:
+            assert c.execute(select(tasks.c.state)).scalar_one() == "SUCCEEDED"
+            payloads = [json.loads(v) for v in c.execute(select(events.c.payload)).scalars()]
+            assert any(v.get("kind") == "public_answer_final" for v in payloads)
+        assert states(s) == ["STREAM_PENDING"]
+        await s.bridge.dispatch_once()
+        assert states(s) == ["SENT"]
+        assert s.calls[-1]["content_raw"] == response_text and s.calls[-1]["input_state"] == 10
+        count = len(s.calls)
+        await s.bridge.dispatch_once()
+        assert len(s.calls) == count
+    finally:
+        await pool.close()
+        await s.client.aclose()
 
 @pytest.mark.parametrize("pending_chars", [0, 1])
 async def test_persisted_server_pending_length_does_not_limit_updates(stream_setup, pending_chars):

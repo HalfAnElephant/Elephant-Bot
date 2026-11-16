@@ -91,3 +91,16 @@ def test_environment_template_includes_onboarding_key():
                   if line and not line.startswith("#"))
     assert {"QQBOT_ADMIN_TOKEN", "QQBOT_MODEL_KEY", "QQBOT_CREDENTIAL_KEY"} <= values.keys()
     assert all(not value for value in values.values())
+
+
+def test_validate_reports_only_explicit_deprecated_quota_fields(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "legacy.yaml"
+    config.write_text("execution:\n  max_active: 8\norchestration:\n  max_task_depth: 2\n")
+    monkeypatch.setattr("sys.argv", ["qqbot", "validate", "--config", str(config)])
+    cli.main()
+    output = capsys.readouterr()
+    assert output.out.strip() == "configuration valid"
+    assert "execution.max_active is deprecated" in output.err
+    assert "orchestration.max_task_depth is deprecated" in output.err
+    assert "sustained_limit is deprecated" not in output.err
+    assert cli.deprecated_quota_warnings(load_settings("configs/example.yaml")) == []

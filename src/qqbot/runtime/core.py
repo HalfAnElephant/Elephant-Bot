@@ -58,12 +58,13 @@ class Core:
         self.outbox = Outbox(db, clock, markdown_adapters={cfg.instance_id for cfg in settings.adapters
                                                        if cfg.kind == "official" and cfg.markdown_enabled})
         self.stream_delivery = StreamDelivery(self)
+        from qqbot.mail.runtime import MailRuntime
+        self.mail = MailRuntime(self)
         self.tasks = TaskService(db, clock, self.outbox, permissions=self.permissions,
             budget_ceiling=settings.execution.budget, context_validator=self.validate_context,
-            stream_eligibility=self.stream_delivery.eligible)
-        self.tasks.qq_adapters = adapters
-        self.tasks.skills_settings = lambda: self.settings.skills
-        self.tasks.skills_provider = self.skills_for
+            stream_eligibility=self.stream_delivery.eligible, qq_adapters=adapters,
+            skills_settings=lambda: self.settings.skills, skills_provider=self.skills_for,
+            action_authorizer=self.mail.authorize_context)
         self.tasks.graph = TaskGraph(self.tasks, settings)
         self.sessions = SessionService(self.tasks, settings, allowed=self.allowed)
         self.sessions.harnesses = self.harnesses
@@ -76,9 +77,6 @@ class Core:
         self.knowledge = KnowledgeRuntime(self)
         from .schedules import ScheduleService
         self.schedules = ScheduleService(self)
-        from qqbot.mail.runtime import MailRuntime
-        self.mail = MailRuntime(self)
-        self.tasks.action_authorizer = self.mail.authorize_context
         self.stopping = False
         self.supervisor = LoopSupervisor(lambda: self.stopping)
         from .recovery import RuntimeRecovery

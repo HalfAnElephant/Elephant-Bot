@@ -3,9 +3,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-import httpx
 import pytest
-from fastapi import FastAPI
+from conftest import runtime_client_for
 from sqlalchemy import select
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime
@@ -13,7 +12,6 @@ from test_agent_runtime import runtime as agent_runtime
 from qqbot.adapters.execution.runtime import JobRuntime
 from qqbot.harness.pi import PiRunnerAdapter
 from qqbot.harness.pool import SessionPool
-from qqbot.jobs.api import internal_router
 from qqbot.jobs.worker import GeneralRun, Spool, Worker
 from qqbot.providers import ModelCapacity
 from qqbot.storage.task_schema import processes, runs, tasks
@@ -26,8 +24,6 @@ async def test_worker_cancel_during_pi_initialization_with_full_stdout_queue_rec
     core.settings, core.sessions = runtime.sessions.settings, runtime.sessions
     jobs = JobRuntime(core, tmp_path, provider=SimpleNamespace())
     root = root_goal(runtime)
-    app = FastAPI()
-    app.include_router(internal_router(runtime.service, "x" * 32))
     started = asyncio.Event()
     created, stopped_receipts = [], []
     args = SimpleNamespace(workspace=str(tmp_path / "pi"), archive=str(tmp_path / "archive"),
@@ -44,47 +40,46 @@ async def test_worker_cancel_during_pi_initialization_with_full_stdout_queue_rec
             self.readers = [asyncio.create_task(self._stdout())]
             started.set()
             await asyncio.Event().wait()  # Cancellation lands before Pi initialization has completed.
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://core",
-                                headers={"Authorization": "Bearer " + "x" * 32}) as client:
-        class RecordingClient:
-            async def post(self, path, **kwargs):
-                if path.endswith("/process-stopped"):
-                    stopped_receipts.append(kwargs["json"]["payload"])
-                return await client.post(path, **kwargs)
-        transport = RecordingClient()
-        def factory(claim, process_id, session_id):
-            runner = InitializingRun(args, claim, transport, process_id, session_id, ModelCapacity())
-            created.append(runner)
-            return runner
-        pool = SessionPool(factory)
-        worker = Worker(transport, "worker", Spool(tmp_path / "spool"), None, pool=pool)
-        running = asyncio.create_task(worker.once())
-        try:
-            await asyncio.wait_for(started.wait(), 1)
-            runner = created[0]
-            while not runner.queue.full():
-                await asyncio.sleep(0)
-            assert runtime.service.cancel(root["public_id"], runtime.access)["state"] == "CANCEL_REQUESTED"
-            done, _ = await asyncio.wait({running}, timeout=1)
-            assert running in done, "Worker stop blocked behind a full stdout queue"
-            assert running.result() is True
-            runtime.service.recover()
-            await jobs.maintain()
-            assert stopped_receipts and all(item["stopped"] is True for item in stopped_receipts)
-            assert all(item["process_id"] == runner.process_id and item["generation"] == 1 for item in stopped_receipts)
-            with runtime.db.engine.connect() as conn:
-                run = conn.execute(select(runs).where(runs.c.role == "worker")).mappings().one()
-                assert run["slot_reserved"] == 0 and run["runner_stopped_at"]
-                assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
-                assert set(conn.execute(select(tasks.c.state)).scalars()) == {"CANCELLED"}
-            assert all(task.done() for task in runner.readers)
-        finally:
-            if not running.done():
-                # Release the reproduction's bounded queue so a failing assertion can clean up.
-                while not created[0].queue.empty():
-                    created[0].queue.get_nowait()
-                await asyncio.wait_for(running, 2)
-            await pool.close()
+    client = runtime_client_for(runtime.service)
+    class RecordingClient:
+        async def post(self, path, **kwargs):
+            if path.endswith("/process-stopped"):
+                stopped_receipts.append(kwargs["json"]["payload"])
+            return await client.post(path, **kwargs)
+    transport = RecordingClient()
+    def factory(claim, process_id, session_id):
+        runner = InitializingRun(args, claim, transport, process_id, session_id, ModelCapacity())
+        created.append(runner)
+        return runner
+    pool = SessionPool(factory)
+    worker = Worker(transport, "worker", Spool(tmp_path / "spool"), None, pool=pool)
+    running = asyncio.create_task(worker.once())
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        runner = created[0]
+        while not runner.queue.full():
+            await asyncio.sleep(0)
+        assert runtime.service.cancel(root["public_id"], runtime.access)["state"] == "CANCEL_REQUESTED"
+        done, _ = await asyncio.wait({running}, timeout=1)
+        assert running in done, "Worker stop blocked behind a full stdout queue"
+        assert running.result() is True
+        runtime.service.recover()
+        await jobs.maintain()
+        assert stopped_receipts and all(item["stopped"] is True for item in stopped_receipts)
+        assert all(item["process_id"] == runner.process_id and item["generation"] == 1 for item in stopped_receipts)
+        with runtime.db.engine.connect() as conn:
+            run = conn.execute(select(runs).where(runs.c.role == "worker")).mappings().one()
+            assert run["slot_reserved"] == 0 and run["runner_stopped_at"]
+            assert conn.execute(select(processes.c.state)).scalar_one() == "STOPPED"
+            assert set(conn.execute(select(tasks.c.state)).scalars()) == {"CANCELLED"}
+        assert all(task.done() for task in runner.readers)
+    finally:
+        if not running.done():
+            # Release the reproduction's bounded queue so a failing assertion can clean up.
+            while not created[0].queue.empty():
+                created[0].queue.get_nowait()
+            await asyncio.wait_for(running, 2)
+        await pool.close()
 
 
 @pytest.mark.parametrize("queued", [0, 8])

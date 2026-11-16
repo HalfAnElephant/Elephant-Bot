@@ -133,6 +133,26 @@ class SyntheticMailbox:
         return {**snapshot, "scanned_through": scanned, "messages": selected[:limit]}
 
 
+async def prepare_synthetic_mail_account(app, account):
+    """Prepare the local-only execution fixture without conflating storage and enablement."""
+    headers = {"Authorization": "Bearer synthetic-mail-admin"}
+    path = "/api/v1/mail/accounts/" + account["id"]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+        if not account["credential_ref"]:
+            response = await client.post(path + "/credential", headers=headers,
+                json={"expected_revision": account["revision"], "secret": "synthetic-app-password"})
+            require(response.status_code == 200, f"protected synthetic credential save returned HTTP {response.status_code}")
+            account = response.json()
+            require(account["credential_ref"], "protected synthetic credential save returned no reference")
+        if not account["enabled"]:
+            response = await client.patch(path, headers=headers,
+                json={"expected_revision": account["revision"], "changes": {"enabled": True}})
+            require(response.status_code == 200, f"synthetic account enable returned HTTP {response.status_code}")
+            account = response.json()
+    require(account["ready"], "synthetic account is not ready for rule evaluation after setup")
+    return account
+
+
 class DialogueSuite:
     def __init__(self, root, report):
         self.root, self.report = root, report
@@ -346,12 +366,7 @@ class DialogueSuite:
         with core.db.engine.connect() as conn:
             account = conn.execute(select(mail_accounts).where(mail_accounts.c.account_id == "weekly-demo")).mappings().one()
         core.mail.accounts.transport = self.mailbox
-        if not account["credential_ref"]:
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
-                response = await client.post("/api/v1/mail/accounts/" + account["id"] + "/credential",
-                    headers={"Authorization": "Bearer synthetic-mail-admin"},
-                    json={"expected_revision": account["revision"], "secret": "synthetic-app-password"})
-            require(response.status_code == 200 and response.json()["ready"], "protected synthetic credential setup failed")
+        await prepare_synthetic_mail_account(app, core.mail.accounts.view(account))
         with core.db.engine.connect() as conn:
             previous = {row.id for row in conn.execute(select(schedules.c.id))}
         await self.case(app, "rule_" + label,

@@ -77,8 +77,9 @@ deploy/elephant-job-user-setup.sh qqbot qqbot.service
 ```
 
 The production template puts SQLite, Pi sessions, workspaces and other durable
-state under `/var/lib/qqbot`. Its internal socket is `/run/qqbot/internal.sock`,
-whose directory systemd creates for the daemon. Pi uses the absolute executable
+state under `/var/lib/qqbot`. The Worker runs in process; the legacy
+`/run/qqbot/internal.sock` setting is retained for startup cleanup, not a listener.
+Pi uses the absolute executable
 `/opt/qqbot/node_modules/.bin/pi`. Keep `/opt/qqbot` and the Python installation
 root-owned and readable by the service account.
 
