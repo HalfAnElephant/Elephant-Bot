@@ -106,7 +106,14 @@ jobs:
         run: |
           uv python install "$(cat .python-version)"
           uv build --no-sources
-          git archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
+          git -c tar.umask=0022 archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
+          python3 - <<'PY'
+          from tarfile import open as open_tar
+
+          with open_tar("dist/elephant-bot.tar.gz") as archive:
+              writable = [member.name for member in archive if member.mode & 0o022]
+          assert not writable, f"System installer would reject writable archive entries: {writable}"
+          PY
           git rev-parse HEAD > dist/REVISION
       - name: Install local audio dependency
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -177,7 +184,7 @@ jobs:
           sudo chmod go-w /opt
           test ! -e /opt/elephant
           sudo install -d -m 0755 /opt/elephant
-          git archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
+          git -c tar.umask=0022 archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
           sudo /opt/elephant/install.sh --apply --system --install-pi
           test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
           test "$(systemctl is-enabled elephant.service || true)" = disabled
@@ -255,7 +262,7 @@ jobs:
           version: '0.11.8'
       - name: Install from a clean source bundle
         run: |
-          git archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          git -c tar.umask=0022 archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/elephant-bot"
           ./install.sh --dry-run
           if command -v pi >/dev/null 2>&1; then
@@ -286,7 +293,7 @@ jobs:
           .venv/bin/python scripts/smoke_guided_install.py
       - name: Reuse an existing compatible Pi without installing a second copy
         run: |
-          git archive --format=tar --prefix=elephant-reuse/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          git -c tar.umask=0022 archive --format=tar --prefix=elephant-reuse/ HEAD | tar -xf - -C "$RUNNER_TEMP"
           export PATH="$RUNNER_TEMP/elephant-bot/node_modules/.bin:$PATH"
           cd "$RUNNER_TEMP/elephant-reuse"
           ./install.sh --apply

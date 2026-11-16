@@ -104,7 +104,7 @@ containing the verified archive:
 
 ```sh
 sudo mkdir -m 0755 /opt/elephant &&
-  sudo tar -xzf elephant-bot.tar.gz -C /opt/elephant --strip-components=1 --no-same-owner &&
+  sudo sh -c 'umask 022; exec tar -xzf elephant-bot.tar.gz -C /opt/elephant --strip-components=1 --no-same-owner --no-same-permissions' &&
   sudo /opt/elephant/install.sh --apply --system --setup
 ```
 
