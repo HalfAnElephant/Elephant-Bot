@@ -191,7 +191,7 @@ jobs:
           test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
           test "$(systemctl is-enabled elephant.service || true)" = disabled
           cd /opt/elephant
-          sudo .venv/bin/python -I - <<'PY'
+          sudo .venv/bin/python -I -B - <<'PY'
           from elephant.config import load_settings
           from elephant.setup_system import system_configuration_lock
           from pathlib import Path
@@ -201,6 +201,7 @@ jobs:
           with system_configuration_lock(settings):
               assert Path(settings.database + ".core.lock").stat().st_uid == pwd.getpwnam("elephant").pw_uid
           PY
+          test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
       - name: Start, stop, and verify a managed reinstall
         run: |
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted

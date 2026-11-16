@@ -52,7 +52,8 @@ def _service_command(*args):
         raise ValueError("system setup requires the root-owned installed interpreter")
     return [
         "/usr/sbin/runuser", "-u", ACCOUNT, "-g", GROUP, "--", str(source),
-        "-I", "-m", "elephant.setup_system", *args,
+        # Both root and service entry points must leave the trusted runtime unchanged.
+        "-I", "-B", "-m", "elephant.setup_system", *args,
     ]
 
 
@@ -156,7 +157,7 @@ def scan_as_service_account(settings, values):
     if "NO_COLOR" in os.environ:
         env["NO_COLOR"] = ""
     return subprocess.run(
-        ["/usr/sbin/runuser", "-u", ACCOUNT, "-g", GROUP, "--", str(source), "-I", "-m", "elephant.setup_system"],
+        ["/usr/sbin/runuser", "-u", ACCOUNT, "-g", GROUP, "--", str(source), "-I", "-B", "-m", "elephant.setup_system"],
         cwd=ROOT, env=env, check=False,
     ).returncode
 

@@ -10,6 +10,7 @@ Group=elephant-worker
 SupplementaryGroups=elephant systemd-journal
 WorkingDirectory=/opt/elephant
 Environment=PATH=/opt/elephant-node/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/elephant/core.env
 EnvironmentFile=/etc/elephant/jobs.env
 ExecStart=/opt/elephant/.venv/bin/elephant serve --config /etc/elephant/core.yaml

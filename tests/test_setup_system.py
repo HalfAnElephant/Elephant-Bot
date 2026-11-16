@@ -42,7 +42,7 @@ def test_system_scan_runs_unprivileged_and_passes_no_secrets_on_argv(tmp_path, m
     [(argv, options)] = calls
     assert argv[:6] == ["/usr/sbin/runuser", "-u", "elephant", "-g", "elephant-worker", "--"]
     assert all("synthetic" not in argument for argument in argv)
-    assert argv[-3:] == ["-I", "-m", "elephant.setup_system"]
+    assert argv[-4:] == ["-I", "-B", "-m", "elephant.setup_system"]
     assert "ELEPHANT_MODEL_KEY" not in options["env"]
     with pytest.raises(ValueError, match="installer-managed"):
         setup_system.scan_as_service_account(SimpleNamespace(

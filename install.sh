@@ -54,7 +54,7 @@ case "$platform:$system:$with_deps" in
             if [ "${NO_COLOR+x}" = x ]; then set -- NO_COLOR=; fi
             exec /usr/bin/env -i "TERM=${TERM:-dumb}" LANG=C.UTF-8 HOME=/root \
                 PATH=/opt/elephant-node/bin:/usr/bin:/bin "$@" \
-                "$base/.venv/bin/python" -I -c 'from elephant.cli import main; raise SystemExit(main())' setup --system
+                "$base/.venv/bin/python" -I -B -c 'from elephant.cli import main; raise SystemExit(main())' setup --system
         fi
         ;;
     Linux:no:no)
