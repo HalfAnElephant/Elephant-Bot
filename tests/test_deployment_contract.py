@@ -40,12 +40,34 @@ def test_fresh_deployment_paths_and_identity_match_service():
 def job_setup(tmp_path, monkeypatch):
     commands = tmp_path / "bin"
     commands.mkdir()
-    for name in ("loginctl", "systemctl", "systemd-run", "journalctl", "bwrap", "runuser", "id"):
+    for name in ("loginctl", "systemctl", "systemd-run", "journalctl", "bwrap", "runuser", "id", "install", "stat"):
         content = "#!/bin/sh\nexit 0\n"
         if name == "id":
-            content = '#!/bin/sh\nif [ "$#" -eq 1 ]; then echo 0; else echo 1234; fi\n'
+            content = """#!/bin/sh
+case "$*" in
+    "-u") echo 0 ;;
+    "-u -- elephant") echo 1234 ;;
+    "-gn -- elephant") echo elephant-worker ;;
+    *) exit 2 ;;
+esac
+"""
         elif name == "runuser":
             content = "#!/bin/sh\necho running\n"
+        elif name == "install":
+            # Model ownership in this unprivileged fixture; enforce actual
+            # modes and create the directories with the real install command.
+            content = """#!/bin/sh
+[ "$#" -eq 8 ] && [ "$1 $2 $3 $4 $6" = "-d -o root -g -m" ] || exit 2
+case "$5:$7" in elephant-worker:0750|root:0755) ;; *) exit 2 ;; esac
+exec /usr/bin/install -d -m "$7" "$8"
+"""
+        elif name == "stat":
+            content = f"""#!/bin/sh
+[ "$#" -eq 4 ] && [ "$1 $2 $3" = "-c %u --" ] || exit 2
+owner=$(/usr/bin/stat "$@") || exit 2
+[ "$owner" = "{os.getuid()}" ] || exit 2
+echo 0
+"""
         command = commands / name
         command.write_text(content)
         command.chmod(0o755)
@@ -68,7 +90,8 @@ def test_job_setup_targets_selected_unit_and_is_repeatable(job_setup, tmp_path, 
     drop_in = tmp_path / "etc/systemd/system" / f"{expected_unit}.d/jobs.conf"
     environment = tmp_path / "etc/elephant/jobs.env"
 
-    subprocess.run(arguments, check=True, capture_output=True, text=True)
+    result = subprocess.run(arguments, check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
     expected = (
         "[Unit]\nRequires=user@1234.service\nAfter=user@1234.service\n"
         "[Service]\nBindReadOnlyPaths=/run/user/1234\n"
@@ -77,7 +100,8 @@ def test_job_setup_targets_selected_unit_and_is_repeatable(job_setup, tmp_path, 
     assert environment.read_text() == (
         "XDG_RUNTIME_DIR=/run/user/1234\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1234/bus\n"
     )
-    subprocess.run(arguments, check=True, capture_output=True, text=True)
+    result = subprocess.run(arguments, check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
     assert drop_in.read_text() == expected
     assert list((tmp_path / "etc/systemd/system").iterdir()) == [drop_in.parent]
 
