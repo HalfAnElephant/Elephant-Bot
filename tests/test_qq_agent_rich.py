@@ -7,15 +7,15 @@ from conftest import runtime_client_for
 from pydantic import ValidationError
 from sqlalchemy import select, update
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.capabilities.gateway import CapabilityRegistry
-from qqbot.capabilities.qq import register_qq
-from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, ReplyContext, Surface
-from qqbot.jobs.rich_delivery import RichMessage, rich_send, rich_status
-from qqbot.jobs.service import TaskService
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import tasks
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.capabilities.gateway import CapabilityRegistry
+from elephant.capabilities.qq import register_qq
+from elephant.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, ReplyContext, Surface
+from elephant.jobs.rich_delivery import RichMessage, rich_send, rich_status
+from elephant.jobs.service import TaskService
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import tasks
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ def test_rich_media_rejects_local_and_unknown(content):
 
 
 def test_agent_buttons_are_scoped_and_no_direct_cancellation(rich_setup):
-    from qqbot.jobs.rich_delivery import rich_buttons
+    from elephant.jobs.rich_delivery import rich_buttons
     service, args, task, _calls = rich_setup
     result = rich_buttons(service, args, {"buttons": [{"label": "选这个", "action": "choice",
         "payload": {"value": "first"}}]})
@@ -117,7 +117,7 @@ def test_agent_buttons_are_scoped_and_no_direct_cancellation(rich_setup):
 
 
 async def test_button_keyboard_can_flow_through_send(rich_setup):
-    from qqbot.jobs.rich_delivery import rich_buttons
+    from elephant.jobs.rich_delivery import rich_buttons
     service, args, _task, calls = rich_setup
     result = rich_buttons(service, args, {"buttons": [{"label": "下一页", "action": "page",
         "payload": {"pages": ["one", "two"], "page": 1}}]})
@@ -128,7 +128,7 @@ async def test_button_keyboard_can_flow_through_send(rich_setup):
 
 
 async def test_run_gateway_verifies_enqueue_not_remote_delivery(rich_setup, tmp_path):
-    from qqbot.harness.gateway import RunGateway
+    from elephant.harness.gateway import RunGateway
     service, args, task, _calls = rich_setup
     async def call(op, payload):
         if op == "authorize":
@@ -152,6 +152,6 @@ async def test_run_gateway_verifies_enqueue_not_remote_delivery(rich_setup, tmp_
 
 @pytest.mark.parametrize("buttons", [None, 1, {}, "bad"])
 def test_invalid_buttons_shape_is_validation_error(buttons):
-    from qqbot.jobs.rich_delivery import RichButtons
+    from elephant.jobs.rich_delivery import RichButtons
     with pytest.raises(ValidationError):
         RichButtons(buttons=buttons)

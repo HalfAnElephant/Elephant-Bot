@@ -8,9 +8,9 @@ from sqlalchemy import select
 from test_worker_failures import environment as worker_environment
 from test_worker_failures import pool_for
 
-from qqbot.jobs.worker import Spool, Worker
-from qqbot.runtime.scheduler import Scheduler
-from qqbot.storage.task_schema import runs, tasks
+from elephant.jobs.worker import Spool, Worker
+from elephant.runtime.scheduler import Scheduler
+from elephant.storage.task_schema import runs, tasks
 
 environment = worker_environment
 

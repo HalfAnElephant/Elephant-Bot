@@ -7,14 +7,14 @@ from sqlalchemy import select, update
 from test_qq_agent_rich import rich_setup as _rich_setup
 from test_qq_rich_messages import envelope, target
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.adapters.qq_official.local_media import LocalMediaStore
-from qqbot.domain import PrincipalRef, Surface
-from qqbot.domain.official import OfficialContent, OfficialMedia
-from qqbot.harness.gateway import RunGateway
-from qqbot.jobs.rich_delivery import local_file_upload, rich_status
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import tasks
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.adapters.qq_official.local_media import LocalMediaStore
+from elephant.domain import PrincipalRef, Surface
+from elephant.domain.official import OfficialContent, OfficialMedia
+from elephant.harness.gateway import RunGateway
+from elephant.jobs.rich_delivery import local_file_upload, rich_status
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import tasks
 
 rich_setup = _rich_setup
 
@@ -78,7 +78,7 @@ async def test_run_gateway_local_output_to_core_durable_enqueue(rich_setup, tmp_
 
 @pytest.mark.parametrize("surface", [Surface.PRIVATE, Surface.GROUP, Surface.GUILD_CHANNEL, Surface.GUILD_PRIVATE])
 async def test_local_binary_actual_adapter_transport(surface, official_config, incoming, clock, db, monkeypatch):
-    from qqbot.adapters.qq_official import local_upload
+    from elephant.adapters.qq_official import local_upload
     store = LocalMediaStore(db, clock)
     principal = PrincipalRef(adapter_instance_id="qq", identity_namespace="app", remote_user_id="u")
     ref = store.put(PNG, task_id="task", conversation_id=target(surface).key, principal_key=principal.key,

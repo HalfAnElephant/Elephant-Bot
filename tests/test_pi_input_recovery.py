@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.parametrize("scenario", ["body", "before_body", "before_cursor", "body_batch", "legacy", "legacy_forged", "forged", "wrong_session", "wrong_hash", "other_input"])
 def test_native_input_recovery_requires_trusted_matching_persisted_body(tmp_path, scenario):
-    bridge = Path(__file__).resolve().parents[1] / "src/qqbot/harness/pi_bridge.ts"
+    bridge = Path(__file__).resolve().parents[1] / "src/elephant/harness/pi_bridge.ts"
     native = tmp_path / "native.jsonl"
     native.write_text("")
     script = r'''
@@ -84,7 +84,7 @@ assert.deepEqual(receipts[0].input_ids, binding.input_ids);
 
 @pytest.mark.parametrize("scenario", ["deleted", "replaced", "paired", "unpaired", "restored", "deleted_result"])
 def test_settled_receipt_checks_projected_tool_pairs(tmp_path, scenario):
-    bridge = Path(__file__).resolve().parents[1] / "src/qqbot/harness/pi_bridge.ts"
+    bridge = Path(__file__).resolve().parents[1] / "src/elephant/harness/pi_bridge.ts"
     package = bridge.parents[3] / "node_modules/@earendil-works/pi-coding-agent/dist"
     script = r'''
 import {createJiti} from "jiti";

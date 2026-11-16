@@ -1,7 +1,7 @@
 """Persist QQ relationship removals and proactive opt-out events."""
 from alembic import op
 
-from qqbot.storage.relationship_schema import qq_relationship_events, qq_relationships
+from elephant.storage.relationship_schema import qq_relationship_events, qq_relationships
 
 revision = "0013"
 down_revision = "0012"

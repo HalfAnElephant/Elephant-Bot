@@ -1,7 +1,7 @@
 """Immutable scoped QQ local media staging."""
 from alembic import op
 
-from qqbot.storage.local_media_schema import qq_local_media
+from elephant.storage.local_media_schema import qq_local_media
 
 revision = "0014"
 down_revision = "0013"

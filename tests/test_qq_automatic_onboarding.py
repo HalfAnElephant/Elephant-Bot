@@ -9,9 +9,9 @@ import httpx
 import pytest
 from test_qq_onboarding import encrypted
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.permissions import PermissionSubject
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.permissions import PermissionSubject
 
 
 class ConnectedGateway:
@@ -36,9 +36,9 @@ class ConnectedGateway:
 
 @pytest.fixture
 async def automatic(tmp_path, monkeypatch):
-    monkeypatch.setenv('QQBOT_CREDENTIAL_KEY', base64.b64encode(os.urandom(32)).decode())
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'owner-administration-token')
-    monkeypatch.setattr('qqbot.adapters.qq_official.gateway.QQGateway', ConnectedGateway)
+    monkeypatch.setenv('ELEPHANT_CREDENTIAL_KEY', base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'owner-administration-token')
+    monkeypatch.setattr('elephant.adapters.qq_official.gateway.QQGateway', ConnectedGateway)
     ConnectedGateway.lifecycle = []
     keys, scanner = {}, {'openid': 'verified-scanner-openid'}
 
@@ -167,7 +167,7 @@ async def test_authenticated_socket_interactions_use_the_existing_verified_dispa
     async def verified(adapter, core, store, payload):
         called.append((adapter, core, store, payload))
         return {'op': 12}
-    monkeypatch.setattr('qqbot.app.handle_verified_interaction', verified)
+    monkeypatch.setattr('elephant.app.handle_verified_interaction', verified)
     _session, result = await scan(app, client)
     assert result['state'] == 'connected'
     adapter = app.state.adapters['qq-official']

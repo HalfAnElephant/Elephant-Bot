@@ -6,17 +6,17 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from qqbot.adapters.qq_official.interaction_delivery import handle_callback, run_workflow
-from qqbot.adapters.qq_official.interactions import (
+from elephant.adapters.qq_official.interaction_delivery import handle_callback, run_workflow
+from elephant.adapters.qq_official.interactions import (
     InteractionStore,
     acknowledge_interaction,
     parse_interaction,
     workflow_keyboard,
 )
-from qqbot.domain import AccessContext, ConversationRef, PrincipalRef, Surface
-from qqbot.permissions import PermissionService
-from qqbot.storage.interaction_schema import qq_interaction_events
-from qqbot.storage.schema import outbox
+from elephant.domain import AccessContext, ConversationRef, PrincipalRef, Surface
+from elephant.permissions import PermissionService
+from elephant.storage.interaction_schema import qq_interaction_events
+from elephant.storage.schema import outbox
 
 
 def refs():
@@ -42,9 +42,9 @@ def token(keyboard, index=0):
 
 
 def owned_task(db, clock):
-    from qqbot.domain import InboundEvent
-    from qqbot.jobs.service import TaskService
-    from qqbot.outbox.service import Outbox
+    from elephant.domain import InboundEvent
+    from elephant.jobs.service import TaskService
+    from elephant.outbox.service import Outbox
     target, principal = refs()
     source = InboundEvent(event_id="owned-source", event_type="message.created", conversation=target,
         principal=principal, platform_message_id="m", occurred_at=clock.now(), received_at=clock.now(), trace_id="t")
@@ -123,7 +123,7 @@ async def test_whole_ack_including_token_refresh_has_deadline(db, clock):
 
 
 async def test_permission_revoked_during_ack_blocks_workflow_and_enqueue(db, clock):
-    from qqbot.outbox.service import Outbox
+    from elephant.outbox.service import Outbox
     store = InteractionStore(db, clock)
     keyboard = workflow_keyboard(store, *refs(), [{"label": "选择", "action": "choice", "payload": {"value": "A"}}])
     allowed = True
@@ -146,9 +146,9 @@ async def test_permission_revoked_during_ack_blocks_workflow_and_enqueue(db, clo
 
 
 def test_real_task_selection_and_cancel_enforce_owner(db, clock):
-    from qqbot.domain import InboundEvent, TextSegment
-    from qqbot.jobs.service import TaskService
-    from qqbot.outbox.service import Outbox
+    from elephant.domain import InboundEvent, TextSegment
+    from elephant.jobs.service import TaskService
+    from elephant.outbox.service import Outbox
     target, principal = refs()
     source = InboundEvent(event_id="task-source", event_type="message.created", conversation=target,
         principal=principal, platform_message_id="m", occurred_at=clock.now(), received_at=clock.now(),
@@ -162,7 +162,7 @@ def test_real_task_selection_and_cancel_enforce_owner(db, clock):
         "payload": {"value": "A", "task_id": task["public_id"]}}])
     event = parse(clock, token(keyboard))
     run_workflow(core, store, event, store.consume(event))
-    from qqbot.storage.task_schema import inputs
+    from elephant.storage.task_schema import inputs
     with db.engine.connect() as c:
         assert c.execute(select(inputs.c.text)).scalar_one() == "A"
     other = principal.model_copy(update={"remote_user_id": "other"})

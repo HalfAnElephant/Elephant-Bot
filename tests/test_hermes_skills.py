@@ -4,8 +4,8 @@ from dataclasses import asdict
 
 import pytest
 
-from qqbot.adapters.hermes_skills import TOOL_SCHEMAS, AgentLearningState, HermesSkills
-from qqbot.adapters.hermes_skills._vendor import skill_ledger, skill_usage
+from elephant.adapters.hermes_skills import TOOL_SCHEMAS, AgentLearningState, HermesSkills
+from elephant.adapters.hermes_skills._vendor import skill_ledger, skill_usage
 
 CONTENT = '---\nname: sample\ndescription: Use when testing a reusable workflow.\n---\nRead the source.\nVerify the result.\n'
 
@@ -175,7 +175,7 @@ def test_same_owner_concurrent_patches_share_one_lock(tmp_path):
 def test_config_explains_candidate_migration_and_rejects_inline_shell():
     from pydantic import ValidationError
 
-    from qqbot.skills.config import SkillsConfig
+    from elephant.skills.config import SkillsConfig
     with pytest.raises(ValidationError, match='retired'):
         SkillsConfig(max_per_scope=10)
     with pytest.raises(ValidationError):
@@ -197,8 +197,8 @@ def test_user_content_lock_is_preserved_for_normal_and_review_agents(tmp_path):
 
 
 async def test_capability_contract_uses_native_schema_and_host_identity():
-    from qqbot.capabilities.gateway import CapabilityRegistry
-    from qqbot.capabilities.skills import register_skills
+    from elephant.capabilities.gateway import CapabilityRegistry
+    from elephant.capabilities.skills import register_skills
     calls = []
     async def host_call(operation, body):
         calls.append((operation, body))

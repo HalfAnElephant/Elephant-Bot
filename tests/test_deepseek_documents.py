@@ -8,14 +8,14 @@ import httpx
 import pytest
 from test_provider_gateway import FakeCore
 
-from qqbot.adapters.deepseek import DeepSeekError
-from qqbot.adapters.execution.world import LocalExecution
-from qqbot.capabilities import CapabilityRegistry, ToolContext
-from qqbot.harness import documents
-from qqbot.harness.documents import REFERENCE, DeepSeekDocuments
-from qqbot.harness.gateway import RunGateway
-from qqbot.permissions import PermissionPolicy, PermissionRule, PermissionService
-from qqbot.providers import validate_transactions
+from elephant.adapters.deepseek import DeepSeekError
+from elephant.adapters.execution.world import LocalExecution
+from elephant.capabilities import CapabilityRegistry, ToolContext
+from elephant.harness import documents
+from elephant.harness.documents import REFERENCE, DeepSeekDocuments
+from elephant.harness.gateway import RunGateway
+from elephant.permissions import PermissionPolicy, PermissionRule, PermissionService
+from elephant.providers import validate_transactions
 
 
 class DeepSeekFixture:

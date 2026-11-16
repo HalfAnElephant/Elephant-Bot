@@ -5,9 +5,9 @@ import pytest
 from sqlalchemy import select, update
 from test_agent_runtime import runtime as runtime  # noqa: PLC0414 - Register the shared pytest fixture.
 
-from qqbot.domain.messages import TextSegment
-from qqbot.runtime.task_graph import TaskGraph
-from qqbot.storage.task_schema import tasks
+from elephant.domain.messages import TextSegment
+from elephant.runtime.task_graph import TaskGraph
+from elephant.storage.task_schema import tasks
 
 
 def submit(r, key, *, spec=None, event=None, context=None, new_dialogue=None):

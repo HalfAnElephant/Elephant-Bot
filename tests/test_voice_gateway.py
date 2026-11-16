@@ -8,8 +8,8 @@ import httpx
 import pytest
 from test_provider_gateway import FakeCore
 
-from qqbot.harness import audio
-from qqbot.harness.gateway import RunGateway
+from elephant.harness import audio
+from elephant.harness.gateway import RunGateway
 
 VOICE = b"fixture original QQ audio"
 TRANSCRIPT = "帮我查询今天上海的天气"
@@ -73,7 +73,7 @@ def voice_host(tmp_path, monkeypatch):
             "context": {"scope": conversation, "workspace_id": workspace_id, "files": [file]}})
         return gateway
 
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_public_bytes", download)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_public_bytes", download)
     monkeypatch.setattr(audio, "transcribe_audio", convert)
     state.make = make
     return state
@@ -131,7 +131,7 @@ async def test_private_cdn_download_uses_current_binding_and_keeps_tokens_out_of
         return VOICE
 
     gateway.media_headers = media_headers
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_public_bytes", download)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_public_bytes", download)
     assert (await send_voice(gateway)).status_code == 200
     next_file = {**gateway.claim["context"]["files"][0], "source": "new-source"}
     claim = {**gateway.claim, "run_id": "next-run",

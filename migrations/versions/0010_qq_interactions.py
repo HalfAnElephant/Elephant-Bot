@@ -1,7 +1,7 @@
 """Durable scoped official QQ button capabilities and interaction receipts."""
 from alembic import op
 
-from qqbot.storage.interaction_schema import qq_interaction_events, qq_interaction_tokens
+from elephant.storage.interaction_schema import qq_interaction_events, qq_interaction_tokens
 
 revision = "0010"
 down_revision = "0009"

@@ -33,7 +33,7 @@
 - `official_messages_per_minute`：每会话默认20。
 - `official_bot_messages_per_minute`：每应用默认30，可按认证权限降低/提高；官方拒收和429始终优先。
 - `official_messages_per_day`：每会话滚动24小时默认1000。按已有 Outbox 尝试记录保守计数，并非腾讯配额实时余额。
-- `credential_ref` / `credential_store_dir`：扫码配置使用加密文件引用，主密钥放 `QQBOT_CREDENTIAL_KEY` 环境变量。
+- `credential_ref` / `credential_store_dir`：扫码配置使用加密文件引用，主密钥放 `ELEPHANT_CREDENTIAL_KEY` 环境变量。
 
 旧 `allowed_users` / `allowed_groups` 不是统一权限系统的替代品，不能假设空列表会拒绝访问。正式启用前必须检查 `PermissionPolicy`。
 
@@ -104,7 +104,7 @@ Pi 只透传 assistant 公开文本，不透传 thinking、工具参数、工具
 
 ## 兼容迁移与恢复
 
-运行 `qqbot migrate` 升级至0021，加入无任务 Leader 流和最终投递绑定；既有流式状态及回执保留。原有文本 Outbox JSON 仍可读取；旧纯文本呈现保持，富消息作为原子条目保留，不能按段复制键盘/媒体。历史 OneBot/NapCat 条目按下线规则结算，当前配置仅支持官方适配器。
+运行 `elephant migrate` 升级至0021，加入无任务 Leader 流和最终投递绑定；既有流式状态及回执保留。原有文本 Outbox JSON 仍可读取；旧纯文本呈现保持，富消息作为原子条目保留，不能按段复制键盘/媒体。历史 OneBot/NapCat 条目按下线规则结算，当前配置仅支持官方适配器。
 
 官方自动 Markdown 对长度不超过10000字符的完整答案保留格式，超长内容明确沿旧纯文本拆分路径发送，避免截断；这不保证 QQ 客户端支持所有 Markdown 方言。
 

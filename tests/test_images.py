@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from qqbot.harness import images
-from qqbot.harness.gateway import RunGateway
+from elephant.harness import images
+from elephant.harness.gateway import RunGateway
 
 PNG = b"\x89PNG\r\n\x1a\nfixture"
 DATA = "data:image/png;base64," + base64.b64encode(PNG).decode()
@@ -109,7 +109,7 @@ def gateway(tmp_path):
 
 async def test_gateway_images_reach_provider_cached_and_rotate(gateway, monkeypatch):
     state, loads = gateway, []
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", lambda url, limit: loads.append(url) or DATA)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", lambda url, limit: loads.append(url) or DATA)
     g = state.gateway
     body = {"model": "offline", "messages": [{"role": "system", "content": "trusted"},
             {"role": "user", "content": "look"}, {"role": "assistant", "tool_calls": [{"id": "tool"}]},
@@ -141,7 +141,7 @@ async def test_gateway_failure_is_explicit_and_authorization_precedes_download(g
         loads.append(url)
         raise error
 
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", failed)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", failed)
     body = {"messages": [{"role": "user", "content": "look"}]}
     result = await gateway.gateway.with_images(body)
     assert "未能读取" in str(result)
@@ -156,7 +156,7 @@ async def test_cached_images_yield_to_growing_tool_history(gateway, monkeypatch)
     g = gateway.gateway
     g.provider.max_bytes = 20000
     data = "data:image/png;base64," + "A" * 9000
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", lambda url, limit: data)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", lambda url, limit: data)
     first = await g.with_images({"messages": [{"role": "user", "content": "look"}]})
     assert "image_url" in str(first)
     later = await g.with_images({"messages": [{"role": "user", "content": "x" * 15000}]})
@@ -170,7 +170,7 @@ async def test_cached_images_yield_to_growing_tool_history(gateway, monkeypatch)
 async def test_invalid_image_request_rejected_before_download(gateway, monkeypatch, messages):
     def unexpected(*args):
         raise AssertionError("invalid requests must not download images")
-    monkeypatch.setattr("qqbot.harness.gateway.fetch_image", unexpected)
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", unexpected)
     g = gateway.gateway
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=g.app), base_url="http://gateway") as client:
         response = await client.post("/v1/chat/completions", json={"model": "offline", "messages": messages},
@@ -184,7 +184,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
     def load(url, limit):
         loads.append(url)
         return b'ORIGINAL_FILE_BYTES'
-    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', load)
+    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', load)
     claim = {**gateway.claim, 'context': {'scope': 'conversation', 'workspace_id': 'alpha', 'files': [
         {'source': 'original-event', 'message_id': '43', 'attachment_ref': 'file-ref',
          'filename': 'slides.pptx', 'url': 'https://cdn.example/file'}]}}
@@ -208,7 +208,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
     gateway.gateway.bind({**claim, 'task_id': 'worker', 'run_id': 'worker-run'})
     def expired(*args):
         raise AssertionError('cached original must survive an expired URL')
-    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', expired)
+    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', expired)
     await gateway.gateway.with_attachments(body)
     assert len(list(work.glob('attachment-*'))) == 1
     gateway.allowed = False
@@ -219,7 +219,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
 async def test_document_download_failure_is_explicit(gateway, monkeypatch):
     def failed(*args):
         raise ValueError('expired')
-    monkeypatch.setattr('qqbot.harness.gateway.fetch_public_bytes', failed)
+    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', failed)
     gateway.gateway.revoke()
     gateway.gateway.bind({**gateway.claim, 'context': {'files': [
         {'source': 'e', 'message_id': '1', 'filename': 'original.pdf', 'url': 'https://cdn.example/file'}]}})

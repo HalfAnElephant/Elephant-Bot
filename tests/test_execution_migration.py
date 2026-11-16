@@ -7,8 +7,8 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from qqbot.cli import migrate
-from qqbot.storage.task_schema import runs, tasks
+from elephant.cli import migrate
+from elephant.storage.task_schema import runs, tasks
 
 
 def test_execution_upgrade_backs_up_and_preserves_legacy_reservations(tmp_path):

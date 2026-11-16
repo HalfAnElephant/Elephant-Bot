@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from qqbot.app import create_app
-from qqbot.config import Settings
+from elephant.app import create_app
+from elephant.config import Settings
 
 
 @pytest.mark.parametrize(
@@ -22,9 +22,9 @@ from qqbot.config import Settings
     ],
 )
 def test_planner_preserves_explicit_output_and_success_contracts(official_config, clock, text, outputs, checks):
-    from qqbot.dialogue.planner import plan_turn
-    from qqbot.domain import ConversationRef, PrincipalRef, Surface
-    from qqbot.domain.execution import TurnInput
+    from elephant.dialogue.planner import plan_turn
+    from elephant.domain import ConversationRef, PrincipalRef, Surface
+    from elephant.domain.execution import TurnInput
 
     turn = TurnInput(
         conversation=ConversationRef(
@@ -62,8 +62,8 @@ def test_config_rejects_inconsistent_context_budgets(changes):
 
 @pytest.mark.parametrize("window", [32768, 1000000])
 def test_native_compaction_scales_with_actual_model_window(window):
-    from qqbot.config import ModelConfig
-    from qqbot.harness.pi import compaction_settings
+    from elephant.config import ModelConfig
+    from elephant.harness.pi import compaction_settings
 
     settings = Settings(model=ModelConfig(context_window=window))
     output = max(settings.execution.budget.output_tokens_per_call or 0,
@@ -91,9 +91,9 @@ def test_status_identifies_single_daemon_pi_configuration(
 ):
     from fastapi.testclient import TestClient
 
-    from qqbot.config import ModelConfig
+    from elephant.config import ModelConfig
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     monkeypatch.setenv("CORE_ONLY_MODEL_KEY", "fixture-only-core-key")
     app = create_app(
         Settings(
@@ -120,7 +120,7 @@ def test_status_identifies_single_daemon_pi_configuration(
 def test_ambiguous_displayed_ordinal_does_not_choose_an_invented_target(clock):
     from types import SimpleNamespace
 
-    from qqbot.context.topics import displayed_references, select_topic
+    from elephant.context.topics import displayed_references, select_topic
 
     references = displayed_references(
         "2. https://github.com/org/one/pull/52\n2. https://github.com/org/two/pull/99",
@@ -151,7 +151,7 @@ def test_ambiguous_displayed_ordinal_does_not_choose_an_invented_target(clock):
 def test_rain_followup_does_not_create_a_fictional_location(clock):
     from types import SimpleNamespace
 
-    from qqbot.context.topics import entities, select_topic
+    from elephant.context.topics import entities, select_topic
 
     assert entities("那明天会下雨吗") == ("weather", [])
     weather = {

@@ -1,12 +1,12 @@
 
 from fastapi.testclient import TestClient
 
-from qqbot.app import create_app
-from qqbot.config import Settings
+from elephant.app import create_app
+from elephant.config import Settings
 
 
 def test_conversation_api_labels_existing_rows_without_changing_ids(tmp_path, monkeypatch, official_config, official_event, clock):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'test-admin')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'test-admin')
     settings = Settings(database=str(tmp_path / 'core.db'), adapters=(official_config,), interactive_execution_enabled=False)
     app = create_app(settings, clock=clock, run_background=False)
     adapter = app.state.adapters[official_config.instance_id]

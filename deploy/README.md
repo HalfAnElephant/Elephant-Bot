@@ -1,6 +1,6 @@
-# Ubuntu daemon deployment
+# Elephant deployment
 
-The supported runtime is one Python daemon under `qqbot`, its on-demand Pi processes,
+The supported runtime is one Python daemon under `elephant`, its on-demand Pi processes,
 SQLite and OpenViking. QQ uses the official adapter. There is no separate Worker
 listener or NapCat route. The daemon admits Leader, Worker and Hermes review turns
 through the same execution pool and limits actual model requests separately.
@@ -11,11 +11,147 @@ backpressure, and individual tools and external waits retain their timeouts.
 Interrupted or blocked Workers preserve results for a Leader decision. A Leader
 takeover requires stopped related execution and reconciled external operations.
 
-## Fresh Ubuntu installation
+## Platforms at a glance
+
+| Platform | Personal installation | Background operation |
+|---|---|---|
+| Ubuntu 24.04+, Debian 13+, Fedora 43+ (x86-64 and arm64) | Dedicated or generic installer | systemd system service, cgroup v2 |
+| Official Arch Linux, up-to-date x86-64 | Dedicated or generic installer | systemd system service, cgroup v2 |
+| Other glibc Linux (x86-64 and arm64, such as Linux Mint or openSUSE) | Generic installer with distro-provided prerequisites | Foreground; no managed system service |
+| macOS Apple Silicon or Intel | Native installer; Intel requires a source build | Foreground or user LaunchAgent at desktop login |
+
+Do not use the Linux system service installer on derivatives just because they use the same package manager. Alpine/musl, Windows, macOS running under Rosetta, and architectures outside the table are not covered. The macOS login option starts at user login, not before login; it does not provide Linux isolation. Shell-process supervision, isolated credentialed GitHub CLI, and durable Jobs retain their Linux prerequisites. An unavailable capability does not fall back to less isolated execution.
+
+## Personal installation
+
+Use a persistent directory containing the complete, verified bundle or a trusted
+checkout; do not run from a temporary archive directory. See
+[release verification](../docs/runbooks/releases.md#手动部署).
+
+```sh
+./install.sh --apply --setup
+```
+
+- **Linux:** install uv, Node.js 22.19+ with npm, and FFmpeg 6+ using your
+  distribution or the upstream official packages. The installer does not
+  run a package manager in personal mode. It installs the locked Python and
+  Pi runtime into the bundle, not the system.
+- **macOS:** use a native terminal. With an existing Homebrew installation,
+  pass `--with-deps` to install the missing formulae. Otherwise supply uv,
+  native Node.js/npm and FFmpeg yourself. Intel also needs Apple Command Line
+  Tools; `pilk-nogil` is built from the locked source because no Intel wheel
+  is supplied. The installer never installs Homebrew or uses sudo.
+- The optional macOS login item is proposed in the final setup step. Nothing
+  is loaded unless you select it. This creates one current-user LaunchAgent
+  and does not replace a different job or restart one that is already loaded.
+  Stop it before moving the bundle. To remove it, use the commands below from
+  a terminal in the same desktop account; they do not remove settings or data.
+
+```sh
+launchctl bootout "gui/$(id -u)/dev.elephant.bot"
+# After confirming the job is unloaded and that this is the Elephant-managed file:
+rm "$HOME/Library/LaunchAgents/dev.elephant.bot.plist"
+```
+
+Pi is reused only when its executable reports the exact version locked in
+`package.json` and responds to an offline RPC compatibility check. A compatible
+installed command is preferred over a private copy; run with the intended native
+Node and Pi on your terminal PATH. The privileged Linux installer only considers
+trusted system-owned paths and probes with Elephant's unprivileged service account,
+not root. Before any probe, it checks the complete enclosing npm `node_modules`
+tree, including hoisted dependencies and every symlink target, for root ownership
+and group/world write access. Custom wrappers or links outside that tree are
+skipped; a verified private copy remains available as the fallback. The probe
+uses temporary configuration and does not call a model.
+If none are suitable, you are asked before installing the locked private copy.
+The default answer is no. Noninteractive deployments must pre-authorize that
+fallback with `--install-pi`; it does not force a download when an existing Pi
+is compatible, and never modifies a global Pi. The private install needs npm.
+After changing the externally supplied Pi, repeat the compatibility check by
+installing into a fresh personal release directory, or rerunning the system
+installer with the service stopped. An explicitly configured custom executable
+remains authoritative.
+
+The default installation action is a preview. Without `--setup`, a successful
+install stops before the wizard. `./elephant` opens setup again. The core listener
+remains loopback-only on all supported paths.
+
+### Upgrade or reinstall a personal bundle
+
+Do not unpack a release over an installed bundle or rerun the installer there:
+the installer refuses to change a directory that already contains `.venv`.
+This protects foreground and macOS login processes that may be using its
+libraries, even if they were started by an older version. Use `./elephant`
+to reopen the wizard without reinstalling.
+
+Back up settings and data, let active tasks finish, and stop the old process.
+On macOS unload its login item and remove the managed plist using the procedure
+above if you intend to re-enable login for the replacement release. Keep the
+old bundle intact, unpack a verified release into a fresh persistent directory,
+and run setup there. The default profile remains in `~/.config/elephant`; retain
+the same `--setup-dir` if you use a separate profile. Do not open the old bundle
+against data migrated by the new one; follow the backup/restore runbook for that
+rollback. An interrupted install may be retried in place only if it did not
+create `.venv`.
+
+## Guided Linux installation
+
+Supported system versions and architectures are in the table above. The
+installer requires active systemd with **cgroup v2 and its `cgroup.kill` interface**, a root-owned release under
+`/opt/elephant` and the distribution's package repositories. Fedora uses
+`ffmpeg-free`; it does not enable third-party repositories. Bring official
+Arch fully up to date before running the installer; it does not issue a
+partial refresh or upgrade the entire OS.
+
+For a **new** installation, verify the archive first. From the directory
+containing the verified archive:
+
+```sh
+sudo mkdir -m 0755 /opt/elephant &&
+  sudo sh -c 'umask 022; exec tar -xzf elephant-bot.tar.gz -C /opt/elephant --strip-components=1 --no-same-owner --no-same-permissions' &&
+  sudo /opt/elephant/install.sh --apply --system --setup
+```
+
+The installer prepares system packages, the locked runtime, an unprivileged
+service account and `elephant.service`. It does not start or enable the service
+unless the operator separately chooses that in the wizard. The optional QQ
+scan uses the runtime account and holds the same SQLite lock as the daemon.
+If the daemon is already running, use its management page to scan. For remote
+access, use an SSH port forward as described below rather than binding a public
+management listener.
+
+To update an installer-managed unit, drain and stop it first, back up data,
+then rerun the installer from a verified replacement release. Existing
+configuration and state files are retained. The installer refuses unknown or
+locally edited unit files and does not automatically migrate legacy installs.
+It does not widen existing configuration permissions: if the service account
+cannot load the configuration, it stops before changing the unit. The kernel
+interface check does not prove the live service has delegation; verify that on
+the deployment host before enabling isolated host tools.
+
+Private Pi dependencies are prepared in a root-only staging directory and
+published only after permissions are tightened and the service-account check
+passes. The staging and install directories must share a filesystem so
+publication can use a rename. If a previous install left dependencies writable by
+other users, do not make that tree trusted by changing its permissions. With
+the service stopped, have an administrator move the old dependency tree aside
+and provision again from the verified release.
+
+Keep the service stopped throughout the upgrade. Do not start it manually or
+through external automation until the installer exits. The installer checks
+the service state again before writing the runtime and unit. An interrupted
+installer unit update can be retried when its recorded unit digest matches.
+If only one generated Job file was published, use the repair command printed
+by the installer; it fills in the missing file only if the survivor matches
+its generated configuration. Inspect operator-customized files before repairing
+them manually. Reopening setup while the daemon is active does not restart it;
+stop the service before changing model or credential settings.
+
+## Fresh Ubuntu installation (manual)
 
 The commands below prepare a new Ubuntu 24.04 or newer machine using systemd,
 cgroup v2 and an amd64 or arm64 CPU. Run them in a root shell opened with `sudo -i`.
-They install the daemon as `qqbot.service`. Existing installations use the upgrade
+They install the daemon as `elephant.service`. Existing installations use the upgrade
 section below and retain their current configuration and service name.
 
 Install the system dependencies, uv and Node.js. The pinned Pi package requires
@@ -41,10 +177,10 @@ node_archive="node-v22.19.0-linux-$node_arch.tar.xz"
 curl -fLsS "https://nodejs.org/dist/v22.19.0/$node_archive" -o "$install_tmp/$node_archive"
 curl -fLsS https://nodejs.org/dist/v22.19.0/SHASUMS256.txt -o "$install_tmp/SHASUMS256.txt"
 (cd "$install_tmp" && sha256sum --check --ignore-missing SHASUMS256.txt)
-install -d -o root -g root -m 0755 /opt/qqbot-node
-tar -xJf "$install_tmp/$node_archive" -C /opt/qqbot-node --strip-components=1 --no-same-owner
-ln -sf /opt/qqbot-node/bin/node /usr/local/bin/node
-ln -sf /opt/qqbot-node/bin/npm /usr/local/bin/npm
+install -d -o root -g root -m 0755 /opt/elephant-node
+tar -xJf "$install_tmp/$node_archive" -C /opt/elephant-node --strip-components=1 --no-same-owner
+ln -sf /opt/elephant-node/bin/node /usr/local/bin/node
+ln -sf /opt/elephant-node/bin/npm /usr/local/bin/npm
 rm -rf "$install_tmp"
 ```
 
@@ -52,44 +188,44 @@ Create the service account, both groups used by the service unit, and its writab
 data directory. Install the locked packages and stop helper from the checkout.
 
 ```sh
-getent group qqbot-worker >/dev/null || groupadd --system qqbot-worker
-getent group qqbot >/dev/null || groupadd --system qqbot
-getent passwd qqbot >/dev/null || useradd --system --gid qqbot-worker \
-  --home-dir /var/lib/qqbot --shell /usr/sbin/nologin qqbot
-install -d -o qqbot -g qqbot-worker -m 0700 /var/lib/qqbot
-install -d -o root -g qqbot-worker -m 0750 /etc/qqbot
-install -d -o root -g root -m 0755 /var/lib/qqbot-daemon-stops /usr/local/libexec /opt/qqbot-python
+getent group elephant-worker >/dev/null || groupadd --system elephant-worker
+getent group elephant >/dev/null || groupadd --system elephant
+getent passwd elephant >/dev/null || useradd --system --gid elephant-worker \
+  --home-dir /var/lib/elephant --shell /usr/sbin/nologin elephant
+install -d -o elephant -g elephant-worker -m 0700 /var/lib/elephant
+install -d -o root -g elephant-worker -m 0750 /etc/elephant
+install -d -o root -g root -m 0755 /var/lib/elephant-daemon-stops /usr/local/libexec /opt/elephant-python
 
-git clone https://github.com/HalfAnElephant/Elephant-Bot.git /opt/qqbot
-cd /opt/qqbot
-UV_PYTHON_INSTALL_DIR=/opt/qqbot-python uv sync --locked --no-dev --no-editable --python 3.13
+git clone https://github.com/HalfAnElephant/Elephant-Bot.git /opt/elephant
+cd /opt/elephant
+UV_PYTHON_INSTALL_DIR=/opt/elephant-python uv sync --locked --no-dev --no-editable --python 3.13
 npm ci --ignore-scripts
-chmod -R go+rX /opt/qqbot /opt/qqbot-python /opt/qqbot-node
+chmod -R go+rX /opt/elephant /opt/elephant-python /opt/elephant-node
 install -o root -g root -m 0755 scripts/elephant-daemon-stopped /usr/local/libexec/elephant-daemon-stopped
-install -o root -g root -m 0644 deploy/qqbot.service /etc/systemd/system/qqbot.service
-if [ ! -e /etc/qqbot/core.yaml ]; then
-  install -o root -g qqbot-worker -m 0640 configs/production.yaml /etc/qqbot/core.yaml
+install -o root -g root -m 0644 deploy/elephant.service /etc/systemd/system/elephant.service
+if [ ! -e /etc/elephant/core.yaml ]; then
+  install -o root -g elephant-worker -m 0640 configs/production.yaml /etc/elephant/core.yaml
 fi
-if [ ! -e /etc/qqbot/core.env ]; then
-  install -o root -g root -m 0600 .env.example /etc/qqbot/core.env
+if [ ! -e /etc/elephant/core.env ]; then
+  install -o root -g root -m 0600 .env.example /etc/elephant/core.env
 fi
-deploy/elephant-job-user-setup.sh qqbot qqbot.service
+deploy/elephant-job-user-setup.sh elephant elephant.service
 ```
 
 The production template puts SQLite, Pi sessions, workspaces and other durable
-state under `/var/lib/qqbot`. The Worker runs in process; the legacy
-`/run/qqbot/internal.sock` setting is retained for startup cleanup, not a listener.
+state under `/var/lib/elephant`. The Worker runs in process; the legacy
+`/run/elephant/internal.sock` setting is retained for startup cleanup, not a listener.
 Pi uses the absolute executable
-`/opt/qqbot/node_modules/.bin/pi`. Keep `/opt/qqbot` and the Python installation
+`/opt/elephant/node_modules/.bin/pi`. Keep `/opt/elephant` and the Python installation
 root-owned and readable by the service account.
 
-Edit `/etc/qqbot/core.yaml` and `/etc/qqbot/core.env` before starting. Set
+Edit `/etc/elephant/core.yaml` and `/etc/elephant/core.env` before starting. Set
 `model.endpoint` to the complete Chat Completions URL, `model.model` to your
 provider's model name, and `model.context_window` to its supported context size.
-Set `QQBOT_MODEL_KEY` in the environment file. Generate an admin token with
+Set `ELEPHANT_MODEL_KEY` in the environment file. Generate an admin token with
 `openssl rand -hex 32` and a credential encryption key with
-`openssl rand -base64 32`, then put those values in `QQBOT_ADMIN_TOKEN` and
-`QQBOT_CREDENTIAL_KEY`. Generate the encryption key once and keep it with the
+`openssl rand -base64 32`, then put those values in `ELEPHANT_ADMIN_TOKEN` and
+`ELEPHANT_CREDENTIAL_KEY`. Generate the encryption key once and keep it with the
 instance's secrets across restarts and upgrades. The existing-key dependency and
 QQ scan steps are described in [QQ onboarding](../docs/operations/qq-onboarding.md).
 
@@ -105,18 +241,18 @@ service. The shell below reads the private environment file as root and passes
 the variables to the service-account processes.
 
 ```sh
-cd /opt/qqbot
+cd /opt/elephant
 set -a
-. /etc/qqbot/core.env
+. /etc/elephant/core.env
 set +a
-runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot validate --config /etc/qqbot/core.yaml
-runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot doctor --config /etc/qqbot/core.yaml
-runuser -u qqbot -g qqbot-worker -- /opt/qqbot/.venv/bin/qqbot migrate --config /etc/qqbot/core.yaml
-runuser -u qqbot -g qqbot-worker -- /opt/qqbot/node_modules/.bin/pi --version
-runuser -u qqbot -g qqbot-worker -- bwrap --unshare-all --ro-bind / / -- /usr/bin/true
+runuser -u elephant -g elephant-worker -- /opt/elephant/.venv/bin/elephant validate --config /etc/elephant/core.yaml
+runuser -u elephant -g elephant-worker -- /opt/elephant/.venv/bin/elephant doctor --config /etc/elephant/core.yaml
+runuser -u elephant -g elephant-worker -- /opt/elephant/.venv/bin/elephant migrate --config /etc/elephant/core.yaml
+runuser -u elephant -g elephant-worker -- /opt/elephant/node_modules/.bin/pi --version
+runuser -u elephant -g elephant-worker -- bwrap --unshare-all --ro-bind / / -- /usr/bin/true
 systemctl daemon-reload
-systemctl enable --now qqbot.service
-systemctl status qqbot.service --no-pager
+systemctl enable --now elephant.service
+systemctl status elephant.service --no-pager
 curl --fail http://127.0.0.1:8080/health/live
 curl --fail http://127.0.0.1:8080/health/ready
 ```
@@ -124,13 +260,25 @@ curl --fail http://127.0.0.1:8080/health/ready
 The server listens on loopback. On your own computer, run
 `ssh -L 8080:127.0.0.1:8080 USER@SERVER` and open
 `http://127.0.0.1:8080/admin` with the configured admin token. A failed service
-reports its startup error through `journalctl -u qqbot.service -n 100 --no-pager`.
+reports its startup error through `journalctl -u elephant.service -n 100 --no-pager`.
 Complete an actual model request and QQ message exchange during acceptance.
-The bubblewrap probe must succeed as `qqbot` for sandbox Workers. A user-namespace
+The bubblewrap probe must succeed as `elephant` for sandbox Workers. A user-namespace
 denial requires the host's bubblewrap/AppArmor policy to permit this account's
 sandbox execution before using that mode.
 
 ## Existing installations
+
+The first release with the `elephant` command also uses a new package, service
+name and directory layout. The installer refuses to adopt older `qqbot` or
+`elephant-bot.service` deployments in place. Do not run the fresh installer to
+migrate one: keep the old service and data together until a separate cutover has
+been planned and tested. Existing environment names used for credentials remain
+readable; do not regenerate the encryption key to change an environment variable name.
+
+For a routine upgrade, preserve the installed service account, restrictions
+and drop-ins. Use the [backup and staged restore checklist](../docs/runbooks/operations.md#升级前备份与回退演练)
+before replacing code or running migrations. The fresh-install commands are not
+an upgrade script and should not be used to regenerate secrets or overwrite an existing unit.
 
 Drain and stop the current service before replacing its installed packages. Keep
 its service name, environment file, encryption key, database and runtime-config
@@ -158,13 +306,12 @@ helper and receipt directory unwritable by the daemon.
 ## Persistent Jobs and execution isolation
 
 Provision the daemon account with root-only
-`deploy/elephant-job-user-setup.sh qqbot qqbot.service`. This enables its systemd user manager
+`deploy/elephant-job-user-setup.sh elephant elephant.service`. This enables its systemd user manager
 and linger, so Jobs survive daemon restarts. See
 [Job operations](../docs/operations/persistent-jobs.md) for receipts and acceptance.
-The setup script writes `/etc/qqbot/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes its `/run/user/UID` directory. Host execution uses the service account's existing filesystem permissions and does not grant sudo or root.
-The optional second argument selects the installed service unit. An existing
-`elephant-bot.service` installation can pass that name explicitly. One-argument
-calls retain the historical `elephant-bot.service` target.
+The setup script writes `/etc/elephant/jobs.env` and a service drop-in with the actual account UID. The drop-in orders the daemon after that user manager and exposes its `/run/user/UID` directory. Host execution uses the service account's existing filesystem permissions and does not grant sudo or root.
+The optional second argument selects the installed service unit. One-argument
+calls target `elephant.service`; another unit must be named explicitly.
 
 Install `bubblewrap` and validate user namespaces under the actual service account.
 `execution.leader_environment` defaults to `host`, and `execution.worker_environment`
@@ -180,8 +327,10 @@ unit's `Delegate=yes`. Each command enters a child cgroup before exec; cleanup
 kills and verifies the entire group, including detached descendants. These groups
 remain inside the daemon service for the existing stop receipt. Explicitly starting
 an external service is a host side effect, whose lifetime is independent of the run.
-The service unit allows host filesystem access for this mode; remove conflicting
-`ProtectSystem`, `ProtectHome` or path restrictions from existing drop-ins when upgrading.
+Existing `ProtectSystem`, `ProtectHome` or path restrictions may limit host mode.
+Keep them during ordinary upgrades. Review the effective unit and grant only the
+access specifically required for a deliberately enabled host workload; do not
+switch a sandbox task to host just because sandbox preflight failed.
 Generic process
 execution receives no GitHub or calendar credentials. GitHub CLI and Git transport
 use their existing controlled credential providers. Pi has no built-in tools,
@@ -190,7 +339,7 @@ calls the host gateway.
 
 For explicitly authorized full host administration, configure the daemon account
 with passwordless sudo and allow privilege elevation in the service. Use
-`systemctl edit qqbot.service` for a new installation, or the actual unit name for
+`systemctl edit elephant.service` for a new installation, or the actual unit name for
 an existing installation.
 
 ```ini
@@ -198,15 +347,15 @@ an existing installation.
 NoNewPrivileges=false
 ```
 
-Use `visudo -f /etc/sudoers.d/qqbot-host-admin` to grant the account root access.
+Use `visudo -f /etc/sudoers.d/elephant-host-admin` to grant the account root access.
 
 ```sudoers
-qqbot ALL=(root) NOPASSWD: ALL
+elephant ALL=(root) NOPASSWD: ALL
 ```
 
 Validate with `visudo -c`, reload systemd, and restart the daemon. Verify
 `sudo -n id -u` returns `0` through an actual host process and persistent Job.
-This grants root access to the Leader and host Workers running as `qqbot`.
+This grants root access to the Leader and host Workers running as `elephant`.
 Sandbox execution enforces its workspace isolation and privilege restrictions.
 
 To use an existing local GitHub login, add service credentials:
@@ -220,7 +369,7 @@ Environment=GH_CONFIG_DIR=%d
 
 For the optional calendar provider, use a private JSON configuration containing
 `apple_id`, `app_password`, `timezone`, `default_calendar` and the exact authorized
-`owner` identity. Mount it with `LoadCredential=icloud-calendar.json:/etc/qqbot/icloud-calendar.json`
+`owner` identity. Mount it with `LoadCredential=icloud-calendar.json:/etc/elephant/icloud-calendar.json`
 and `Environment=ICLOUD_CALENDAR_CONFIG=%d/icloud-calendar.json`. A retired numeric
 QQ identity does not authorize the official OpenID or host identity.
 
@@ -250,4 +399,4 @@ not one stored alongside the old snapshot.
 
 ## Automatic QQ onboarding
 
-After the one-time `QQBOT_CREDENTIAL_KEY` environment setup, `/admin/qq-onboarding` defaults to automatic owner setup. The server validates the official scan response, saves encrypted credentials and owner-bound permissions, and connects through QQ WebSocket. Enabled configurations reconnect on daemon startup. Per-instance `transport` selects Webhook or WebSocket, and `intents` records the permitted subscription. Connection status is included in `/health/ready` and `/api/v1/qq/onboarding/status`. See [the onboarding workflow](../docs/operations/qq-onboarding.md).
+After the one-time `ELEPHANT_CREDENTIAL_KEY` environment setup, `/admin/qq-onboarding` defaults to automatic owner setup. The server validates the official scan response, saves encrypted credentials and owner-bound permissions, and connects through QQ WebSocket. Enabled configurations reconnect on daemon startup. Per-instance `transport` selects Webhook or WebSocket, and `intents` records the permitted subscription. Connection status is included in `/health/ready` and `/api/v1/qq/onboarding/status`. See [the onboarding workflow](../docs/operations/qq-onboarding.md).

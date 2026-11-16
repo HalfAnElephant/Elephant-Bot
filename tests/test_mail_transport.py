@@ -3,9 +3,9 @@ import re
 
 import pytest
 
-from qqbot.mail import transport as mail_transport
-from qqbot.mail.models import MailAccountSpec
-from qqbot.mail.transport import MailTransport, MailTransportError, _parts, _structure
+from elephant.mail import transport as mail_transport
+from elephant.mail.models import MailAccountSpec
+from elephant.mail.transport import MailTransport, MailTransportError, _parts, _structure
 
 BODY = base64.b64encode('本周中文周报。'.encode())
 ATTACHMENT = base64.b64encode(b'attachment-bytes')
@@ -181,7 +181,7 @@ def test_html_body_strips_scripts_and_styles(protocol, monkeypatch):
 
 @pytest.mark.parametrize(('charset', 'content'), [('unknown-mail-charset', b'visible text'), ('UTF-8', b'visible\xfftext')])
 def test_uncertain_body_decoding_cannot_confirm_exclusion(protocol, monkeypatch, charset, content):
-    from qqbot.runtime.mail_filters import MailTrigger
+    from elephant.runtime.mail_filters import MailTrigger
 
     transport, spec, _server = protocol
     monkeypatch.setattr(__import__(__name__), 'BODY', content)

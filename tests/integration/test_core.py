@@ -2,12 +2,12 @@ import json
 
 from fastapi.testclient import TestClient
 
-from qqbot.app import create_app
-from qqbot.config import Settings
+from elephant.app import create_app
+from elephant.config import Settings
 
 
 def test_admin_config_auth_and_http_callback(tmp_path, official_config, official_event, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-fixture")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-fixture")
     app = create_app(
         Settings(database=str(tmp_path / "http.db"), adapters=(official_config,)),
         clock=clock,

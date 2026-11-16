@@ -10,10 +10,10 @@ import pytest
 from sqlalchemy import select, update
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 
-from qqbot.permissions import PermissionPolicy, PermissionRule
-from qqbot.storage.mail_trigger_schema import mail_received, mail_rule_receipts, mail_rule_state
-from qqbot.storage.schedule_schema import schedules
-from qqbot.storage.task_schema import tasks
+from elephant.permissions import PermissionPolicy, PermissionRule
+from elephant.storage.mail_trigger_schema import mail_received, mail_rule_receipts, mail_rule_state
+from elephant.storage.schedule_schema import schedules
+from elephant.storage.task_schema import tasks
 
 
 class Mailbox:
@@ -62,7 +62,7 @@ class SMTP:
 @pytest.fixture
 def mail(control_runtime, monkeypatch):
     core = control_runtime.core
-    monkeypatch.setenv('QQBOT_CREDENTIAL_KEY', base64.b64encode(b'm' * 32).decode())
+    monkeypatch.setenv('ELEPHANT_CREDENTIAL_KEY', base64.b64encode(b'm' * 32).decode())
     event, _ = core.inbox.accept(control_runtime.event('configure demo mailbox and authorized rules'))
     core.inbox.finish(event.event_id)
     mailbox, smtp = Mailbox(), SMTP()
@@ -304,10 +304,10 @@ async def test_cross_task_outgoing_read_is_denied_but_fresh_user_status_is_allow
 
 
 async def test_admin_update_of_qq_rule_keeps_original_scope_and_user_revocation(mail, monkeypatch):
-    from qqbot.app import create_app
+    from elephant.app import create_app
 
     item = rule(mail, enabled=False)
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'mail-admin-test')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'mail-admin-test')
     app = create_app(mail.core.settings, clock=mail.core.clock, run_background=False)
     try:
         auth = {'Authorization': 'Bearer mail-admin-test'}

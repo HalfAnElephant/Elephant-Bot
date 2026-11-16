@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
-config = json.loads(Path("/run/qqbot/probe.json").read_text())
+config = json.loads(Path("/run/elephant/probe.json").read_text())
 checks = {}
 checks["uid_boundary"] = os.getuid() == config["runner_uid"] and os.getuid() != config["worker_uid"]
 status = Path("/proc/self/status").read_text()

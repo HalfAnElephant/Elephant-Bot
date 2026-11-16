@@ -6,11 +6,11 @@ from test_host_controls import control_runtime as control_runtime  # noqa: PLC04
 from test_mail_runtime import claim, rule
 from test_mail_runtime import mail as mail  # noqa: PLC0414
 
-from qqbot.capabilities.gateway import CapabilityRegistry, standard_registry
-from qqbot.capabilities.types import Action, Capability
-from qqbot.jobs.waiters import ExternalWaiters
-from qqbot.permissions import PermissionPolicy, PermissionRule
-from qqbot.storage.task_schema import inputs, tasks, waits
+from elephant.capabilities.gateway import CapabilityRegistry, standard_registry
+from elephant.capabilities.types import Action, Capability
+from elephant.jobs.waiters import ExternalWaiters
+from elephant.permissions import PermissionPolicy, PermissionRule
+from elephant.storage.task_schema import inputs, tasks, waits
 
 
 def waiting_mail_task(mail, grants):
@@ -91,7 +91,7 @@ async def test_mail_waiter_rechecks_current_rule_grant_on_each_poll(mail):
 
 @pytest.mark.parametrize('restriction', ['rule', 'global'])
 async def test_mail_waiter_redirect_rechecks_rule_and_global_domain_scope(mail, monkeypatch, restriction):
-    from qqbot.harness import public_web
+    from elephant.harness import public_web
 
     hosts = ('allowed.example',) if restriction == 'rule' else ('allowed.example', 'denied.example')
     _, task_id = waiting_mail_task(mail, [web_grant(*hosts)])

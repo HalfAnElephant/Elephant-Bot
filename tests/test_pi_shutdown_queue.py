@@ -9,12 +9,12 @@ from sqlalchemy import select
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as agent_runtime
 
-from qqbot.adapters.execution.runtime import JobRuntime
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.harness.pool import SessionPool
-from qqbot.jobs.worker import GeneralRun, Spool, Worker
-from qqbot.providers import ModelCapacity
-from qqbot.storage.task_schema import processes, runs, tasks
+from elephant.adapters.execution.runtime import JobRuntime
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.harness.pool import SessionPool
+from elephant.jobs.worker import GeneralRun, Spool, Worker
+from elephant.providers import ModelCapacity
+from elephant.storage.task_schema import processes, runs, tasks
 
 runtime = agent_runtime
 
@@ -30,7 +30,7 @@ async def test_worker_cancel_during_pi_initialization_with_full_stdout_queue_rec
         pi=__file__, model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="worker")
     def process_gone(*_):
         raise ProcessLookupError
-    monkeypatch.setattr("qqbot.harness.pi.os.killpg", process_gone)
+    monkeypatch.setattr("elephant.harness.pi.os.killpg", process_gone)
     class InitializingRun(GeneralRun):
         async def start(self):
             stdout = asyncio.StreamReader()

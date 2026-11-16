@@ -8,13 +8,13 @@ from pathlib import Path
 from pydantic import Field
 from sqlalchemy import insert, select
 
-from qqbot.clock import Clock
-from qqbot.config import load_settings
-from qqbot.domain import DTO, AccessContext, InboundEvent, Surface, stable_id
-from qqbot.memory import MemoryRecord, SocialService, _safe
-from qqbot.storage.db import Database
-from qqbot.storage.schema import inbox
-from qqbot.storage.social_schema import social_records, social_tombstones
+from elephant.clock import Clock
+from elephant.config import load_settings
+from elephant.domain import DTO, AccessContext, InboundEvent, Surface, stable_id
+from elephant.memory import MemoryRecord, SocialService, _safe
+from elephant.storage.db import Database
+from elephant.storage.schema import inbox
+from elephant.storage.social_schema import social_records, social_tombstones
 
 
 class Entry(DTO):

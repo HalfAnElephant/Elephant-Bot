@@ -6,10 +6,10 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.adapters.qq_official.streaming import OfficialStream, send_typing
-from qqbot.domain import OutboundEnvelope, Surface
-from qqbot.harness.pi import PiRunnerAdapter, PublicAnswerEvents
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.adapters.qq_official.streaming import OfficialStream, send_typing
+from elephant.domain import OutboundEnvelope, Surface
+from elephant.harness.pi import PiRunnerAdapter, PublicAnswerEvents
 
 
 def outgoing(adapter, clock, official_event, *, private=True):

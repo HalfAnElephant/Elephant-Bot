@@ -8,13 +8,13 @@ from sqlalchemy import select
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 from test_mail_runtime import mail as mail  # noqa: PLC0414
 
-from qqbot.domain.tasks import TaskResult
-from qqbot.harness.gateway import RunGateway
-from qqbot.jobs.protocol import WorkerRequest
-from qqbot.jobs.worker import Spool, Worker
-from qqbot.runtime.scheduler import RuntimeClient
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import runs, tasks
+from elephant.domain.tasks import TaskResult
+from elephant.harness.gateway import RunGateway
+from elephant.jobs.protocol import WorkerRequest
+from elephant.jobs.worker import Spool, Worker
+from elephant.runtime.scheduler import RuntimeClient
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import runs, tasks
 
 
 def summary(body):

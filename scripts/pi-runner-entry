@@ -12,7 +12,7 @@ if len(sys.argv) != 3:
 task_id, run_id = sys.argv[1:]
 if any(str(UUID(value)) != value for value in (task_id, run_id)):
     raise SystemExit("canonical UUID required")
-manifest = json.loads(Path("/run/qqbot/manifest.json").read_text())
+manifest = json.loads(Path("/run/elephant/manifest.json").read_text())
 if manifest.get("schema_version") != 2:
     raise SystemExit("legacy research launches are retired")
 general = True
@@ -27,7 +27,7 @@ if os.getuid() == 0:
 status = Path("/proc/self/status").read_text()
 if "NoNewPrivs:\t1" not in status:
     raise SystemExit("NoNewPrivileges is required")
-for forbidden in ("/etc/qqbot", "/var/lib/qqbot", "/var/lib/qqbot-worker", "/run/qqbot/internal.sock"):
+for forbidden in ("/etc/elephant", "/var/lib/elephant", "/var/lib/elephant-worker", "/run/elephant/internal.sock"):
     if Path(forbidden).exists():
         raise SystemExit("host/private path is visible inside runner")
 for home in ("/home", "/root"):
@@ -79,10 +79,10 @@ env = {
     "PI_OFFLINE": "1",
     "PI_TELEMETRY": "0",
 }
-env.update(QQBOT_GATEWAY_URL=manifest["proxy_url"], QQBOT_PROCESS_TOKEN=manifest["process_token"])
+env.update(ELEPHANT_GATEWAY_URL=manifest["proxy_url"], ELEPHANT_PROCESS_TOKEN=manifest["process_token"])
 argv = [
     "/usr/bin/node",
-    "/opt/qqbot/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    "/opt/elephant/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
     "--mode",
     "rpc",
     "--provider",
@@ -94,7 +94,7 @@ argv = [
     "--no-extensions",
     "--no-builtin-tools",
     "--extension",
-    "/opt/qqbot/pi_bridge.ts",
+    "/opt/elephant/pi_bridge.ts",
     "--no-mcp",
     "--no-skills",
     "--no-prompt-templates",

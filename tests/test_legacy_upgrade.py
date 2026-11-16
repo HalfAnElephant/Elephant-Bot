@@ -6,7 +6,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from qqbot.cli import migrate
+from elephant.cli import migrate
 
 
 @pytest.mark.parametrize("experimental", [False, True])

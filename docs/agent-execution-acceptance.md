@@ -93,7 +93,7 @@
 
 ## home 部署验证（2026-11-09）
 
-已部署至 `/opt/qqbot`，沿用 `elephant-core-acceptance.service` 和 `elephant-worker-acceptance.service`。数据库从 0005 升至 0007，完整性检查通过；部署前备份位于 home 的 `/root/elephant-deploy-backups/20261109T055101Z`，包含旧代码、配置、数据库、Worker 状态和启动配置。NapCat 未重启。
+已部署至 `/opt/elephant`，沿用 `elephant-core-acceptance.service` 和 `elephant-worker-acceptance.service`。数据库从 0005 升至 0007，完整性检查通过；部署前备份位于 home 的 `/root/elephant-deploy-backups/20261109T055101Z`，包含旧代码、配置、数据库、Worker 状态和启动配置。NapCat 未重启。
 
 目标主机十八项隔离探针通过。另以实际 Worker 身份和服务沙箱执行工作区命令，验证供应商环境变量、服务配置、Core 数据及用户主目录不可见。真实 pi 1.5.0 + OpenCode Go 完成连续两轮简短回复，同一进程复用、每轮一次模型请求、usage 有上游报告，最后停止清理成功。该检查使用独立测试数据库，没有向 QQ 发送消息。
 

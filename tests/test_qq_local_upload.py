@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from qqbot.adapters.qq_official.local_upload import LocalUploadError, upload_local
-from qqbot.domain import DeliveryCheck, Surface
+from elephant.adapters.qq_official.local_upload import LocalUploadError, upload_local
+from elephant.domain import DeliveryCheck, Surface
 
 
 @pytest.fixture
@@ -207,7 +207,7 @@ async def test_server_block_larger_than_small_file_does_not_allocate_block(targe
 @pytest.mark.parametrize("kind,limit", [("image", 31457280), ("audio", 20971520),
                                        ("video", 104857600), ("file", 104857600)])
 def test_verified_official_limit_boundaries(kind, limit):
-    from qqbot.adapters.qq_official.local_limits import limit_for, validate_size
+    from elephant.adapters.qq_official.local_limits import limit_for, validate_size
     assert limit_for(kind) == limit
     validate_size(limit, kind)
     validate_size(limit - 1, kind)
@@ -216,8 +216,8 @@ def test_verified_official_limit_boundaries(kind, limit):
 
 
 async def test_official_max_file_streams_in_bounded_reads(target):
-    from qqbot.adapters.qq_official.local_limits import MAX_FILE_BYTES
-    from qqbot.adapters.qq_official.local_upload import IO_CHUNK
+    from elephant.adapters.qq_official.local_limits import MAX_FILE_BYTES
+    from elephant.adapters.qq_official.local_upload import IO_CHUNK
     class Source:
         offset = 0
         max_read = 0

@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import insert, update
 
-from qqbot.adapters.execution.world import LocalExecution
-from qqbot.adapters.qq_official.events import extra_segments
-from qqbot.harness import attachments
-from qqbot.storage.agent_schema import dialogue_inputs
+from elephant.adapters.execution.world import LocalExecution
+from elephant.adapters.qq_official.events import extra_segments
+from elephant.harness import attachments
+from elephant.storage.agent_schema import dialogue_inputs
 
 
 def source(filename='report.docx'):
@@ -103,7 +103,7 @@ async def test_atomic_workspace_write_failure_leaves_no_partial_file(tmp_path, m
 
 
 def test_cache_gc_keeps_originals_needed_by_future_schedules(db, clock, tmp_path):
-    from qqbot.storage.schedule_schema import schedules
+    from elephant.storage.schedule_schema import schedules
     item = source('annual-report.pptx')
     identity = attachments.attachment_identity(item, {})
     attachments.cache_attachment(tmp_path, identity, b'original', source_id=item['source'])
@@ -167,7 +167,7 @@ async def test_process_exit_after_atomic_publish_leaves_readable_single_link_fil
     script = '''
 import asyncio, os, sys
 from types import SimpleNamespace
-from qqbot.adapters.execution import world
+from elephant.adapters.execution import world
 publish = world._publish_exclusive
 def exit_after_publish(*args):
     publish(*args)

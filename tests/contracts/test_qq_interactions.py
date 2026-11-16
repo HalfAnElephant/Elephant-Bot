@@ -9,17 +9,17 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from qqbot.adapters.qq_official.interactions import (
+from elephant.adapters.qq_official.interactions import (
     InteractionStore,
     acknowledge_interaction,
     action_keyboard,
     parse_interaction,
     router,
 )
-from qqbot.domain import ConversationRef, PrincipalRef, Surface
-from qqbot.domain.interactions import QQButtonAction, QQButtonPermission, QQKeyboard
-from qqbot.permissions import PermissionService
-from qqbot.storage.interaction_schema import qq_interaction_events
+from elephant.domain import ConversationRef, PrincipalRef, Surface
+from elephant.domain.interactions import QQButtonAction, QQButtonPermission, QQKeyboard
+from elephant.permissions import PermissionService
+from elephant.storage.interaction_schema import qq_interaction_events
 
 
 def refs():

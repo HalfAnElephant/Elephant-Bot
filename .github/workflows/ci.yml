@@ -10,6 +10,10 @@ on:
     secrets:
       DEEPSEEK_API_KEY:
         required: true
+    outputs:
+      release-artifact-id:
+        description: Immutable artifact ID for the verified release bundle
+        value: ${{ jobs.build.outputs.release-artifact-id }}
 
 permissions:
   contents: read
@@ -70,8 +74,8 @@ jobs:
       - name: Configuration schema
         if: ${{ !cancelled() }}
         run: |
-          uv run qqbot schema > "$RUNNER_TEMP/schema.json"
-          uv run python -c 'import json, os; from pathlib import Path; assert json.loads(Path("configs/schema.json").read_text()) == json.loads((Path(os.environ["RUNNER_TEMP"]) / "schema.json").read_text()), "Regenerate configs/schema.json with qqbot schema"'
+          uv run elephant schema > "$RUNNER_TEMP/schema.json"
+          uv run python -c 'import json, os; from pathlib import Path; assert json.loads(Path("configs/schema.json").read_text()) == json.loads((Path(os.environ["RUNNER_TEMP"]) / "schema.json").read_text()), "Regenerate configs/schema.json with elephant schema"'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
@@ -84,6 +88,8 @@ jobs:
     needs: correctness
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      release-artifact-id: ${{ steps.upload-release-assets.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,32 +106,55 @@ jobs:
         run: |
           uv python install "$(cat .python-version)"
           uv build --no-sources
-          git archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
+          git -c tar.umask=0022 archive --format=tar.gz --prefix=elephant-bot/ --output=dist/elephant-bot.tar.gz HEAD
+          python3 - <<'PY'
+          from tarfile import open as open_tar
+
+          with open_tar("dist/elephant-bot.tar.gz") as archive:
+              writable = [member.name for member in archive if member.mode & 0o022]
+          assert not writable, f"System installer would reject writable archive entries: {writable}"
+          PY
           git rev-parse HEAD > dist/REVISION
+      - name: Install local audio dependency
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install and check the extracted release
         run: |
           mkdir "$RUNNER_TEMP/release"
           tar -xzf dist/elephant-bot.tar.gz -C "$RUNNER_TEMP/release"
           cd "$RUNNER_TEMP/release/elephant-bot"
-          uv sync --no-dev --no-editable --python "$(cat .python-version)"
+          ./install.sh --dry-run
+          ./install.sh --apply --install-pi
           uv pip install --python .venv/bin/python --no-deps --reinstall "$GITHUB_WORKSPACE"/dist/*.whl
-          npm ci --ignore-scripts
-          node_modules/.bin/pi --version
-          .venv/bin/qqbot validate
-          .venv/bin/qqbot doctor
+          .venv/bin/python -c 'import subprocess; from elephant.pi_installation import runtime_pi_path; subprocess.check_call([runtime_pi_path("node_modules/.bin/pi"), "--version"])'
+          ./elephant validate
+          .venv/bin/elephant doctor
+          .venv/bin/elephant doctor --share-safe
           .venv/bin/python scripts/smoke_release.py
+          .venv/bin/python scripts/smoke_guided_install.py
       - name: Checksum release assets
         working-directory: dist
         run: sha256sum ./*.whl ./*.tar.gz REVISION > SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload-release-assets
         with:
           name: release-assets
           path: dist/
           if-no-files-found: error
           retention-days: 14
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        id: download-release-assets
+        continue-on-error: true
         with:
-          name: release-assets
+          artifact-ids: ${{ steps.upload-release-assets.outputs.artifact-id }}
+          path: ${{ runner.temp }}/downloaded-release
+      # Artifact listings can briefly lag behind a successful upload.
+      - name: Wait before retrying artifact download
+        if: steps.download-release-assets.outcome == 'failure'
+        run: sleep 5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.download-release-assets.outcome == 'failure'
+        with:
+          artifact-ids: ${{ steps.upload-release-assets.outputs.artifact-id }}
           path: ${{ runner.temp }}/downloaded-release
       - name: Verify uploaded release assets
         working-directory: ${{ runner.temp }}/downloaded-release
@@ -134,6 +163,175 @@ jobs:
         run: |
           sha256sum --check SHA256SUMS
           test "$(cat REVISION)" = "$EXPECTED_SHA"
+
+  install-systemd:
+    name: Ubuntu systemd installation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install without starting or enabling the daemon
+        run: |
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          # This disposable test VM shares /opt with runner tooling. Match the
+          # production trust precondition on the parent, not on its other files.
+          test -d /opt
+          test ! -L /opt
+          stat -c '%U:%G %a %n' /opt
+          sudo chown root:root /opt
+          sudo chmod go-w /opt
+          test ! -e /opt/elephant
+          sudo install -d -m 0755 /opt/elephant
+          git -c tar.umask=0022 archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
+          sudo /opt/elephant/install.sh --apply --system --install-pi
+          test -z "$(sudo find -P /opt/elephant/node_modules -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
+          test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
+          test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
+          test "$(systemctl is-enabled elephant.service || true)" = disabled
+          cd /opt/elephant
+          sudo .venv/bin/python -I -B - <<'PY'
+          from elephant.config import load_settings
+          from elephant.setup_system import system_configuration_lock
+          from pathlib import Path
+          import pwd
+
+          settings = load_settings("/etc/elephant/core.yaml")
+          with system_configuration_lock(settings):
+              assert Path(settings.database + ".core.lock").stat().st_uid == pwd.getpwnam("elephant").pw_uid
+          PY
+          test -z "$(sudo find -P /opt/elephant/.venv /opt/elephant-python -xdev ! -type l \( ! -user root -o -perm /022 \) -print -quit)"
+      - name: Reject writable Pi dependencies before execution
+        run: |
+          sudo /opt/elephant/.venv/bin/python -I -B - <<'PY'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          with tempfile.TemporaryDirectory(prefix=".elephant-pi-trust-", dir="/opt") as folder:
+              root = Path(folder)
+              root.chmod(0o755)
+              modules = root / "node_modules"
+              modules.mkdir(mode=0o755)
+              package = modules / "pi"
+              package.mkdir(mode=0o755)
+              executable = package / "cli.js"
+              executable.write_text("throw new Error('trust check must not execute Pi');\n")
+              executable.chmod(0o755)
+              dependency = package / "dependency.js"
+              dependency.write_text("export default 1;\n")
+              dependency.chmod(0o644)
+              command = ["/bin/sh", "-ec", '. "$1"; elephant_pi_root_path "$2" "$3"',
+                         "_", "/opt/elephant/deploy/pi-install.sh", str(executable), sys.executable]
+              assert subprocess.run(command, check=False).returncode == 0
+              dependency.chmod(0o666)
+              assert subprocess.run(command, check=False).returncode != 0
+          PY
+      - name: Start, stop, and verify a managed reinstall
+        run: |
+          test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          wait_ready() {
+            for attempt in {1..40}; do
+              if curl --noproxy '*' -fsS http://127.0.0.1:8080/health/ready > "$RUNNER_TEMP/elephant-ready.json" 2>/dev/null; then
+                python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["ready"] is True' "$RUNNER_TEMP/elephant-ready.json"
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+          sudo systemctl start elephant.service
+          wait_ready
+          if sudo /opt/elephant/install.sh --apply --system --install-pi > "$RUNNER_TEMP/elephant-busy.log" 2>&1; then
+            echo "Installer accepted a running system service" >&2
+            exit 1
+          fi
+          grep -F 'Stop elephant.service and drain tasks' "$RUNNER_TEMP/elephant-busy.log"
+          test "$(systemctl show -p ActiveState --value elephant.service)" = active
+          original_invocation=$(systemctl show -p InvocationID --value elephant.service)
+          [[ "$original_invocation" =~ ^[a-f0-9]{32}$ ]]
+          sudo systemctl stop elephant.service
+          test "$(systemctl show -p Result --value elephant.service)" = success
+          test -s "/var/lib/elephant-daemon-stops/$original_invocation.json"
+          sudo sha256sum /etc/elephant/core.yaml /etc/elephant/core.env /var/lib/elephant/core.db > "$RUNNER_TEMP/elephant-before-reinstall"
+          sudo /opt/elephant/install.sh --apply --system --install-pi
+          sudo sha256sum --check "$RUNNER_TEMP/elephant-before-reinstall"
+          test "$(systemctl show -p ActiveState --value elephant.service)" = inactive
+          sudo systemctl start elephant.service
+          wait_ready
+          sudo systemctl stop elephant.service
+      - name: Print service diagnostics if the check failed
+        if: ${{ failure() && runner.environment == 'github-hosted' }}
+        run: |
+          systemctl status elephant.service --no-pager || true
+          sudo journalctl -u elephant.service --no-pager -n 100
+          sudo namei -l /opt/elephant/node_modules/.bin/pi /opt/elephant-node/bin/node /opt/elephant/.venv/bin/python || true
+
+  install-macos:
+    name: macOS installation (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: Apple Silicon
+          - runner: macos-15-intel
+            arch: Intel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.19.0'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.11.8'
+      - name: Install from a clean source bundle
+        run: |
+          git -c tar.umask=0022 archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/elephant-bot"
+          ./install.sh --dry-run
+          if command -v pi >/dev/null 2>&1; then
+            echo "Unexpected preinstalled Pi on a clean-install test runner" >&2
+            exit 1
+          fi
+          if ./install.sh --apply > "$RUNNER_TEMP/pi-declined.log" 2>&1; then
+            echo "Installer installed Pi without approval" >&2
+            exit 1
+          fi
+          grep -F '未安装 Pi' "$RUNNER_TEMP/pi-declined.log"
+          for output in .elephant-pi node_modules .venv; do
+            test ! -e "$output"
+            test ! -L "$output"
+          done
+          ./install.sh --apply --install-pi
+          test "$(cat .elephant-pi)" = bundled
+          cp .elephant-pi "$RUNNER_TEMP/pi-installed-selection"
+          if ./install.sh --apply --install-pi > "$RUNNER_TEMP/pi-rerun.log" 2>&1; then
+            echo "Installer overwrote an existing personal release" >&2
+            exit 1
+          fi
+          cmp .elephant-pi "$RUNNER_TEMP/pi-installed-selection"
+          .venv/bin/python -c 'import subprocess; from elephant.pi_installation import runtime_pi_path; subprocess.check_call([runtime_pi_path("node_modules/.bin/pi"), "--version"])'
+          ./elephant doctor --share-safe
+          .venv/bin/python -c 'from pilk_nogil import decode'
+          .venv/bin/python scripts/smoke_release.py
+          .venv/bin/python scripts/smoke_guided_install.py
+      - name: Reuse an existing compatible Pi without installing a second copy
+        run: |
+          git -c tar.umask=0022 archive --format=tar --prefix=elephant-reuse/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/elephant-bot/node_modules/.bin:$PATH"
+          cd "$RUNNER_TEMP/elephant-reuse"
+          ./install.sh --apply
+          test ! -e node_modules
+          test ! -L node_modules
+          .venv/bin/python -c 'import pathlib, shutil; from elephant.pi_installation import runtime_pi_path; assert pathlib.Path(runtime_pi_path("node_modules/.bin/pi")).resolve() == pathlib.Path(shutil.which("pi")).resolve()'
+          .venv/bin/python scripts/smoke_guided_install.py
 
   dialogue:
     name: DeepSeek dialogue

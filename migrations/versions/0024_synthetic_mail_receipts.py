@@ -9,7 +9,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.schedule_schema import synthetic_mail_receipts
+    from elephant.storage.schedule_schema import synthetic_mail_receipts
 
     bind = op.get_bind()
     columns = {column['name'] for column in inspect(bind).get_columns('schedules')}

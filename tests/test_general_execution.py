@@ -9,8 +9,8 @@ import pytest
 from conftest import runtime_client_for
 from sqlalchemy import select
 
-from qqbot.domain.execution import ExecutionPlan, TaskGoal
-from qqbot.domain.messages import (
+from elephant.domain.execution import ExecutionPlan, TaskGoal
+from elephant.domain.messages import (
     AccessContext,
     ConversationRef,
     InboundEvent,
@@ -18,13 +18,13 @@ from qqbot.domain.messages import (
     PrincipalRef,
     Surface,
 )
-from qqbot.harness.pool import SessionPool
-from qqbot.jobs.service import TaskService
-from qqbot.jobs.worker import GeneralRun, Spool, Worker
-from qqbot.outbox.service import Outbox
-from qqbot.providers import ModelCapacity
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import inputs, notifications, processes, runs, tasks, waits
+from elephant.harness.pool import SessionPool
+from elephant.jobs.service import TaskService
+from elephant.jobs.worker import GeneralRun, Spool, Worker
+from elephant.outbox.service import Outbox
+from elephant.providers import ModelCapacity
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import inputs, notifications, processes, runs, tasks, waits
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ def test_question_fast_reply_is_consumed_after_quiescence_once(execution):
 
 @pytest.mark.parametrize("question_reply", [False, True])
 def test_image_only_task_input_is_persisted_and_delivered_once(execution, question_reply):
-    from qqbot.ingress.service import Inbox
+    from elephant.ingress.service import Inbox
 
     service, event, access = execution
     task = service.accept(event, access, "inspect image", context={"source_manifest": []})
@@ -127,7 +127,7 @@ def test_image_only_task_input_is_persisted_and_delivered_once(execution, questi
 
 
 def test_task_input_images_use_persisted_source_and_text_only_shape(execution):
-    from qqbot.ingress.service import Inbox
+    from elephant.ingress.service import Inbox
 
     service, event, access = execution
     task = service.accept(event, access, "inspect image", context={"source_manifest": []})
@@ -207,7 +207,7 @@ async def test_twelve_second_tool_detaches_same_run_and_short_chat_starts(execut
     import asyncio
     import time
 
-    from qqbot.capabilities.types import Action, Capability
+    from elephant.capabilities.types import Action, Capability
     service, event, access = execution
     pi = Path("node_modules/.bin/pi").resolve()
     if not pi.exists():
@@ -268,9 +268,9 @@ async def test_twelve_second_tool_detaches_same_run_and_short_chat_starts(execut
 
 @pytest.mark.asyncio
 async def test_external_wait_has_no_model_poll_and_wakes_once(execution):
-    from qqbot.capabilities.gateway import CapabilityRegistry
-    from qqbot.capabilities.types import Action, Capability
-    from qqbot.jobs.waiters import ExternalWaiters
+    from elephant.capabilities.gateway import CapabilityRegistry
+    from elephant.capabilities.types import Action, Capability
+    from elephant.jobs.waiters import ExternalWaiters
     service, event, access = execution
     task = service.accept(event, access, "wait for CI")
     claim = service.claim("w")
@@ -296,7 +296,7 @@ async def test_external_wait_has_no_model_poll_and_wakes_once(execution):
 
 
 def test_question_timeout_starts_after_delivery(execution, clock):
-    from qqbot.domain.messages import SendReceipt
+    from elephant.domain.messages import SendReceipt
     service, event, access = execution
     task = service.accept(event, access, "ask")
     claim = service.claim("w")
@@ -334,7 +334,7 @@ def test_workspace_claim_exclusion_and_pending_input_continuation(execution, clo
 
 
 async def test_reconciled_write_is_unknown_and_retry_uses_original_ledger(execution, clock):
-    from qqbot.storage.action_schema import operations
+    from elephant.storage.action_schema import operations
     service, event, access = execution
     task = service.accept(event, access, "write")
     claim = service.claim("w")
@@ -358,9 +358,9 @@ async def test_reconciled_write_is_unknown_and_retry_uses_original_ledger(execut
 
 
 async def test_malformed_external_observation_does_not_kill_other_waiters():
-    from qqbot.capabilities.gateway import CapabilityRegistry
-    from qqbot.capabilities.types import Action, Capability
-    from qqbot.jobs.waiters import ExternalWaiters
+    from elephant.capabilities.gateway import CapabilityRegistry
+    from elephant.capabilities.types import Action, Capability
+    from elephant.jobs.waiters import ExternalWaiters
     registry, observed = CapabilityRegistry(), []
     registry.register(Capability("ci", "CI"), lambda a, c: {"jobs": []},
         lambda a, c: Action("github.run.read", ("repo:github.com/o/r",)))
@@ -504,7 +504,7 @@ async def test_pool_host_limits_disable_reuse_and_failed_warm_binding_starts_col
 
 
 async def test_worker_exports_requested_binary_without_text_write_tool(execution, tmp_path):
-    from qqbot.domain.tasks import TaskResult
+    from elephant.domain.tasks import TaskResult
     service, event, access = execution
     workspace = tmp_path / "work"
     (workspace / "outputs").mkdir(parents=True)
@@ -530,7 +530,7 @@ async def test_worker_exports_requested_binary_without_text_write_tool(execution
 
 
 def test_continuation_keeps_task_budget_and_completion_reserve(execution):
-    from qqbot.domain.execution import RunBudget
+    from elephant.domain.execution import RunBudget
     service, event, access = execution
     task = service.accept(event, access, "wait", plan=ExecutionPlan(budget=RunBudget(model_calls=2)))
     claim = service.claim("w")
@@ -549,7 +549,7 @@ def test_continuation_keeps_task_budget_and_completion_reserve(execution):
 
 
 def test_unknown_question_delivery_never_starts_user_timeout(execution, clock):
-    from qqbot.domain.messages import SendReceipt
+    from elephant.domain.messages import SendReceipt
     service, event, access = execution
     task = service.accept(event, access, "question")
     claim = service.claim("w")

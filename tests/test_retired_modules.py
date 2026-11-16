@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from qqbot import context, dialogue, expressions
+from elephant import context, dialogue, expressions
 
 
 def test_retired_social_and_persona_entrypoints_stay_absent():
-    package = Path(__file__).resolve().parents[1] / "src" / "qqbot"
+    package = Path(__file__).resolve().parents[1] / "src" / "elephant"
     for module in (
         "policy/__init__.py",
         "policy/judge.py",
@@ -27,9 +27,9 @@ def test_legacy_expression_deletion_keeps_tombstones(db, clock):
 
     from sqlalchemy import insert, select
 
-    from qqbot.domain import stable_id
-    from qqbot.storage.expression_schema import expression_tombstones, expression_versions
-    from qqbot.storage.expression_schema import expressions as records
+    from elephant.domain import stable_id
+    from elephant.storage.expression_schema import expression_tombstones, expression_versions
+    from elephant.storage.expression_schema import expressions as records
 
     now = clock.now().isoformat()
     with db.transaction() as conn:

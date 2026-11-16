@@ -4,7 +4,7 @@ import sqlite3
 from alembic import command
 from alembic.config import Config
 
-from qqbot.cli import migrate
+from elephant.cli import migrate
 
 
 def test_project_upgrade_preserves_0021_dialogues_and_pending_inputs(tmp_path):

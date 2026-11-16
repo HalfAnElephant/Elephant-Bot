@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI, Header, HTTPException
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 
-from qqbot.admin.mail import build_mail_router
+from elephant.admin.mail import build_mail_router
 
 
 def evaluator():
@@ -21,7 +21,7 @@ def evaluator():
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_synthetic_mail_account_credentials_are_prepared_and_reused(
         control_runtime, monkeypatch, enabled):
-    monkeypatch.setenv("QQBOT_CREDENTIAL_KEY", base64.b64encode(b"r" * 32).decode())
+    monkeypatch.setenv("ELEPHANT_CREDENTIAL_KEY", base64.b64encode(b"r" * 32).decode())
     core = control_runtime.core
     service = core.mail.accounts
     event = control_runtime.event("configure fake mailbox")

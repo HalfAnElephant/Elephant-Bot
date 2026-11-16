@@ -2,19 +2,19 @@
 # Fixed root-owned namespace; no default route and no general host access.
 set -eu
 [ "$(id -u)" = 0 ]
-if ip netns exec qqbot-runner true 2>/dev/null; then
+if ip netns exec elephant-runner true 2>/dev/null; then
   exit 0
 fi
-ip netns add qqbot-runner
-ip link add qqbot-host type veth peer name qqbot-task
-ip link set qqbot-task netns qqbot-runner
-ip addr add 10.203.0.1/30 dev qqbot-host
-ip link set qqbot-host up
-ip -n qqbot-runner addr add 10.203.0.2/30 dev qqbot-task
-ip -n qqbot-runner link set qqbot-task up
-ip -n qqbot-runner link set lo up
-ip netns exec qqbot-runner nft -f - <<'NFT'
-table inet qqbot_runner {
+ip netns add elephant-runner
+ip link add elephant-host type veth peer name elephant-task
+ip link set elephant-task netns elephant-runner
+ip addr add 10.203.0.1/30 dev elephant-host
+ip link set elephant-host up
+ip -n elephant-runner addr add 10.203.0.2/30 dev elephant-task
+ip -n elephant-runner link set elephant-task up
+ip -n elephant-runner link set lo up
+ip netns exec elephant-runner nft -f - <<'NFT'
+table inet elephant_runner {
   chain output {
     type filter hook output priority 0; policy drop;
     oifname "lo" accept

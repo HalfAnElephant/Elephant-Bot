@@ -9,7 +9,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.agent_schema import AGENT_TABLES
+    from elephant.storage.agent_schema import AGENT_TABLES
     bind = op.get_bind()
     for table in AGENT_TABLES:
         table.create(bind, checkfirst=True)

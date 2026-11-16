@@ -18,7 +18,7 @@ systemd 单位使用 `ExitType=cgroup`、`KillMode=control-group`、`RemainAfter
 
 ## 主机准备与真实验收
 
-使用实际运行 daemon 的普通账号，并安装 Ubuntu 的 systemd（支持 `ExitType=cgroup`，systemd 250+）和 bubblewrap。新装管理员运行 `deploy/elephant-job-user-setup.sh qqbot qqbot.service` 开启 linger 与 user manager。已有安装使用 `deploy/elephant-job-user-setup.sh ACCOUNT SERVICE_UNIT` 指定实际账号和 unit，省略 unit 时沿用历史 `elephant-bot.service`。脚本配置该账号的 `/run/user/UID/bus`，daemon 账号必须与 user manager 账号一致。没有 user manager 或 Linux 时，能力握手明确拒绝持久 Job。缺少 bubblewrap 时仅支持 host 模式，sandbox 请求明确失败。
+使用实际运行 daemon 的普通账号，并安装 Ubuntu 的 systemd（支持 `ExitType=cgroup`，systemd 250+）和 bubblewrap。新装管理员运行 `deploy/elephant-job-user-setup.sh elephant elephant.service` 开启 linger 与 user manager。已有安装使用 `deploy/elephant-job-user-setup.sh ACCOUNT SERVICE_UNIT` 指定实际账号和 unit，省略 unit 时沿用历史 `elephant-bot.service`。脚本配置该账号的 `/run/user/UID/bus`，daemon 账号必须与 user manager 账号一致。没有 user manager 或 Linux 时，能力握手明确拒绝持久 Job。缺少 bubblewrap 时仅支持 host 模式，sandbox 请求明确失败。
 
 配置脚本同时写入 daemon drop-in，依赖指定 UID 的 user manager，并挂入它的运行目录。默认服务允许 Leader 访问宿主机文件系统，旧部署的 `ProtectHome`、`ProtectSystem` 或路径限制需与选用的环境模式一致。应在真实服务内检查 user manager 连接。
 

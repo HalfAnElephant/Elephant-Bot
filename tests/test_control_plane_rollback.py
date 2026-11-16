@@ -3,11 +3,11 @@
 import pytest
 from sqlalchemy import func, select
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.storage.agent_schema import dialogues
-from qqbot.storage.schema import inbox
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.storage.agent_schema import dialogues
+from elephant.storage.schema import inbox
+from elephant.storage.task_schema import tasks
 
 
 class InterruptedBeforeCommit(RuntimeError):

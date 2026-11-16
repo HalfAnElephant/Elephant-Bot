@@ -11,11 +11,11 @@ from sqlalchemy import func, select, update
 from test_agent_runtime import runtime as agent_runtime
 from test_pi_bridge import completion_sse
 
-from qqbot.adapters.pi.sessions import branch_entries, load_entries, unfinished_tools
-from qqbot.jobs.worker import GeneralRun
-from qqbot.providers import ModelCapacity
-from qqbot.runtime.scheduler import RuntimeClient
-from qqbot.storage.task_schema import runs, tasks
+from elephant.adapters.pi.sessions import branch_entries, load_entries, unfinished_tools
+from elephant.jobs.worker import GeneralRun
+from elephant.providers import ModelCapacity
+from elephant.runtime.scheduler import RuntimeClient
+from elephant.storage.task_schema import runs, tasks
 
 runtime = agent_runtime
 

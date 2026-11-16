@@ -6,10 +6,10 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import select, update
 
-from qqbot.domain import ConversationRef, DeliveryCheck, OutboundEnvelope, SendReceipt, Surface
-from qqbot.outbox.presentation import plain_text, split_text
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox
+from elephant.domain import ConversationRef, DeliveryCheck, OutboundEnvelope, SendReceipt, Surface
+from elephant.outbox.presentation import plain_text, split_text
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ async def test_legacy_pending_and_retry_keep_code_literal(db, clock, target):
 
 
 async def test_parts_remain_ordered_and_jitter_survives_restart(db, clock, target, monkeypatch):
-    import qqbot.outbox.service as module
+    import elephant.outbox.service as module
     identities = iter(("zz-last-lexically", "aa-first-lexically", "mm-middle"))
     monkeypatch.setattr(module, "uuid4", lambda: next(identities))
     service = Outbox(db, clock)
@@ -261,7 +261,7 @@ async def test_removed_adapter_rows_are_terminal_and_do_not_starve_later_deliver
 
 
 def test_persona_controls_split_without_losing_content_or_exposing_tags(db, clock, target):
-    from qqbot.outbox.presentation import chat_bubbles
+    from elephant.outbox.presentation import chat_bubbles
 
     assert chat_bubbles('在呢|||吃饭了吗\n今天吃白米饭') == ['在呢', '吃饭了吗', '今天吃白米饭']
     assert chat_bubbles('<voice>在呢</voice><sticker:开心>') == ['在呢']

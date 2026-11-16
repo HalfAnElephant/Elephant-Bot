@@ -7,19 +7,19 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.domain import AccessContext, InboundEvent
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.domain import AccessContext, InboundEvent
+from elephant.storage.task_schema import tasks
 
 
 @pytest.mark.parametrize('workspace_id', ['personal', 'alpha'])
 async def test_admin_mail_filter_update_persists_source_atomically(tmp_path, clock, monkeypatch, workspace_id):
-    from qqbot.storage.agent_schema import dialogue_inputs
-    from qqbot.storage.schedule_schema import schedules
-    from qqbot.storage.schema import inbox
+    from elephant.storage.agent_schema import dialogue_inputs
+    from elephant.storage.schedule_schema import schedules
+    from elephant.storage.schema import inbox
 
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'admin-test-token')
     app = create_app(Settings(database=str(tmp_path / 'mail.db'), orchestration={
         'workspace_bindings': {'alpha': str(tmp_path / 'alpha'), 'beta': str(tmp_path / 'beta')}}),
         clock=clock, run_background=False)
@@ -83,7 +83,7 @@ async def test_admin_mail_filter_update_persists_source_atomically(tmp_path, clo
 
 
 def test_conversation_policy_only_allows_addressed_or_silent(tmp_path, official_config, official_event, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
                      clock=clock, run_background=False)
     core = app.state.core
@@ -106,7 +106,7 @@ def test_conversation_policy_only_allows_addressed_or_silent(tmp_path, official_
 
 
 def test_config_rollback_and_artifact_download_boundary(tmp_path, official_config, official_event, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'admin-test-token')
     settings = Settings(database=str(tmp_path/'core.db'), adapters=(official_config,), owner={
         "qq_bindings": ({"app_id": official_config.app_id, "user_openid": "300",
                          "verified_at": clock.now().isoformat()},),
@@ -162,8 +162,8 @@ def test_config_rollback_and_artifact_download_boundary(tmp_path, official_confi
 def test_unknown_delivery_resolution_does_not_resend(tmp_path, official_config, official_event, clock, monkeypatch):
     from sqlalchemy import select
 
-    from qqbot.storage.schema import outbox
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'admin-test-token')
+    from elephant.storage.schema import outbox
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'admin-test-token')
     app = create_app(Settings(database=str(tmp_path/'core.db'), adapters=(official_config,)), clock=clock, run_background=False)
     core = app.state.core
     event = core.inbox.accept(core.adapters['qq'].normalize(official_event))[0]
@@ -183,7 +183,7 @@ def test_unknown_delivery_resolution_does_not_resend(tmp_path, official_config, 
 
 
 def test_pi_model_change_requires_restart_without_partial_apply(tmp_path, official_config, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(
         Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
         clock=clock,
@@ -218,7 +218,7 @@ def test_pi_model_change_requires_restart_without_partial_apply(tmp_path, offici
 
 
 def test_admin_task_uses_host_owner_and_idempotency(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db"), tasks_enabled=True),
                      clock=clock, run_background=False)
     auth = {"Authorization": "Bearer admin-test-token"}
@@ -246,7 +246,7 @@ def test_admin_can_read_and_cancel_owner_qq_task_by_id_or_public_id(
 ):
     from sqlalchemy import select
 
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     settings = Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), owner={
         "qq_bindings": ({"app_id": official_config.app_id, "user_openid": "300",
                          "verified_at": clock.now().isoformat()},),
@@ -281,7 +281,7 @@ def test_admin_can_read_and_cancel_owner_qq_task_by_id_or_public_id(
 def test_memory_restore_reconcile_is_authenticated_and_uses_private_owner_scope(
     tmp_path, clock, monkeypatch,
 ):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db")), clock=clock, run_background=False)
     core = app.state.core
     seen = []
@@ -318,9 +318,9 @@ def test_confirmed_question_delivery_updates_wait_without_exposing_non_owner_tas
 ):
     from sqlalchemy import select
 
-    from qqbot.storage.schema import outbox
-    from qqbot.storage.task_schema import waits
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "admin-test-token")
+    from elephant.storage.schema import outbox
+    from elephant.storage.task_schema import waits
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "admin-test-token")
     app = create_app(Settings(database=str(tmp_path / "core.db"), adapters=(official_config,)),
         clock=clock, run_background=False)
     core = app.state.core

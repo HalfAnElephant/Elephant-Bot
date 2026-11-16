@@ -8,15 +8,15 @@ from sqlalchemy import select, update
 from test_agent_runtime import leader_complete, root_goal, worker_complete
 from test_agent_runtime import runtime as runtime  # noqa: PLC0414
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.domain import InboundEvent
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import notifications, tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.domain import InboundEvent
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import notifications, tasks
 
 
 def test_console_task_progress_and_result_are_visible_without_external_delivery(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "console-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "console-token")
     app = create_app(Settings(database=str(tmp_path / "console.db"), tasks_enabled=True),
         clock=clock, run_background=False)
     auth = {"Authorization": "Bearer console-token", "Idempotency-Key": "console-goal"}
@@ -122,7 +122,7 @@ async def test_qq_notifications_still_queue_and_missing_adapter_fails(runtime):
 
 @pytest.mark.parametrize("field,value", [("bot_identity_id", "other"), ("surface", "group")])
 def test_reserved_adapter_name_alone_does_not_suppress_delivery(runtime, field, value):
-    from qqbot.domain import Surface
+    from elephant.domain import Surface
 
     root = host_task(runtime)
     claim = runtime.service.claim("worker")

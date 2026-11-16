@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from qqbot.harness.gateway import RunGateway
-from qqbot.providers import ModelCapacity
+from elephant.harness.gateway import RunGateway
+from elephant.providers import ModelCapacity
 
 
 async def occupy(capacity, background, entered, release):

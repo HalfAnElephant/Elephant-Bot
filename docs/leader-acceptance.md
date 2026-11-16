@@ -123,7 +123,7 @@ T10 的重规划同时处理原始用户文本、已认证的后续输入和 HOS
 
 ## home 最终部署与恢复证据
 
-- 单 `elephant-bot.service` 已启用，旧 core/worker acceptance units 均 disabled/inactive。后台监督包含 ingress、delivery、scheduler、external_waiters 和 memory；ready 为 true。发布 revision 记录在 `/opt/qqbot/REVISION`。
+- 单 `elephant-bot.service` 已启用，旧 core/worker acceptance units 均 disabled/inactive。后台监督包含 ingress、delivery、scheduler、external_waiters 和 memory；ready 为 true。发布 revision 记录在 `/opt/elephant/REVISION`。
 - 实际库从历史实验 0010 升级至 0020，`PRAGMA integrity_check=ok`。按用户要求使用 `backup=False`，本次没有备份原 bot。
 - 最终代码回归以 [PR #6 的检查](https://github.com/HalfAnElephant/Elephant-Bot/pull/6/checks)为准，包括 Python、console、Ruff、配置 schema、构建/发布冒烟，以及 Python/TypeScript CodeQL。对应原始 JUnit 和日志保留在每次 CI 的 correctness-results artifact。统一渠道使用 CI，不另跑同范围的本地全量测试。
 - 最终干净模型目标 `T-03be12cc-338` 由一次 Worker 和一次 Leader 汇总达到 SUCCEEDED，产物 `outputs/final-summary.txt` 为 8 字节 `FINAL_OK`，最终正文准确说明路径、内容和核对结果。此前真实文件目标 `T-87ade253-056` 达到 SUCCEEDED。根目标聚合子 artifact，通过受保护下载 API 取得 17 字节 `ELEPHANT_FINAL_OK`，hash 与登记值一致。
@@ -138,23 +138,23 @@ root 的 `task_outcome` 接单与 turn_finished 后原子结算分开。旧故�
 
 home 持久证据：
 
-- `/var/lib/qqbot/leader-live-acceptance.json`：task/run/Job、延迟、正常重启、Leader SIGKILL、artifact 下载校验。
-- `/var/lib/qqbot/leader-deployment-facts.json`：revision、迁移、units、监督、学习会话及监听快照。
-- `/var/lib/qqbot-daemon-stops/`：root-owned、daemon 只读的旧 epoch 停止证明。
-- `/var/lib/qqbot/acceptance-natural-review/production-review-facts-c6055f8e.json`：默认阈值自然复盘、原生日志 hash、来源结果及工具范围的只读核对。
+- `/var/lib/elephant/leader-live-acceptance.json`：task/run/Job、延迟、正常重启、Leader SIGKILL、artifact 下载校验。
+- `/var/lib/elephant/leader-deployment-facts.json`：revision、迁移、units、监督、学习会话及监听快照。
+- `/var/lib/elephant-daemon-stops/`：root-owned、daemon 只读的旧 epoch 停止证明。
+- `/var/lib/elephant/acceptance-natural-review/production-review-facts-c6055f8e.json`：默认阈值自然复盘、原生日志 hash、来源结果及工具范围的只读核对。
 - OpenViking 基准与删除/恢复证据仍位于前述独立 acceptance-package，包含原始评分记录。
 
 ## 补充批次的宿主证据与修复
 
 原始计划 11.3 节允许 fake/replay Harness、工具和受控时钟验证 L01–L14。上表采用这一范围，真实 Pi、模型、Job 和平台结果分别保留，未把所有竞态改成必须在 QQ 平台逐一注入。
 
-实际 daemon 的可信 HOST 入站钩子复用了已认证 admin_api owner 事件，输入经 Core.inbox.accept 后由运行中的 Core.process、Scheduler 和 Pi 处理。原生源自动达到 OpenViking INDEXED，全新 Dialogue/Pi Session 召回精确项目值和唯一原始 source ID。实际停止 OpenViking 后，Leader 仍完成输入及 skills_list，同步留下 QUEUED/ConnectError；后端恢复后同一操作 ID 达到 INDEXED，新 Dialogue 正确回答。8 项断言全部通过，记录在 `/var/lib/qqbot/acceptance-memory-daemon/46f5d4cc-4212-482e-b704-817351ee9f7b/summary.json`。这是 HOST 链路，QQ 平台范围仍按下节记录。
+实际 daemon 的可信 HOST 入站钩子复用了已认证 admin_api owner 事件，输入经 Core.inbox.accept 后由运行中的 Core.process、Scheduler 和 Pi 处理。原生源自动达到 OpenViking INDEXED，全新 Dialogue/Pi Session 召回精确项目值和唯一原始 source ID。实际停止 OpenViking 后，Leader 仍完成输入及 skills_list，同步留下 QUEUED/ConnectError；后端恢复后同一操作 ID 达到 INDEXED，新 Dialogue 正确回答。8 项断言全部通过，记录在 `/var/lib/elephant/acceptance-memory-daemon/46f5d4cc-4212-482e-b704-817351ee9f7b/summary.json`。这是 HOST 链路，QQ 平台范围仍按下节记录。
 
 该实测也暴露了“记住偏好”被模型误作写本地文件的行为。单一提示词现已说明自动原生同步和实际记忆回执，不为记忆另建文件/Worker 保存链。错误根目标已取消，原文件和失败回执保留，后续新提示词验证写入最新 HOST 验收事实。
 
-同 Dialogue 的双目标试运行中，失败 Job 按设计退出 7，另一 Job 实际退出 0 并写出文件，但 `outputs/.keep` 被自动当作可交付制品，导致成功分支在导出时失败。正常结算与停止后恢复现均仅自动收集支持的输出文件，显式附件在工具边界校验；TaskSpec 的机器验收检查只接受 artifact、observation、effect，产物必须是可导出的相对文件路径，业务完成标准写在 goal。无效要求在接单事务中拒绝，不再执行到最后才发现不可验收。原失败结果保留在 `/var/lib/qqbot/leader-isolation-acceptance.json`，未计作双目标通过。 Leader 对子任务 Job 的只读 inspect 现由宿主按实际 Job/Task 冻结绑定授权，绑定根、当前租约、主体/会话及读取权限在异步读取后再次核对，Worker 的精确作用域保持原契约。
+同 Dialogue 的双目标试运行中，失败 Job 按设计退出 7，另一 Job 实际退出 0 并写出文件，但 `outputs/.keep` 被自动当作可交付制品，导致成功分支在导出时失败。正常结算与停止后恢复现均仅自动收集支持的输出文件，显式附件在工具边界校验；TaskSpec 的机器验收检查只接受 artifact、observation、effect，产物必须是可导出的相对文件路径，业务完成标准写在 goal。无效要求在接单事务中拒绝，不再执行到最后才发现不可验收。原失败结果保留在 `/var/lib/elephant/leader-isolation-acceptance.json`，未计作双目标通过。 Leader 对子任务 Job 的只读 inspect 现由宿主按实际 Job/Task 冻结绑定授权，绑定根、当前租约、主体/会话及读取权限在异步读取后再次核对，Worker 的精确作用域保持原契约。
 
-30 个不同根目标经真实 HTTP 管理入口接单后立即取消，全部 CANCELLED，未派发 Job；唯一抢先启动的 run 已确认停止并释放槽。取消持久接受 P95 19.08 ms，30 次状态读取 P95 8.32 ms，记录在 `/var/lib/qqbot/leader-control-benchmark.json`。本批生产复验的输入、模型结果、任务树和制品校验另存最新 HOST 验收事实文件，发布版本以 `/var/lib/qqbot/leader-deployment-facts.json` 为准。
+30 个不同根目标经真实 HTTP 管理入口接单后立即取消，全部 CANCELLED，未派发 Job；唯一抢先启动的 run 已确认停止并释放槽。取消持久接受 P95 19.08 ms，30 次状态读取 P95 8.32 ms，记录在 `/var/lib/elephant/leader-control-benchmark.json`。本批生产复验的输入、模型结果、任务树和制品校验另存最新 HOST 验收事实文件，发布版本以 `/var/lib/elephant/leader-deployment-facts.json` 为准。
 
 ## 后续真实入口发现的问题
 
@@ -168,11 +168,11 @@ home 持久证据：
 
 `db1b4eb` 的统一 CI 为 1070 项 Python、17 项 JavaScript 全部通过且无跳过，Ruff、配置 schema、构建/发布冒烟与 CodeQL 均通过，已部署到 home。旧 IDLE 驻留记录 `889f6490-4375-4209-aaf7-7f6012ea4368` 已凭可信旧 epoch 停止证明成为 STOPPED。
 
-原失败分支 `T-4e232c35-b0b` 的 Job 等待在部署后唤醒原 Task 与同一 Worker Session，最终 BLOCKED，原 Job 仍只有一个且 exit 7。另一根目标保持 SUCCEEDED，已核对的产物保持原 hash。恢复事实写入 `/var/lib/qqbot/leader-isolation-fixed-acceptance.json` 的 post_fix_checks。
+原失败分支 `T-4e232c35-b0b` 的 Job 等待在部署后唤醒原 Task 与同一 Worker Session，最终 BLOCKED，原 Job 仍只有一个且 exit 7。另一根目标保持 SUCCEEDED，已核对的产物保持原 hash。恢复事实写入 `/var/lib/elephant/leader-isolation-fixed-acceptance.json` 的 post_fix_checks。
 
-真实 HOST 普通文件重试已完成 Leader → Worker → 文件读回 → Leader 核验闭环。根目标 `T-19dd86df-b83` 达到 SUCCEEDED，只有一个 Worker attempt 和一个 finalizer，均 FINISHED、槽位为 0，没有 Job。`outputs/host-final.txt` 为精确 13 字节 `HOST_FINAL_OK`，受保护下载的原始字节及 SHA-256 与登记值相符。该重试保留了先前绑定前失败的目标，记录在 `/var/lib/qqbot/acceptance-host-final/3828bb49-8ecc-4c48-b004-79eedf310331/summary.json`。
+真实 HOST 普通文件重试已完成 Leader → Worker → 文件读回 → Leader 核验闭环。根目标 `T-19dd86df-b83` 达到 SUCCEEDED，只有一个 Worker attempt 和一个 finalizer，均 FINISHED、槽位为 0，没有 Job。`outputs/host-final.txt` 为精确 13 字节 `HOST_FINAL_OK`，受保护下载的原始字节及 SHA-256 与登记值相符。该重试保留了先前绑定前失败的目标，记录在 `/var/lib/elephant/acceptance-host-final/3828bb49-8ecc-4c48-b004-79eedf310331/summary.json`。
 
-真实 Pi 已启动后的取消接受耗时 24.83 ms，但首次探针发现进程退出后任务槽未释放，原失败结果保留在 `/var/lib/qqbot/leader-cancel-process-fixed-acceptance.json`。原因是取消 stdout reader 时，满队列的 EOF 入队等待没有消费者，阻塞停止回执。后续 `47d397e` 的统一 CI 为 1073 项 Python、17 项 JavaScript 全部通过且无跳过，构建/发布冒烟和 CodeQL 通过。部署后，原取消任务凭可信停止证明自然恢复为 CANCELLED。新探针 `T-346170d1-060` 先观察实际 Pi PID 与启动时间，再发取消；接受耗时 33.58 ms，随后根目标 CANCELLED、run FINISHED 且 slot_reserved=0、process STOPPED，原 PID 已停止。新成功证据独立保存在 `/var/lib/qqbot/leader-cancel-process-final-acceptance.json`，首次失败记录保留。
+真实 Pi 已启动后的取消接受耗时 24.83 ms，但首次探针发现进程退出后任务槽未释放，原失败结果保留在 `/var/lib/elephant/leader-cancel-process-fixed-acceptance.json`。原因是取消 stdout reader 时，满队列的 EOF 入队等待没有消费者，阻塞停止回执。后续 `47d397e` 的统一 CI 为 1073 项 Python、17 项 JavaScript 全部通过且无跳过，构建/发布冒烟和 CodeQL 通过。部署后，原取消任务凭可信停止证明自然恢复为 CANCELLED。新探针 `T-346170d1-060` 先观察实际 Pi PID 与启动时间，再发取消；接受耗时 33.58 ms，随后根目标 CANCELLED、run FINISHED 且 slot_reserved=0、process STOPPED，原 PID 已停止。新成功证据独立保存在 `/var/lib/elephant/leader-cancel-process-final-acceptance.json`，首次失败记录保留。
 
 真实 HOST 活动任务更正已完成同根返工。根目标 `T-52013406-6de` 原 Job `897934bd5b0943c2be1a23b7a07e22c5` 处于 RUNNING 时，通过真实 `memory_correct` 更正唯一测试项目，操作达到 APPLIED，owner epoch 从 0 升至 1。旧 child 与 Job 均 CANCELLED，确认原 PID 消失且 cgroup 消失或为空后，系统才建立关联旧任务的 rework。新 Worker 使用新 Session、epoch 1，替代 Job EXITED/0，原根最终 SUCCEEDED。受保护制品下载的 71 字节为更正后的 archive-b 值，hash 与登记一致。中间 Leader 轮次 `cbc941bc-527d-4a71-9280-da548ab24a26` 的 aborted 结果保留；该轮已持久派出关联子任务，后续正常汇总，无额外业务 Job 或最终阻塞。证据仍在上述 HOST summary 和原生日志中。
 
@@ -186,7 +186,7 @@ home 持久证据：
 
 ## 2026-11-13 服务器源码同步
 
-本次以 home 的 `/opt/qqbot` 为源码依据，同步到本地工作区并更新现有 PR #6。服务器 `REVISION` 仍为 `9b77a1b`，其后直接部署的修改通过逐文件内容比对纳入本次提交，单凭该文件不能识别完整运行源码。
+本次以 home 的 `/opt/elephant` 为源码依据，同步到本地工作区并更新现有 PR #6。服务器 `REVISION` 仍为 `9b77a1b`，其后直接部署的修改通过逐文件内容比对纳入本次提交，单凭该文件不能识别完整运行源码。
 
 同步内容包括动态 Worker 调度、模型请求背压、活动目标复用与补充、Leader 进度合并、失败升级与受控接手、原生轮次崩溃恢复，以及统一人格文件。服务器配套测试一并纳入，并保留本地已有的扫码 owner 经持久 Outbox 投递的身份与撤权回归。README 补充当前代码入口，部署说明补充兼容字段与执行限制语义。
 
@@ -230,7 +230,7 @@ PR#6 承接 Leader/Workers 主线。PR#4 的 GitHub 授权与效果回读、安�
 
 默认配置为 `execution.leader_environment=host`、`execution.worker_environment=sandbox`。Leader 可以在派发时指定子任务的 `environment`。已接受任务保存实际模式，旧任务继续沿用原有沙箱模式。沙箱 Worker 的子任务不能提升到 host。
 
-home 已安装本次 wheel 并切换生产服务，启用 `Delegate=yes` 和宿主机文件系统访问。前台 host 命令在执行用户程序前进入 daemon 内的独立 cgroup，清理确认后才报告停止。执行身份为 `qqbot`，系统级提权仍需另行配置。
+home 已安装本次 wheel 并切换生产服务，启用 `Delegate=yes` 和宿主机文件系统访问。前台 host 命令在执行用户程序前进入 daemon 内的独立 cgroup，清理确认后才报告停止。执行身份为 `elephant`，系统级提权仍需另行配置。
 
 | 验证范围 | 结果 |
 | --- | --- |

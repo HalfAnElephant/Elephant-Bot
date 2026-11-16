@@ -4,16 +4,16 @@ import pytest
 from conftest import runtime_client_for
 from sqlalchemy import select, update
 
-from qqbot.clock import FakeClock
-from qqbot.domain.execution import TaskGoal
-from qqbot.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
-from qqbot.harness.artifacts import export_artifacts
-from qqbot.jobs.service import TaskService
-from qqbot.outbox.service import Outbox
-from qqbot.permissions import PermissionRule
-from qqbot.storage.db import Database
-from qqbot.storage.schema import metadata, outbox
-from qqbot.storage.task_schema import inputs, notifications, runs, tasks, waits
+from elephant.clock import FakeClock
+from elephant.domain.execution import TaskGoal
+from elephant.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+from elephant.harness.artifacts import export_artifacts
+from elephant.jobs.service import TaskService
+from elephant.outbox.service import Outbox
+from elephant.permissions import PermissionRule
+from elephant.storage.db import Database
+from elephant.storage.schema import metadata, outbox
+from elephant.storage.task_schema import inputs, notifications, runs, tasks, waits
 
 
 @pytest.fixture
@@ -195,9 +195,9 @@ async def test_worker_lost_result_response_replays_without_model(setup, tmp_path
 
     import httpx
 
-    from qqbot.domain.tasks import TaskResult
-    from qqbot.jobs.worker import Spool, Worker
-    from qqbot.storage.task_schema import events
+    from elephant.domain.tasks import TaskResult
+    from elephant.jobs.worker import Spool, Worker
+    from elephant.storage.task_schema import events
 
     service, event, access, _clock = setup
     service.accept(event, access, "work")
@@ -242,8 +242,8 @@ async def test_worker_lost_result_response_replays_without_model(setup, tmp_path
 
 @pytest.mark.asyncio
 async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
-    from qqbot.domain.tasks import TaskResult
-    from qqbot.jobs.worker import Spool, Worker
+    from elephant.domain.tasks import TaskResult
+    from elephant.jobs.worker import Spool, Worker
 
     service, event, access, _clock = setup
     task = service.accept(event, access, "work")
@@ -272,7 +272,7 @@ async def test_worker_cancel_at_result_commit_releases_slot(setup, tmp_path):
 async def test_supervisor_cancellation_stops_and_commits_failure(setup, tmp_path):
     import asyncio
 
-    from qqbot.jobs.worker import Spool, Worker
+    from elephant.jobs.worker import Spool, Worker
 
     service, event, access, _clock = setup
     task = service.accept(event, access, "work")
@@ -497,7 +497,7 @@ def test_archive_cleanup_keeps_live_trees_recent_references_and_pending_exports(
     from datetime import timedelta
     from uuid import uuid4
 
-    from qqbot.harness.artifacts import cleanup_artifacts
+    from elephant.harness.artifacts import cleanup_artifacts
 
     service, event, access, clock = setup
     archive = service.archive_root
@@ -551,7 +551,7 @@ def test_archive_cleanup_keeps_old_child_outputs_while_root_is_active(setup):
     from datetime import timedelta
     from uuid import uuid4
 
-    from qqbot.harness.artifacts import cleanup_artifacts
+    from elephant.harness.artifacts import cleanup_artifacts
 
     service, event, access, clock = setup
     root = service.accept(event, access, "root")

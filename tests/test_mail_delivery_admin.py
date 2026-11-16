@@ -5,15 +5,15 @@ import httpx
 import pytest
 from sqlalchemy import insert, select
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.permissions import PermissionPolicy, PermissionRule
-from qqbot.storage.mail_send_schema import mail_outgoing
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.permissions import PermissionPolicy, PermissionRule
+from elephant.storage.mail_send_schema import mail_outgoing
 
 
 @pytest.fixture
 async def delivery_admin(tmp_path, clock, monkeypatch):
-    monkeypatch.setenv('QQBOT_ADMIN_TOKEN', 'delivery-admin-token')
+    monkeypatch.setenv('ELEPHANT_ADMIN_TOKEN', 'delivery-admin-token')
     app = create_app(Settings(database=str(tmp_path / 'delivery.db'), owner={'id': 'owner'}),
         clock=clock, run_background=False)
     core = app.state.core

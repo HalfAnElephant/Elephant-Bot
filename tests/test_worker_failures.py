@@ -12,14 +12,14 @@ import pytest
 from conftest import runtime_client_for
 from sqlalchemy import select, update
 
-from qqbot.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.harness.pool import SessionPool
-from qqbot.jobs.service import TaskService
-from qqbot.jobs.worker import Spool, Worker
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import processes, runs, tasks
+from elephant.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.harness.pool import SessionPool
+from elephant.jobs.service import TaskService
+from elephant.jobs.worker import Spool, Worker
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import processes, runs, tasks
 
 
 @pytest.fixture
@@ -322,7 +322,7 @@ async def test_event_persistence_error_does_not_drop_failure_result(environment,
 
 
 async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp_path, clock, monkeypatch):
-    from qqbot.jobs import worker as worker_module
+    from elephant.jobs import worker as worker_module
 
     service, _task, client = environment
     sleeping, ticks = asyncio.Queue(), asyncio.Queue()
@@ -378,7 +378,7 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
 
 
 async def test_rejected_live_result_preserves_original_and_queues_failure(environment, tmp_path):
-    from qqbot.domain.tasks import TaskResult
+    from elephant.domain.tasks import TaskResult
 
     service, _task, client = environment
 
@@ -422,7 +422,7 @@ async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path
 
 
 async def test_finalizer_does_not_reexport_child_paths_from_its_workspace(environment, tmp_path):
-    from qqbot.domain.tasks import TaskResult
+    from elephant.domain.tasks import TaskResult
     service, task, client = environment
     class FinalizerRunner(SlowStopRunner):
         async def run(self, goal, **kwargs):

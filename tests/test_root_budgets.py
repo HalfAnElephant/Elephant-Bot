@@ -5,12 +5,12 @@ from sqlalchemy import func, select, update
 from test_agent_runtime import prepare_conditional_review, root_goal
 from test_agent_runtime import runtime as agent_runtime_fixture
 
-from qqbot.domain.execution import RunBudget
-from qqbot.providers import ProviderAdapter
-from qqbot.storage.agent_schema import dialogue_inputs, leader_inbox
-from qqbot.storage.learning_schema import learning_sessions
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import model_requests, notifications, runs, tasks
+from elephant.domain.execution import RunBudget
+from elephant.providers import ProviderAdapter
+from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
+from elephant.storage.learning_schema import learning_sessions
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import model_requests, notifications, runs, tasks
 
 runtime = agent_runtime_fixture
 

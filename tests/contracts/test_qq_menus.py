@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from qqbot.adapters.qq_official.menus import (
+from elephant.adapters.qq_official.menus import (
     MenuClient,
     QQMenu,
     QQMenuAPIError,
@@ -20,7 +20,7 @@ from qqbot.adapters.qq_official.menus import (
     QQPanelUpdate,
     router,
 )
-from qqbot.permissions import PermissionService
+from elephant.permissions import PermissionService
 
 
 def adapter(handler):

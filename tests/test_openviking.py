@@ -7,10 +7,10 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from qqbot.adapters.openviking import OpenVikingMemory
-from qqbot.adapters.openviking.service import MEMORY_TYPES, digest
-from qqbot.adapters.openviking.transport import MemoryBackendError
-from qqbot.contracts.memory import (
+from elephant.adapters.openviking import OpenVikingMemory
+from elephant.adapters.openviking.service import MEMORY_TYPES, digest
+from elephant.adapters.openviking.transport import MemoryBackendError
+from elephant.contracts.memory import (
     MemoryBinding,
     MemoryCorrection,
     MemoryDeletion,
@@ -18,8 +18,8 @@ from qqbot.contracts.memory import (
     SourceBatch,
     SourceEvent,
 )
-from qqbot.memory.openviking_config import OpenVikingConfig
-from qqbot.storage.memory_sync_schema import (
+from elephant.memory.openviking_config import OpenVikingConfig
+from elephant.storage.memory_sync_schema import (
     memory_documents,
     memory_operations,
 )
@@ -593,7 +593,7 @@ async def test_multi_source_export_extracts_independently_and_recovers_each_slic
 
 @pytest.mark.parametrize("mutation", ["correct", "forget"])
 async def test_uri_mutation_preserves_sibling_with_legacy_batch_union_and_freezes_replay(memory, mutation):
-    from qqbot.storage.memory_sync_schema import memory_sources
+    from elephant.storage.memory_sync_schema import memory_sources
 
     service, remote, scope, originals = memory
     source = batch(scope, source_event_ids=("legacy-a", "legacy-b"))
@@ -643,7 +643,7 @@ async def test_uri_mutation_preserves_sibling_with_legacy_batch_union_and_freeze
 
 
 async def test_later_forget_never_rebuilds_a_previously_frozen_shared_source(memory):
-    from qqbot.storage.memory_sync_schema import memory_sources
+    from elephant.storage.memory_sync_schema import memory_sources
 
     service, remote, scope, originals = memory
     original = batch(scope, event_id="shared-source", content="项目A旧值与项目B旧值")

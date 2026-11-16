@@ -10,8 +10,8 @@ from test_host_controls import child_rows, task_state
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 from test_project_scopes import project_core as project_core  # noqa: PLC0414
 
-from qqbot.storage.agent_schema import agent_events, leader_inbox
-from qqbot.storage.task_schema import inputs, runs, tasks
+from elephant.storage.agent_schema import agent_events, leader_inbox
+from elephant.storage.task_schema import inputs, runs, tasks
 
 
 def report(runtime, claim, call_id, *, phase="checking", evidence=("observation",), text="正在核实资料"):
@@ -208,8 +208,8 @@ async def test_numeric_reply_to_real_question_ignores_unrelated_cancel_selection
 
 
 def control_deliveries(runtime, source):
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.storage.schema import outbox
+    from elephant.domain import OutboundEnvelope
+    from elephant.storage.schema import outbox
     with runtime.core.db.engine.connect() as conn:
         return [OutboundEnvelope.model_validate_json(raw) for raw in conn.execute(select(outbox.c.envelope_json).where(
             outbox.c.origin_id == source.event_id).order_by(outbox.c.part_no)).scalars()]
@@ -306,9 +306,9 @@ async def test_control_status_body_and_fingerprint_share_one_transaction(control
 def test_control_old_body_stays_invalid_after_memory_replan_completes(project_core):
     from test_project_scopes import host_event
 
-    from qqbot.domain import OutboundEnvelope
-    from qqbot.storage.memory_sync_schema import memory_owners
-    from qqbot.storage.schema import outbox
+    from elephant.domain import OutboundEnvelope
+    from elephant.storage.memory_sync_schema import memory_owners
+    from elephant.storage.schema import outbox
     core = project_core
     root = core.enqueue_admin_task("旧记忆下的目标", idempotency_key="control-old-memory", workspace_id="alpha")
     source, _ = core.inbox.accept(host_event(core, "control-memory-status", "/任务 " + root["public_id"]))

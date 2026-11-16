@@ -1,0 +1,25 @@
+#!/bin/sh
+# Keep runtime data files and the Pi package relative to the installed bundle.
+set -eu
+base=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+if [ ! -x "$base/.venv/bin/elephant" ]; then
+    printf '%s\n' 'Elephant 尚未安装，请先完成安装。' >&2
+    exit 1
+fi
+# The installer may have found Homebrew without an interactive shell profile.
+if [ "$(uname -s)" = Darwin ]; then
+    case "$(uname -m)" in
+        arm64) brew_bin=/opt/homebrew/bin ;;
+        x86_64) brew_bin=/usr/local/bin ;;
+        *) brew_bin= ;;
+    esac
+    if [ -n "$brew_bin" ] && [ -x "$brew_bin/brew" ]; then
+        PATH="$PATH:$brew_bin"
+        export PATH
+    fi
+fi
+cd -- "$base"
+if [ "$#" -eq 0 ]; then
+    set -- setup
+fi
+exec "$base/.venv/bin/elephant" "$@"

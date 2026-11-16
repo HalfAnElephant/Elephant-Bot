@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from qqbot.adapters.qq_official.events import extra_segments
-from qqbot.domain import MediaSegment
-from qqbot.harness import audio
+from elephant.adapters.qq_official.events import extra_segments
+from elephant.domain import MediaSegment
+from elephant.harness import audio
 
 
 def test_voice_normalization_retains_platform_transcript_and_wav_source():
@@ -159,7 +159,7 @@ async def test_invalid_audio_does_not_reach_asr(tmp_path, monkeypatch):
 async def test_decoder_cancel_or_timeout_reaps_child_and_cleans_files(tmp_path, monkeypatch, cancel):
     monkeypatch.setattr(audio.tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(audio.shutil, "which", lambda _: "/usr/bin/ffmpeg")
-    monkeypatch.setenv("QQBOT_MODEL_KEY", "must-not-reach-decoder")
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "must-not-reach-decoder")
     entered, stopped = asyncio.Event(), asyncio.Event()
 
     class Child:
@@ -179,7 +179,7 @@ async def test_decoder_cancel_or_timeout_reaps_child_and_cleans_files(tmp_path, 
     child = Child()
 
     async def spawn(*argv, **options):
-        assert "QQBOT_MODEL_KEY" not in options["env"]
+        assert "ELEPHANT_MODEL_KEY" not in options["env"]
         assert argv[argv.index("-protocol_whitelist") + 1] == "fd,pipe"
         assert argv[argv.index("-i") + 1] == "fd:"
         assert Path(options["stdin"].name).is_file()

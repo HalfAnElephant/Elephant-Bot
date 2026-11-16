@@ -71,7 +71,7 @@ def main():
         "stopped_at": datetime.now(UTC).isoformat()}
     if not cgroup_is_drained(root, os.getpid()):
         raise SystemExit("old daemon cgroup changed before attestation")
-    write_receipt(Path("/var/lib/qqbot-daemon-stops"), epoch, receipt)
+    write_receipt(Path("/var/lib/elephant-daemon-stops"), epoch, receipt)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 import sqlalchemy as sa
 from alembic import op
 
-from qqbot.storage.schema import decision_logs, decisions
+from elephant.storage.schema import decision_logs, decisions
 
 revision = "0009"
 down_revision = "0008"

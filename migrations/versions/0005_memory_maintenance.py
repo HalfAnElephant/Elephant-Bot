@@ -2,7 +2,7 @@
 
 from alembic import op
 
-from qqbot.storage.social_schema import MAINTENANCE_TABLES
+from elephant.storage.social_schema import MAINTENANCE_TABLES
 
 revision = "0005"
 down_revision = "0004"

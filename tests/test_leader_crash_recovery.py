@@ -8,10 +8,10 @@ from test_agent_runtime import runtime as runtime  # noqa: PLC0414 - Register th
 from test_leader_decisions import failed_attention, tool
 from test_leader_dispatch_recovery import native_pending_submit
 
-from qqbot.adapters.pi.sessions import branch_entries, load_entries, restore_tool_results, unfinished_tools
-from qqbot.domain import TextSegment
-from qqbot.storage.action_schema import operations
-from qqbot.storage.task_schema import runs, waits
+from elephant.adapters.pi.sessions import branch_entries, load_entries, restore_tool_results, unfinished_tools
+from elephant.domain import TextSegment
+from elephant.storage.action_schema import operations
+from elephant.storage.task_schema import runs, waits
 
 
 def prepare(operation_id, arguments_hash="same-write"):

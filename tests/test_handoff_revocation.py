@@ -11,12 +11,12 @@ import pytest
 from conftest import official_payload
 from sqlalchemy import insert, select, update
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.domain import OutboundEnvelope
-from qqbot.permissions import PermissionRule
-from qqbot.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
-from qqbot.storage.task_schema import runs, sessions, tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.domain import OutboundEnvelope
+from elephant.permissions import PermissionRule
+from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
+from elephant.storage.task_schema import runs, sessions, tasks
 
 
 def receipt(claim):
@@ -65,7 +65,7 @@ async def bind_user(state, claim, tmp_path):
 
 @pytest.fixture
 async def handoff(tmp_path, official_config, official_event, clock, monkeypatch):
-    monkeypatch.setenv("QQBOT_ADMIN_TOKEN", "handoff-admin-token")
+    monkeypatch.setenv("ELEPHANT_ADMIN_TOKEN", "handoff-admin-token")
     settings = Settings(database=str(tmp_path / "core.db"), adapters=(official_config,), tasks_enabled=True,
         owner={"qq_bindings": ({"app_id": "app", "user_openid": "300", "verified_at": clock.now().isoformat()},)})
     app = create_app(settings, clock=clock, run_background=False)
@@ -169,7 +169,7 @@ async def test_finalizer_and_queued_delivery_recheck_persisted_handoff(handoff, 
             complete()
         return
     complete()
-    from qqbot.storage.schema import outbox
+    from elephant.storage.schema import outbox
     with s.core.db.engine.connect() as conn:
         row = conn.execute(select(outbox).where(outbox.c.task_id == s.root["task_id"])).mappings().one()
     envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
@@ -222,7 +222,7 @@ async def test_revoked_leader_history_rotates_without_consuming_new_input(handof
 
 
 async def test_revoked_root_stops_then_settles_while_independent_root_runs(handoff, tmp_path):
-    from qqbot.adapters.execution.runtime import JobRuntime
+    from elephant.adapters.execution.runtime import JobRuntime
 
     s = handoff
     revoke(s)

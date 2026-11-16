@@ -6,11 +6,11 @@ from sqlalchemy import select
 from test_agent_runtime import root_goal
 from test_agent_runtime import runtime as runtime_fixture
 
-from qqbot.domain import MediaSegment
-from qqbot.ingress.service import Inbox
-from qqbot.storage.agent_schema import agent_events, leader_inbox
-from qqbot.storage.schema import inbox
-from qqbot.storage.task_schema import inputs, tasks
+from elephant.domain import MediaSegment
+from elephant.ingress.service import Inbox
+from elephant.storage.agent_schema import agent_events, leader_inbox
+from elephant.storage.schema import inbox
+from elephant.storage.task_schema import inputs, tasks
 
 runtime = runtime_fixture
 
@@ -72,11 +72,11 @@ async def test_scheduled_result_uses_existing_proactive_authority_and_unknown_fe
 ):
     import httpx
 
-    from qqbot.adapters.qq_official.adapter import OfficialAdapter
-    from qqbot.domain import AccessContext
-    from qqbot.jobs.service import TaskService
-    from qqbot.outbox.service import Outbox
-    from qqbot.storage.schema import outbox
+    from elephant.adapters.qq_official.adapter import OfficialAdapter
+    from elephant.domain import AccessContext
+    from elephant.jobs.service import TaskService
+    from elephant.outbox.service import Outbox
+    from elephant.storage.schema import outbox
 
     calls = []
     def transport(request):

@@ -43,9 +43,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Confirm the checked artifact ID
+        env:
+          RELEASE_ARTIFACT_ID: ${{ needs.checks.outputs.release-artifact-id }}
+        run: '[[ "$RELEASE_ARTIFACT_ID" =~ ^[0-9]+$ ]]'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release-assets
+          artifact-ids: ${{ needs.checks.outputs.release-artifact-id }}
           path: dist
       - name: Verify and publish tested assets
         working-directory: dist

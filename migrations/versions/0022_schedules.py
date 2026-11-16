@@ -8,7 +8,7 @@ depends_on = None
 
 
 def upgrade():
-    from qqbot.storage.schedule_schema import schedule_fires, schedules
+    from elephant.storage.schedule_schema import schedule_fires, schedules
     schedules.create(op.get_bind(), checkfirst=True)
     schedule_fires.create(op.get_bind(), checkfirst=True)
 

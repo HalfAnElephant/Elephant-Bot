@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from qqbot.capabilities import ToolContext, ToolGateway, standard_registry
-from qqbot.harness import public_web
+from elephant.capabilities import ToolContext, ToolGateway, standard_registry
+from elephant.harness import public_web
 
 
 class DeepSeekFixture:

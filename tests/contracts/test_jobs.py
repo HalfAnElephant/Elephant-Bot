@@ -10,10 +10,10 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from qqbot.adapters.execution.jobs import JobService, SystemdJobProvider, UnitReceipt
-from qqbot.contracts.execution import ExecutionCapabilities, JobScope, JobStart
-from qqbot.storage.job_schema import jobs
-from qqbot.storage.task_schema import inputs, runs, tasks, waits
+from elephant.adapters.execution.jobs import JobService, SystemdJobProvider, UnitReceipt
+from elephant.contracts.execution import ExecutionCapabilities, JobScope, JobStart
+from elephant.storage.job_schema import jobs
+from elephant.storage.task_schema import inputs, runs, tasks, waits
 
 
 class FakeSystemd:
@@ -232,7 +232,7 @@ async def test_same_execution_world_cwd_and_file_boundary(setup, tmp_path):
 
 
 async def test_tools_register_native_schema_and_do_not_bind_to_run_lifecycle(setup):
-    from qqbot.capabilities.gateway import CapabilityRegistry
+    from elephant.capabilities.gateway import CapabilityRegistry
     service, provider, scope = setup
     registry = CapabilityRegistry()
     service.register(registry)
@@ -273,7 +273,7 @@ async def test_real_provider_builds_controlled_unit_and_bwrap_command(tmp_path):
     assert command[bind + 1:bind + 3] == (str(tmp_path), '/workspace')
     assert command[command.index('--chdir') + 1] == '/workspace/sub'
     assert command[-2:] == ('--', '/usr/bin/true')
-    assert not any('QQBOT_' in item or 'TOKEN=' in item for item in command)
+    assert not any('ELEPHANT_' in item or 'TOKEN=' in item for item in command)
 
 
 async def test_host_provider_allows_sudoers_elevation_in_controlled_unit(tmp_path):
@@ -296,7 +296,7 @@ async def test_host_provider_allows_sudoers_elevation_in_controlled_unit(tmp_pat
     assert command[command.index('/usr/bin/env') + 1:command.index('/usr/bin/env') + 3] == ('-i', '--')
     assert command[-3:] == host_request.argv
     assert '--bind' not in command and '--clearenv' not in command
-    assert not any('QQBOT_' in item or 'TOKEN=' in item for item in command)
+    assert not any('ELEPHANT_' in item or 'TOKEN=' in item for item in command)
 
 
 async def test_real_provider_parses_exit_and_filters_journal_by_invocation():
@@ -348,17 +348,17 @@ async def test_successful_stop_cli_cannot_mask_remaining_descendants(tmp_path):
 
 @pytest.fixture
 def job_runtime(db, clock, tmp_path, monkeypatch):
-    from qqbot.adapters.execution.runtime import JobRuntime
-    from qqbot.adapters.execution.world import execution_workspace
-    from qqbot.config import OwnerConfig, QQOwnerBinding, Settings
-    from qqbot.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
-    from qqbot.harness.gateway import RunGateway
-    from qqbot.jobs.service import TaskService
-    from qqbot.outbox.service import Outbox
-    from qqbot.runtime.leader import LeaderRuntime
-    from qqbot.runtime.scheduler import RuntimeClient
-    from qqbot.runtime.sessions import SessionService
-    from qqbot.runtime.task_graph import TaskGraph
+    from elephant.adapters.execution.runtime import JobRuntime
+    from elephant.adapters.execution.world import execution_workspace
+    from elephant.config import OwnerConfig, QQOwnerBinding, Settings
+    from elephant.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+    from elephant.harness.gateway import RunGateway
+    from elephant.jobs.service import TaskService
+    from elephant.outbox.service import Outbox
+    from elephant.runtime.leader import LeaderRuntime
+    from elephant.runtime.scheduler import RuntimeClient
+    from elephant.runtime.sessions import SessionService
+    from elephant.runtime.task_graph import TaskGraph
     monkeypatch.delenv('ICLOUD_CALENDAR_CONFIG', raising=False)
     settings = Settings(owner=OwnerConfig(id='owner', qq_bindings=(
         QQOwnerBinding(app_id='app', user_openid='person', verified_at=clock.now().isoformat()),)))
@@ -400,7 +400,7 @@ def job_runtime(db, clock, tmp_path, monkeypatch):
 
 
 async def test_runtime_gateway_starts_verifies_and_reads_independent_job(job_runtime):
-    from qqbot.storage.action_schema import operations
+    from elephant.storage.action_schema import operations
     fixture = job_runtime
     result = await fixture.gateway.tools.invoke('job.start', {'job_key': 'build', 'argv': ['true']},
                                                 fixture.gateway.context, operation_id='job-start')
@@ -441,7 +441,7 @@ async def test_runtime_cancelled_run_can_readback_and_host_stops_job_without_lea
 async def test_runtime_late_start_receipt_settles_original_operation_after_slot_release(job_runtime):
     from sqlalchemy import update
 
-    from qqbot.storage.action_schema import operations
+    from elephant.storage.action_schema import operations
     fixture = job_runtime
     result = await fixture.gateway.tools.invoke('job.start', {'job_key': 'build', 'argv': ['true']},
                                                 fixture.gateway.context, operation_id='lost-start')
@@ -505,7 +505,7 @@ async def test_runtime_consult_and_review_cannot_start_business_job(job_runtime)
 async def test_runtime_revision_and_permission_revocation_stop_existing_job(job_runtime):
     from sqlalchemy import insert
 
-    from qqbot.permissions import PermissionPolicy, PermissionRule
+    from elephant.permissions import PermissionPolicy, PermissionRule
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'build', 'argv': ['true']}})
@@ -528,7 +528,7 @@ async def test_runtime_revision_and_permission_revocation_stop_existing_job(job_
 
 @pytest.fixture
 async def sibling_jobs(job_runtime):
-    from qqbot.adapters.execution.world import execution_workspace
+    from elephant.adapters.execution.world import execution_workspace
     fixture = job_runtime
     with fixture.service.db.transaction() as conn:
         root = conn.execute(select(tasks).where(tasks.c.id == fixture.root['task_id'])).mappings().one()
@@ -561,7 +561,7 @@ async def sibling_jobs(job_runtime):
 async def test_job_revision_stop_intent_preserves_unaffected_sibling_and_survives_input_consumption(
     sibling_jobs, kind, consume_before_maintenance
 ):
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
     fixture, claims, started = sibling_jobs
     with fixture.service.db.engine.connect() as conn:
         second_wait = dict(conn.execute(select(waits).where(waits.c.run_id == claims[1]['run_id'])).mappings().one())
@@ -593,7 +593,7 @@ async def test_job_revision_stop_intent_preserves_unaffected_sibling_and_survive
 
 
 async def test_job_dispatched_after_revision_transaction_is_marked_for_stop_without_replay(job_runtime):
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
     fixture = job_runtime
     guard = fixture.runtime.jobs.dispatch_guard
     def revise_after_authorization(scope):
@@ -792,7 +792,7 @@ async def test_job_waiter_only_accepts_stored_wait_identity_and_job_inspection_c
 
 
 async def test_scheduler_recovers_jobs_before_claiming_and_shutdown_leaves_units_alone(job_runtime, monkeypatch):
-    from qqbot.runtime.scheduler import Scheduler
+    from elephant.runtime.scheduler import Scheduler
     fixture = job_runtime
     scheduler = Scheduler(fixture.core, SimpleNamespace(sessions=fixture.core.sessions))
     recovery_gate = asyncio.Event()
@@ -838,7 +838,7 @@ def _finish_job_worker(fixture, claim=None):
 def _job_leader(fixture, *, user=False):
     _finish_job_worker(fixture)
     if user:
-        from qqbot.domain import TextSegment
+        from elephant.domain import TextSegment
         event = fixture.event.model_copy(update={'event_id': 'explicit-job-read', 'segments': (TextSegment(text='查看指定 Job'),)})
         fixture.core.sessions.enqueue(event, fixture.access)
     claim = fixture.core.sessions.claim('leader-reader')
@@ -847,7 +847,7 @@ def _job_leader(fixture, *, user=False):
 
 
 async def test_leader_finalizer_inspects_actual_child_job_and_logs_without_worker_scope(job_runtime):
-    from qqbot.jobs.protocol import WorkerRequest
+    from elephant.jobs.protocol import WorkerRequest
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'leader-read', 'argv': ['true']}})
@@ -931,7 +931,7 @@ async def test_bound_leader_cannot_inspect_another_actual_root(job_runtime):
 
 @pytest.mark.parametrize('action', ['task.read', 'workspace.job.inspect'])
 async def test_leader_job_read_requires_current_actual_child_permissions(job_runtime, action):
-    from qqbot.permissions import PermissionRule
+    from elephant.permissions import PermissionRule
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'permission-read', 'argv': ['true']}})
@@ -943,7 +943,7 @@ async def test_leader_job_read_requires_current_actual_child_permissions(job_run
 
 
 async def test_leader_job_read_rechecks_authority_after_asynchronous_provider_read(job_runtime):
-    from qqbot.permissions import PermissionRule
+    from elephant.permissions import PermissionRule
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'late-read-revoke', 'argv': ['true']}})
@@ -991,9 +991,9 @@ async def test_leader_missing_job_is_bounded_runtime_error_without_mutation(job_
 @pytest.mark.parametrize('path', ['state', 'data.state'])
 @pytest.mark.parametrize(('target', 'exit_code'), [('EXITED', 0), ('FAILED', 7)])
 async def test_host_job_condition_wakes_original_task_once_without_model_polling(job_waiter, path, target, exit_code):
-    from qqbot.capabilities.gateway import CapabilityRegistry
-    from qqbot.jobs.waiters import ExternalWaiters
-    from qqbot.storage.task_schema import model_requests
+    from elephant.capabilities.gateway import CapabilityRegistry
+    from elephant.jobs.waiters import ExternalWaiters
+    from elephant.storage.task_schema import model_requests
     fixture, started, payload = job_waiter
     with fixture.service.db.transaction() as conn:
         condition = json.loads(conn.execute(select(waits.c.condition_json).where(waits.c.id == payload['wait_id'])).scalar_one())
@@ -1032,7 +1032,7 @@ async def test_host_job_condition_wakes_original_task_once_without_model_polling
 
 
 async def test_revision_supersedes_job_wait_but_writes_and_finalization_wait_for_stop(job_waiter):
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
     fixture, started, payload = job_waiter
     with fixture.service.db.engine.connect() as conn:
         public_id = conn.execute(select(tasks.c.public_id).where(tasks.c.id == fixture.claim['task_id'])).scalar_one()
@@ -1065,7 +1065,7 @@ async def test_revision_supersedes_job_wait_but_writes_and_finalization_wait_for
 
 
 async def test_revision_before_job_wait_yield_does_not_leave_an_obsolete_condition(job_runtime):
-    from qqbot.domain import TextSegment
+    from elephant.domain import TextSegment
     fixture = job_runtime
     started = await fixture.runtime.invoke(fixture.identity, {'operation': 'start',
         'arguments': {'job_key': 'before-yield', 'argv': ['true']}})

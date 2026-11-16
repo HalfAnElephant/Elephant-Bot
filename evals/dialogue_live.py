@@ -22,19 +22,19 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import select
 
-from qqbot.app import create_app
-from qqbot.capabilities.gateway import CapabilityRegistry
-from qqbot.capabilities.types import Action, Capability
-from qqbot.config import Settings
-from qqbot.harness.gateway import RunGateway
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.runtime.scheduler import RuntimeClient
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.mail_schema import mail_accounts
-from qqbot.storage.mail_trigger_schema import mail_rule_receipts
-from qqbot.storage.schedule_schema import schedules
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.capabilities.gateway import CapabilityRegistry
+from elephant.capabilities.types import Action, Capability
+from elephant.config import Settings
+from elephant.harness.gateway import RunGateway
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.runtime.scheduler import RuntimeClient
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.mail_schema import mail_accounts
+from elephant.storage.mail_trigger_schema import mail_rule_receipts
+from elephant.storage.schedule_schema import schedules
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import tasks
 
 MODEL = "deepseek-flash"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -69,6 +69,25 @@ for (let index = 0; index < 6; index++) {
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def verify_weekly_mail_filter(trigger):
+    positives = (
+        {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"},
+        {"sender_address": "project@example.org", "subject": "本周周报（更新）", "body": "当前版本"},
+    )
+    for mail in positives:
+        require(trigger.matches(**mail), "mail draft does not match the requested weekly report")
+    mail = positives[0]
+    for label, changed in (
+        ("exact sender domain", {"sender_address": "office@sub.example.org"}),
+        ("unrelated sender domain", {"sender_address": "office@elsewhere.org"}),
+        ("subject substring", {"subject": "通知"}),
+        ("body exclusion", {"body": "旧稿"}),
+        ("body substring exclusion", {"body": "请不要使用旧稿附件"}),
+        ("incomplete body", {"body_complete": False}),
+    ):
+        require(not trigger.matches(**(mail | changed)), f"mail draft did not enforce {label}")
 
 
 class LiveModelTransport(httpx.AsyncBaseTransport):
@@ -294,33 +313,30 @@ class DialogueSuite:
                                      if row["id"] not in prior_schedules]
                             accounts = [dict(row) for row in conn.execute(select(mail_accounts)).mappings()]
                         if label == "mail_draft":
-                            from qqbot.runtime.schedules import ScheduleSpec
+                            from elephant.runtime.schedules import ScheduleSpec
 
                             require(len(saved) == 1, "mail request did not persist exactly one draft")
                             row = saved[0]
                             spec = ScheduleSpec.model_validate_json(row["spec_json"])
+                            # This suite uses synthetic mail. Preserve the saved rule even on failure.
+                            case["mail_draft"] = {"enabled": bool(row["enabled"]), "spec": spec.model_dump(mode="json")}
+                            if spec.mail:
+                                case["mail_draft"].update(account_id=spec.mail.account_id, folder=spec.mail.folder)
                             require(not row["enabled"] and not spec.enabled and row["next_fire_at"] is None,
                                     "mail draft was enabled or scheduled as a timer")
                             identifiers = {"weekly-demo", *(row["id"] for row in accounts if row["account_id"] == "weekly-demo")}
                             require(spec.mail and spec.mail.account_id in identifiers and spec.mail.folder == "INBOX",
                                     "mail draft changed the user's account or folder")
-                            mail = {"sender_address": "office@example.org", "subject": "周报", "body": "新稿"}
-                            require(spec.mail.matches(**mail), "mail draft does not match the requested weekly report")
-                            require(not spec.mail.matches(**{**mail, "sender_address": "office@elsewhere.org"})
-                                    and not spec.mail.matches(**{**mail, "subject": "通知"})
-                                    and not spec.mail.matches(**{**mail, "body": "旧稿"}),
-                                    "mail draft lost the requested sender, subject or exclusion")
+                            verify_weekly_mail_filter(spec.mail)
                             require(any(Path(path).name == "summary.md" for path in spec.requested_outputs)
                                     and re.search(r"三|3", spec.goal),
                                     "mail draft lost the requested output or summary requirement")
                             require(re.search(r"(?:未|没(?:有)?)启用|禁用|停用|不.*扫描|不会.*扫描", final_text),
                                     "mail draft reply omitted its inactive state")
-                            case["mail_draft"] = {"enabled": False, "account_id": spec.mail.account_id,
-                                                  "folder": spec.mail.folder, "spec": spec.model_dump(mode="json")}
                         else:
                             require(not saved, "mail clarification unexpectedly saved an invented configuration")
                             if label in {"mail_config", "mail_update", "mail_test_missing_credential"}:
-                                from qqbot.mail.models import MailAccountSpec
+                                from elephant.mail.models import MailAccountSpec
 
                                 require(len(accounts) == 1 and accounts[0]["account_id"] == "weekly-demo",
                                         "mail configuration did not persist the selected account exactly once")
@@ -488,8 +504,8 @@ class DialogueSuite:
 
         with patch.object(RunGateway, "__init__", gateway_init), patch.object(PiRunnerAdapter, "start", start), \
                 patch.object(RuntimeClient, "invoke", invoke), patch.dict(os.environ, {
-                    "QQBOT_ADMIN_TOKEN": "synthetic-mail-admin",
-                    "QQBOT_CREDENTIAL_KEY": base64.b64encode(os.urandom(32)).decode()}):
+                    "ELEPHANT_ADMIN_TOKEN": "synthetic-mail-admin",
+                    "ELEPHANT_CREDENTIAL_KEY": base64.b64encode(os.urandom(32)).decode()}):
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.receiver)) as receiver:
                 app = create_app(settings, official_client=receiver)
                 async with app.router.lifespan_context(app):
@@ -556,7 +572,7 @@ async def self_check():
     """Check fixtures and native history construction without credentials or any HTTP request."""
     from types import SimpleNamespace
 
-    from qqbot.adapters.pi.sessions import load_entries, unfinished_tools
+    from elephant.adapters.pi.sessions import load_entries, unfinished_tools
 
     with tempfile.TemporaryDirectory(prefix="elephant-dialogue-self-check-") as directory:
         root = Path(directory)

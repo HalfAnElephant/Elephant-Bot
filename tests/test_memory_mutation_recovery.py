@@ -9,12 +9,12 @@ from test_agent_runtime import memory_runtime
 from test_agent_runtime import runtime as agent_runtime
 from test_leader_dispatch_recovery import native_pending_submit
 
-from qqbot.adapters.pi.sessions import unfinished_tools
-from qqbot.contracts.memory import MutationReceipt
-from qqbot.domain import TextSegment
-from qqbot.storage.agent_schema import dialogue_inputs, dialogues
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import processes, runs
+from elephant.adapters.pi.sessions import unfinished_tools
+from elephant.contracts.memory import MutationReceipt
+from elephant.domain import TextSegment
+from elephant.storage.agent_schema import dialogue_inputs, dialogues
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import processes, runs
 
 runtime = agent_runtime
 
@@ -46,7 +46,7 @@ async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(r
     external_forget = Mock(side_effect=AssertionError("The committed memory operation must never replay"))
     knowledge.memory.forget = external_forget
     native_repair = Mock(side_effect=AssertionError("The retired native Session must remain untouched"))
-    monkeypatch.setattr("qqbot.adapters.pi.sessions.restore_tool_results", native_repair)
+    monkeypatch.setattr("elephant.adapters.pi.sessions.restore_tool_results", native_repair)
     followup = runtime.event.model_copy(update={"event_id": "new-user-input",
         "segments": (TextSegment(text="继续处理新的问题"),)})
     runtime.sessions.enqueue(followup, runtime.access)

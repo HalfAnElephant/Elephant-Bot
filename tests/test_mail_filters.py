@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from qqbot.runtime.mail_filters import MailCondition, MailTrigger
+from elephant.runtime.mail_filters import MailCondition, MailTrigger
 
 
 def condition(field, op, value):

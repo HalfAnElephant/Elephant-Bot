@@ -15,11 +15,11 @@ from pathlib import Path
 import httpx
 from sqlalchemy import func, select
 
-from qqbot.app import create_app
-from qqbot.clock import Clock
-from qqbot.config import AdapterConfig, Settings
-from qqbot.storage.schema import inbox
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.clock import Clock
+from elephant.config import AdapterConfig, Settings
+from elephant.storage.schema import inbox
+from elephant.storage.task_schema import tasks
 
 CONVERSATIONS = 20
 DUPLICATE_PERIOD = 10

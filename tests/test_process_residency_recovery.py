@@ -8,7 +8,7 @@ from test_agent_runtime import runtime as agent_runtime
 from test_runtime_recovery import NEW_EPOCH, OLD_EPOCH, bound_worker, prove_stop
 from test_runtime_recovery import recovery as runtime_recovery
 
-from qqbot.storage.task_schema import processes, runs, sessions
+from elephant.storage.task_schema import processes, runs, sessions
 
 recovery = runtime_recovery
 runtime = agent_runtime

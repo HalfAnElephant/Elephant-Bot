@@ -6,9 +6,9 @@ import httpx
 import pytest
 from test_leader_core import make_core
 
-from qqbot.harness.gateway import RunGateway
-from qqbot.runtime.tools import native_tools
-from qqbot.storage.task_schema import runs
+from elephant.harness.gateway import RunGateway
+from elephant.runtime.tools import native_tools
+from elephant.storage.task_schema import runs
 
 
 def test_schedule_schemas_are_only_available_to_user_leader():
@@ -16,6 +16,19 @@ def test_schedule_schemas_are_only_available_to_user_leader():
         native_tools('leader', 'user'))
     for role, purpose in [('worker', 'work'), ('leader', 'progress'), ('leader', 'finalize'), ('skill_review', 'skill_review')]:
         assert not any(name.startswith('schedules.') for name in native_tools(role, purpose))
+
+
+def test_mail_schedule_tool_schema_explains_literal_filter_operators():
+    schema = native_tools('leader', 'user')['schedules.create']['parameters']['$defs']
+    mail = schema['MailTrigger']['properties']
+    condition = schema['MailCondition']['properties']
+    assert 'AND' in mail['all']['description']
+    assert 'OR' in mail['any']['description']
+    assert 'body does not contain X' in mail['none']['description']
+    assert 'op=contains' in mail['none']['description']
+    assert 'without @' in condition['field']['description']
+    assert 'exact match' in condition['op']['description']
+    assert 'literal text' in condition['value']['description']
 
 
 async def test_schedule_native_tool_reaches_host_operation(tmp_path):
@@ -64,7 +77,7 @@ async def test_mail_draft_from_authenticated_leader_persists_filters_and_goal(
         tmp_path, official_config, official_event, clock):
     from conftest import official_payload
 
-    from qqbot.runtime.schedules import ScheduleService
+    from elephant.runtime.schedules import ScheduleService
 
     core = make_core(tmp_path, official_config, clock)
     try:
@@ -98,7 +111,7 @@ async def test_mail_draft_from_authenticated_leader_persists_filters_and_goal(
         assert stored['next_fire_at'] is None
         assert stored['spec']['goal'] == args['goal']
         assert stored['spec']['requested_outputs'] == args['requested_outputs']
-        from qqbot.runtime.schedules import ScheduleSpec
+        from elephant.runtime.schedules import ScheduleSpec
         trigger = ScheduleSpec.model_validate(stored['spec']).mail
         assert trigger is not None
         assert trigger.account_id == 'demo'
@@ -121,9 +134,9 @@ async def test_synthetic_mail_trigger_bound_to_owner_persists_once(
 
     from conftest import official_payload
 
-    from qqbot.runtime.mail_source import MailBinding, SyntheticMailSource, SyntheticMessage
-    from qqbot.runtime.schedules import ScheduleService
-    from qqbot.storage.task_schema import tasks
+    from elephant.runtime.mail_source import MailBinding, SyntheticMailSource, SyntheticMessage
+    from elephant.runtime.schedules import ScheduleService
+    from elephant.storage.task_schema import tasks
 
     core = make_core(tmp_path, official_config, clock)
     try:
@@ -213,12 +226,12 @@ async def test_synthetic_mail_runs_worker_and_archives_local_output(
 
     from conftest import official_payload
 
-    from qqbot.domain.tasks import TaskResult
-    from qqbot.jobs.worker import Spool, Worker
-    from qqbot.runtime.mail_source import MailBinding, SyntheticMailSource, SyntheticMessage
-    from qqbot.runtime.scheduler import RuntimeClient
-    from qqbot.runtime.schedules import ScheduleService
-    from qqbot.storage.task_schema import tasks
+    from elephant.domain.tasks import TaskResult
+    from elephant.jobs.worker import Spool, Worker
+    from elephant.runtime.mail_source import MailBinding, SyntheticMailSource, SyntheticMessage
+    from elephant.runtime.scheduler import RuntimeClient
+    from elephant.runtime.schedules import ScheduleService
+    from elephant.storage.task_schema import tasks
 
     core = make_core(tmp_path, official_config, clock)
     try:

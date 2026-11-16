@@ -7,12 +7,12 @@ import pytest
 from sqlalchemy import select, update
 from test_agent_runtime import runtime as runtime  # noqa: PLC0414 - Register the shared pytest fixture.
 
-from qqbot.domain.agents import GoalSpec, WaitSpec
-from qqbot.domain.messages import TextSegment
-from qqbot.harness.pool import SessionPool
-from qqbot.runtime.scheduler import Scheduler
-from qqbot.storage.agent_schema import agent_events, leader_inbox
-from qqbot.storage.task_schema import tasks
+from elephant.domain.agents import GoalSpec, WaitSpec
+from elephant.domain.messages import TextSegment
+from elephant.harness.pool import SessionPool
+from elephant.runtime.scheduler import Scheduler
+from elephant.storage.agent_schema import agent_events, leader_inbox
+from elephant.storage.task_schema import tasks
 
 
 def submit(r, index=0, children=1):

@@ -2,9 +2,9 @@
 from alembic import op
 from sqlalchemy import inspect
 
-from qqbot.storage.action_schema import operations
-from qqbot.storage.schema import outbox
-from qqbot.storage.task_schema import EXECUTION_TABLES, runs, tasks
+from elephant.storage.action_schema import operations
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import EXECUTION_TABLES, runs, tasks
 
 revision = "0007"
 down_revision = "0006"

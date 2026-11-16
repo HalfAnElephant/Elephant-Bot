@@ -10,10 +10,10 @@ import httpx
 import pytest
 import uvicorn
 
-from qqbot.capabilities import Action, Capability
-from qqbot.harness.gateway import MAX_TOOL_RESULT_BYTES, RunGateway
-from qqbot.harness.pi import PiRunnerAdapter
-from qqbot.jobs.worker import CapabilityServer
+from elephant.capabilities import Action, Capability
+from elephant.harness.gateway import MAX_TOOL_RESULT_BYTES, RunGateway
+from elephant.harness.pi import PiRunnerAdapter
+from elephant.jobs.worker import CapabilityServer
 
 
 class CoreFixture:
@@ -320,7 +320,7 @@ async def test_finalizer_cannot_export_a_child_path_as_its_own_file(discovery):
 
 
 async def test_output_sidecar_stays_workspace_file_without_breaking_artifact_export(discovery):
-    from qqbot.harness.artifacts import export_artifacts
+    from elephant.harness.artifacts import export_artifacts
     gateway, _core, _calls = discovery
     gateway.notify_before_tools = False
     (gateway.workspace / "outputs").mkdir()

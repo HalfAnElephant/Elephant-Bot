@@ -1,7 +1,7 @@
 """MaiBot expression material, source evidence, durable learning and deletion ledger."""
 from alembic import op
 
-from qqbot.storage.expression_schema import EXPRESSION_TABLES
+from elephant.storage.expression_schema import EXPRESSION_TABLES
 
 revision = "0008"
 down_revision = "0007"

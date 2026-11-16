@@ -1,9 +1,9 @@
 import pytest
 from sqlalchemy import insert, select
 
-from qqbot.storage.db import Database
-from qqbot.storage.operations import backup, export_deletions, restore
-from qqbot.storage.social_schema import social_tombstones
+from elephant.storage.db import Database
+from elephant.storage.operations import backup, export_deletions, restore
+from elephant.storage.social_schema import social_tombstones
 
 
 def test_online_backup_restore_ledger(db, tmp_path):
@@ -26,10 +26,10 @@ def test_online_backup_restore_ledger(db, tmp_path):
 def test_restore_old_snapshot_cannot_resurrect_deleted_memory(db, tmp_path, official_config, official_event, clock, incoming):
     import json
 
-    from qqbot.adapters.qq_official.adapter import OfficialAdapter
-    from qqbot.domain import AccessContext
-    from qqbot.memory import MemoryRecord, SocialService
-    from qqbot.storage.social_schema import social_records
+    from elephant.adapters.qq_official.adapter import OfficialAdapter
+    from elephant.domain import AccessContext
+    from elephant.memory import MemoryRecord, SocialService
+    from elephant.storage.social_schema import social_records
 
     event = incoming.accept(OfficialAdapter(official_config, 'restore-test', incoming, clock).normalize(official_event))[0]
     access = AccessContext(principal=event.principal, conversation=event.conversation, role='admin')

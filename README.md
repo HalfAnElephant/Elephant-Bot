@@ -2,7 +2,7 @@
 
 QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 对话、根目标和按需 Worker；Pi 管理各 Agent 的原生历史与压缩，OpenViking 管理长期记忆，Hermes 原生工具管理标准 `SKILL.md`。
 
-首次使用从[本地启动](#本地启动)开始，Ubuntu 常驻服务使用[生产部署步骤](deploy/README.md)。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
+首次使用从[本地启动](#本地启动)开始，各平台的[安装和后台运行方式](deploy/README.md)见部署说明。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
 
 - 同一 Dialogue 可以挂多个目标；Leader 派发后结束轮次，Worker 独立推进。
 - 任务、输入、操作回执和投递状态保存在 SQLite。等待会让出执行资格，取消与恢复需要真实停止证明。
@@ -15,7 +15,7 @@ QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 
 - 使用官方 DeepSeek 模型地址及已配置的模型密钥时，联网工具调用 DeepSeek Search／Fetch。`deepseek-flash` 还可按需调用 `document.parse`，以文字或图文方式解析工作区文档，并将文件引用交给当前对话。上传回执按用户、会话和项目隔离，供重试及重启复用，远端文件设置 30 天有效期。
 - QQ 语音优先使用平台转写，否则通过 DeepSeek ASR 自动转写为本轮口述请求，转写随 Pi 输入持久保存。支持 SILK 及 FFmpeg 可解码的常见音频，单条上限 8 MiB、120 秒。历史和转发语音保留资料来源，识别失败时要求重发或改用文字。
 
-需要 Python 3.13、uv、Node.js >= 22.19.0、npm 和 FFmpeg >= 6。协议开发支持 macOS/Linux；生产使用 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
+个人安装支持 Linux 和 macOS；Python 由 uv 按锁定版本准备，Pi 使用 Node.js 22.19.0 或更新版本。完整的系统隔离及持久 Job 需要 Linux、systemd、cgroup v2 和 bubblewrap。NapCat/OneBot 接入、社交 Judge、主动插话、表达学习、旧人格覆盖系统、research 专用执行器与独立 Worker API 已退役。
 
 ## 架构与代码入口
 
@@ -31,22 +31,31 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 | 记忆与技能 | `adapters/openviking/`、`adapters/hermes_skills/` 管理长期记忆和标准技能文件 |
 | 持久化与投递 | `storage/`、`ingress/`、`outbox/` 保存输入、任务、操作证据与消息投递状态 |
 
-表中代码路径相对 `src/qqbot/`。SQLite 保存恢复依据，Pi Session 保存原生历史，OpenViking 保存长期记忆，systemd user manager 监督持久 Job。daemon 重启后的处理以停止证明和原始回执为依据。
+表中代码路径相对 `src/elephant/`。SQLite 保存恢复依据，Pi Session 保存原生历史，OpenViking 保存长期记忆，systemd user manager 监督持久 Job。daemon 重启后的处理以停止证明和原始回执为依据。
 
 ## 本地启动
 
-准备 Python 3.13、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Node.js](https://nodejs.org/en/download) >= 22.19.0（含 npm）和 FFmpeg >= 6。macOS 可用 `brew install uv node ffmpeg`，Ubuntu 的完整安装命令见[部署说明](deploy/README.md)。
-
-首次安装使用源码仓库。已有安装升级时保留自己的配置、环境文件和数据目录。
+推荐使用已校验的 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 完整发布包；也可在可信的源码检出目录安装。解压后保留完整目录。在目录内运行：
 
 ```sh
-git clone https://github.com/HalfAnElephant/Elephant-Bot.git
-cd Elephant-Bot
+./install.sh --apply --setup
 ```
 
-也可从 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 下载完整源码包 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`，按[发布包校验步骤](docs/runbooks/releases.md#手动部署)解压后进入 `elephant-bot` 目录。
+Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）和 FFmpeg 6 或以上。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
 
-在仓库根目录安装锁定依赖并创建本地配置。
+个人版升级时，先备份、排空任务并停止旧进程，再把新发布包解压到一个新目录安装。安装器不会覆盖已有运行环境；默认配置和数据不随发布目录改变。
+
+安装时优先复用与项目锁定版本一致的系统 Pi；如果没有，也没有可用的 Elephant 私有副本，安装器会先询问。默认不安装，不覆盖系统 Pi。无人值守安装时，可明确加上 `--install-pi` 允许在需要时安装私有副本。
+
+Linux 常驻服务支持 Ubuntu、Debian、Fedora 和官方 Arch Linux；macOS 可选择当前窗口运行，或登录当前用户时运行。版本、架构、限制与升级流程见[各平台部署](deploy/README.md)。不要把新安装当作旧数据迁移。
+
+向导分四步：选择模型服务和推荐模型、按需检测连接、用手机 QQ 扫码、选择是否直接启动。普通终端用方向键和回车操作，窄终端或不支持彩色菜单的终端可用编号。常用服务不需要填写接口地址；仅自定义服务需要提供地址与模型名称。密钥输入不回显。
+
+内置 DeepSeek、OpenAI、OpenRouter、通义千问（阿里云北京）、Kimi（国际站）、GLM（Z.AI 国际站）、Google Gemini、Groq 和 xAI 的 API 配置，不包含订阅登录或 OAuth。可选检测只验证模型能否回复，插件工具、多轮对话和地域可用性另行验证。重复运行默认保留已有设置和 QQ 绑定。可以单独更换当前 API 密钥，无需重选服务和模型；更换服务时则需要新服务的密钥。如果本地 Elephant 正在运行，先停再改模型或密钥，或在管理页调整；系统服务沿用管理页明确保存的模型。仅完成绑定或网关接通不代表消息已送达，用 QQ 发一条私聊确认首个回复。
+
+### 手动配置（可选）
+
+自动部署不需要逐项编辑配置。手动配置或排错可从示例开始：
 
 ```sh
 uv sync --locked
@@ -62,29 +71,31 @@ chmod 600 .env configs/local.yaml
 model:
   endpoint: https://api.deepseek.com/chat/completions
   model: deepseek-flash
-  api_key_env: QQBOT_MODEL_KEY
+  api_key_env: ELEPHANT_MODEL_KEY
   context_window: 32768
 ```
 
-其他供应商填写其完整 Chat Completions 地址、模型名和实际支持的上下文窗口。`api_key_env` 是环境变量名。编辑 `.env`，将供应商密钥填入 `QQBOT_MODEL_KEY`，将下面两条命令的输出分别填入 `QQBOT_ADMIN_TOKEN` 和 `QQBOT_CREDENTIAL_KEY`。
+其他供应商填写其完整 Chat Completions 地址、模型名和实际支持的上下文窗口。`api_key_env` 是环境变量名。编辑 `.env`，将供应商密钥填入 `ELEPHANT_MODEL_KEY`，将下面两条命令的输出分别填入 `ELEPHANT_ADMIN_TOKEN` 和 `ELEPHANT_CREDENTIAL_KEY`。
 
 ```sh
 uv run python -c 'import secrets; print(secrets.token_urlsafe(32))'
 uv run python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
 ```
 
-管理员令牌用于登录管理页。凭据加密密钥用于 QQ 扫码接入，生成一次后随私有配置备份，后续重启和升级沿用原值。实际密钥通过进程环境提供，管理页保存环境变量名。`QQBOT_OFFICIAL_SECRET` 供手动配置已有 QQ 应用使用，自动扫码流程会加密保存应用凭据。
+管理员令牌用于登录管理页。凭据加密密钥用于 QQ 扫码接入，生成一次后随私有配置备份，后续重启和升级沿用原值。实际密钥通过进程环境提供，管理页保存环境变量名。`ELEPHANT_OFFICIAL_SECRET` 供手动配置已有 QQ 应用使用，自动扫码流程会加密保存应用凭据。
 
 ```sh
 set -a
 . ./.env
 set +a
-uv run qqbot validate --config configs/local.yaml
-uv run qqbot doctor --config configs/local.yaml
-uv run qqbot serve --config configs/local.yaml
+uv run elephant validate --config configs/local.yaml
+uv run elephant doctor --config configs/local.yaml
+uv run elephant serve --config configs/local.yaml
 ```
 
 `serve` 迁移数据库并监听 `127.0.0.1:8080`。示例已启用管理任务，默认适配器列表为空。`validate` 检查配置结构并提示缺失的首次配置；`doctor` 检查临时数据库、迁移、FTS5、可执行文件位置和配置告警。先补齐相关告警，再提交首次任务。真实模型和 QQ 连接状态通过后续实际操作确认。
+
+需要分享诊断结果时，运行 `uv run elephant doctor --share-safe --config configs/local.yaml`。它只输出脱敏状态，不输出凭据、服务地址、账户标识或文件路径，不联网，也不修改正式数据库。`configured` 只表示本地配置条件符合，`not_tested` 表示尚未验证联通或隔离。普通 `doctor` 的输出保持不变。详见[脱敏诊断说明](docs/runbooks/operations.md#分享首次启动诊断)。
 
 - [管理页](http://127.0.0.1:8080/admin)
 - [存活检查](http://127.0.0.1:8080/health/live)
@@ -92,11 +103,11 @@ uv run qqbot serve --config configs/local.yaml
 
 ### 第一个任务
 
-打开管理页并输入 `QQBOT_ADMIN_TOKEN`，也可在已加载 `.env` 的另一个终端提交一次任务。
+打开管理页并输入 `ELEPHANT_ADMIN_TOKEN`，也可在已加载 `.env` 的另一个终端提交一次任务。
 
 ```sh
 curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks \
-  -H "Authorization: Bearer $QQBOT_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $ELEPHANT_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: first-hello-1' \
   -d '{"goal":"请用一句中文介绍你能做什么，无需调用工具。"}'
@@ -106,10 +117,10 @@ curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks \
 
 ```sh
 curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks/PUBLIC_ID \
-  -H "Authorization: Bearer $QQBOT_ADMIN_TOKEN"
+  -H "Authorization: Bearer $ELEPHANT_ADMIN_TOKEN"
 ```
 
-任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。Linux 工具执行需按生产说明准备 cgroup、bubblewrap 和 user manager；macOS 本地调试工具时可显式将 `execution.worker_environment` 设为 `host`，以当前账号权限执行。
+任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。受隔离的命令、凭据 GitHub CLI 与持久 Job 依赖 Linux 对应能力。macOS 和缺少这些组件的 Linux 不会因此切换到不隔离的宿主执行。
 
 ### 接入 QQ 与长期记忆
 
@@ -121,7 +132,7 @@ curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks/PUBLIC_ID \
 
 官方 QQ owner 绑定使用 AppID 与验证过的 OpenID。旧数字 QQ 号不能直接作为官方身份。`owner.preferences` 保存明确设置的称呼、语言和沟通偏好。
 
-Leader 的聊天、进度、提问和最终汇报统一加载 `src/qqbot/runtime/persona.md`，改编自 Aurabot 大肥鱼，保留“大象”称呼。日常回复简短口语化，长结果按需使用 Markdown。QQ 只展示目标、实际进展和结果，内部编号、队列与执行分工保留在管理和调试接口中。
+Leader 的聊天、进度、提问和最终汇报统一加载 `src/elephant/runtime/persona.md`，改编自 Aurabot 大肥鱼，保留“大象”称呼。日常回复简短口语化，长结果按需使用 Markdown。QQ 只展示目标、实际进展和结果，内部编号、队列与执行分工保留在管理和调试接口中。
 
 完整配置见 [示例](configs/example.yaml) 与 [Schema](configs/schema.json)。管理页支持校验、版本、保存和有限热应用；连接、身份、模型及运行边界的修改需要重启 daemon。网页配置写入启动数据库旁的 `runtime-config.json`，历史版本在 `config-versions/`。保存配置不会自动搬迁数据库或部署服务。
 
@@ -150,7 +161,7 @@ Worker 超时、阻塞或一次尝试无法继续时会保存已有结果并通�
 
 ## 部署和恢复
 
-按 [Ubuntu 部署说明](deploy/README.md) 安装单 daemon、root 停止证明 helper、Job user manager 和 OpenViking。现有部署升级需先停止旧服务，保留数据库中的输入、操作回执、未知投递和删除屏障。普通启动默认保留迁移前备份；明确要求不备份的部署可调用 `migrate(path, backup=False)`。
+按 [Linux 系统部署说明](deploy/README.md#guided-linux-installation) 安装单 daemon、root 停止证明 helper、Job user manager 和 OpenViking。现有部署升级需先停止旧服务，保留数据库中的输入、操作回执、未知投递和删除屏障。普通启动默认保留迁移前备份；明确要求不备份的部署可调用 `migrate(path, backup=False)`。
 
 - [实现与完整验收矩阵](docs/elephant-agent-implementation-plan.md)
 - [持久 Job](docs/operations/persistent-jobs.md)

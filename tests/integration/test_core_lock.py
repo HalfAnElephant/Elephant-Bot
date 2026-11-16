@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from qqbot.cli import clean_stale_socket
+from elephant.cli import clean_stale_socket
 
 
 @pytest.fixture

@@ -38,3 +38,7 @@ models.json
 docs/evidence/
 docs/implementation-log.md
 qq-bot-agent-execution-plan.md
+
+# Local installer selection and in-progress installation lock
+/.elephant-pi
+/.elephant-install.lock/

@@ -7,11 +7,11 @@ import httpx
 import pytest
 from sqlalchemy import func, select
 
-from qqbot.adapters.qq_official.adapter import OfficialAdapter
-from qqbot.config import Settings
-from qqbot.domain import ObservationMode, OutboundEnvelope
-from qqbot.outbox.service import Outbox
-from qqbot.storage.schema import inbox, outbox
+from elephant.adapters.qq_official.adapter import OfficialAdapter
+from elephant.config import Settings
+from elephant.domain import ObservationMode, OutboundEnvelope
+from elephant.outbox.service import Outbox
+from elephant.storage.schema import inbox, outbox
 
 
 def signed(adapter, payload, clock):
@@ -185,7 +185,7 @@ def test_full_and_at_dual_notification_updates_invitation_once(official_config, 
 
 @pytest.mark.parametrize("budget, expected", [(0, 8), (1, 1)])
 async def test_outbox_unlimited_default_and_explicit_limit(official_config, incoming, clock, official_event, db, budget, expected):
-    from qqbot.domain import DeliveryCheck, SendReceipt
+    from elephant.domain import DeliveryCheck, SendReceipt
 
     qq = OfficialAdapter(official_config, "d", incoming, clock)
     event = qq.normalize(official_event)

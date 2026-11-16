@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from qqbot.jobs.worker import configured_github
+from elephant.jobs.worker import configured_github
 
 
 @pytest.mark.parametrize("host,key", [("github.com", "GH_TOKEN"), ("git.example.com", "GH_ENTERPRISE_TOKEN")])
 def test_local_gh_login_precedes_environment(monkeypatch, host, key):
-    monkeypatch.setenv("QQBOT_GITHUB_TOKEN", "fallback")
+    monkeypatch.setenv("ELEPHANT_GITHUB_TOKEN", "fallback")
     for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
         monkeypatch.setenv(name, "override")
     monkeypatch.setenv("GH_CONFIG_DIR", "/credential-directory")

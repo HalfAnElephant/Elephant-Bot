@@ -4,10 +4,10 @@ import pytest
 from pydantic import ValidationError
 from test_agent_runtime import runtime as protocol_runtime  # noqa: F401 - pytest fixture
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.jobs.protocol import WorkerRequest
-from qqbot.runtime.scheduler import RuntimeClient
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.jobs.protocol import WorkerRequest
+from elephant.runtime.scheduler import RuntimeClient
 
 
 def test_worker_request_validation_contract():

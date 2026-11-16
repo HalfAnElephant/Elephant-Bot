@@ -23,9 +23,9 @@ context:
 model:
   endpoint: null
   model: null
-  api_key_env: QQBOT_MODEL_KEY
+  api_key_env: ELEPHANT_MODEL_KEY
   context_window: 32768 # Set the actual window supported by your model.
-# Add QQ through /admin/qq-onboarding after setting QQBOT_CREDENTIAL_KEY.
+# Add QQ through /admin/qq-onboarding after setting ELEPHANT_CREDENTIAL_KEY.
 
 owner:
   preferences: '' # Explicit name, language, or communication preferences; leave empty for no extra preference.
@@ -34,7 +34,7 @@ owner:
 memory:
   openviking:
     endpoint: null
-    api_key_env: QQBOT_OPENVIKING_KEY
+    api_key_env: ELEPHANT_OPENVIKING_KEY
     private_enabled: true
     group_enabled: false
     bindings: []
@@ -44,4 +44,4 @@ memory:
     #     workspace_id: personal
     #     account_id: elephant
     #     user_id: assistant
-    #     api_key_env: QQBOT_OPENVIKING_KEY
+    #     api_key_env: ELEPHANT_OPENVIKING_KEY

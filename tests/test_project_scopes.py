@@ -6,14 +6,14 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select, update
 
-from qqbot.app import create_app
-from qqbot.config import Settings
-from qqbot.contracts.memory import MemorySearchResult
-from qqbot.domain import ConversationRef, InboundEvent, MediaSegment, PrincipalRef, Surface, TextSegment
-from qqbot.storage.agent_schema import dialogue_inputs
-from qqbot.storage.memory_sync_schema import memory_owners
-from qqbot.storage.schema import inbox
-from qqbot.storage.task_schema import tasks
+from elephant.app import create_app
+from elephant.config import Settings
+from elephant.contracts.memory import MemorySearchResult
+from elephant.domain import ConversationRef, InboundEvent, MediaSegment, PrincipalRef, Surface, TextSegment
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.memory_sync_schema import memory_owners
+from elephant.storage.schema import inbox
+from elephant.storage.task_schema import tasks
 
 
 @pytest.fixture
@@ -122,7 +122,7 @@ async def test_host_memory_replan_preserves_structured_checks_and_real_followups
         core.tasks.add_graph_input(conn, root, followup, core.access(event), followup.text)
         conn.execute(update(memory_owners).where(memory_owners.c.id == scope.key).values(epoch=1))
         if forget_followup:
-            from qqbot.storage.memory_sync_schema import memory_barriers
+            from elephant.storage.memory_sync_schema import memory_barriers
             conn.execute(memory_barriers.insert().values(id='revoked-followup', scope_id=scope.key,
                 epoch=1, operation_id='corrected', source_id=followup.event_id, created_at=core.clock.now().isoformat()))
         affected = [followup.event_id] if forget_followup else ['unrelated-memory-source']
@@ -185,7 +185,7 @@ def test_maximum_chinese_host_goal_keeps_verifiable_structured_source(project_co
 
 @pytest.mark.parametrize("barrier_state", ["barrier", "FROZEN", "REVOKED"])
 def test_forgotten_attachment_cannot_reenter_fresh_epoch_or_delivery_context(project_core, barrier_state):
-    from qqbot.storage.memory_sync_schema import memory_barriers, memory_sources
+    from elephant.storage.memory_sync_schema import memory_barriers, memory_sources
     core = project_core
     original = host_event(core, 'forgotten-file')
     original = original.model_copy(update={'segments': (*original.segments, MediaSegment(type='file',
@@ -218,7 +218,7 @@ def test_forgotten_attachment_cannot_reenter_fresh_epoch_or_delivery_context(pro
 
 
 def test_group_project_requires_explicit_group_grant(project_core, official_event):
-    from qqbot.permissions import PermissionRule
+    from elephant.permissions import PermissionRule
     core = project_core
     event = core.adapters['qq'].normalize(official_event)
     assert event.conversation.surface != Surface.PRIVATE
@@ -234,7 +234,7 @@ def test_group_project_requires_explicit_group_grant(project_core, official_even
 
 
 def test_legacy_group_memory_binding_does_not_become_private_project(project_core):
-    from qqbot.contracts.memory import MemoryBinding
+    from elephant.contracts.memory import MemoryBinding
     core = project_core
     group = 'a' * 64
     binding = MemoryBinding(owner_id=core.settings.owner.id, workspace_id=group,
@@ -249,8 +249,8 @@ def test_legacy_group_memory_binding_does_not_become_private_project(project_cor
 
 
 def test_skill_write_failures_are_durable_deduplicated_and_redacted(project_core):
-    from qqbot.skills import record_skill_result
-    from qqbot.storage.schema import audit_events
+    from elephant.skills import record_skill_result
+    from elephant.storage.schema import audit_events
     core = project_core
     record_skill_result(core.tasks, 'run', 'call', {'success': False, 'error': 'private body and token'})
     record_skill_result(core.tasks, 'run', 'call', {'success': False, 'error': 'private body and token'})
