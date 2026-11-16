@@ -1,6 +1,10 @@
 # Elephant Bot
 
-QQ 官方机器人上的个人助手。一个 Python daemon 管理持久 Leader 对话、根目标和按需 Worker；Pi 管理各 Agent 的原生历史与压缩，OpenViking 管理长期记忆，Hermes 原生工具管理标准 `SKILL.md`。
+面向自行部署的 QQ 个人助手，使用 **QQ 官方接入**。配置对应工具后，可以在对话中查天气或仓库 Issue、让后台处理文件并回报、按邮件筛选条件生成摘要。不是群聊运营机器人。
+
+管理端默认只接受本机连接；QQ、记忆、邮箱等能力按需配置，工具与外部操作受权限约束。先跑通一个首任务，再启用外部能力。
+
+[安装与首任务](#本地启动) · [文档索引](docs/index.md) · [贡献](CONTRIBUTING.md) · [安全报告](SECURITY.md)
 
 首次使用从[本地启动](#本地启动)开始，各平台的[安装和后台运行方式](deploy/README.md)见部署说明。完整运行目录包括 Python 包、迁移文件和 npm 依赖。
 
@@ -35,7 +39,7 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 
 ## 本地启动
 
-推荐使用已校验的 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 完整发布包；也可在可信的源码检出目录安装。解压后保留完整目录。在目录内运行：
+推荐使用 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 的完整发布包，先[核对校验值和发布提交](docs/runbooks/releases.md#手动部署)，并使用包内配套文档。**已发布的 v0.1.0 没有 `install.sh`**，请按包内 README 使用 `qqbot`。下面的向导步骤仅适用于包含 `install.sh` 的可信源码检出或已校验发布包。保留完整目录，在目录内运行：
 
 ```sh
 ./install.sh --apply --setup
@@ -120,7 +124,7 @@ curl --fail-with-body http://127.0.0.1:8080/api/v1/tasks/PUBLIC_ID \
   -H "Authorization: Bearer $ELEPHANT_ADMIN_TOKEN"
 ```
 
-任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。受隔离的命令、凭据 GitHub CLI 与持久 Job 依赖 Linux 对应能力。macOS 和缺少这些组件的 Linux 不会因此切换到不隔离的宿主执行。
+任务结果为 `SUCCEEDED` 且包含实际模型答复后，首次任务完成。默认 Leader 使用 host，Worker 使用 sandbox。macOS 可做对话和不调用系统进程的首任务；由 Agent 执行系统进程（包括 host 模式）、凭据 GitHub CLI 和持久 Job 需要相应 Linux 能力。按部署说明准备 cgroup v2、sandbox 所需的 bubblewrap 和 Job 所需的 systemd user manager。macOS 或 Linux 缺少必要组件时，不会降级到不隔离的宿主执行。
 
 ### 接入 QQ 与长期记忆
 

@@ -77,26 +77,53 @@ git push origin v0.1.0
 发布失败时先查看 Actions 日志。若已留下草稿，核实后删除该草稿再重跑失败 job。
 已经公开的版本保留原有标签与附件，修复通过新版本发布。
 
+## 升级与回退清单
+
+### 升级前记录和核对
+
+1. 记录当前/目标版本及对应的 `REVISION`，下载目标版本的配套附件并校验。确认目标代码、配置 schema、Python/Node/Pi 锁定版本和本机部署方式相容。**当前服务使用的名称和路径以该版本及本机配置为准**；二进制、用户、服务名、环境变量名不能视为原地迁移承诺。
+2. 对照目标版本的示例和 schema，核对被移除的设置、实际生效的配置及依赖，先修复校验报错，不把新模板覆盖到原配置。改变权限、挂载或外部账号配置需另行确认。
+3. 暂停新任务入口，等待已有任务、外部操作和发送状态可核对，再停止服务。存在不明外部操作、未确认停止的任务或无法备份的数据时，停止升级，不用重启替代核对。
+4. 按[运维与恢复](operations.md#备份和隔离恢复演练)保存数据库快照、最新删除账本及独立的配置/状态备份。确认旧代码与运行依赖也可以取回。不要把备份、实际凭据或恢复日志放入发布附件。
+
+### 升级后与回退
+
+- 在隔离实例先验证配置可读、迁移成功、健康检查和合成首任务完成，重启后仍读得到结果。再在目标环境分别验证已启用的模型、QQ、邮箱及隔离；无凭据或未实际测试时写明“未验证”。
+- 启动前出现校验、迁移或密钥错误，保持停止，保留出错现场与备份；不要多次启动覆盖证据。迁移若已经执行，不直接拿旧程序打开新 schema，也不要以清空凭据或关闭屏障换取就绪。
+- 只有在目标版本的兼容说明明确支持旧程序读现有数据时，才考虑只回退运行包。否则用旧兼容版本的快照向**新路径**恢复，并应用当前最新删除账本；先确认时间窗口内的数据损失和外部操作。无法确认账本、schema、停机证明或真实发送状态时，停止回退，转人工核对。
+- 对已经发布的版本，在附注记录验证实际覆盖的平台、制品 SHA、配置废弃项、迁移、回退条件与没有验证的组合。确认检查作业成功不等于真实 QQ 送达，也不替代单独的合并门槛。
+
 ## 手动部署
 
 从 [GitHub Releases](https://github.com/HalfAnElephant/Elephant-Bot/releases/latest) 的对应版本下载 `elephant-bot.tar.gz`、`REVISION` 和 `SHA256SUMS`。
 源码包包含迁移、默认人格、前端资源、锁文件、runner 脚本及部署模板。
 wheel 和 sdist 一并提供，生产安装使用完整源码包中的运行目录。
 
-仅下载上述三个文件时，在空目录校验源码包与提交号。
+v0.1.0 发布包没有 `install.sh`。使用发布包内配套说明；开发分支上的新安装入口须使用包含该文件的检出或归档。
+
+仅下载上述三个文件时，在空目录校验源码包与提交号。先取出这两个文件各自的唯一校验项；归档或提交号条目缺失或重复时不要继续。Linux 可使用 `sha256sum --check`，macOS 使用系统的 `shasum`。校验失败不要解压。先从 GitHub 发布标签的提交页复制完整提交 SHA，填到下方的 `EXPECTED_REVISION`；不要从同一个下载包反抄 `REVISION`。
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS
-cat REVISION
+EXPECTED_REVISION='填写发布标签所指向的完整提交 SHA'
+awk '
+  $2 == "./elephant-bot.tar.gz" || $2 == "elephant-bot.tar.gz" { archive++; print }
+  $2 == "./REVISION" || $2 == "REVISION" { revision++; print }
+  END { if (archive != 1 || revision != 1) exit 1 }
+' SHA256SUMS > selected.sha256 || exit 1
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum --check selected.sha256 || exit 1
+else
+  shasum -a 256 --check selected.sha256 || exit 1
+fi
+if [ "$(cat REVISION)" != "$EXPECTED_REVISION" ]; then
+  printf '%s\n' '发布提交号与标签不一致。' >&2
+  exit 1
+fi
 tar -xzf elephant-bot.tar.gz
 cd elephant-bot
 uv sync --locked --no-dev --no-editable
 npm ci --ignore-scripts
 ```
-
-macOS 自带的 `shasum` 没有 `--ignore-missing`。在解压前执行
-`shasum -a 256 elephant-bot.tar.gz REVISION`，将两行摘要分别与 `SHA256SUMS`
-内的同名条目核对；任一条目缺失或不一致都不要解压。然后从上述 `tar` 命令继续。
 
 随后按 [Ubuntu 部署说明](../../deploy/README.md) 准备 root 控制的 `/opt/elephant`。
 使用发布包时，将已校验的 `elephant-bot` 完整目录放到 `/opt/elephant`，继续部署说明中的依赖安装、账号、配置和服务初始化步骤。

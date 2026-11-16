@@ -272,12 +272,18 @@ def router(core, authenticate):
         if not core.settings.tasks_enabled:
             raise HTTPException(409, "tasks disabled")
         try:
-            return core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
+            receipt = core.enqueue_admin_task(body.goal, idempotency_key=idempotency_key,
                 success_checks=body.success_checks, requested_outputs=body.requested_outputs,
                 requested_actions=body.requested_actions,
-                workspace_id=body.workspace_id)
+                workspace_id=body.workspace_id, viewer=admin_subject)
         except (ValueError, PermissionError) as error:
             raise HTTPException(422, str(error)) from error
+        try:
+            projection = task_projection(receipt["public_id"])
+        except HTTPException:
+            # Submission is already committed. A caller allowed only to create gets its receipt.
+            return receipt
+        return {**projection, **receipt}
 
     @router.get("/api/v1/tasks")
     def list_tasks():
@@ -292,26 +298,33 @@ def router(core, authenticate):
             for row in rows:
                 try:
                     _, access = task_row(row["id"])
-                except HTTPException:
+                    require_permission("task.read", "task:" + row["id"])
+                    core.tasks.get(row["public_id"], access)
+                except (HTTPException, KeyError, PermissionError):
                     continue
-                visible.append({**core.tasks.graph.status(c, row, access=access), "created_at": row["created_at"]})
+                visible.append({**core.tasks.graph.status(c, row, access=access, viewer=admin_subject),
+                                "created_at": row["created_at"]})
             return visible
 
-    @router.get("/api/v1/tasks/{public_id}")
-    def get_task(public_id: str):
+    def task_projection(public_id):
         row, access = task_row(public_id)
         require_permission("task.read", "task:" + row["id"])
         try:
             core.tasks.get(row["public_id"], access)
             with core.db.engine.connect() as c:
-                result = core.tasks.graph.status(c, row, access=access)
+                return core.tasks.graph.status(c, row, access=access, viewer=admin_subject)
         except (KeyError, PermissionError) as error:
             raise HTTPException(404, "task unavailable") from error
+
+    @router.get("/api/v1/tasks/{public_id}")
+    def get_task(public_id: str):
+        result = task_projection(public_id)
+        task_id = result["task_id"]
         with core.db.engine.connect() as c:
             result["deliveries"] = [
                 dict(r._mapping)
                 for r in c.execute(select(outbox.c.id, outbox.c.state).where(
-                    (outbox.c.task_id == row["id"]) | (outbox.c.origin_id == row["id"])))
+                    (outbox.c.task_id == task_id) | (outbox.c.origin_id == task_id)))
             ]
         return result
 
@@ -348,29 +361,58 @@ def router(core, authenticate):
 
     @router.get("/api/v1/tasks/{public_id}/events")
     async def task_events(public_id: str, request: Request, last_event_id: str = Header(default="0")):
-        row, _ = task_row(public_id)
-        require_permission("task.read", "task:" + row["id"])
+        def event_scope():
+            authenticate(request)
+            authorize_admin(request)
+            row, access = task_row(public_id)
+            require_permission("task.read", "task:" + row["id"])
+            try:
+                core.tasks.get(row["public_id"], access)
+            except (KeyError, PermissionError) as error:
+                raise HTTPException(404, "task unavailable") from error
+            with core.db.engine.connect() as conn:
+                revision = core.tasks.graph.event_scope_revision(conn, row, access)
+                if revision is None:
+                    raise HTTPException(403, "task source is no longer authorized")
+            return row["id"], revision
+
+        task_id, revision = event_scope()
         try:
             after = int(last_event_id)
         except ValueError:
             raise HTTPException(400, "invalid Last-Event-ID") from None
 
         async def stream():
+            def still_authorized():
+                try:
+                    return event_scope() == (task_id, revision)
+                except HTTPException:
+                    return False
+
+            revoked = "event: access-revoked\ndata: {}\n\n"
             cursor = after
             while not await request.is_disconnected():
+                if not still_authorized():
+                    yield revoked
+                    return
                 with core.db.engine.connect() as c:
                     rows = (
                         c.execute(
                             select(events)
                             .join(runs, events.c.run_id == runs.c.id)
-                            .where(runs.c.task_id == row["id"], events.c.seq > cursor)
+                            .where(runs.c.task_id == task_id, runs.c.basis_goal_revision == revision,
+                                   events.c.seq > cursor)
                             .order_by(events.c.seq)
                             .limit(100)
                         )
                         .mappings()
                         .all()
                     )
-                for item in rows:
+                for index, item in enumerate(rows):
+                    # Sending a frame yields to other requests, including permission changes.
+                    if index and not still_authorized():
+                        yield revoked
+                        return
                     cursor = item["seq"]
                     yield f"id: {cursor}\ndata: {json.dumps(dict(item), ensure_ascii=False)}\n\n"
                 yield ": heartbeat\n\n"

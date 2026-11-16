@@ -76,7 +76,15 @@ class TaskGraph:
         return {**intent, "children": [{key: value for key, value in child.items() if key != "delegation_key"}
                                       for child in intent["children"]]}
 
-    def submit(self, conn, dialogue, event, access, spec, dispatch_key, binding, context):
+    def submit(self, conn, dialogue, event, access, spec, dispatch_key, binding, context, *, viewer=None):
+        def receipt(task, *, created=False):
+            if viewer is None:
+                return self.status(conn, task)
+            if not created and not self.may_read(task["id"], access, viewer):
+                raise PermissionError("task unavailable")
+            # The HTTP endpoint projects details only after the task and its source commit.
+            return {"public_id": task["public_id"]}
+
         spec = GoalSpec.model_validate_json(json.dumps(spec))
         for path in spec.requested_outputs:
             artifact_path(path)
@@ -86,7 +94,7 @@ class TaskGraph:
         if old:
             if GoalSpec.model_validate(previous_intent).model_dump(mode="json") != intent:
                 raise ValueError("dispatch key reused for another goal")
-            status = self.status(conn, old)
+            status = receipt(old)
             return {**status, "reused": True} if old["dispatch_key"] != dispatch_key else status
         candidates = conn.execute(select(tasks).where(tasks.c.owner_id == dialogue["owner_id"],
             tasks.c.kind == "goal", tasks.c.origin_dialogue_id == dialogue["id"],
@@ -113,7 +121,7 @@ class TaskGraph:
             self.service.permissions.require(access, "task.read", "task:" + candidate["id"])
             self.event(conn, candidate, "dispatch_reused", {"dispatch_spec": intent},
                 event_id=stable_id("dispatch-reuse", dialogue["owner_id"], dispatch_key))
-            return {**self.status(conn, candidate), "reused": True}
+            return {**receipt(candidate), "reused": True}
         root_id = str(uuid4())
         plan = ExecutionPlan(initial_delivery="DETACHED", foreground_wait_ms=0,
                              budget=self.settings.execution.budget,
@@ -137,7 +145,7 @@ class TaskGraph:
             self.spawn(conn, root, child, access)
         self.event(conn, root, "accepted", {"public_summary": "已接受，等待 Worker 执行"})
         self.service.wakeup.set()
-        return self.status(conn, root)
+        return receipt(root, created=True)
 
     def spawn(self, conn, parent, spec, access):
         spec = spec if isinstance(spec, ChildSpec) else ChildSpec.model_validate_json(json.dumps(spec))
@@ -258,7 +266,7 @@ class TaskGraph:
         return (not (context.get("task_sources") or context.get("mail_receipt_id")) or not self.service.context_validator
             or self.service.context_validator(self.service._access_for(task), context))
 
-    def status(self, conn, task, *, access=None):
+    def _projection_context(self, conn, task, access):
         root = self.root(conn, task)
         context = json.loads(root["context_json"])
         replanning = bool(context.get("memory_replan_pending") or context.get("memory_replan"))
@@ -268,11 +276,30 @@ class TaskGraph:
                 or not validator(access, json.loads(task["context_json"])))))
         stale_task = bool(revoked_handoff or context.get("memory_replan_pending") or replanning and
             json.loads(task["context_json"]).get("memory_epoch") != context.get("memory_epoch"))
+        return root, context, replanning, revoked_handoff, stale_task
+
+    def event_scope_revision(self, conn, task, access):
+        root, _, _, _, stale = self._projection_context(conn, task, access)
+        return None if stale else root["goal_revision"]
+
+    def may_read(self, task_id, *subjects):
+        return all(self.service.permissions.check(subject, "task.read", "task:" + task_id).allowed
+                   for subject in subjects if subject is not None)
+
+    def status(self, conn, task, *, access=None, viewer=None):
+        root, context, replanning, revoked_handoff, stale_task = self._projection_context(conn, task, access)
+        validator = self.service.context_validator if access is not None else None
+
+        def may_read(task_id):
+            return self.may_read(task_id, access, viewer)
+
         children = conn.execute(select(tasks.c.id, tasks.c.public_id, tasks.c.kind, tasks.c.state,
             tasks.c.goal, tasks.c.result_json, tasks.c.context_json, tasks.c.plan_json).where(tasks.c.parent_task_id == task["id"])
             .order_by(tasks.c.created_at, tasks.c.id)).mappings().all()
         child_status = []
         for row in children:
+            if not may_read(row["id"]):
+                continue
             old_context = json.loads(row["context_json"])
             environment = ExecutionPlan.model_validate_json(row["plan_json"]).environment
             stale = (revoked_handoff or bool(validator and not validator(access, old_context))
@@ -302,7 +329,7 @@ class TaskGraph:
                 .order_by(notifications.c.sequence.desc()).limit(20)).mappings()]
             notices.reverse()
         from .progress import task_progress
-        projection = task_progress(self, conn, task, root, access=access, stale=stale_task,
+        projection = task_progress(self, conn, task, root, access=access, may_read=may_read, stale=stale_task,
                                    delivery_states=delivery)
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
             "environment": ExecutionPlan.model_validate_json(task["plan_json"]).environment,
