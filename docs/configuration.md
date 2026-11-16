@@ -55,7 +55,7 @@ QQ 和邮箱的加密凭据还依赖原来的 Base64 32 字节 `ELEPHANT_CREDENT
 
 当前版本保留废弃配额的解析，但 `execution.max_active/sustained_limit`、`orchestration.pending_inputs_per_owner/pending_root_tasks_per_owner/child_parallelism/max_task_depth/max_nodes_per_root` 已不控制准入，显式写在启动 YAML 中会告警。模型并发使用 `orchestration.model_request_limit`，单任务预算使用 `execution` 中的 budget。OneBot/NapCat 配置及旧候选技能配置会被拒绝，迁移到官方 QQ 和现有 Hermes 字段后再启动。
 
-`execution.warm_max` 当前用作空闲进程缓存开关，`0` 关闭缓存，正数启用缓存。缓存数量由 `warm_idle_max` 决定，保留时间由 `warm_ttl_seconds` 决定。忙进程按任务动态创建，模型请求按 `model_request_limit` 等待容量。实际内存随活动 Pi 进程数和原生会话大小增长，部署资源用[控制面与混合负载基线](runbooks/control-plane-baseline.md)测量。
+空闲进程缓存数量由 `execution.warm_idle_max` 决定，设为 `0` 关闭缓存，保留时间由 `warm_ttl_seconds` 决定。`warm_max` 保留兼容，当前任务领取流程会用 `warm_idle_max` 覆盖缓存上限，因此关闭缓存应设置 `warm_idle_max=0`。忙进程按任务动态创建，模型请求按 `model_request_limit` 等待容量。实际内存随活动 Pi 进程数和原生会话大小增长，部署资源用[控制面与混合负载基线](runbooks/control-plane-baseline.md)测量。
 
 ## 安装路径与执行权限
 
