@@ -168,6 +168,13 @@ jobs:
       - name: Install without starting or enabling the daemon
         run: |
           test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+          # This disposable test VM shares /opt with runner tooling. Match the
+          # production trust precondition on the parent, not on its other files.
+          test -d /opt
+          test ! -L /opt
+          stat -c '%U:%G %a %n' /opt
+          sudo chown root:root /opt
+          sudo chmod go-w /opt
           test ! -e /opt/elephant
           sudo install -d -m 0755 /opt/elephant
           git archive --format=tar HEAD | sudo tar --no-same-owner -xf - -C /opt/elephant
