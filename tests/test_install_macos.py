@@ -2,6 +2,7 @@
 
 import os
 import plistlib
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,6 +12,16 @@ import pytest
 from elephant import setup_macos
 
 SOURCE = Path(__file__).resolve().parents[1] / "deploy" / "install-macos.sh"
+PI_FIXTURE = """#!/bin/sh
+[ "$PI_OFFLINE" = 1 ] && [ -z "${TEST_SECRET:-}" ] || exit 10
+if [ "$*" = "--offline --version" ]; then
+    printf '1.5.0\n'
+else
+    IFS= read -r request || exit 1
+    [ "$request" = '{"id":"elephant-install-check","type":"get_state"}' ] || exit 2
+    printf '%s\n' '{"id":"elephant-install-check","type":"response","command":"get_state","success":true,"data":{"isStreaming":false}}'
+fi
+"""
 
 
 @pytest.fixture
@@ -27,6 +38,8 @@ def fake_mac(tmp_path):
     (tmp_path / ".python-version").write_text("3.13.9\n")
     settings = tmp_path / "settings.yaml"
     settings.write_text("keep me\n")
+    (tmp_path / "pi-fixture").write_text(PI_FIXTURE)
+    native_node = shlex.quote(shutil.which("node") or "/nonexistent/node")
     tools = tmp_path / "fake-tools"
     tools.mkdir()
     trace = tmp_path / "trace"
@@ -44,7 +57,7 @@ def fake_mac(tmp_path):
         "sysctl": 'echo "${TEST_TRANSLATED:-0}"',
         "node": (
             'if [ "$1" = -p ]; then echo 1.5.0; exit 0; fi\n'
-            'case "$2" in *spawnSync*) exec "$3" --offline --version;; esac\n'
+            f'case "$2" in *spawnSync*) exec {native_node} "$@";; esac\n'
             '[ "${TEST_BAD_NODE:-0}" != 1 ]'
         ),
         "npm": (
@@ -52,7 +65,7 @@ def fake_mac(tmp_path):
             'echo "npm $*" >>"$TRACE"\n'
             '[ "${TEST_MISSING_PI:-0}" = 1 ] && exit 0\n'
             'mkdir -p node_modules/.bin\n'
-            'printf "#!/bin/sh\\nprintf 1.5.0" >node_modules/.bin/pi\n'
+            'cp pi-fixture node_modules/.bin/pi\n'
             'chmod +x node_modules/.bin/pi'
         ),
         "ffmpeg": (
@@ -149,7 +162,7 @@ def fake_launchd(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_macos.sys, "platform", "darwin")
     monkeypatch.setattr(setup_macos.os, "getuid", lambda: 501)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(setup_macos, "_node_path", lambda uid: Path("/native/node/bin/node"))
+    monkeypatch.setattr(setup_macos, "_node_path", lambda uid, root: Path("/native/node/bin/node"))
     monkeypatch.setattr(setup_macos, "_trusted_path", lambda path, uid, **kwargs: path)
     monkeypatch.setattr(setup_macos, "_safe_acl", lambda *args, **kwargs: True)
     root = tmp_path / "Elephant with spaces"
@@ -243,7 +256,7 @@ def test_brew_dependencies_require_explicit_apply(fake_mac):
     assert not trace.exists()
 
 
-def test_launch_agent_checks_node_at_detected_absolute_path(monkeypatch):
+def test_launch_agent_checks_native_node_path_and_declared_minimum(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     monkeypatch.setattr(setup_macos.platform, "machine", lambda: "arm64")
@@ -258,9 +271,10 @@ def test_launch_agent_checks_node_at_detected_absolute_path(monkeypatch):
 
     monkeypatch.setattr(setup_macos.subprocess, "run", run)
     with pytest.raises(setup_macos.LaunchAgentError, match="架构不匹配"):
-        setup_macos._node_path(501)
+        setup_macos._node_path(501, tmp_path)
     assert calls[0][0] == "/native/node/bin/node"
-    assert calls[0][-2:] == ["arm64", "/native/node/bin/node"]
+    assert calls[0][-3:] == ["arm64", "/native/node/bin/node", str(tmp_path / "package.json")]
+    assert "process.versions.node" in calls[0][2] and "engines.node" in calls[0][2]
 
 
 def test_launch_agent_rejects_shared_or_linked_secret_files(tmp_path):
@@ -343,11 +357,7 @@ def test_missing_ffmpeg_has_distinct_optional_voice_warning(fake_mac):
 def test_compatible_path_pi_is_reused_without_npm_install(fake_mac):
     root, trace, run = fake_mac
     pi = root / "fake-tools/pi"
-    pi.write_text(
-        '#!/bin/sh\n'
-        '[ "$*" = "--offline --version" ] && [ "$PI_OFFLINE" = 1 ] && [ -z "${TEST_SECRET:-}" ] || exit 10\n'
-        'printf 1.5.0\n'
-    )
+    pi.write_text(PI_FIXTURE)
     pi.chmod(0o700)
     (root / "fake-tools/npm").unlink()
     result = run("--apply", TEST_SECRET="must-not-reach-probe")
@@ -376,3 +386,61 @@ def test_compatible_private_pi_is_reused_without_reinstall(fake_mac):
     assert run("--apply").returncode == 0
     assert (root / ".elephant-pi").read_text().strip() == "bundled"
     assert trace.read_text().splitlines() == ["uv sync --locked --no-dev --no-editable --python 3.13.9"]
+
+
+def test_matching_version_without_rpc_is_not_compatible(fake_mac):
+    root, trace, run = fake_mac
+    pi = root / "fake-tools/pi"
+    pi.write_text("#!/bin/sh\necho 1.5.0\n")
+    pi.chmod(0o700)
+    result = run("--apply")
+    assert result.returncode == 1
+    assert "无法验证为兼容" in result.stdout
+    assert not (root / ".elephant-pi").exists()
+    assert not trace.exists()
+
+
+def test_unreadable_system_pi_falls_through_to_usable_private_copy(fake_mac):
+    root, _, _ = fake_mac
+    tools = root / "fake-tools"
+    external = tools / "pi"
+    private = root / "node_modules/.bin/pi"
+    private.parent.mkdir(parents=True)
+    for executable in (external, private):
+        executable.write_text(PI_FIXTURE)
+        executable.chmod(0o700)
+
+    # Emulate the service account's effective denial without root, systemd, or
+    # changing host ownership. The production ownership check stays independent.
+    runuser = tools / "runuser"
+    denied = root / "service-denial"
+    runuser.write_text(
+        '#!/bin/sh\n'
+        '[ "$1 $2 $3 $4 $5" = "-u elephant -g elephant-worker --" ] || exit 3\n'
+        'shift 5\n'
+        f'if [ "$*" = "/usr/bin/test -x {external}" ]; then touch {shlex.quote(str(denied))}; exit 1; fi\n'
+        'exec "$@"\n'
+    )
+    runuser.chmod(0o700)
+    chown = tools / "chown"
+    chown.write_text("#!/bin/sh\nexit 0\n")
+    chown.chmod(0o700)
+    realpath = tools / "realpath"
+    realpath.write_text('#!/bin/sh\n[ "$1 $2" = "-e --" ] || exit 3\nprintf "%s\\n" "$3"\n')
+    realpath.chmod(0o700)
+    implementation = (root / "deploy/pi-install.sh").read_text()
+    staged = root / "pi-provisioner.sh"
+    staged.write_text(
+        implementation
+        .replace("/run/elephant-pi-probe.XXXXXX", str(root / "probe.XXXXXX"))
+        .replace("extra_pi=/usr/local/bin/pi", "extra_pi=")
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-ec", '. "$1"; elephant_pi_root_path() { :; }; elephant_prepare_pi "$2" no system',
+         "staged", str(staged), str(root)],
+        env={"PATH": str(tools)},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert denied.exists()
+    assert (root / ".elephant-pi").read_text() == "bundled\n"

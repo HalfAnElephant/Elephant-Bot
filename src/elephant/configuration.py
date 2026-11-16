@@ -1,5 +1,6 @@
 """Versioned configuration snapshots shared by the console and legacy apply API."""
 
+import errno
 import json
 import os
 import tempfile
@@ -14,6 +15,23 @@ def version(settings: Settings) -> str:
     return sha256(settings.model_dump_json().encode()).hexdigest()
 
 
+class DurabilityError(OSError):
+    """Publication occurred, but persistence across abrupt power loss is unconfirmed."""
+
+
+def sync_directory(directory: Path):
+    """Persist a directory entry after publication on supporting filesystems."""
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+            raise DurabilityError("file may have been updated; directory sync failed") from exc
+
+
 def atomic_write(path: Path, content: str):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = None
@@ -24,6 +42,7 @@ def atomic_write(path: Path, content: str):
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
+        sync_directory(path.parent)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

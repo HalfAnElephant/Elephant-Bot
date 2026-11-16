@@ -25,7 +25,7 @@ getconf GNU_LIBC_VERSION >/dev/null 2>&1 ||
     fail '通用个人安装目前需要 glibc。基于 musl 的系统尚未验收。'
 for tool in uv node ffmpeg; do
     command -v "$tool" >/dev/null 2>&1 ||
-        fail "缺少 $tool，请按部署文档补齐系统依赖后重试。"
+        fail "缺少 ${tool}，请按部署文档补齐系统依赖后重试。"
 done
 node -e 'const [m,n] = process.versions.node.split(".").map(Number); process.exit(m > 22 || (m === 22 && n >= 19) ? 0 : 1)' ||
     fail 'Node.js 版本过低，需要 22.19 或更新版本。'

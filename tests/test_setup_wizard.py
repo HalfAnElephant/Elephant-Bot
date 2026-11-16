@@ -413,3 +413,127 @@ def test_wizard_does_not_overwrite_model_or_credentials_while_core_is_running(tm
         assert setup.run_setup(directory) == 1
     assert [path.read_bytes() for path in (cfg, env, store.path)] == saved
     assert "Elephant 正在运行" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("model_key", "admin_key"),
+    [
+        ("QQBOT_ADMIN_TOKEN", "ELEPHANT_ADMIN_TOKEN"),
+        ("ELEPHANT_MODEL_KEY", "QQBOT_MODEL_KEY"),
+        ("QQBOT_CREDENTIAL_KEY", "CUSTOM_ADMIN_TOKEN"),
+        ("QQBOT_GITHUB_TOKEN", "CUSTOM_ADMIN_TOKEN"),
+    ],
+)
+def test_wizard_refuses_reserved_credential_role_collisions_before_probe(
+    model_key, admin_key, tmp_path, monkeypatch
+):
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    cfg = directory / "config.yaml"
+    cfg.write_text(json.dumps({
+        "database": str(directory / "core.db"),
+        "admin_token_env": admin_key,
+        "model": {"endpoint": "https://example.invalid/v1/chat/completions", "model": "fixture",
+                  "api_key_env": model_key},
+    }))
+    cfg.chmod(0o600)
+    env = directory / "credentials.env"
+    env.write_text("ELEPHANT_ADMIN_TOKEN=synthetic-admin-only\n")
+    env.chmod(0o600)
+    before = (cfg.read_bytes(), env.read_bytes())
+    answers(monkeypatch, "", "1")
+    monkeypatch.setattr(setup, "probe_model", lambda *_: pytest.fail("unsafe model probe must not be attempted"))
+    assert setup.run_setup(directory) == 1
+    assert (cfg.read_bytes(), env.read_bytes()) == before
+
+
+def test_blank_credential_does_not_reuse_legacy_alias(tmp_path, monkeypatch):
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    env = directory / "credentials.env"
+    env.write_text("ELEPHANT_MODEL_KEY=\nQQBOT_MODEL_KEY=stale-fixture-key\n")
+    env.chmod(0o600)
+    answers(monkeypatch, "", "", "", "", "")
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: "fresh-fixture-key")
+    assert setup.run_setup(directory) == 0
+    saved = dotenv_values(env, interpolate=False)
+    selected = load_settings(directory / "config.yaml").model.api_key_env
+    assert saved[selected] == "fresh-fixture-key"
+    assert saved[setup.MODEL_KEY] == ""
+    assert saved["QQBOT_MODEL_KEY"] == "stale-fixture-key"
+
+
+def test_keep_endpoint_can_rotate_valid_key_without_model_probe(tmp_path, monkeypatch):
+    directory = tmp_path / "private"
+    keys = iter(("old-working-fixture", "replacement-fixture"))
+    monkeypatch.setattr(setup.getpass, "getpass", lambda *_args, **_opts: next(keys))
+    answers(monkeypatch, "", "", "", "", "")
+    assert setup.run_setup(directory) == 0
+    before = load_settings(directory / "config.yaml").model
+
+    monkeypatch.setattr(setup, "probe_model", lambda *_: pytest.fail("probe was explicitly skipped"))
+    answers(monkeypatch, "3", "", "", "")
+    assert setup.run_setup(directory) == 0
+    after = load_settings(directory / "config.yaml").model
+    assert after == before.model_copy(update={"api_key_env": after.api_key_env})
+    assert after.api_key_env != before.api_key_env
+    saved = dotenv_values(directory / "credentials.env", interpolate=False)
+    assert saved[before.api_key_env] == "old-working-fixture"
+    assert saved[after.api_key_env] == "replacement-fixture"
+
+
+def test_dotenv_updates_operate_on_bindings_not_inside_multiline_values():
+    unrelated = "OTHER='first\nELEPHANT_MODEL_KEY=phantom\nlast'\n"
+    for raw in (unrelated, unrelated + "ELEPHANT_MODEL_KEY=''\n"):
+        updated = setup._add_credentials(raw, {setup.MODEL_KEY: "synthetic-model-key"})
+        assert updated.startswith(unrelated)
+        assert setup._credentials(updated) == {
+            "OTHER": "first\nELEPHANT_MODEL_KEY=phantom\nlast",
+            setup.MODEL_KEY: "synthetic-model-key",
+        }
+
+
+def test_private_first_write_publishes_complete_file_without_replacing(tmp_path, monkeypatch):
+    path = tmp_path / "config"
+    real_link = setup.os.link
+
+    def interrupt_before_publish(source, destination):
+        assert source.read_text() == "complete payload"
+        assert not destination.exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(setup.os, "link", interrupt_before_publish)
+    with pytest.raises(KeyboardInterrupt):
+        setup._private_write(path, "complete payload")
+    assert not list(tmp_path.iterdir())
+
+    monkeypatch.setattr(setup.os, "link", real_link)
+    setup._private_write(path, "already here")
+    with pytest.raises(FileExistsError):
+        setup._private_write(path, "unexpected replacement")
+    assert path.read_text() == "already here"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+
+def test_snapshot_durability_error_distinguishes_already_published(tmp_path, monkeypatch):
+    import errno
+    import os
+    import stat
+
+    from elephant.configuration import DurabilityError, atomic_write
+
+    path = tmp_path / "runtime-config.json"
+    path.write_text("prior")
+    real_fsync = os.fsync
+
+    def fail_directory_sync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "test directory sync failed")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_sync)
+    with pytest.raises(DurabilityError, match="may have been updated"):
+        atomic_write(path, "published")
+    assert path.read_text() == "published"
+    assert list(tmp_path.iterdir()) == [path]

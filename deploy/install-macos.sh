@@ -48,17 +48,17 @@ case "$arch" in
         translated=$(sysctl -n sysctl.proc_translated 2>/dev/null || true)
         [ "$translated" != 1 ] || fail '请关闭终端的「使用 Rosetta 打开」，改用原生 Apple Silicon 终端。'
         node_arch=x64; brew_bin=/usr/local/bin ;;
-    *) fail "不支持此 macOS 架构：$arch。" ;;
+    *) fail "不支持此 macOS 架构：${arch}。" ;;
 esac
 
 root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." && pwd -P)
 cd -- "$root"
 for path in .python-version pyproject.toml uv.lock package.json package-lock.json; do
-    [ -f "$path" ] && [ ! -L "$path" ] || fail "缺少可信发布文件：$path。"
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "缺少可信发布文件：${path}。"
 done
 for path in .venv node_modules; do
     if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
-        fail "拒绝写入非目录或符号链接：$path。"
+        fail "拒绝写入非目录或符号链接：${path}。"
     fi
 done
 
@@ -76,7 +76,7 @@ if (difference !== -1 && current[difference] < expected[difference]) process.exi
 }
 
 node_path_help() {
-    fail "当前 PATH 上的 Node.js/npm 不完整、版本过低或架构不匹配。请将兼容工具所在目录（如 $brew_bin）放在 PATH 前面，再重试。此安装不会自动替换已有工具。"
+    fail "当前 PATH 上的 Node.js/npm 不完整、版本过低或架构不匹配。请将兼容工具所在目录（如 ${brew_bin}）放在 PATH 前面，再重试。此安装不会自动替换已有工具。"
 }
 
 # Prefer the caller's already-installed tools. Expose the standard Homebrew

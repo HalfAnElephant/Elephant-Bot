@@ -18,11 +18,11 @@ from urllib.parse import urlsplit
 import httpx
 import yaml
 from alembic.util import CommandError
-from dotenv import dotenv_values
+from dotenv.parser import parse_stream
 from sqlalchemy.exc import SQLAlchemyError
 
 from elephant.config import Settings, load_runtime_settings, overlay_runtime_settings, runtime_config_path
-from elephant.configuration import ConfigurationStore
+from elephant.configuration import ConfigurationStore, DurabilityError, sync_directory
 from elephant.providers import output_limit_parameter
 from elephant.setup_providers import MODEL_PROVIDERS
 from elephant.setup_ui import SetupUI
@@ -36,15 +36,19 @@ SCAN_TIMEOUT = 180.0
 
 
 def _private_write(path, data):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd, name = tempfile.mkstemp(prefix=".setup-", dir=path.parent)
+    tmp = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+        # Publish the complete file without overwriting an unexpected destination.
+        os.link(tmp, path)
+        tmp.unlink()
+        sync_directory(path.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _private_read(path, *, system_config=False, allowed_uids=None):
@@ -85,34 +89,70 @@ def _replace_private(path, prior, updated, *, system_config=False):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
+        sync_directory(path.parent)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def _credentials(raw):
-    result = dotenv_values(stream=StringIO(raw or ""), interpolate=False)
-    if any(not re.fullmatch("[A-Z_][A-Z_0-9]*", key) for key in result):
+def _credential_bindings(raw):
+    bindings = list(parse_stream(StringIO(raw or "")))
+    if any(binding.error or binding.key is not None and not re.fullmatch(
+        "[A-Z_][A-Z_0-9]*", binding.key
+    ) for binding in bindings):
         raise ValueError("invalid credentials file")
-    return {key: value or "" for key, value in result.items()}
+    return bindings
+
+
+def _credentials(raw):
+    return {binding.key: binding.value or "" for binding in _credential_bindings(raw) if binding.key is not None}
 
 
 def _add_credentials(raw, updates):
-    # Preserve unrelated keys and text. Replace single, blank declarations only;
-    # duplicate declarations would otherwise have ambiguous shell/systemd semantics.
-    value = raw or ""
-    for key, secret in updates.items():
-        assignment = re.compile(rf"(?m)^[ \t]*(?:export[ \t]+)?{key}[ \t]*=.*$")
-        hits = list(assignment.finditer(value))
-        if len(hits) > 1:
+    original = _credentials(raw)
+    pending = dict(updates)
+    seen = set()
+    parts = []
+    for binding in _credential_bindings(raw):
+        key = binding.key
+        if key not in updates:
+            parts.append(binding.original.string)
+            continue
+        if key in seen:
             raise ValueError("duplicate credential setting")
-        if any(ord(char) < 32 or ord(char) == 127 for char in secret):
-            raise ValueError("invalid credential value")
-        line = key + "=" + json.dumps(secret, ensure_ascii=False)
-        if hits:
-            value = value[:hits[0].start()] + line + value[hits[0].end():]
-        else:
-            value = value.rstrip("\n") + ("\n" if value else "") + line + "\n"
-    return value
+        seen.add(key)
+        leading = re.match(r"\s*", binding.original.string).group()
+        parts.append(leading + _credential_line(key, pending.pop(key)))
+    updated = "".join(parts)
+    if pending:
+        if updated and not updated.endswith("\n"):
+            updated += "\n"
+        updated += "".join(_credential_line(key, secret) for key, secret in pending.items())
+    if _credentials(updated) != {**original, **updates}:
+        raise ValueError("credential file update failed validation")
+    return updated
+
+
+def _credential_line(key, value):
+    if not re.fullmatch("[A-Z_][A-Z_0-9]*", key) or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("invalid credential name or value")
+    return key + "=" + json.dumps(value, ensure_ascii=False) + "\n"
+
+
+def _validate_credential_roles(settings):
+    names = (settings.model.api_key_env, settings.admin_token_env, CREDENTIAL_KEY)
+    if any(not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in names):
+        raise ValueError("invalid credential variable names")
+    normalized = tuple("ELEPHANT_" + name[6:] if name.startswith("QQBOT_") else name for name in names)
+    reserved = {MODEL_KEY, ADMIN_TOKEN, CREDENTIAL_KEY, "ELEPHANT_GITHUB_TOKEN", "ELEPHANT_INTERNAL_TOKEN",
+                "ELEPHANT_OFFICIAL_SECRET", "ELEPHANT_OPENVIKING_KEY", "ELEPHANT_RUNNER_OPENAI_KEY"}
+    role_names = (MODEL_KEY, ADMIN_TOKEN, CREDENTIAL_KEY)
+    if len(set(normalized)) != 3 or any(
+        (name in reserved and name != own)
+        or (name.startswith(MODEL_KEY + "_") and own != MODEL_KEY)
+        for name, own in zip(normalized, role_names)
+    ):
+        raise ValueError("credential variable is assigned to the wrong role")
+    return names
 
 
 def _valid_endpoint(endpoint):
@@ -191,7 +231,7 @@ def _collect_credentials(values, names):
     updates = {}
     standard_keys = (MODEL_KEY, ADMIN_TOKEN, CREDENTIAL_KEY)
     for name in names:
-        if values.get(name):
+        if name in values:
             continue
         if name in standard_keys:
             alternate = "QQBOT_" + name.removeprefix("ELEPHANT_")
@@ -230,7 +270,7 @@ def _setup_environment(values, names):
     old = {key: os.environ.get(key) for key in names}
     try:
         for key in names:
-            if values.get(key):
+            if key in values:
                 os.environ[key] = values[key]
             else:
                 os.environ.pop(key, None)
@@ -366,30 +406,28 @@ def _load_wizard_model(ui, initial, values):
     """Choose and optionally verify model settings before any persistent write."""
     persisted = initial.get("model") or {}
     model = dict(persisted)
-    replace = False
+    action = 0
     if model.get("endpoint") and model.get("model"):
         ui.status("info", f"当前使用 {_model_label(model['endpoint'])}。")
-        replace = ui.choose("要保留当前模型服务吗？", ("保留当前设置", "更换模型服务或模型")) == 1
-    _pick_model(ui, model, replace=replace)
+        action = ui.choose("如何处理当前模型设置？", ("保留当前设置", "更换模型服务或模型", "更换当前模型密钥"))
+    _pick_model(ui, model, replace=action == 1)
 
     # A key may only be reused for its existing endpoint. A new slot keeps
     # interrupted writes safe and leaves older credentials available for rollback.
     old_key = persisted.get("api_key_env", MODEL_KEY)
     old_keys = {old_key, MODEL_KEY, "QQBOT_MODEL_KEY"}
-    if model["endpoint"] != persisted.get("endpoint") and (
+    if action == 2 or (model["endpoint"] != persisted.get("endpoint") and (
         persisted.get("endpoint") or any(values.get(name) for name in old_keys)
-    ):
+    )):
         model["api_key_env"] = "ELEPHANT_MODEL_KEY_" + secrets.token_hex(8).upper()
     model.setdefault("api_key_env", MODEL_KEY)
 
-    force_key = False
+    force_key = action == 2
     while True:
         candidate = {**initial, "model": model}
         settings = Settings.model_validate_json(json.dumps(candidate), strict=False)
         model_key = settings.model.api_key_env
-        names = (model_key, settings.admin_token_env, CREDENTIAL_KEY)
-        if len(set(names)) != 3 or any(not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in names):
-            raise ValueError("invalid credential variable names")
+        names = _validate_credential_roles(settings)
         updates = _collect_credentials(values, names)
         if force_key or not (values.get(model_key) or updates.get(model_key)):
             updates[model_key] = _enter_key(ui)
@@ -505,13 +543,10 @@ def _prepare_configuration(ui, directory, *, system):
         config = dict(original) if original is not None else _new_local_configuration(directory)
         config.setdefault("admin_token_env", ADMIN_TOKEN)
         startup = Settings.model_validate_json(json.dumps(config), strict=False)
-        setting_names = (startup.model.api_key_env, startup.admin_token_env, CREDENTIAL_KEY)
-        if len(set(setting_names)) != 3 or any(
-            not re.fullmatch("[A-Z_][A-Z_0-9]*", name) for name in setting_names
-        ):
-            raise ValueError("invalid credential variable names")
+        _validate_credential_roles(startup)
         snapshot_path, saved_snapshot, overrides = _read_setup_overrides(startup, system=system)
         runtime = overlay_runtime_settings(startup, overrides)
+        _validate_credential_roles(runtime)
         snapshot_owns_model = "model" in overrides
         edit_model = (runtime.admin_token_env == startup.admin_token_env
                       and (not system or not snapshot_owns_model))
@@ -665,6 +700,9 @@ def run_setup(directory: Path | str, *, system: bool = False) -> int:
         else:
             ui.status("info", "准备好后，重新打开向导即可启动。")
         return int(outcome != 0)
+    except DurabilityError:
+        ui.status("error", "文件可能已更新，但无法确认已写入磁盘。请检查磁盘，然后重新打开向导。")
+        return 1
     except (OSError, TypeError, ValueError, RuntimeError, EOFError, getpass.GetPassWarning, yaml.YAMLError):
         ui.status("error", "设置未完成。请检查安装环境，或从部署文档查看排查说明。")
         return 1

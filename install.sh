@@ -30,7 +30,7 @@ for flag do
         --with-deps) with_deps=yes ;;
         --install-pi) allow_pi=yes ;;
         --help|-h) usage; exit 0 ;;
-        *) fail "未知安装选项：$flag（可查看帮助）" ;;
+        *) fail "未知安装选项：${flag}（可查看帮助）" ;;
     esac
 done
 mode=${mode:---dry-run}

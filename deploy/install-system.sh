@@ -249,6 +249,9 @@ export PATH
 cd "$app"
 chmod 0755 "$app"
 env -i PATH="$PATH" HOME=/root UV_PYTHON_INSTALL_DIR="$python" "$uv" --no-config sync --locked --no-dev --no-editable --python 3.13.9
+getent group elephant-worker >/dev/null || groupadd --system elephant-worker
+getent group elephant >/dev/null || groupadd --system elephant
+getent passwd elephant >/dev/null || useradd --system --gid elephant-worker --home-dir "$state" --shell /usr/sbin/nologin elephant
 # The sourced helper is within the root-owned release checked above. It probes
 # only trusted system paths and asks before falling back to a private install.
 . "$app/deploy/pi-install.sh"
@@ -262,9 +265,6 @@ esac
 chmod -R a+rX "$python" "$app/.venv"
 [ ! -d "$app/node_modules" ] || chmod -R a+rX "$app/node_modules"
 
-getent group elephant-worker >/dev/null || groupadd --system elephant-worker
-getent group elephant >/dev/null || groupadd --system elephant
-getent passwd elephant >/dev/null || useradd --system --gid elephant-worker --home-dir "$state" --shell /usr/sbin/nologin elephant
 [ -e "$state" ] || install -d -o elephant -g elephant-worker -m 0700 "$state"
 [ -e "$config" ] || install -d -o root -g elephant-worker -m 0750 "$config"
 [ -e "$stops" ] || install -d -o root -g root -m 0755 "$stops"

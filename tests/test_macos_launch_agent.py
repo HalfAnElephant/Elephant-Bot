@@ -52,7 +52,7 @@ PYTHON_CODE
 """
     )
     command.chmod(0o700)
-    monkeypatch.setattr(setup_macos, "_node_path", lambda uid: Path("/trusted/native/bin/node"))
+    monkeypatch.setattr(setup_macos, "_node_path", lambda uid, root: Path("/trusted/native/bin/node"))
     monkeypatch.setattr(setup_macos, "_trusted_path", lambda path, uid, **kwargs: path)
     data = setup_macos._plist(settings, home, command, home, uid)
     args = plistlib.loads(data)["ProgramArguments"]

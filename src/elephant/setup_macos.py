@@ -180,7 +180,7 @@ def _trusted_pi(root: Path, uid: int, configured: str) -> Path:
     return resolved
 
 
-def _node_path(uid: int) -> Path:
+def _node_path(uid: int, root: Path) -> Path:
     node = shutil.which("node", path=os.environ.get("PATH", ""))
     if not node or not Path(node).is_absolute() or ":" in node:
         raise LaunchAgentError("找不到原生 Node.js。请在装有 Node.js 的终端中重试。")
@@ -188,17 +188,26 @@ def _node_path(uid: int) -> Path:
     arch = {"arm64": "arm64", "x86_64": "x64"}.get(platform.machine())
     if arch is None:
         raise LaunchAgentError("当前 macOS 架构不受支持。")
+    manifest = _trusted_path(root / "package.json", uid)
     try:
         result = subprocess.run(
             [
                 str(resolved),
                 "-e",
-                (
-                    'const fs=require("node:fs"); process.exit(process.platform === "darwin" && '
-                    "process.arch === process.argv[1] && fs.realpathSync(process.execPath) === process.argv[2] ? 0 : 1)"
-                ),
+                """
+const fs = require("node:fs");
+const [arch, path, manifest] = process.argv.slice(1);
+const minimum = JSON.parse(fs.readFileSync(manifest)).engines.node.match(/^>=(\\d+)\\.(\\d+)\\.(\\d+)$/);
+if (!minimum || process.platform !== "darwin" || process.arch !== arch ||
+    fs.realpathSync(process.execPath) !== path) process.exit(1);
+const current = process.versions.node.split(".").map(Number);
+const expected = minimum.slice(1).map(Number);
+const changed = current.findIndex((part, i) => part !== expected[i]);
+process.exit(changed === -1 || current[changed] >= expected[changed] ? 0 : 1);
+""",
                 arch,
                 str(resolved),
+                str(manifest),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -210,7 +219,7 @@ def _node_path(uid: int) -> Path:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LaunchAgentError("无法验证 Node.js，请在已安装原生 Node.js 的终端重试。") from exc
     if result.returncode != 0:
-        raise LaunchAgentError("Node.js 与当前 macOS 架构不匹配。")
+        raise LaunchAgentError("Node.js 版本或当前 macOS 架构不匹配。")
     if resolved.name != "node":
         raise LaunchAgentError("找不到可用于登录启动的原生 Node.js 可执行文件。")
     return resolved
@@ -219,7 +228,7 @@ def _node_path(uid: int) -> Path:
 def _plist(settings: Path, root: Path, command: Path, home: Path, uid: int) -> bytes:
     # Set up a clean child environment equivalent to the wizard profile. In
     # particular, launchctl's user-wide variables cannot override dotenv keys.
-    node_parent = _node_path(uid).parent
+    node_parent = _node_path(uid, root).parent
     if ":" in str(node_parent):
         raise LaunchAgentError("Node.js 路径不能用于登录启动。")
     sources = [node_parent, Path("/usr/bin"), Path("/bin")]

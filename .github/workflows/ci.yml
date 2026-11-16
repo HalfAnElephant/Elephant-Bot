@@ -122,14 +122,26 @@ jobs:
         working-directory: dist
         run: sha256sum ./*.whl ./*.tar.gz REVISION > SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload-release-assets
         with:
           name: release-assets
           path: dist/
           if-no-files-found: error
           retention-days: 14
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        id: download-release-assets
+        continue-on-error: true
         with:
-          name: release-assets
+          artifact-ids: ${{ steps.upload-release-assets.outputs.artifact-id }}
+          path: ${{ runner.temp }}/downloaded-release
+      # Artifact listings can briefly lag behind a successful upload.
+      - name: Wait before retrying artifact download
+        if: steps.download-release-assets.outcome == 'failure'
+        run: sleep 5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.download-release-assets.outcome == 'failure'
+        with:
+          artifact-ids: ${{ steps.upload-release-assets.outputs.artifact-id }}
           path: ${{ runner.temp }}/downloaded-release
       - name: Verify uploaded release assets
         working-directory: ${{ runner.temp }}/downloaded-release
@@ -166,11 +178,35 @@ jobs:
           git archive --format=tar --prefix=elephant-bot/ HEAD | tar -xf - -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/elephant-bot"
           ./install.sh --dry-run
+          if command -v pi >/dev/null 2>&1; then
+            echo "Unexpected preinstalled Pi on a clean-install test runner" >&2
+            exit 1
+          fi
+          if ./install.sh --apply > "$RUNNER_TEMP/pi-declined.log" 2>&1; then
+            echo "Installer installed Pi without approval" >&2
+            exit 1
+          fi
+          grep -F '未安装 Pi' "$RUNNER_TEMP/pi-declined.log"
+          for output in .elephant-pi node_modules .venv; do
+            test ! -e "$output"
+            test ! -L "$output"
+          done
           ./install.sh --apply --install-pi
+          test "$(cat .elephant-pi)" = bundled
           .venv/bin/python -c 'import subprocess; from elephant.pi_installation import runtime_pi_path; subprocess.check_call([runtime_pi_path("node_modules/.bin/pi"), "--version"])'
           ./elephant doctor --share-safe
           .venv/bin/python -c 'from pilk_nogil import decode'
           .venv/bin/python scripts/smoke_release.py
+          .venv/bin/python scripts/smoke_guided_install.py
+      - name: Reuse an existing compatible Pi without installing a second copy
+        run: |
+          git archive --format=tar --prefix=elephant-reuse/ HEAD | tar -xf - -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/elephant-bot/node_modules/.bin:$PATH"
+          cd "$RUNNER_TEMP/elephant-reuse"
+          ./install.sh --apply
+          test ! -e node_modules
+          test ! -L node_modules
+          .venv/bin/python -c 'import pathlib, shutil; from elephant.pi_installation import runtime_pi_path; assert pathlib.Path(runtime_pi_path("node_modules/.bin/pi")).resolve() == pathlib.Path(shutil.which("pi")).resolve()'
           .venv/bin/python scripts/smoke_guided_install.py
 
   dialogue:
