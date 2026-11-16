@@ -61,6 +61,39 @@ def test_native_route_authenticates_and_binds_owner(setup, tmp_path, receipt):
         skill_operation(service, args, {"operation": "skills_list", "arguments": {}})
 
 
+def test_constructor_skills_use_current_settings_and_owner_scope(setup, tmp_path):
+    from qqbot.adapters.hermes_skills import HermesSkills
+    from qqbot.skills.config import SkillsConfig
+
+    previous, event = setup
+    options = SkillsConfig(enabled=True)
+    calls = []
+    adapter = HermesSkills(tmp_path)
+
+    def provider(access, *, workspace_id):
+        calls.append((access.principal, workspace_id))
+        return adapter if access.principal == event.principal else None
+
+    service = TaskService(previous.db, previous.clock, previous.outbox,
+        skills_settings=lambda: options, skills_provider=provider)
+    _, args = start(service, event, "constructor-skills")
+    payload = {"operation": "skills_list", "arguments": {}}
+    assert skill_operation(service, args, payload)["success"]
+    assert calls == [(event.principal, "personal")]
+
+    options = options.model_copy(update={"enabled": False})
+    with pytest.raises(PermissionError, match="disabled"):
+        skill_operation(service, args, payload)
+    assert calls == [(event.principal, "personal")]
+
+
+def test_unconfigured_service_does_not_fabricate_skill_provider(setup):
+    service, event = setup
+    _, args = start(service, event, "no-provider")
+    with pytest.raises(RuntimeError, match="Owner-bound"):
+        skill_operation(service, args, {"operation": "skills_list", "arguments": {}})
+
+
 def test_legacy_migration_is_idempotent_and_preserves_archived_audit(setup, tmp_path):
     from sqlalchemy import insert
 

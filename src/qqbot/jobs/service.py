@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import os
 import stat
 import threading
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, insert, select, update
@@ -19,6 +23,10 @@ from qqbot.permissions import PermissionService
 from qqbot.storage.schema import outbox as outbox_table
 from qqbot.storage.stream_schema import stream_runs
 from qqbot.storage.task_schema import events, inputs, model_requests, notifications, runs, tasks, waits
+
+if TYPE_CHECKING:
+    from qqbot.adapters.hermes_skills import HermesSkills
+    from qqbot.skills.config import SkillsConfig
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
 
@@ -42,7 +50,14 @@ class _TaskWakeup(asyncio.Event):
 
 
 class TaskService:
-    def __init__(self, db, clock, outbox, archive_root=None, stop_verifier=None, *, permissions=None, max_active=4, sustained_limit=2, max_resident=None, context_validator=None, budget_ceiling=None, stream_eligibility=None):
+    def __init__(
+        self, db, clock, outbox, archive_root=None, stop_verifier=None, *,
+        permissions=None, max_active=4, sustained_limit=2, max_resident=None,
+        context_validator=None, budget_ceiling=None, stream_eligibility=None,
+        qq_adapters: Mapping[str, object] | None = None,
+        skills_settings: Callable[[], SkillsConfig] | SkillsConfig | None = None,
+        skills_provider: Callable[..., HermesSkills | None] | None = None,
+    ):
         self.db, self.clock, self.outbox = db, clock, outbox
         self.permissions = permissions or PermissionService(db, clock)
         self.max_active, self.sustained_limit = max_active, sustained_limit
@@ -50,6 +65,9 @@ class TaskService:
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.stream_eligibility = stream_eligibility
+        self.qq_adapters = qq_adapters if qq_adapters is not None else {}
+        self.skills_settings = skills_settings
+        self.skills_provider = skills_provider
         self.wakeup = _TaskWakeup()
         self.stop_verifier = stop_verifier or verify_stop_marker
         self.archive_root = Path(archive_root) if archive_root else Path(db.path).parent / "artifacts"

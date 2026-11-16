@@ -36,8 +36,10 @@ def rich_setup(db, clock, incoming, official_config):
         principal=principal, platform_message_id="m", occurred_at=clock.now(), received_at=clock.now(),
         trace_id="t", reply_context=ReplyContext(platform_message_id="m",
             expires_at=clock.now() + timedelta(minutes=5), max_replies=4))
-    service = TaskService(db, clock, Outbox(db, clock))
-    service.qq_adapters = {"qq": adapter}
+    adapters = {}
+    service = TaskService(db, clock, Outbox(db, clock), qq_adapters=adapters)
+    adapters["qq"] = adapter
+    assert service.qq_adapters is adapters
     task = service.accept(event, AccessContext(principal=principal, conversation=conversation), "send image")
     claim = service.claim("worker")
     return service, (claim["run_id"], claim["fencing_token"], "worker"), task, calls

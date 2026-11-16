@@ -38,12 +38,12 @@ def skill_operation(service, args, payload):
     with service.db.engine.connect() as conn:
         run, task = service._lease(conn, *args)
     access = service._access_for(task)
-    settings = getattr(service, 'skills_settings', None)
+    settings = service.skills_settings
     settings = settings() if callable(settings) else settings or SkillsConfig()
     if not settings.enabled or (access.conversation.surface != 'private' and not settings.group_enabled):
         raise PermissionError('Skills are disabled for this conversation.')
     service.permissions.require(access, action, 'conversation:' + access.conversation.key)
-    provider = getattr(service, 'skills_provider', None)
+    provider = service.skills_provider
     if provider is None:
         raise RuntimeError('Owner-bound Hermes skills provider is not configured.')
     adapter = provider(access, workspace_id=json.loads(task["context_json"]).get("workspace_id", "personal"))

@@ -63,7 +63,7 @@ def _status(row):
 async def rich_send(service, args, payload):
     body = RichMessage.model_validate(payload)
     task, event = _authorize(service, args)
-    adapter = getattr(service, "qq_adapters", {}).get(event.conversation.adapter_instance_id)
+    adapter = service.qq_adapters.get(event.conversation.adapter_instance_id)
     if not isinstance(adapter, OfficialAdapter):
         raise ValueError("official QQ adapter unavailable for this conversation")  # noqa: TRY004
     notification_id = stable_id("qq-rich", task["id"], body.request_id)
@@ -134,7 +134,7 @@ def rich_buttons(service, args, payload):
     from qqbot.adapters.qq_official.interactions import InteractionStore, workflow_keyboard
     body = RichButtons.model_validate(payload)
     task, event = _authorize(service, args)
-    if not isinstance(getattr(service, "qq_adapters", {}).get(event.conversation.adapter_instance_id), OfficialAdapter):
+    if not isinstance(service.qq_adapters.get(event.conversation.adapter_instance_id), OfficialAdapter):
         raise ValueError("official QQ adapter unavailable")  # noqa: TRY004
     buttons = [button.model_dump(mode="json") for button in body.buttons]
     for button in buttons:
@@ -173,7 +173,7 @@ async def local_file_upload(service, args, payload, content):
     from qqbot.adapters.qq_official.local_media import LocalMediaStore, sniff_media_file
     body = LocalFileMessage.model_validate(payload)
     task, event = _authorize(service, args)
-    adapter = getattr(service, "qq_adapters", {}).get(event.conversation.adapter_instance_id)
+    adapter = service.qq_adapters.get(event.conversation.adapter_instance_id)
     if not isinstance(adapter, OfficialAdapter):
         raise ValueError("official QQ adapter unavailable for this conversation")  # noqa: TRY004
     from qqbot.domain import Surface

@@ -60,10 +60,8 @@ class Core:
         self.stream_delivery = StreamDelivery(self)
         self.tasks = TaskService(db, clock, self.outbox, permissions=self.permissions,
             budget_ceiling=settings.execution.budget, context_validator=self.validate_context,
-            stream_eligibility=self.stream_delivery.eligible)
-        self.tasks.qq_adapters = adapters
-        self.tasks.skills_settings = lambda: self.settings.skills
-        self.tasks.skills_provider = self.skills_for
+            stream_eligibility=self.stream_delivery.eligible, qq_adapters=adapters,
+            skills_settings=lambda: self.settings.skills, skills_provider=self.skills_for)
         self.tasks.graph = TaskGraph(self.tasks, settings)
         self.sessions = SessionService(self.tasks, settings, allowed=self.allowed)
         self.sessions.harnesses = self.harnesses
