@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import time
@@ -208,12 +209,23 @@ class Worker:
 
         return save
 
-    def quarantine_result(self, path):
+    def quarantine_result(self, path, error):
         rejected = self.spool.directory / "rejected"
         rejected.mkdir(mode=0o700, exist_ok=True)
         destination = rejected / path.name
         path.replace(destination)
-        logger.error("Core rejected result evidence preserved worker_id=%s spool=%s", self.worker_id, destination)
+        detail = self.rejection_detail(error)
+        logger.error("Core rejected result evidence preserved worker_id=%s spool=%s detail=%s",
+                     self.worker_id, destination, detail)
+        return detail
+
+    @staticmethod
+    def rejection_detail(error):
+        try:
+            detail = str(error.response.json().get("detail", error.response.reason_phrase))
+        except (ValueError, AttributeError):
+            detail = error.response.reason_phrase
+        return re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+=*", r"\1[REDACTED]", detail)[:1000]
 
     async def lease_heartbeat(self, identity):
         # Renewal preserves supervisor ownership only. It never updates runner authority or deadlines.
@@ -245,10 +257,11 @@ class Worker:
                         path.unlink(missing_ok=True)
                     continue
                 if error.response.status_code == 422:
-                    self.quarantine_result(path)
+                    detail = self.quarantine_result(path, error)
                     recovery = {**payload, "stopped": False, "quiescent": False,
                         "result": {"status": "failed", "agent_authored": False,
-                            "summary": "Core rejected persisted result. Original evidence quarantined for recovery."}}
+                            "summary": "Core rejected persisted result: " + detail +
+                                ". Original evidence quarantined for recovery."}}
                     recovery_path = await self.save_result(recovery)
                     try:
                         await self.deliver_result(recovery, recovery_path)
@@ -260,6 +273,8 @@ class Worker:
 
     def failure_result(self, claim, error, harness=None):
         summary = f"Runner failed with {type(error).__name__}."
+        if isinstance(error, httpx.HTTPStatusError):
+            summary += " " + self.rejection_detail(error)
         if harness is not None and hasattr(harness, "failure_summary"):
             try:
                 summary = harness.failure_summary(error)
@@ -411,7 +426,7 @@ class Worker:
             if heartbeat is None:
                 heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             if path is not None and isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 422:
-                self.quarantine_result(path)
+                self.quarantine_result(path, error)
                 path = None
             if path is not None:
                 logger.error("Result delivery pending worker_id=%s task_id=%s run_id=%s spool=%s error_type=%s",

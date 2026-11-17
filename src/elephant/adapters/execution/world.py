@@ -62,18 +62,30 @@ class LocalExecution:
         from elephant.capabilities.gateway import workspace_parent
 
         def write():
-            directory, name = workspace_parent(context, path)
+            try:
+                directory, name = workspace_parent(context, path, create=True)
+            except OSError as error:
+                error.file_not_published = True
+                raise
             temporary = ".incoming-" + uuid4().hex
             created = False
             try:
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600, dir_fd=directory)
-                created = True
-                with os.fdopen(fd, "wb") as target:
-                    target.write(content)
-                    target.flush()
-                    os.fsync(target.fileno())
-                _publish_exclusive(directory, temporary, name)
+                try:
+                    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=directory)
+                    created = True
+                    with os.fdopen(fd, "wb") as target:
+                        target.write(content)
+                        target.flush()
+                        os.fsync(target.fileno())
+                except OSError as error:
+                    error.file_not_published = True
+                    raise
+                try:
+                    _publish_exclusive(directory, temporary, name)
+                except FileExistsError as error:
+                    error.file_not_published = True
+                    raise
             finally:
                 try:
                     if created:

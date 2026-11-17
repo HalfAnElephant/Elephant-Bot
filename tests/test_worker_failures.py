@@ -13,6 +13,7 @@ from conftest import runtime_client_for
 from sqlalchemy import select, update
 
 from elephant.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
+from elephant.harness.gateway import RunGateway
 from elephant.harness.pi import PiRunnerAdapter
 from elephant.harness.pool import SessionPool
 from elephant.jobs.service import TaskService
@@ -69,6 +70,7 @@ class SlowStopRunner(PiRunnerAdapter):
             provider=SimpleNamespace(background=False), tools=SimpleNamespace(max_calls=8), key="",
             model_token="", tool_token="", process_token="", evidence=[], artifacts=[], effects={},
             observations={}, workspace=directory, drain=self.drain, session_receipt=None)
+        self.gateway.result = lambda summary: RunGateway.result(self.gateway, summary)
         if claim.get("notification_status"):
             self.queue.put_nowait({"type": "message_end", "message": {"role": "assistant",
                 "content": [{"type": "text", "text": "任务未完成，执行时遇到了错误。"}]}})
@@ -377,7 +379,7 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
     assert list(worker.spool.directory.glob("*.json")) == []
 
 
-async def test_rejected_live_result_preserves_original_and_queues_failure(environment, tmp_path):
+async def test_rejected_live_result_preserves_original_and_queues_failure(environment, tmp_path, caplog):
     from elephant.domain.tasks import TaskResult
 
     service, _task, client = environment
@@ -392,16 +394,20 @@ async def test_rejected_live_result_preserves_original_and_queues_failure(enviro
     pool = SessionPool(lambda claim, pid, _sid: InvalidResult(tmp_path / pid, claim, service, pid))
     worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
     assert await worker.once()
+    with service.db.engine.connect() as conn:
+        result = json.loads(conn.execute(select(runs.c.result_json)).scalar_one())
+        assert "result references unknown operations" in result["summary"]
     assert await worker.once()  # The rejected result cannot poison the queued failure explanation.
     rejected = list((worker.spool.directory / "rejected").glob("*.json"))
     assert len(rejected) == 1
     assert json.loads(rejected[0].read_text())["result"]["effect_refs"] == ["unknown-operation"]
+    assert "detail=result references unknown operations" in caplog.text
     with service.db.engine.connect() as conn:
         assert all(row == 0 for row in conn.execute(select(runs.c.slot_reserved)).scalars())
     assert list(worker.spool.directory.glob("*.json")) == []
 
 
-async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path):
+async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path, caplog):
     service, _task, client = environment
     claim = service.claim("worker")
     spool = Spool(tmp_path / "spool")
@@ -416,6 +422,9 @@ async def test_rejected_replay_isolated_and_new_claim_runs(environment, tmp_path
     worker = Worker(client, "worker", spool, None, pool=pool)
     assert await worker.once()
     assert len(list((spool.directory / "rejected").glob("*.json"))) == 1
+    assert "detail=result references unknown operations" in caplog.text
+    remaining = [json.loads(path.read_text()) for path in spool.directory.glob("*.json")]
+    assert any("result references unknown operations" in payload["result"]["summary"] for payload in remaining)
     with service.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == claim["task_id"])).scalar_one() == "NEEDS_RECONCILIATION"
         assert conn.execute(select(tasks.c.failure_notice_json).where(tasks.c.id == new_task["id"])).scalar_one()

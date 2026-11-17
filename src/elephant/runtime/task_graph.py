@@ -406,7 +406,8 @@ class TaskGraph:
         self.service.wakeup.set()
         return True
 
-    def finalize_ready(self, conn, root, *, allow_pending_inputs=False, allow_running_jobs=False):
+    def finalize_ready(self, conn, root, *, allow_pending_inputs=False, allow_running_jobs=False,
+                       allow_unsettled_operations=False):
         if json.loads(root["context_json"]).get("memory_replan_pending"):
             return False
         children = conn.execute(select(tasks.c.state).where(tasks.c.root_task_id == root["id"], tasks.c.id != root["id"])).scalars().all()
@@ -421,7 +422,8 @@ class TaskGraph:
         if allow_running_jobs:
             job_query = job_query.where(jobs.c.cancel_requested_at.is_not(None))
         stopping = conn.execute(job_query).first()
-        return bool(children and all(state in TERMINAL for state in children) and not active and not uncertain
+        return bool(children and all(state in TERMINAL for state in children) and not active
+                    and (allow_unsettled_operations or not uncertain)
                     and not stopping and (allow_pending_inputs or not pending))
 
     def verify_final_result(self, conn, root, result, checks=None):

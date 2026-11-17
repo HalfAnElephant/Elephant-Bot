@@ -85,3 +85,44 @@ def test_worker_check_still_rejects_other_task_refs(runtime, check):
         check + "_refs": ["child-" + check]})
     with runtime.db.engine.connect() as conn, pytest.raises(ValueError, match="success check not verified"):
         runtime.service._verify_checks(conn, (check,), result, worker["task_id"])
+
+
+@pytest.mark.parametrize("check", ["observation", "effect"])
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_finalizer_reference_preflight_uses_the_same_root_scope(runtime, check, foreign):
+    from elephant.runtime.scheduler import RuntimeClient
+
+    root_goal(runtime)
+    worker = worker_complete(runtime)
+    claim = runtime.sessions.claim("leader")
+    owner = root_goal(runtime, key="foreign-root")["task_id"] if foreign else worker["task_id"]
+    record_refs(runtime, worker, owner=owner)
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    response = await client.post("/internal/tasks/validate-result-refs", json={"worker_id": "leader",
+        "run_id": claim["run_id"], "fencing_token": claim["fencing_token"],
+        "payload": {"status": "completed", check + "_refs": ["child-" + check]}})
+    assert response.status_code == (422 if foreign else 200), response.text
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.result_json).where(tasks.c.id == claim["task_id"])).scalar_one() is None
+
+
+@pytest.mark.parametrize("check", ["observation", "effect"])
+async def test_worker_reference_preflight_accepts_prior_attempt_and_rejects_missing(runtime, check):
+    from elephant.runtime.scheduler import RuntimeClient
+
+    root_goal(runtime)
+    worker = runtime.service.claim("worker")
+    record_refs(runtime, {**worker, "run_id": "prior-attempt"})
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    body = {"worker_id": "worker", "run_id": worker["run_id"], "fencing_token": worker["fencing_token"]}
+    valid = await client.post("/internal/tasks/validate-result-refs", json={**body,
+        "payload": {"status": "completed", check + "_refs": ["child-" + check]}})
+    assert valid.status_code == 200, valid.text
+    invalid = await client.post("/internal/tasks/validate-result-refs", json={**body,
+        "payload": {"status": "completed", check + "_refs": ["missing-" + check]}})
+    assert invalid.status_code == 422
+    stale = await client.post("/internal/tasks/validate-result-refs", json={**body, "fencing_token": 100,
+        "payload": {"status": "completed", check + "_refs": ["child-" + check]}})
+    assert stale.status_code == 409
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(tasks.c.result_json).where(tasks.c.id == worker["task_id"])).scalar_one() is None

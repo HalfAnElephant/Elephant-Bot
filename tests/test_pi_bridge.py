@@ -384,6 +384,47 @@ async def test_failed_protocol_correction_preserves_refs_for_worker_failure(comp
     assert "1 条操作已核验" in result["summary"]
 
 
+async def test_locked_pi_corrects_rejected_outcome_without_repeating_work(compaction_session):
+    state = compaction_session
+    gateway = state.gateway
+    gateway.claim["session_id"] = state.runner.session_path.stem
+    gateway.observations["known-observation"] = {}
+    gateway.effects["verified-operation"] = "verified"
+    original_call = gateway.call
+    validations, requests = [], []
+
+    async def host(operation, payload):
+        if operation == "validate-result-refs":
+            validations.append(payload)
+            if "missing-observation" in payload["observation_refs"]:
+                httpx.Response(422, json={"detail": "success check not verified: observation"},
+                    request=httpx.Request("POST", "http://runtime.local/validate-result-refs")).raise_for_status()
+            return {"accepted": True}
+        return await original_call(operation, payload)
+
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        if len(requests) < 3:
+            reference = "missing-observation" if len(requests) == 1 else "known-observation"
+            message = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "outcome-" + str(len(requests)), "type": "function", "function": {
+                    "name": "task_outcome", "arguments": json.dumps({"status": "completed",
+                        "observation_refs": [reference], "effect_refs": []})}}]}
+        else:
+            message = {"role": "assistant", "content": "结算引用已修正，原操作已保留。"}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+
+    gateway.call = host
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    result = await state.runner.run("Report the completed work", keep_alive=True)
+    assert len(requests) == 3 and len(validations) == 2
+    assert "success check not verified: observation" in json.dumps(requests[1]["messages"])
+    assert result.status == "completed" and result.observation_refs == ("known-observation",)
+    assert result.effect_refs == ()
+    assert gateway.session_receipt["result"] == result.model_dump(mode="json")
+    assert not any(operation == "ledger" for _run, operation, _payload in state.host_calls)
+
+
 async def test_locked_pi_raw_protocol_preserves_committed_wait_without_correction(compaction_session):
     state = compaction_session
     gateway = state.gateway

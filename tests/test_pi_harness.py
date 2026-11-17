@@ -193,6 +193,18 @@ def test_stderr_diagnostics_are_bounded_and_redacted(tmp_path):
     assert "[REDACTED]" in summary
 
 
+def test_runner_failure_preserves_core_rejection_detail(tmp_path):
+    import httpx
+
+    harness = PiHarness(__file__, tmp_path / "work", api_key="secret-upstream-key-123456")
+    response = httpx.Response(422, json={"detail": "success check not verified: observation secret-upstream-key-123456"},
+        request=httpx.Request("POST", "http://runtime.local/internal/tasks/result"))
+    error = httpx.HTTPStatusError("422 Unprocessable Entity", request=response.request, response=response)
+    summary = harness.failure_summary(error)
+    assert "success check not verified: observation" in summary
+    assert "secret-upstream-key-123456" not in summary
+
+
 @pytest.mark.parametrize("hook", ["before_provider_request", "agent_settled"])
 async def test_extension_errors_stop_runner_with_redacted_diagnostic(tmp_path, hook):
     fake = tmp_path / "fake-pi"

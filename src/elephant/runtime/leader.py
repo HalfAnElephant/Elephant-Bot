@@ -799,6 +799,17 @@ class LeaderRuntime:
             return result
         with self.db.transaction() as conn:
             run, claim = self.lease(conn, *identity)
+            if operation == "validate-result-refs":
+                self.authorize(conn, run, claim, {"action": "task.execute"})
+                result = TaskResult.model_validate({"summary": "Outcome reference validation", **payload})
+                if claim.get("target_root_task_id"):
+                    root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                    checks = tuple(name for name in ("observation", "effect") if getattr(result, name + "_refs"))
+                    self.service.graph.verify_final_result(conn, root, result, checks=checks)
+                else:
+                    self.service._verify_result_refs(conn, result, {"id": claim["task_id"],
+                        "retry_of_task_id": None, "rework_of_task_id": None})
+                return {"accepted": True}
             if operation == "authorize":
                 return self.authorize(conn, run, claim, payload)
             if operation == "tasks":
