@@ -20,7 +20,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from elephant.app import create_app
 from elephant.capabilities.gateway import CapabilityRegistry
@@ -29,12 +29,13 @@ from elephant.config import Settings
 from elephant.harness.gateway import RunGateway
 from elephant.harness.pi import PiRunnerAdapter
 from elephant.runtime.scheduler import RuntimeClient
-from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.action_schema import operations
+from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
 from elephant.storage.mail_schema import mail_accounts
 from elephant.storage.mail_trigger_schema import mail_rule_receipts
 from elephant.storage.schedule_schema import schedules
 from elephant.storage.schema import outbox
-from elephant.storage.task_schema import tasks
+from elephant.storage.task_schema import runs, tasks
 
 MODEL = "deepseek-flash"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -69,6 +70,27 @@ for (let index = 0; index < 6; index++) {
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def mail_task_snapshot(core, root_id):
+    """Keep settlement diagnostics while omitting tool arguments, message bodies and credentials."""
+    tree = select(tasks.c.id).where(tasks.c.root_task_id == root_id)
+    with core.db.engine.connect() as conn:
+        return {
+            "tasks": [dict(row) for row in conn.execute(select(tasks.c.id, tasks.c.kind, tasks.c.state,
+                tasks.c.wait_json).where(tasks.c.id.in_(tree))).mappings()],
+            "attempts": [dict(row) for row in conn.execute(select(runs.c.id, runs.c.role, runs.c.purpose,
+                runs.c.state, runs.c.slot_reserved,
+                func.json_extract(runs.c.result_json, "$.status").label("result_status"),
+                func.json_extract(runs.c.receipt_json, "$.kind").label("receipt_kind"))
+                .where(runs.c.task_id.in_(tree))).mappings()],
+            "operations": [dict(row) for row in conn.execute(select(operations.c.state,
+                func.count().label("count")).where(operations.c.task_id.in_(tree))
+                .group_by(operations.c.state)).mappings()],
+            "inbox": [dict(row) for row in conn.execute(select(leader_inbox.c.resume_reason,
+                leader_inbox.c.claimed_attempt_id, leader_inbox.c.persisted_at, leader_inbox.c.handled_at)
+                .where(leader_inbox.c.root_task_id == root_id)).mappings()],
+        }
 
 
 def verify_weekly_mail_filter(trigger):
@@ -444,6 +466,7 @@ class DialogueSuite:
                 artifact=artifact, artifact_text=text, replies=[{"purpose": "result", "text": reply}],
                 first_reply_seconds=case["received"][0]["seconds"])
             return
+        case["task_snapshot"] = mail_task_snapshot(core, root["id"])
         raise AssertionError("mail execution timed out")
 
     async def run(self, cases=None):

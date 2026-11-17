@@ -363,14 +363,14 @@ class TaskGraph:
     def settled(self, conn, task, run_id, result):
         self.event(conn, task, "child_result", {"result": result}, attempt_id=run_id,
                    event_id="result:" + run_id, wake=True)
-        if task["state"] in {"FAILED", "BLOCKED", "EXPIRED", "PARTIAL"}:
+        attention = task["state"] in {"FAILED", "BLOCKED", "EXPIRED", "PARTIAL"}
+        if attention:
             self.event(conn, task, "needs_attention", {"result": result, "state": task["state"]},
                 attempt_id=run_id, event_id="attention:" + run_id, wake=True)
-            return
         parent_id = task["parent_task_id"]
         if parent_id:
             parent = conn.execute(select(tasks).where(tasks.c.id == parent_id)).mappings().one()
-            if parent["kind"] != "goal":
+            if not attention or parent["kind"] == "goal":
                 self.wake_parent(conn, parent)
 
     def wait(self, conn, task, spec, run_id):
@@ -385,6 +385,14 @@ class TaskGraph:
             continuation_revision=condition["revision"]))
         return {"accepted": True, "waiting": True, "wait_revision": condition["revision"]}
 
+    def yield_children(self, conn, parent):
+        condition = json.loads(parent["wait_json"])
+        condition["yielded"] = True
+        wait_json = json.dumps(condition)
+        conn.execute(update(tasks).where(tasks.c.id == parent["id"]).values(
+            state="WAITING_CHILDREN", wait_json=wait_json))
+        return self.wake_parent(conn, {**dict(parent), "state": "WAITING_CHILDREN", "wait_json": wait_json})
+
     def wake_parent(self, conn, parent):
         if parent["state"] != "WAITING_CHILDREN" or not parent["wait_json"]:
             return False
@@ -396,13 +404,16 @@ class TaskGraph:
         ready = all(settled) if condition["predicate"] == "all" else any(settled)
         if not ready:
             return False
+        changed = conn.execute(update(tasks).where(tasks.c.id == parent["id"],
+            tasks.c.state == "WAITING_CHILDREN", tasks.c.wait_json == parent["wait_json"]).values(state="QUEUED"))
+        if not changed.rowcount:
+            return False
         if condition["predicate"] == "any":
             for child in children:
                 if child["state"] not in TERMINAL:
                     self.cancel_tree(conn, child)
-        conn.execute(update(tasks).where(tasks.c.id == parent["id"]).values(state="QUEUED"))
         self.event(conn, parent, "children_ready", {"wait_revision": condition["revision"]},
-            event_id=stable_id(parent["id"], "wait", str(condition["revision"])))
+            event_id=stable_id(parent["id"], "wait", str(condition["revision"])), wake=parent["kind"] == "goal")
         self.service.wakeup.set()
         return True
 

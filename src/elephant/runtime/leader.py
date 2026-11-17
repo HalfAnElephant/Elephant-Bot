@@ -387,10 +387,7 @@ class LeaderRuntime:
                 self.service._wake(conn, target["id"], pending_wait["id"])
             elif protocol_failure and target is not None:
                 if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
-                    condition = json.loads(target["wait_json"])
-                    condition["yielded"] = True
-                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
-                        state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                    self.service.graph.yield_children(conn, target)
                 elif claim["purpose"] == "finalize" and self.service.graph.finalize_ready(conn, target):
                     conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
                         state="BLOCKED", result_json=result.model_dump_json()))
@@ -407,10 +404,7 @@ class LeaderRuntime:
                 if not target or target["fencing"] != fencing or target["goal_revision"] != claim["basis_goal_revision"]:
                     raise PermissionError("stale finalize generation or revision")
                 if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
-                    condition = json.loads(target["wait_json"])
-                    condition["yielded"] = True
-                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
-                        state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                    self.service.graph.yield_children(conn, target)
                 else:
                     if not self.service.graph.finalize_ready(conn, target):
                         raise PermissionError("required children, inputs or operations are not settled")
@@ -595,12 +589,7 @@ class LeaderRuntime:
                         conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(state="WAITING_INPUT"))
                         self.service._wake(conn, root["id"], waiting["id"])
                     else:
-                        condition = json.loads(root["wait_json"])
-                        condition["yielded"] = True
-                        conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
-                            state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
-                        self.service.graph.event(conn, root, "children_ready", {},
-                            event_id="leader-wait-recovered:" + run_id, wake=True)
+                        self.service.graph.yield_children(conn, root)
                     conn.execute(update(leader_inbox).where(leader_inbox.c.id.in_(claim["source_ids"]),
                         leader_inbox.c.claimed_attempt_id == run_id).values(handled_at=now, output_ref="WAIT_RECOVERED"))
                     self._account_turn(conn, current, claim)
