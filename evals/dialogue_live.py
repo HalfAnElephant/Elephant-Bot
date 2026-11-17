@@ -78,7 +78,9 @@ def mail_task_snapshot(core, root_id):
     with core.db.engine.connect() as conn:
         return {
             "tasks": [dict(row) for row in conn.execute(select(tasks.c.id, tasks.c.kind, tasks.c.state,
-                tasks.c.wait_json).where(tasks.c.id.in_(tree))).mappings()],
+                tasks.c.wait_json, func.json_extract(tasks.c.result_json, "$.status").label("result_status"),
+                func.json_extract(tasks.c.result_json, "$.artifacts").label("artifacts"))
+                .where(tasks.c.id.in_(tree))).mappings()],
             "attempts": [dict(row) for row in conn.execute(select(runs.c.id, runs.c.role, runs.c.purpose,
                 runs.c.state, runs.c.slot_reserved,
                 func.json_extract(runs.c.result_json, "$.status").label("result_status"),
@@ -440,6 +442,8 @@ class DialogueSuite:
                 root = conn.execute(select(tasks).where(tasks.c.id == receipts[0]["task_id"])).mappings().one()
                 deliveries = conn.execute(select(outbox).where(outbox.c.task_id == root["id"])).mappings().all()
             case["root_state"] = root["state"]
+            if root["state"] in {"FAILED", "PARTIAL", "BLOCKED", "CANCELLED", "EXPIRED"}:
+                case["task_snapshot"] = mail_task_snapshot(core, root["id"])
             require(root["state"] not in {"FAILED", "PARTIAL", "BLOCKED", "CANCELLED", "EXPIRED"},
                     "mail task did not complete successfully")
             finals = [json.loads(row["envelope_json"]) for row in deliveries if row["state"] == "SENT"
@@ -491,6 +495,20 @@ class DialogueSuite:
             "memory": {"openviking": {"private_enabled": False, "group_enabled": False}},
         }, strict=False)
         original_gateway, original_start, original_invoke = RunGateway.__init__, PiRunnerAdapter.start, RuntimeClient.invoke
+        original_result = RunGateway.result
+
+        def gateway_result(gateway, summary, *, outcome=None):
+            result = original_result(gateway, summary, outcome=outcome)
+            if self.current:
+                selected = (gateway.outcome or {}) if outcome is None else outcome
+                self.current.setdefault("result_construction", []).append({
+                    "role": gateway.claim.get("role"), "purpose": gateway.claim.get("purpose"),
+                    "stage": "preflight" if outcome is not None else "settlement",
+                    "outcome_status": selected.get("status"), "result_status": result.status,
+                    "effects": dict(gateway.effects), "summary": gateway.safe_error(result.summary),
+                    "limitations": [gateway.safe_error(item) for item in result.limitations],
+                })
+            return result
 
         def gateway_init(gateway, *args, **kwargs):
             original_gateway(gateway, *args, **kwargs)
@@ -523,10 +541,16 @@ class DialogueSuite:
                                                "session_id": result.get("session_id"), "seconds": self.elapsed()})
             if operation == "result" and self.current and not body.result.agent_authored:
                 self.current["runner_failed"] = True
+            if operation == "result" and self.current:
+                self.current.setdefault("submitted_results", []).append({
+                    "run_id": body.run_id, "status": body.result.status,
+                    "agent_authored": body.result.agent_authored, "artifact_count": len(body.result.artifacts),
+                })
             return result
 
         with patch.object(RunGateway, "__init__", gateway_init), patch.object(PiRunnerAdapter, "start", start), \
-                patch.object(RuntimeClient, "invoke", invoke), patch.dict(os.environ, {
+                patch.object(RunGateway, "result", gateway_result), patch.object(RuntimeClient, "invoke", invoke), \
+                patch.dict(os.environ, {
                     "ELEPHANT_ADMIN_TOKEN": "synthetic-mail-admin",
                     "ELEPHANT_CREDENTIAL_KEY": base64.b64encode(os.urandom(32)).decode()}):
             async with httpx.AsyncClient(transport=httpx.MockTransport(self.receiver)) as receiver:
@@ -637,6 +661,9 @@ async def self_check():
             with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "synthetic-offline-key"}):
                 await asyncio.wait_for(suite.run(cases=[("hello", "Hello～")]), timeout=30)
             require(suite.report["cases"][0]["passed"], "offline signed ingress to final delivery failed")
+            recorded = suite.report["cases"][0]["result_construction"]
+            require(any(item["result_status"] == "completed" for item in recorded), "result construction was not recorded")
+            require("synthetic-offline-key" not in json.dumps(recorded), "result diagnostics exposed the model credential")
         finally:
             await suite.transport.transport.aclose()
     print("Dialogue live offline self-check passed")
