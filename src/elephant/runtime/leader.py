@@ -760,7 +760,7 @@ class LeaderRuntime:
                         return await self._reconcile_direct_operation(identity, claim, payload)
                     from elephant.capabilities.types import ToolContext
 
-                    context = ToolContext(task_id=claim["task_id"], run_id=run_id, fence=_fencing,
+                    context = ToolContext(task_id=claim["task_id"], run_id=run_id, fence=fencing,
                         principal=self.sessions.access_for_claim(claim), workspace="")
                     def authorize(action):
                         with self.db.engine.connect() as conn:
