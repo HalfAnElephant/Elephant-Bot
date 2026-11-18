@@ -2,8 +2,9 @@ from contextlib import nullcontext
 
 from sqlalchemy import func, insert, select, update
 
-from elephant.domain import InboundEvent
-from elephant.storage.schema import conversations, inbox
+from elephant.domain import InboundEvent, stable_id
+from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.schema import audit_events, conversations, inbox
 
 
 class Inbox:
@@ -16,6 +17,11 @@ class Inbox:
             old_event = InboundEvent.model_validate_json(existing) if existing else None
             if old_event and (old_event.mentions_bot or not event.mentions_bot):
                 return old_event, False
+            if old_event:
+                bound = select(dialogue_inputs.c.id).where(dialogue_inputs.c.id == event.event_id).exists() | select(
+                    audit_events.c.id).where(audit_events.c.id == stable_id("host-task-control", event.event_id)).exists()
+                if c.scalar(select(bound)):
+                    return old_event, False  # A committed input or control already depends on this source digest.
             key = event.conversation.key
             seq = c.execute(select(conversations.c.seq).where(conversations.c.id == key)).scalar()
             if seq is None:

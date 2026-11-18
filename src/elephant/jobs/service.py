@@ -384,7 +384,8 @@ class TaskService:
                 )
             )
             continuation = c.execute(select(inputs.c.id, inputs.c.text).where(
-                inputs.c.task_id == row["id"], inputs.c.state == "READY")).mappings().all()
+                inputs.c.task_id == row["id"], inputs.c.state == "READY")
+                .order_by(inputs.c.goal_revision, inputs.c.created_at, inputs.c.id)).mappings().all()
             checkpoint = c.execute(select(waits.c.checkpoint).where(waits.c.task_id == row["id"],
                 waits.c.state == "CONSUMED").order_by(waits.c.revision.desc()).limit(1)).scalar_one_or_none()
             references = json.loads(row["goal_json"]).get("target_refs", [])
@@ -535,7 +536,8 @@ class TaskService:
                 state = json.loads(task["context_json"]).get("failure_state", "FAILED")
             elif self._time_limited(task) and (task["stop_reason"] == "deadline" or task["deadline"] <= now):
                 state = "EXPIRED"
-            if revision_pending and state not in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED"}:
+            if (revision_pending and not child_wait and (not wait or wait["kind"] == "external")
+                    and state not in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED"}):
                 state = "QUEUED"
                 c.execute(update(inputs).where(inputs.c.task_id == task["id"], inputs.c.consumed_at.is_(None)).values(state="READY"))
             if revoked_handoff and state not in {"CANCELLED", "CANCEL_REQUESTED"}:
@@ -939,8 +941,12 @@ class TaskService:
                 self._notification(c, task, run_id, payload["text"], "question" if kind == "input" else "progress",
                                    "important", question_id)
             elif kind == "input":
+                text = payload["text"]
+                if not isinstance(text, str) or not text.strip() or len(text) > 10000:
+                    raise ValueError("question text must contain 1..10000 characters")
+                validate_user_facing_text(text)
                 self.graph.event(c, task, "needs_input", {"question_id": question_id,
-                    "public_text": payload["text"]}, attempt_id=run_id, event_id="question:" + question_id, wake=True)
+                    "public_text": text}, attempt_id=run_id, event_id="question:" + question_id, wake=True)
             now = self.clock.now()
             revision = task["continuation_revision"] + 1
             c.execute(insert(waits).values(id=question_id, task_id=task["id"], run_id=run_id,
@@ -948,16 +954,16 @@ class TaskService:
                 condition_json=json.dumps(condition), state="INTENT", created_at=now.isoformat(),
                 delivery_deadline=(now + timedelta(hours=24)).isoformat(), expires_at=None))
             c.execute(update(tasks).where(tasks.c.id == task["id"]).values(continuation_revision=revision))
-            c.execute(update(inputs).where(inputs.c.task_id == task["id"], inputs.c.question_id.is_(None),
-                inputs.c.state == "PENDING").values(question_id=question_id))
             return {"accepted": True, "question_id": question_id, "waiting": True}
 
-    def _input_sources(self, conn, event, access):
+    def _input_sources(self, conn, event, access, *, selected_by=None):
         from elephant.storage.schema import inbox as inbox_table
         raw = conn.execute(select(inbox_table.c.event_json).where(inbox_table.c.id == event.event_id,
             inbox_table.c.conversation_id == access.conversation.key,
             inbox_table.c.principal_id == access.principal.key)).scalar_one_or_none()
         if raw is None:
+            if selected_by is not None:
+                raise PermissionError("task selection requires the original input source")
             if any(segment.type in {"image", "file", "audio"} for segment in event.segments):
                 raise PermissionError("media input requires a durably accepted source")
             return {}
@@ -968,14 +974,20 @@ class TaskService:
         if conn.execute(select(inbox_table.c.id).where(inbox_table.c.conversation_id == access.conversation.key,
                 inbox_table.c.event_type == "message.recalled", inbox_table.c.message_id == source.platform_message_id)).first():
             raise PermissionError("input source has been recalled")
+        manifest = [{"kind": "inbox", "id": source.event_id, "digest": hashlib.sha256(raw.encode()).hexdigest()}]
+        if selected_by is not None:
+            selection = self._input_sources(conn, selected_by, access).get("source_manifest", ())
+            if not selection:
+                raise PermissionError("task selection requires a durably accepted source")
+            manifest.extend({**item, "selects_input_event": source.event_id} for item in selection)
+
         def metadata(segment):
             return {"source": source.event_id, "message_id": source.platform_message_id,
                 "url": segment.image_url or segment.source_url, "filename": segment.filename,
                 "mime_type": segment.mime_type, "size": segment.size, "attachment_ref": segment.attachment_ref,
                 **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
                     "is_current_input": True} if segment.type == "audio" else {})}
-        return {"source_manifest": [{"kind": "inbox", "id": source.event_id,
-                    "digest": hashlib.sha256(raw.encode()).hexdigest()}],
+        return {"source_manifest": manifest,
             "images": [metadata(segment) for segment in source.segments if segment.type == "image"][-16:],
             "files": [metadata(segment) for segment in source.segments if segment.type in {"file", "audio"}][-16:]}
 
@@ -1008,7 +1020,7 @@ class TaskService:
                 return "[用户发送了语音，请根据带来源的语音转写理解本次输入]"
         return text
 
-    def add_input(self, public_id, event, access, text, question_id=None):
+    def add_input(self, public_id, event, access, text, question_id=None, *, selected_by=None):
         text = self._input_text(event, text)
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
             raise ValueError("input must contain 1..16000 characters")
@@ -1020,36 +1032,43 @@ class TaskService:
                 raise PermissionError("task input requires the original authenticated subject")
             if task["root_task_id"]:
                 return self.add_graph_input(c, task, event, access, text,
-                                            kind="answer" if question_id else "followup", question_id=question_id)
+                    kind="answer" if question_id else "followup", question_id=question_id, selected_by=selected_by)
             self.permissions.require(access, "task.input", "task:" + task["id"])
             old = c.execute(select(inputs).where(inputs.c.source_id == event.event_id)).mappings().first()
             if old:
-                if old["task_id"] != task["id"] or old["text"] != text:
+                if old["task_id"] != task["id"] or old["text"] != text or old["question_id"] != question_id:
                     raise ValueError("conflicting input replay")
                 return {"accepted": True, "input_id": old["id"]}
             if task["state"] in TERMINAL or task["state"] in {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
                 raise PermissionError("task cannot accept input")
-            wait = c.execute(select(waits).where(waits.c.task_id == task["id"],
-                waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
-            if question_id and (not wait or wait["id"] != question_id):
+            if question_id and not self._open_input_wait(c, task["id"], question_id):
                 raise ValueError("question is no longer waiting")
             input_id = str(uuid4())
-            c.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=wait["id"] if wait else None,
+            c.execute(insert(inputs).values(id=input_id, task_id=task["id"], question_id=question_id,
                 source_id=event.event_id, text=text, state="PENDING", created_at=self.clock.now().isoformat()))
-            sources = self._input_sources(c, event, access)
+            sources = self._input_sources(c, event, access, selected_by=selected_by)
             self._merge_input_sources(c, {task["id"]}, sources)
             if sources:
                 c.execute(update(inputs).where(inputs.c.id == input_id).values(source_event_id=event.event_id))
-            if wait:
-                self._wake(c, task["id"], wait["id"])
+            if question_id:
+                self._wake(c, task["id"], question_id)
             return {"accepted": True, "input_id": input_id}
+
+    def open_input_waits(self):
+        return select(waits.c.id, waits.c.task_id).join(tasks, tasks.c.id == waits.c.task_id).where(
+            waits.c.kind == "input", tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]),
+            waits.c.state.in_(["INTENT", "WAITING"]),
+            (waits.c.expires_at.is_(None)) | (waits.c.expires_at > self.clock.now().isoformat()),
+            ~select(inputs.c.id).where(inputs.c.question_id == waits.c.id, inputs.c.task_id == waits.c.task_id).exists())
+
+    def _open_input_wait(self, conn, task_id, question_id):
+        return conn.execute(self.open_input_waits().where(waits.c.id == question_id,
+            waits.c.task_id == task_id)).scalar_one_or_none()
 
     def question_for(self, event):
         with self.db.engine.connect() as c:
-            query = select(waits.c.id, tasks.c.public_id).join(tasks, tasks.c.id == waits.c.task_id).where(
-                tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
-                waits.c.kind == "input",
-                waits.c.state.in_(["INTENT", "WAITING"]), tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]))
+            query = self.open_input_waits().with_only_columns(waits.c.id, tasks.c.public_id).where(
+                tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key)
             if event.reply_to:
                 query = query.where(waits.c.notification_id.in_(select(outbox_table.c.origin_id).where(
                     outbox_table.c.conversation_id == event.conversation.key,
@@ -1067,7 +1086,8 @@ class TaskService:
         if not c.execute(select(inputs.c.id).where(inputs.c.question_id == question_id,
                                                   inputs.c.state == "PENDING")).first():
             return False
-        c.execute(update(inputs).where(inputs.c.question_id == question_id, inputs.c.state == "PENDING").values(state="READY"))
+        c.execute(update(inputs).where(inputs.c.task_id == task_id, inputs.c.consumed_at.is_(None),
+            (inputs.c.question_id == question_id) | inputs.c.question_id.is_(None)).values(state="READY"))
         c.execute(update(waits).where(waits.c.id == question_id).values(state="CONSUMED"))
         state = "WAITING_CHILDREN" if task["kind"] == "goal" else "QUEUED"
         c.execute(update(tasks).where(tasks.c.id == task_id).values(state=state))
@@ -1108,10 +1128,14 @@ class TaskService:
     def take_inputs(self, run_id, fencing_token, worker_id):
         with self.db.transaction() as c:
             _run, task = self._lease(c, run_id, fencing_token, worker_id)
-            if c.execute(select(waits.c.id).where(waits.c.run_id == run_id)).first():
+            if (task["state"] != "RUNNING" or
+                    c.execute(select(waits.c.id).where(waits.c.run_id == run_id)).first()):
                 return []
             rows = c.execute(select(inputs).where(inputs.c.task_id == task["id"],
-                inputs.c.state == "PENDING", inputs.c.question_id.is_(None))).mappings().all()
+                inputs.c.state == "PENDING", inputs.c.question_id.is_(None))
+                .order_by(inputs.c.goal_revision, inputs.c.created_at, inputs.c.id)).mappings().all()
+            if not rows or hasattr(self, "graph") and not self.graph.handoff_valid(task):
+                return []
             context = json.loads(task["context_json"])
             result = []
             for row in rows:
@@ -1449,9 +1473,9 @@ class TaskService:
                 inputs.c.task_id == task["id"], inputs.c.question_id.is_(None), inputs.c.state == "PENDING").values(state="STEERED"))
             return {"accepted": bool(changed.rowcount)}
 
-    def add_graph_input(self, conn, task, event, access, text, *, kind="followup", question_id=None, source_id=None):
+    def add_graph_input(self, conn, task, event, access, text, *, kind="followup", question_id=None, source_id=None, selected_by=None):
         from elephant.storage.agent_schema import leader_inbox
-        if kind not in {"followup", "answer", "notify"}:
+        if kind not in {"followup", "answer", "notify"} or bool(question_id) != (kind == "answer"):
             raise ValueError("invalid task input kind")
         text = self._input_text(event, text)
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
@@ -1460,24 +1484,22 @@ class TaskService:
                 or task["conversation"] != event.conversation.key or access.conversation != event.conversation):
             raise PermissionError("task input requires its authenticated subject")
         self.permissions.require(access, "task.input", "task:" + task["id"])
-        if task["state"] in TERMINAL | {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}:
-            raise PermissionError("task is closed")
         source_id = source_id or event.event_id
         old = conn.execute(select(inputs).where(inputs.c.source_id == source_id)).mappings().first()
+        if old is None and kind != "notify":
+            old = conn.execute(select(inputs).where(inputs.c.source_event_id == event.event_id,
+                ~inputs.c.source_id.endswith(":" + inputs.c.task_id))).mappings().first()
         if old:
-            if old["task_id"] != task["id"] or old["text"] != text or old["kind"] != kind:
+            if (old["task_id"] != task["id"] or old["text"] != text or old["kind"] != kind
+                    or old["question_id"] != question_id or old["actor"] not in {None, event.principal.key}):
                 raise ValueError("conflicting task input replay")
             return {"accepted": True, "input_id": old["id"], "state": old["state"]}
-        wait = None
-        if kind == "answer":
-            if not question_id:
-                raise ValueError("answer requires an open question_id")
-            wait = conn.execute(select(waits).where(waits.c.id == question_id, waits.c.task_id == task["id"],
-                waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
-            if not wait:
-                raise PermissionError("question is no longer open for this task")
-        sources = self._input_sources(conn, event, access) if kind != "notify" else {}
         root = self.graph.root(conn, task)
+        if {task["state"], root["state"]} & (TERMINAL | {"CANCEL_REQUESTED", "NEEDS_RECONCILIATION"}):
+            raise PermissionError("task is closed")
+        if question_id and not self._open_input_wait(conn, task["id"], question_id):
+            raise PermissionError("question is no longer open for this task")
+        sources = self._input_sources(conn, event, access, selected_by=selected_by) if kind != "notify" else {}
         revision = root["goal_revision"] + (kind != "notify")
         now = self.clock.now().isoformat()
         input_id = str(uuid4())
@@ -1488,7 +1510,7 @@ class TaskService:
         affected = {task["id"]}
         if kind != "notify":
             conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(goal_revision=revision))
-        if kind == "followup":
+        if kind == "followup" and task["kind"] == "goal":
             children = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
                 tasks.c.kind != "goal", tasks.c.id != task["id"], tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings().all()
             for child in children:
@@ -1501,8 +1523,15 @@ class TaskService:
                 event_id = self.graph.event(conn, root, "followup", {"input_id": input_id, "text": text})
                 conn.execute(insert(leader_inbox).values(id=str(uuid4()), target_session_id=root["coordinator_session_id"],
                     root_task_id=root["id"], event_id=event_id, resume_reason="followup", source_revision=revision, created_at=now))
-        self._merge_input_sources(conn, affected | {root["id"]}, sources)
+        self._merge_input_sources(conn, affected, sources)
+        if sources and task["id"] != root["id"]:
+            self._merge_input_sources(conn, {root["id"]}, {"source_manifest": sources["source_manifest"]})
         if kind != "notify":
+            unchanged = select(tasks.c.id).where(tasks.c.root_task_id == root["id"], tasks.c.kind != "goal",
+                tasks.c.id.not_in(affected), tasks.c.goal_revision == root["goal_revision"])
+            conn.execute(update(runs).where(runs.c.task_id.in_(unchanged), runs.c.slot_reserved == 1,
+                runs.c.basis_goal_revision == root["goal_revision"]).values(basis_goal_revision=revision))
+            conn.execute(update(tasks).where(tasks.c.id.in_(unchanged)).values(goal_revision=revision))
             from elephant.storage.job_schema import jobs
             conn.execute(update(jobs).where(jobs.c.task_id.in_(affected),
                 jobs.c.state.not_in({"EXITED", "FAILED", "CANCELLED"})).values(
@@ -1519,7 +1548,7 @@ class TaskService:
                 conn.execute(update(tasks).where(tasks.c.id == waiting["task_id"]).values(state="QUEUED"))
                 conn.execute(update(inputs).where(inputs.c.task_id == waiting["task_id"],
                     inputs.c.consumed_at.is_(None)).values(state="READY"))
-        if wait:
+        if question_id:
             self._wake(conn, task["id"], question_id)
         self.wakeup.set()
         return {"accepted": True, "input_id": input_id, "state": "PENDING", "goal_revision": revision}
@@ -1528,6 +1557,8 @@ class TaskService:
         if (payload.get("session_id") != run["session_id"] or payload.get("run_id") != run["id"]
                 or not isinstance(payload.get("session_revision"), str)):
             raise PermissionError("receipt does not match the worker session")
+        if hasattr(self, "graph") and not self.graph.handoff_valid(task):
+            raise PermissionError("input context is no longer authorized")
         ids = payload.get("input_ids")
         if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
             raise ValueError("input receipt needs explicit IDs")

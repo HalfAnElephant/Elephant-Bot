@@ -119,7 +119,8 @@ const ConsoleModel = (() => {
       : progress.delivery?.required === false ? '控制台任务，不会发送外部消息。'
         : progress.delivery?.delivered ? '有结果发送成功记录。'
           : states.includes('FAILED') ? '有投递失败记录。'
-            : progress.delivery?.required === true ? '暂无结果发送成功记录。' : null;
+            : progress.delivery?.outbox_states?.includes('WAITING_FOR_TRIGGER') ? '结果等待可回复的消息。'
+              : progress.delivery?.required === true ? '暂无结果发送成功记录。' : null;
     return {
       title: task.kind === 'goal' ? '目标' : task.kind === 'consult' ? '咨询 Worker' : 'Worker',
       state: taskStateLabel(task.state),

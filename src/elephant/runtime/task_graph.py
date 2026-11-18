@@ -2,7 +2,7 @@
 import json
 from uuid import uuid4
 
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 
 from elephant.domain import InboundEvent, stable_id
 from elephant.domain.agents import ChildSpec, GoalSpec, ProgressSpec, WaitSpec
@@ -11,7 +11,8 @@ from elephant.harness.artifacts import artifact_path
 from elephant.storage.action_schema import operations
 from elephant.storage.agent_schema import agent_events, leader_inbox
 from elephant.storage.job_schema import jobs
-from elephant.storage.task_schema import inputs, notifications, observations, runs, tasks
+from elephant.storage.schema import outbox
+from elephant.storage.task_schema import inputs, notifications, observations, runs, tasks, waits
 
 TERMINAL = frozenset({"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"})
 UNSETTLED = frozenset({"PREPARED", "DISPATCHED", "UNKNOWN", "PARTIAL", "RECONCILIATION"})
@@ -25,7 +26,8 @@ class TaskGraph:
         event_id = event_id or str(uuid4())
         previous = conn.execute(select(agent_events).where(agent_events.c.id == event_id)).mappings().first()
         if previous:
-            if previous["task_id"] != task["id"] or json.loads(previous["payload_json"]) != payload:
+            if (previous["task_id"] != task["id"] or previous["kind"] != kind
+                    or previous["attempt_id"] != attempt_id or json.loads(previous["payload_json"]) != payload):
                 raise ValueError("conflicting task event replay")
             return event_id
         seq = (conn.execute(select(func.max(agent_events.c.seq)).where(
@@ -37,7 +39,7 @@ class TaskGraph:
         if wake:
             root = self.root(conn, task)
             if (task["id"] == root["id"] or task["parent_task_id"] == root["id"]
-                    or kind == "needs_attention") and root["state"] not in TERMINAL | {"CANCEL_REQUESTED"}:
+                    or kind in {"needs_attention", "needs_input"}) and root["state"] not in TERMINAL | {"CANCEL_REQUESTED"}:
                 conn.execute(insert(leader_inbox).values(id=stable_id(root["id"], event_id),
                     target_session_id=root["coordinator_session_id"], root_task_id=root["id"],
                     event_id=event_id, resume_reason=kind, source_revision=root["goal_revision"], created_at=now))
@@ -262,9 +264,24 @@ class TaskGraph:
         return True
 
     def handoff_valid(self, task):
+        validator = self.service.context_validator
+        if not validator:
+            return True
         context = json.loads(task["context_json"])
-        return (not (context.get("task_sources") or context.get("mail_receipt_id")) or not self.service.context_validator
-            or self.service.context_validator(self.service._access_for(task), context))
+        if context.get("task_sources") or context.get("mail_receipt_id"):
+            return validator(self.service._access_for(task), context)
+        manifest = context.get("source_manifest")
+        if not manifest:
+            return True
+        scoped = (inputs.c.task_id.in_(select(tasks.c.id).where(tasks.c.root_task_id == task["id"]))
+                  if task["kind"] == "goal" else inputs.c.task_id == task["id"])
+        with self.db.engine.connect() as conn:
+            sources = {event_id or source_id.removesuffix(":" + task_id) for event_id, source_id, task_id in
+                       conn.execute(select(inputs.c.source_event_id, inputs.c.source_id, inputs.c.task_id).where(scoped))}
+        task_input_manifest = [source for source in manifest if source.get("id") in sources
+                               or source.get("selects_input_event") in sources]
+        return not task_input_manifest or validator(self.service._access_for(task),
+            {**context, "source_manifest": task_input_manifest})
 
     def _projection_context(self, conn, task, access):
         root = self.root(conn, task)
@@ -315,8 +332,11 @@ class TaskGraph:
                     "result": json.loads(row["result_json"]) if row["result_json"] else None})
         last = conn.execute(select(agent_events.c.kind, agent_events.c.payload_json, agent_events.c.created_at)
             .where(agent_events.c.task_id == task["id"]).order_by(agent_events.c.seq.desc()).limit(1)).mappings().first()
-        delivery = conn.execute(select(notifications.c.state).where(notifications.c.task_id == task["id"],
-            notifications.c.purpose == "result")).scalars().all()
+        result_deliveries = conn.execute(select(notifications.c.id, notifications.c.state, outbox.c.state).outerjoin(outbox,
+            and_(outbox.c.origin_kind == "task", outbox.c.origin_id == notifications.c.id)).where(
+                notifications.c.task_id == task["id"], notifications.c.purpose == "result")
+            .order_by(notifications.c.sequence, outbox.c.part_no)).all()
+        delivery = list({notice_id: state for notice_id, state, _ in result_deliveries}.values())
         notices = []
         if not stale_task and task["goal_revision"] == root["goal_revision"]:
             notices = [dict(row) for row in conn.execute(select(
@@ -331,6 +351,7 @@ class TaskGraph:
         from .progress import task_progress
         projection = task_progress(self, conn, task, root, access=access, may_read=may_read, stale=stale_task,
                                    delivery_states=delivery)
+        projection["delivery"]["outbox_states"] = [state for _, _, state in result_deliveries if state is not None]
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
             "environment": ExecutionPlan.model_validate_json(task["plan_json"]).environment,
             "progress": projection,
@@ -408,6 +429,9 @@ class TaskGraph:
             tasks.c.state == "WAITING_CHILDREN", tasks.c.wait_json == parent["wait_json"]).values(state="QUEUED"))
         if not changed.rowcount:
             return False
+        if parent["kind"] != "goal":
+            conn.execute(update(inputs).where(inputs.c.task_id == parent["id"],
+                inputs.c.question_id.is_(None), inputs.c.consumed_at.is_(None)).values(state="READY"))
         if condition["predicate"] == "any":
             for child in children:
                 if child["state"] not in TERMINAL:
@@ -468,12 +492,23 @@ class TaskGraph:
             while parent_id in rows and parent_id not in active:
                 active.add(parent_id)
                 parent_id = rows[parent_id]["parent_task_id"]
+        cancelled = set()
         for row in rows.values():
             if row["state"] in TERMINAL:
                 continue
             jobs_quiescent = getattr(self.service, "job_tree_quiescent", lambda _task: True)(row)
-            conn.execute(update(tasks).where(tasks.c.id == row["id"]).values(
-                state="CANCEL_REQUESTED" if row["id"] in active or not jobs_quiescent else "CANCELLED", stop_reason=reason))
+            state = "CANCEL_REQUESTED" if row["id"] in active or not jobs_quiescent else "CANCELLED"
+            conn.execute(update(tasks).where(tasks.c.id == row["id"]).values(state=state, stop_reason=reason))
+            if state == "CANCELLED":
+                cancelled.add(row["id"])
+                self.event(conn, row, "cancelled", {"reason": reason},
+                    event_id=stable_id(row["id"], "cancelled"), wake=row["id"] == task["id"] and bool(task["parent_task_id"]))
+        if cancelled:
+            conn.execute(update(waits).where(waits.c.task_id.in_(cancelled), waits.c.state.in_(["INTENT", "WAITING"]))
+                .values(state="CANCELLED"))
+        if task["id"] in cancelled and task["parent_task_id"]:
+            parent = conn.execute(select(tasks).where(tasks.c.id == task["parent_task_id"])).mappings().one()
+            self.wake_parent(conn, parent)
         conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id.in_(ids),
             leader_inbox.c.handled_at.is_(None)).values(handled_at=self.clock.now().isoformat(), output_ref="SUPERSEDED"))
         self.service.wakeup.set()

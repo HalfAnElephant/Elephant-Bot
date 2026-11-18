@@ -7,10 +7,37 @@ from test_leader_decisions import failed_attention, tool
 from test_leader_dispatch_recovery import native_pending_submit
 
 from elephant.adapters.pi.sessions import restore_tool_results, unfinished_tools
+from elephant.domain import TextSegment
 from elephant.storage.agent_schema import agent_events, leader_inbox
 from elephant.storage.task_schema import runs, tasks
 
 runtime = agent_runtime
+
+
+@pytest.mark.parametrize("cancel_child", [False, True])
+def test_worker_revision_preserves_child_wait_and_enters_the_resumed_claim(runtime, cancel_child):
+    root_goal(runtime)
+    parent = runtime.service.claim("parent")
+    identity = (parent["run_id"], parent["fencing_token"], "parent")
+    child = runtime.service.task_operation(*identity, {"operation": "tasks.spawn", "call_id": "spawn-check",
+        "arguments": {"goal": "核对事实", "delegation_key": "facts"}})
+    runtime.service.task_operation(*identity, {"operation": "tasks.wait", "call_id": "await-check",
+        "arguments": {"children": [child["task_id"]]}})
+    with runtime.db.engine.connect() as conn:
+        ref = conn.execute(select(tasks.c.public_id).where(tasks.c.id == parent["task_id"])).scalar_one()
+    source = runtime.event.model_copy(update={"event_id": "parent-revision", "segments": (TextSegment(text="按周汇总"),)})
+    revision = runtime.service.add_input(ref, source, runtime.access, source.text)
+    assert runtime.service.submit(*identity, {"status": "waiting_children", "summary": "等待事实核对"}, receipt={
+        "kind": "run_yielded", "run_id": parent["run_id"], "session_id": parent["session_id"],
+        "session_revision": "parent-yield", "input_ids": parent["context"]["source_input_ids"],
+        "inflight": 0, "tools_paired": True})["state"] == "WAITING_CHILDREN"
+    if cancel_child:
+        assert runtime.service.cancel(child["public_id"], runtime.access)["state"] == "CANCELLED"
+    else:
+        assert worker_complete(runtime)["task_id"] == child["task_id"]
+    resumed = runtime.service.claim("parent")
+    assert resumed["task_id"] == parent["task_id"]
+    assert resumed["continuation"]["inputs"] == [{"id": revision["input_id"], "text": source.text}]
 
 
 def finish_wait(runtime, claim, ending, arguments, accepted):

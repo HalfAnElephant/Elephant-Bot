@@ -24,6 +24,12 @@ Agent-authored progress, questions, status explanations and final results enter 
 
 `task.ask_user` persists question/checkpoint and wait intent. The extension requires a waiting tool to occupy its whole batch. Later business effects are blocked while pi settles. Answers are source-deduplicated and mapped by reply-to when possible. A fast answer stays pending until quiescence, then one continuation revision consumes it and starts the same Task's next run. Cancellation suppresses late continuation. Delivery and answer deadlines are separate.
 
+QQ task controls bind replies and explicit task references to the original conversation and requester. Use `补充 T-… 内容` or `回答 T-… 内容` with a task reference from the console, or reply to a task message. An answer must identify an open question. If the user chooses from several questions, the answer and the selection message are both required sources. A task-level follow-up stays with the selected Worker, and a goal-level follow-up reaches its active children. A durable control receipt preserves the target when ingress retries. Pi acknowledges each input for the current run after its trusted user message is present in the native session. Revoked input sources fence subsequent execution and delivery that use those sources.
+
+The QQ adapter records authenticated deletion events for guild channels and guild direct messages. Receiving those events depends on the bot's configured subscriptions. The [official group and C2C event list](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html) provides message creation and subscription events for those surfaces.
+
+Task delivery progress reads Outbox states for the result. A completed goal remains queryable while QQ delivery waits for an authorized trigger. Its result counts as delivered after every part of a result notification has a send receipt.
+
 `task.wait_external` persists a registered read-only remote observation condition. Deterministic bounded polling rechecks authority and observes the external resource without invoking a model each poll. A satisfied condition is durably recorded before the Task resumes. Failures or stale observations do not satisfy the condition. Local processes cannot be detached from their run without a Task-level ProcessLease handoff, which is currently unsupported.
 
 ## Daemon execution and recovery
@@ -35,6 +41,8 @@ The daemon-owned Worker, spool and Pi runner preserve fsynced result/event repla
 Production Pi processes use the fixed root launcher with run-scoped identity, `pi_bridge.ts` and root-owned stop evidence. This preserves UID, namespace, cgroup and filesystem boundaries. Credentialed GitHub and workspace subprocess capabilities additionally require bubblewrap. See [harness contracts](harness-contract.md) for the host boundary and [deployment instructions](../deploy/README.md) for installation.
 
 Actual verification coverage and unfinished external acceptance appear in [the A01–A62 matrix](agent-execution-acceptance.md). Real QQ windows/delivery, GitHub writes, model billing, Linux isolation and reboot recovery must be checked on their corresponding systems.
+
+The first task collaboration milestone requires [routing and replay](../tests/test_host_controls.py) and [Pi input recovery](../tests/test_pi_input_recovery.py). The second requires [parent wakeup, verified-effect recovery and QQ result retriggering](../tests/test_message_updates.py). Direct interaction with a selected work item also requires [scoped attachment handoff](../tests/test_task_input_media.py). These checks use local fixtures and synthetic QQ traffic.
 
 Core includes pool limits in each claim context. `warm_max=0` disables idle reuse while retaining cold execution capacity; otherwise resident capacity is at least `max_active`. Idle count and TTL follow the current context configuration. Workspace aliases are serialized while any owning run retains its execution slot.
 

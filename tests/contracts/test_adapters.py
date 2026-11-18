@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from elephant.adapters.qq_official.adapter import OfficialAdapter
 from elephant.config import Settings
-from elephant.domain import ObservationMode, OutboundEnvelope
+from elephant.domain import InboundEvent, ObservationMode, OutboundEnvelope
 from elephant.outbox.service import Outbox
 from elephant.storage.schema import inbox, outbox
 
@@ -56,6 +56,34 @@ async def test_A02_signature_replay_and_challenge(official_config, incoming, clo
     with db.engine.connect() as c:
         assert c.execute(select(func.count()).select_from(inbox)).scalar() == 1
     await qq.stop()
+
+
+@pytest.mark.parametrize(("creation", "deletion"), [
+    ("MESSAGE_CREATE", "MESSAGE_DELETE"),
+    ("AT_MESSAGE_CREATE", "PUBLIC_MESSAGE_DELETE"),
+    ("DIRECT_MESSAGE_CREATE", "DIRECT_MESSAGE_DELETE"),
+])
+async def test_signed_channel_deletion_records_only_the_recalled_message_identity(
+        official_config, incoming, clock, db, creation, deletion):
+    qq = OfficialAdapter(official_config, "d", incoming, clock)
+    try:
+        message = {"id": "channel-message", "channel_id": "channel", "guild_id": "guild",
+            "author": {"id": "author"}, "timestamp": clock.now().isoformat(), "content": "原消息"}
+        original = qq.normalize({"op": 0, "t": creation, "d": message})
+        payload = {"op": 0, "id": "deletion-1", "t": deletion, "d": {"message": message, "op_user": {"id": "moderator"}}}
+        body, headers = signed(qq, payload, clock)
+        with pytest.raises(ValueError, match="invalid callback signature"):
+            qq.callback(body, {})
+        assert qq.callback(body, headers) == {"op": 12}
+        assert qq.callback(*signed(qq, {**payload, "id": "deletion-2"}, clock)) == {"op": 12}
+        with db.engine.connect() as conn:
+            raw = conn.execute(select(inbox.c.event_json)).scalar_one()
+        recalled = InboundEvent.model_validate_json(raw)
+        assert recalled.event_type == "message.recalled" and recalled.platform_message_id == original.platform_message_id
+        assert recalled.conversation == original.conversation and recalled.event_id != original.event_id
+        assert recalled.principal.remote_user_id == "moderator" and recalled.segments == () and recalled.reply_context is None
+    finally:
+        await qq.stop()
 
 
 async def test_A05_modes(official_config, incoming, clock, official_event):
