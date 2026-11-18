@@ -55,7 +55,7 @@ class RuntimeClient:
 
     async def invoke(self, operation, body):
         result = await self._invoke(operation, body)
-        if body.run_id:
+        if body.run_id and operation != "recovery-status":
             self.leader.observe_operation((body.run_id, body.fencing_token, body.worker_id), operation, body.payload or {}, result)
         return result
 

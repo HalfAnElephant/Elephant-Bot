@@ -1239,7 +1239,10 @@ class TaskService:
             c.execute(update(processes).where(processes.c.id == old["id"]).values(
                 state="STOPPED" if stopped else "UNKNOWN", stopped_at=self.clock.now().isoformat() if stopped else None))
             if stopped:
-                c.execute(update(sessions).where(sessions.c.id == old["session_id"]).values(active_run_id=None))
+                stopped_runs = select(runs.c.id).where(runs.c.process_id == old["id"],
+                    runs.c.process_epoch == old["epoch"], runs.c.binding_generation == old["generation"])
+                c.execute(update(sessions).where(sessions.c.id == old["session_id"],
+                    sessions.c.active_run_id.in_(stopped_runs)).values(active_run_id=None))
             return {"recorded": True}
 
     def _operation_task_id(self, c, task):

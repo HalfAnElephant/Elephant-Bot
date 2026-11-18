@@ -72,6 +72,16 @@ class Spool:
             os.close(directory_fd)
         return destination
 
+    def archive(self, path):
+        archive = self.directory.with_name(self.directory.name + "-reconciled")
+        archive.mkdir(mode=0o700, exist_ok=True)
+        destination = archive / path.relative_to(self.directory)
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if destination.exists():
+            destination = destination.with_name(f"{destination.stem}-{uuid4()}{destination.suffix}")
+        path.replace(destination)
+        return destination
+
 
 class Worker:
     def __init__(self, client, worker_id, spool, harness_factory, *, pool=None):
@@ -107,12 +117,21 @@ class Worker:
                 logger.exception("Run uncertainty report failed worker_id=%s run_id=%s", self.worker_id, payload["run_id"])
             raise
 
+    async def resolve_spooled(self, path, identity):
+        status = await self.call("recovery-status", **identity)
+        if status.get("archive_spool"):
+            destination = self.spool.archive(path)
+            logger.info("Reconciled replay evidence archived run_id=%s spool=%s", identity["run_id"], destination)
+        elif status["discard_spool"]:
+            path.unlink(missing_ok=True)
+        else:
+            return False
+        return True
+
     async def deliver_result(self, payload, path):
         if not payload.get("stopped") and not payload.get("quiescent"):
             identity = {key: payload[key] for key in ("run_id", "fencing_token")}
-            status = await self.call("recovery-status", **identity)
-            if status["discard_spool"]:
-                path.unlink(missing_ok=True)
+            if await self.resolve_spooled(path, identity):
                 return True
             await self.call("uncertain", **identity)
             return False
@@ -141,8 +160,11 @@ class Worker:
         root = self.spool.directory / "events"
         if run_id:
             root = root / run_id
+        awaiting_recovery = set()
         async with asyncio.timeout(2):
             for path in sorted(root.rglob("*.json")):
+                if path.parent in awaiting_recovery:
+                    continue
                 payload = json.loads(path.read_text())
                 try:
                     await self.call("event", **payload)
@@ -150,9 +172,9 @@ class Worker:
                     if error.response.status_code != 409:
                         raise
                     identity = {key: payload[key] for key in ("run_id", "fencing_token")}
-                    status = await self.call("recovery-status", **identity)
-                    if not status["discard_spool"]:
-                        continue
+                    if not await self.resolve_spooled(path, identity):
+                        awaiting_recovery.add(path.parent)
+                    continue
                 path.unlink(missing_ok=True)
 
     def event_sink(self, identity):
@@ -252,9 +274,7 @@ class Worker:
             except httpx.HTTPStatusError as error:
                 if error.response.status_code == 409:
                     identity = {key: payload[key] for key in ("run_id", "fencing_token")}
-                    status = await self.call("recovery-status", **identity)
-                    if status["discard_spool"]:
-                        path.unlink(missing_ok=True)
+                    await self.resolve_spooled(path, identity)
                     continue
                 if error.response.status_code == 422:
                     detail = self.quarantine_result(path, error)

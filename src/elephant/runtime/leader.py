@@ -687,8 +687,18 @@ class LeaderRuntime:
             "result": json.loads(current["result_json"]), "changed": bool(changed)}
 
     async def invoke(self, operation, identity, payload=None, **values):
-        run_id, _fencing, worker_id = identity
+        run_id, fencing, worker_id = identity
         payload = payload or {}
+        if operation == "recovery-status":
+            # Replay needs to inspect closed attempts, whose execution lease is no longer valid.
+            with self.db.engine.connect() as conn:
+                run = conn.execute(select(runs.c.state, runs.c.slot_reserved, runs.c.quiescent_at).where(
+                    runs.c.id == run_id, runs.c.worker == worker_id, runs.c.fencing == fencing,
+                    runs.c.role.in_(["leader", "skill_review"]))).one_or_none()
+            if run is None:
+                raise PermissionError("unknown recovery source")
+            closed = run.state in {"FINISHED", "RECOVERED"} and not run.slot_reserved and run.quiescent_at is not None
+            return {"state": run.state, "discard_spool": False, "archive_spool": closed}
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))
@@ -905,8 +915,6 @@ class LeaderRuntime:
                     seq=seq, payload=encoded))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(last_seq=seq))
                 return {"accepted": True}
-            if operation == "recovery-status":
-                return {"discard_spool": False}
             if operation == "uncertain":
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="NEEDS_RECONCILIATION"))
                 return {"recorded": True}
