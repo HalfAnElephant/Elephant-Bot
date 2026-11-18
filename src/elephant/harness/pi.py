@@ -327,7 +327,14 @@ class PiRunnerAdapter:
         return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED]", text)
 
     def failure_summary(self, error):
-        detail = self.safe_diagnostic(f"{type(error).__name__}: {error}")[:1000]
+        description = str(error)
+        response = getattr(error, "response", None)
+        if response is not None:
+            try:
+                description += ". " + str(response.json().get("detail", ""))
+            except (ValueError, AttributeError):
+                pass
+        detail = self.safe_diagnostic(f"{type(error).__name__}: {description}")[:1000]
         tail = self.safe_diagnostic(self.stderr_tail.decode("utf-8", errors="replace"))[-2000:]
         return "Runner failed. " + detail + ("\nRunner stderr\n" + tail if tail else "")
 
@@ -438,16 +445,9 @@ class PiRunnerAdapter:
                         if protocol_failed:
                             return self.protocol_failure_result()
                         self.protocol_recovery_attempted = False
-                        outcome = (self.gateway.outcome or {}) if self.gateway else {}
-                        status = (self.gateway.claim.get("notification_status") if self.gateway else None) or outcome.get("status", "completed")
-                        if self.gateway and self.gateway.waiting:
-                            status = self.gateway.wait_kind or "waiting_input"
-                        elif self.gateway and any(value in {"unknown", "partial", "dispatched", "prepared"} for value in self.gateway.effects.values()):
-                            status = "partial" if status == "completed" else status
-                        return TaskResult(status=status, summary=text[:10000] or "Waiting checkpoint persisted.",
-                            observation_refs=tuple(outcome.get("observation_refs", self.gateway.observations if self.gateway else ())),
-                            effect_refs=tuple(outcome.get("effect_refs", self.gateway.effects if self.gateway else ())),
-                            limitations=tuple(outcome.get("unresolved_items", ())))
+                        if self.gateway:
+                            return self.gateway.result(text)
+                        return TaskResult(status="completed", summary=text[:10000] or "Waiting checkpoint persisted.")
                     elif kind in {"host_error", "host_eof"}:
                         raise RuntimeError(event.get("error", "RPC closed before agent_settled"))
         finally:

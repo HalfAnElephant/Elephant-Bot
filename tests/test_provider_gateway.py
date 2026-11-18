@@ -299,6 +299,89 @@ async def test_old_binding_and_tokens_are_revoked(gateway):
         assert current.status_code == 200 and current.json()["generation"] == 2
 
 
+async def test_outcome_references_are_validated_before_acceptance(gateway):
+    instance, core, _claim = gateway
+    validations = []
+
+    async def host(operation, payload):
+        if operation == "validate-result-refs":
+            validations.append(payload)
+            if "missing-observation" in payload["observation_refs"]:
+                httpx.Response(422, json={"detail": "success check not verified: observation"},
+                    request=httpx.Request("POST", "http://runtime.local/validate-result-refs")).raise_for_status()
+            return {"accepted": True}
+        return await core(operation, payload)
+
+    instance.call = host
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://gateway") as client:
+        rejected = await client.post("/tools/task_outcome", headers=auth(instance.tool_token),
+            json={"call_id": "bad-outcome", "arguments": {"status": "completed",
+                "observation_refs": ["missing-observation"], "attachments": ["outputs/report.md"]}})
+        assert rejected.status_code == 422 and "observation" in rejected.json()["detail"]
+        assert instance.outcome is None and not instance.artifacts
+        accepted = await client.post("/tools/task_outcome", headers=auth(instance.tool_token),
+            json={"call_id": "corrected-outcome", "arguments": {"status": "completed",
+                "observation_refs": ["prior-attempt-observation"], "effect_refs": []}})
+        assert accepted.status_code == 200, accepted.text
+    assert len(validations) == 2
+    assert instance.outcome["observation_refs"] == ["prior-attempt-observation"]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("effect_state", ["verified", "unknown", "failed"])
+async def test_receipt_and_result_share_reference_and_status_rules(gateway, explicit, effect_state):
+    instance, core, _claim = gateway
+    instance.observations = {"automatic-observation": {}}
+    instance.effects = {"automatic-effect": effect_state}
+    instance.outcome = {"status": "completed", "unresolved_items": ["fixture limitation"]}
+    if explicit:
+        instance.outcome.update(observation_refs=["prior-attempt-observation"], effect_refs=[])
+    receipts = []
+
+    async def host(operation, payload):
+        if operation == "session-receipt":
+            receipts.append(payload.copy())
+            return {"accepted": True}
+        return await core(operation, payload)
+
+    instance.call = host
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://gateway") as client:
+        response = await client.post("/session-receipt", headers=auth(instance.tool_token),
+            json={"kind": "turn_finished", "tools_paired": True, "summary": "Verified report"})
+    assert response.status_code == 200, response.text
+    result = instance.result("Verified report")
+    assert receipts[0]["result"] == result.model_dump(mode="json")
+    assert result.status == ("partial" if effect_state == "unknown" else "completed")
+    assert result.observation_refs == (("prior-attempt-observation",) if explicit else ("automatic-observation",))
+    assert result.effect_refs == (("automatic-effect",) if not explicit and effect_state == "verified" else ())
+
+
+async def test_completed_outcome_omits_failed_operations_without_discarding_the_ledger(gateway):
+    instance, core, _claim = gateway
+    records = [{"id": "failed-attempt", "state": "FAILED"}, {"id": "verified-retry", "state": "VERIFIED"}]
+
+    async def host(operation, payload):
+        if operation == "ledger" and payload["operation"] == "list":
+            return records
+        return await core(operation, payload)
+
+    instance.call = host
+    instance.effects = {"failed-attempt": "failed", "verified-retry": "verified"}
+    result = instance.result("The corrected operation completed.")
+    assert result.status == "completed" and result.effect_refs == ("verified-retry",)
+    assert await instance.list_operations({}, instance.context) == records
+    assert instance.effects["failed-attempt"] == "failed"
+
+
+def test_explicit_empty_outcome_references_stay_empty(gateway):
+    instance, _core, _claim = gateway
+    instance.observations = {"automatic-observation": {}}
+    instance.effects = {"automatic-effect": "verified"}
+    instance.outcome = {"status": "completed", "observation_refs": [], "effect_refs": []}
+    result = instance.result("Report")
+    assert result.observation_refs == result.effect_refs == ()
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_operation_notice_gates_tools_and_resets_on_rebind(gateway, enabled):
     instance, core, claim = gateway

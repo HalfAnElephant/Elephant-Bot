@@ -387,10 +387,7 @@ class LeaderRuntime:
                 self.service._wake(conn, target["id"], pending_wait["id"])
             elif protocol_failure and target is not None:
                 if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
-                    condition = json.loads(target["wait_json"])
-                    condition["yielded"] = True
-                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
-                        state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                    self.service.graph.yield_children(conn, target)
                 elif claim["purpose"] == "finalize" and self.service.graph.finalize_ready(conn, target):
                     conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
                         state="BLOCKED", result_json=result.model_dump_json()))
@@ -407,10 +404,7 @@ class LeaderRuntime:
                 if not target or target["fencing"] != fencing or target["goal_revision"] != claim["basis_goal_revision"]:
                     raise PermissionError("stale finalize generation or revision")
                 if target["wait_json"] and json.loads(target["wait_json"]).get("attempt_id") == run_id:
-                    condition = json.loads(target["wait_json"])
-                    condition["yielded"] = True
-                    conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(
-                        state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
+                    self.service.graph.yield_children(conn, target)
                 else:
                     if not self.service.graph.finalize_ready(conn, target):
                         raise PermissionError("required children, inputs or operations are not settled")
@@ -595,12 +589,7 @@ class LeaderRuntime:
                         conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(state="WAITING_INPUT"))
                         self.service._wake(conn, root["id"], waiting["id"])
                     else:
-                        condition = json.loads(root["wait_json"])
-                        condition["yielded"] = True
-                        conn.execute(update(tasks).where(tasks.c.id == root["id"]).values(
-                            state="WAITING_CHILDREN", wait_json=json.dumps(condition)))
-                        self.service.graph.event(conn, root, "children_ready", {},
-                            event_id="leader-wait-recovered:" + run_id, wake=True)
+                        self.service.graph.yield_children(conn, root)
                     conn.execute(update(leader_inbox).where(leader_inbox.c.id.in_(claim["source_ids"]),
                         leader_inbox.c.claimed_attempt_id == run_id).values(handled_at=now, output_ref="WAIT_RECOVERED"))
                     self._account_turn(conn, current, claim)
@@ -698,8 +687,18 @@ class LeaderRuntime:
             "result": json.loads(current["result_json"]), "changed": bool(changed)}
 
     async def invoke(self, operation, identity, payload=None, **values):
-        run_id, _fencing, worker_id = identity
+        run_id, fencing, worker_id = identity
         payload = payload or {}
+        if operation == "recovery-status":
+            # Replay needs to inspect closed attempts, whose execution lease is no longer valid.
+            with self.db.engine.connect() as conn:
+                run = conn.execute(select(runs.c.state, runs.c.slot_reserved, runs.c.quiescent_at).where(
+                    runs.c.id == run_id, runs.c.worker == worker_id, runs.c.fencing == fencing,
+                    runs.c.role.in_(["leader", "skill_review"]))).one_or_none()
+            if run is None:
+                raise PermissionError("unknown recovery source")
+            closed = run.state in {"FINISHED", "RECOVERED"} and not run.slot_reserved and run.quiescent_at is not None
+            return {"state": run.state, "discard_spool": False, "archive_spool": closed}
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))
@@ -761,7 +760,7 @@ class LeaderRuntime:
                         return await self._reconcile_direct_operation(identity, claim, payload)
                     from elephant.capabilities.types import ToolContext
 
-                    context = ToolContext(task_id=claim["task_id"], run_id=run_id, fence=_fencing,
+                    context = ToolContext(task_id=claim["task_id"], run_id=run_id, fence=fencing,
                         principal=self.sessions.access_for_claim(claim), workspace="")
                     def authorize(action):
                         with self.db.engine.connect() as conn:
@@ -799,6 +798,17 @@ class LeaderRuntime:
             return result
         with self.db.transaction() as conn:
             run, claim = self.lease(conn, *identity)
+            if operation == "validate-result-refs":
+                self.authorize(conn, run, claim, {"action": "task.execute"})
+                result = TaskResult.model_validate({"summary": "Outcome reference validation", **payload})
+                if claim.get("target_root_task_id"):
+                    root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+                    checks = tuple(name for name in ("observation", "effect") if getattr(result, name + "_refs"))
+                    self.service.graph.verify_final_result(conn, root, result, checks=checks)
+                else:
+                    self.service._verify_result_refs(conn, result, {"id": claim["task_id"],
+                        "retry_of_task_id": None, "rework_of_task_id": None})
+                return {"accepted": True}
             if operation == "authorize":
                 return self.authorize(conn, run, claim, payload)
             if operation == "tasks":
@@ -905,8 +915,6 @@ class LeaderRuntime:
                     seq=seq, payload=encoded))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(last_seq=seq))
                 return {"accepted": True}
-            if operation == "recovery-status":
-                return {"discard_spool": False}
             if operation == "uncertain":
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="NEEDS_RECONCILIATION"))
                 return {"recorded": True}

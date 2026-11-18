@@ -55,7 +55,7 @@ class RuntimeClient:
 
     async def invoke(self, operation, body):
         result = await self._invoke(operation, body)
-        if body.run_id:
+        if body.run_id and operation != "recovery-status":
             self.leader.observe_operation((body.run_id, body.fencing_token, body.worker_id), operation, body.payload or {}, result)
         return result
 
@@ -118,7 +118,8 @@ class RuntimeClient:
                         "qq-file-send": local_file_send}[operation]
             result = function(self.service, identity, body.payload)
             return await result if hasattr(result, "__await__") else result
-        methods = {"session-receipt": "session_receipt", "tasks": "task_operation", "inputs": "take_inputs",
+        methods = {"session-receipt": "session_receipt", "validate-result-refs": "validate_result_refs",
+            "tasks": "task_operation", "inputs": "take_inputs",
             "input-ack": "acknowledge_input", "extend-budget": "extend_budget", "bind-process": "bind_process",
             "reserve-budget": "reserve_budget", "usage": "record_usage", "recovery-status": "recovery_status"}
         method = getattr(self.service, methods.get(operation, operation.replace("-", "_")))

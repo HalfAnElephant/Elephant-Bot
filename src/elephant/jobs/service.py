@@ -511,17 +511,7 @@ class TaskService:
             self.permissions.require(self._access_for(task), "task.execute", "task:" + task["id"])
             self._account_active(c, run, task)
             goal = TaskGoal.model_validate_json(task["goal_json"]) if task["goal_json"] != "{}" else TaskGoal(text=task["goal"])
-            if result.observation_refs:
-                self._verify_checks(c, ("observation",), result, task["id"])
-            if result.effect_refs:
-                from elephant.storage.action_schema import operations
-                operation_task_id = self._operation_task_id(c, task)
-                effects = c.execute(select(operations.c.state).where(operations.c.task_id == operation_task_id,
-                    operations.c.id.in_(result.effect_refs))).scalars().all()
-                if len(effects) != len(set(result.effect_refs)):
-                    raise ValueError("result references unknown operations")
-                if result.status == "completed" and any(state != "VERIFIED" for state in effects):
-                    raise ValueError("completion contains unverified operations")
+            self._verify_result_refs(c, result, task)
             if result.status == "completed":
                 missing = set(goal.requested_outputs) - {a.relative_path for a in result.artifacts}
                 if missing:
@@ -597,6 +587,27 @@ class TaskService:
                 self._notification(c, task, run_id, result.summary, "result", "important", "result:" + run_id)
             self.wakeup.set()
             return {"state": state}
+
+    def validate_result_refs(self, run_id, fencing_token, worker_id, payload):
+        result = TaskResult.model_validate({"summary": "Outcome reference validation", **payload})
+        with self.db.engine.connect() as conn:
+            _run, task = self._lease(conn, run_id, fencing_token, worker_id)
+            self.permissions.require(self._access_for(task), "task.execute", "task:" + task["id"])
+            self._verify_result_refs(conn, result, task)
+        return {"accepted": True}
+
+    def _verify_result_refs(self, conn, result, task):
+        if result.observation_refs:
+            self._verify_checks(conn, ("observation",), result, task["id"])
+        if result.effect_refs:
+            from elephant.storage.action_schema import operations
+            operation_task_id = self._operation_task_id(conn, task)
+            effects = conn.execute(select(operations.c.state).where(operations.c.task_id == operation_task_id,
+                operations.c.id.in_(result.effect_refs))).scalars().all()
+            if len(effects) != len(set(result.effect_refs)):
+                raise ValueError("result references unknown operations")
+            if result.status == "completed" and any(state != "VERIFIED" for state in effects):
+                raise ValueError("completion contains unverified operations")
 
     def _verify_checks(self, c, checks, result, task_id=None):
         # A named check must have a registered verifier; unknown checks never silently succeed.
@@ -1228,7 +1239,10 @@ class TaskService:
             c.execute(update(processes).where(processes.c.id == old["id"]).values(
                 state="STOPPED" if stopped else "UNKNOWN", stopped_at=self.clock.now().isoformat() if stopped else None))
             if stopped:
-                c.execute(update(sessions).where(sessions.c.id == old["session_id"]).values(active_run_id=None))
+                stopped_runs = select(runs.c.id).where(runs.c.process_id == old["id"],
+                    runs.c.process_epoch == old["epoch"], runs.c.binding_generation == old["generation"])
+                c.execute(update(sessions).where(sessions.c.id == old["session_id"],
+                    sessions.c.active_run_id.in_(stopped_runs)).values(active_run_id=None))
             return {"recorded": True}
 
     def _operation_task_id(self, c, task):

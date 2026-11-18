@@ -99,6 +99,84 @@ async def test_workspace_pages_symlink_hardlink_escape(context, ledger, tmp_path
         await gateway.invoke("workspace.read", {"path": "hardlink"}, context)
 
 
+async def test_workspace_write_creates_nested_parents_and_settles_existing_target(context, ledger, tmp_path):
+    registry = standard_registry()
+    gateway = ToolGateway(registry, authority=lambda c: True, permission=lambda c, a: True,
+                          ledger=ledger, verify=registry.verify)
+    result = await gateway.invoke("workspace.write", {"path": "outputs/ops-log/report.md", "text": "verified"},
+                                  context, operation_id="new-log")
+    assert result.status == "verified"
+    target = tmp_path / "outputs/ops-log/report.md"
+    assert target.read_text() == "verified"
+    assert target.parent.stat().st_mode & 0o777 == 0o700
+    with pytest.raises(FileExistsError):
+        await gateway.invoke("workspace.write", {"path": "outputs/ops-log/report.md", "text": "replacement"},
+                             context, operation_id="existing-log")
+    replay = await gateway.invoke("workspace.write", {"path": "outputs/ops-log/report.md", "text": "replacement"},
+                                  context, operation_id="existing-log")
+    assert replay.status == "failed" and replay.data["file_not_published"]
+    assert target.read_text() == "verified"
+
+
+async def test_workspace_parent_creation_preserves_symlink_boundary(context, ledger, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    gateway = ToolGateway(standard_registry(), authority=lambda c: True, permission=lambda c, a: True,
+                          ledger=ledger)
+    with pytest.raises(OSError):
+        await gateway.invoke("workspace.write", {"path": "linked/nested/report.md", "text": "unsafe"},
+                             context, operation_id="symlink-log")
+    assert not (outside / "nested").exists()
+    replay = await gateway.invoke("workspace.write", {"path": "linked/nested/report.md", "text": "unsafe"},
+                                  context, operation_id="symlink-log")
+    assert replay.status == "failed"
+
+
+async def test_workspace_write_fsync_failure_after_publish_stays_unknown(context, ledger, tmp_path, monkeypatch):
+    original = os.fsync
+    calls = 0
+
+    def fail_directory_sync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("directory sync failed after publish")
+        original(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_sync)
+    gateway = ToolGateway(standard_registry(), authority=lambda c: True, permission=lambda c, a: True,
+                          ledger=ledger)
+    with pytest.raises(OSError, match="directory sync"):
+        await gateway.invoke("workspace.write", {"path": "published.md", "text": "published"},
+                             context, operation_id="uncertain-log")
+    assert (tmp_path / "published.md").read_text() == "published"
+    replay = await gateway.invoke("workspace.write", {"path": "published.md", "text": "published"},
+                                  context, operation_id="uncertain-log")
+    assert replay.status == "unknown"
+
+
+async def test_workspace_publish_error_keeps_uncertain_effect(context, ledger, tmp_path, monkeypatch):
+    from elephant.adapters.execution import world
+
+    publish = world._publish_exclusive
+
+    def publish_then_fail(directory, temporary, name):
+        publish(directory, temporary, name)
+        raise OSError("publish response lost")
+
+    monkeypatch.setattr(world, "_publish_exclusive", publish_then_fail)
+    gateway = ToolGateway(standard_registry(), authority=lambda c: True, permission=lambda c, a: True,
+                          ledger=ledger)
+    with pytest.raises(OSError, match="publish response lost"):
+        await gateway.invoke("workspace.write", {"path": "published.md", "text": "published"},
+                             context, operation_id="lost-publish-response")
+    assert (tmp_path / "published.md").read_text() == "published"
+    replay = await gateway.invoke("workspace.write", {"path": "published.md", "text": "published"},
+                                  context, operation_id="lost-publish-response")
+    assert replay.status == "unknown"
+
+
 async def test_cli_literal_stdin_and_bounded_output(context, tmp_path):
     program = tmp_path / "fake-gh"
     program.write_text('#!' + sys.executable + '\nimport sys\nsys.stdout.write(sys.stdin.read())\n')

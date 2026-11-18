@@ -150,7 +150,9 @@ class ToolGateway:
                 state = state.lower()
         except BaseException as error:
             if side_effect:
-                await self.ledger.transition(operation_id, "DISPATCHED", "UNKNOWN", {"error": str(error)})
+                unpublished = action.name == "workspace.file.write" and getattr(error, "file_not_published", False)
+                await self.ledger.transition(operation_id, "DISPATCHED", "FAILED" if unpublished else "UNKNOWN",
+                    {"error": str(error), **({"file_not_published": True} if unpublished else {})})
             raise
         if side_effect and state == "verified":
             effect_refs = (operation_id,)
@@ -168,7 +170,7 @@ class ToolGateway:
         return result
 
 
-def workspace_parent(context, relative):
+def workspace_parent(context, relative, *, create=False):
     path = PurePosixPath(relative)
     host_path = getattr(context, "environment", "sandbox") == "host" and path.is_absolute()
     if host_path:
@@ -179,7 +181,17 @@ def workspace_parent(context, relative):
     directory = os.open("/" if host_path else context.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in path.parts[1:-1] if host_path else path.parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            except FileNotFoundError:
+                if not create or host_path:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=directory)
+                except FileExistsError:
+                    pass
+                os.fsync(directory)
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
         return directory, path.name
@@ -264,7 +276,8 @@ def standard_registry(*, github=None, execution=None, deepseek=None):
         return {"path": arguments["path"], "bytes": len(content)}
     for name, handler, effect in (("read", read, "read"), ("write", write, "write")):
         registry.register(Capability("workspace." + name,
-            "File " + name + "; workspace-relative paths, or absolute host paths in host environment"), handler,
+            "File " + name + "; workspace-relative paths, or absolute host paths in host environment"
+            + ("; creates missing workspace parents and requires an absent destination" if name == "write" else "")), handler,
             lambda a, c, n=name, e=effect: Action("workspace.file." + n,
                                                 ("workspace:" + c.workspace, "file:" + a["path"]), e))
     registry.register(Capability("gh.exec", "Execute installed GitHub CLI with literal argv/stdin",

@@ -23,6 +23,7 @@ from elephant.adapters.hermes_skills import GUIDANCE as SKILLS_GUIDANCE
 from elephant.capabilities.gateway import ToolGateway, standard_registry
 from elephant.capabilities.types import Action, Capability, ToolContext
 from elephant.domain.execution import WaitCondition
+from elephant.domain.tasks import TaskResult
 from elephant.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, artifact_path
 from elephant.harness.attachments import (
     MAX_FILE_BYTES,
@@ -510,6 +511,20 @@ class RunGateway:
             raise ValueError("content archive hash mismatch")
         return content.decode()
 
+    def result(self, summary, *, outcome=None):
+        outcome = (self.outcome or {}) if outcome is None else outcome
+        status = self.claim.get("notification_status") or outcome.get("status", "completed")
+        if self.waiting:
+            status = self.wait_kind or "waiting_input"
+        elif status == "completed" and any(
+                value in {"unknown", "partial", "dispatched", "prepared"} for value in self.effects.values()):
+            status = "partial"
+        return TaskResult(status=status, summary=summary[:10000] or "Waiting checkpoint persisted.",
+            observation_refs=tuple(outcome.get("observation_refs", self.observations)),
+            effect_refs=tuple(outcome.get("effect_refs", [identity for identity, state in self.effects.items()
+                if state == "verified"])),
+            limitations=tuple(outcome.get("unresolved_items", ())))
+
     def safe_error(self, error):
         message = str(error)
         for secret in (self.key, self.model_token, self.tool_token, self.process_token):
@@ -637,10 +652,7 @@ class RunGateway:
                     raise HTTPException(403, "binding changed while settling")
                 body["inflight"] = max(0, self.inflight - 1)
                 if body.get("kind") in {"turn_finished", "run_yielded"}:
-                    body["result"] = {"status": self.wait_kind or (self.outcome or {}).get("status", "completed"),
-                        "summary": body.get("summary") or "等待条件已持久化。", "agent_authored": True,
-                        "observation_refs": list(self.observations), "effect_refs": list(self.effects),
-                        "limitations": (self.outcome or {}).get("unresolved_items", [])}
+                    body["result"] = self.result(body.get("summary") or "").model_dump(mode="json")
                     body["attachments"] = list(self.artifacts)
                 try:
                     result = await self.call("session-receipt", body)
@@ -771,6 +783,10 @@ class RunGateway:
                         if (attachments and self.claim.get("role") == "leader"
                                 and self.claim.get("purpose") == "finalize" and not self.claim.get("takeover")):
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
+                        result = self.result("Outcome reference validation", outcome=args)
+                        if args.get("observation_refs") or args.get("effect_refs"):
+                            await self.call("validate-result-refs", {"status": result.status,
+                                "observation_refs": list(result.observation_refs), "effect_refs": list(result.effect_refs)})
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)
                         return {"accepted": True, "committed": False,

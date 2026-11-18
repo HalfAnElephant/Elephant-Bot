@@ -1,13 +1,20 @@
 """The opt-in live evaluator's account setup uses only the local protected Mail API."""
 import base64
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Header, HTTPException
+from sqlalchemy import update
+from test_agent_runtime import root_goal, worker_complete
+from test_agent_runtime import runtime as agent_runtime
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 
 from elephant.admin.mail import build_mail_router
+from elephant.storage.task_schema import runs
+
+runtime = agent_runtime
 
 
 def evaluator():
@@ -59,3 +66,16 @@ async def test_synthetic_mail_account_credentials_are_prepared_and_reused(
     reused = await module.prepare_synthetic_mail_account(app, prepared)
     assert reused == prepared
     assert len(observed) == 1
+
+
+def test_mail_timeout_snapshot_omits_result_and_receipt_contents(runtime):
+    root = root_goal(runtime)
+    worker_complete(runtime)
+    with runtime.db.transaction() as conn:
+        conn.execute(update(runs).values(result_json=json.dumps({"status": "completed", "summary": "private-body"}),
+            receipt_json=json.dumps({"kind": "turn_finished", "result": {"summary": "private-receipt"}})))
+    snapshot = evaluator().mail_task_snapshot(runtime.leader.core, root["task_id"])
+    assert snapshot["attempts"][0]["result_status"] == "completed"
+    assert snapshot["attempts"][0]["receipt_kind"] == "turn_finished"
+    assert len(snapshot["tasks"]) == 2 and snapshot["inbox"]
+    assert "private-body" not in json.dumps(snapshot) and "private-receipt" not in json.dumps(snapshot)

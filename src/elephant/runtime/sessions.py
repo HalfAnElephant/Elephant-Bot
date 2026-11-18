@@ -185,6 +185,55 @@ class SessionService:
                 reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
                 anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True)
 
+    def _next_inbox(self, conn, dialogue, pending_sources, now):
+        available = (
+            leader_inbox.c.target_session_id == dialogue["session_id"], leader_inbox.c.handled_at.is_(None),
+            leader_inbox.c.claimed_attempt_id.is_(None), leader_inbox.c.id.not_in(pending_sources))
+        roots = conn.execute(select(leader_inbox.c.root_task_id).where(*available)
+            .group_by(leader_inbox.c.root_task_id)
+            .order_by(func.min(leader_inbox.c.created_at), leader_inbox.c.root_task_id)).scalars().all()
+        for root_id in roots:
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+            if json.loads(root["context_json"]).get("memory_replan_pending"):
+                continue
+            incoming = conn.execute(select(leader_inbox).where(*available, leader_inbox.c.root_task_id == root_id)
+                .order_by(leader_inbox.c.resume_reason.in_({
+                    "needs_attention", "needs_reconciliation", "user_answer", "needs_input"}).desc(),
+                    leader_inbox.c.created_at, leader_inbox.c.id)
+                .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
+            selected = []
+            for item in incoming:
+                if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or (
+                        root["goal_revision"] != item["source_revision"]
+                        and item["resume_reason"] not in {"needs_attention", "needs_reconciliation", "user_answer"}):
+                    conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
+                        handled_at=now.isoformat(), output_ref="SUPERSEDED"))
+                    continue
+                if not self.service.graph.handoff_valid(root):
+                    self.service.graph.cancel_tree(conn, root, reason="revoked")
+                    conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
+                        handled_at=now.isoformat(), output_ref="CONTEXT_REVOKED"))
+                    break
+                selected.append(item)
+            if not selected:
+                continue
+            attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"}
+                            for item in selected)
+            ready = not attention and self.service.graph.finalize_ready(conn, root,
+                allow_pending_inputs=True, allow_running_jobs=True)
+            if not attention and not ready:
+                attention = self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True,
+                    allow_running_jobs=True, allow_unsettled_operations=True)
+            purpose = "attention" if attention else "finalize" if ready else "question" if any(
+                item["resume_reason"] == "needs_input" for item in selected) else "progress"
+            if purpose == "progress" and all(item["resume_reason"] == "child_result" for item in selected):
+                continue
+            age = (now - datetime.fromisoformat(selected[0]["created_at"])).total_seconds()
+            if purpose == "progress" and age < self.settings.orchestration.leader_inbox_coalesce_seconds:
+                continue
+            return selected, root, purpose
+        return None
+
     def claim(self, worker_id):
         now = self.clock.now()
         with self.db.transaction() as conn:
@@ -229,11 +278,6 @@ class SessionService:
                     dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
                     dialogue_inputs.c.id.not_in(pending_sources))
                     .order_by(dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(1)).mappings().first()
-                incoming = conn.execute(select(leader_inbox).where(
-                    leader_inbox.c.target_session_id == dialogue["session_id"], leader_inbox.c.handled_at.is_(None),
-                    leader_inbox.c.claimed_attempt_id.is_(None), leader_inbox.c.id.not_in(pending_sources))
-                    .order_by(leader_inbox.c.created_at, leader_inbox.c.id)
-                    .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
                 selected, root, purpose, task_inputs, turn = [], None, "user", [], None
                 if user:
                     if user["id"] in self.reconciling_inputs:
@@ -274,44 +318,14 @@ class SessionService:
                     source_ids = [user["id"]]
                     goal = self.service._input_text(event, event.text)
                 else:
-                    if not incoming:
+                    pending = self._next_inbox(conn, dialogue, pending_sources, now)
+                    if pending is None:
                         continue
-                    for item in incoming:
-                        candidate = conn.execute(select(tasks).where(tasks.c.id == item["root_task_id"])).mappings().one()
-                        if json.loads(candidate["context_json"]).get("memory_replan_pending"):
-                            continue
-                        if candidate["state"] in TERMINAL | {"CANCEL_REQUESTED"} or (
-                                candidate["goal_revision"] != item["source_revision"]
-                                and item["resume_reason"] not in {"needs_attention", "needs_reconciliation", "user_answer"}):
-                            conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
-                                handled_at=now.isoformat(), output_ref="SUPERSEDED"))
-                            continue
-                        if not self.service.graph.handoff_valid(candidate):
-                            self.service.graph.cancel_tree(conn, candidate, reason="revoked")
-                            conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
-                                handled_at=now.isoformat(), output_ref="CONTEXT_REVOKED"))
-                            continue
-                        if root is None:
-                            root = candidate
-                        if item["root_task_id"] == root["id"]:
-                            selected.append(item)
-                    if not selected:
-                        continue
-                    attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"} for item in selected)
-                    ready = not attention and self.service.graph.finalize_ready(conn, root,
-                        allow_pending_inputs=True, allow_running_jobs=True)
-                    if ready or attention:
+                    selected, root, purpose = pending
+                    if purpose in {"finalize", "attention"}:
                         task_inputs = conn.execute(select(inputs).where(inputs.c.task_id == root["id"],
                             inputs.c.kind != "notify", inputs.c.consumed_at.is_(None))
                             .order_by(inputs.c.created_at, inputs.c.id)).mappings().all()
-                    purpose = "attention" if attention else "finalize" if ready else "question" if any(
-                        item["resume_reason"] == "needs_input" for item in selected) else "progress"
-                    if purpose == "progress" and all(item["resume_reason"] == "child_result" for item in selected):
-                        # A partial set of child results is held until the remaining children settle.
-                        continue
-                    age = (now - __import__("datetime").datetime.fromisoformat(selected[0]["created_at"])).total_seconds()
-                    if purpose == "progress" and age < self.settings.orchestration.leader_inbox_coalesce_seconds:
-                        continue
                     event = InboundEvent.model_validate_json(root["event_json"])
                     context = json.loads(root["context_json"])
                     snapshot = self.service.graph.status(conn, root)
