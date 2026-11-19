@@ -11,7 +11,7 @@ from uuid import uuid4
 from elephant.adapters.deepseek import DeepSeekError
 from elephant.capabilities.types import Action, Capability
 from elephant.configuration import atomic_write
-from elephant.harness.attachments import MAX_FILE_BYTES, _cache_lock, _read_regular
+from elephant.harness.attachments import _cache_lock, _read_regular
 
 REFERENCE = "deepseek-document:"
 PURPOSES = ("text_recognition", "rich_layout_recognition", "user_data")
@@ -19,6 +19,7 @@ RECOGNITION_SUFFIXES = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".png", ".jpg"
                         ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 FILE_LIFETIME = 30 * 86400
 PENDING_SECONDS = 300
+MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_RECEIPTS = 4096
 MAX_RECEIPT_BYTES = 16384
 

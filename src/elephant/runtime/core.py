@@ -345,7 +345,7 @@ class Core:
                 "attachment_ref": segment.attachment_ref,
                 **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
                     "is_current_input": source.event_id == event.event_id} if segment.type == "audio" else {})}
-                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}][-16:],
+                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}],
             "now": self.clock.now().isoformat(), "timezone": self.settings.timezone,
             "limits": self.settings.context.limits(self.settings.model.context_window,
                 self.settings.execution.interactive_budget.output_tokens_per_call),

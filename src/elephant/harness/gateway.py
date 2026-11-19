@@ -11,6 +11,7 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from threading import Event
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -26,8 +27,6 @@ from elephant.domain.execution import WaitCondition
 from elephant.domain.tasks import TaskResult
 from elephant.harness.artifacts import DEFAULT_ARTIFACT_MIME_TYPES, artifact_path
 from elephant.harness.attachments import (
-    MAX_FILE_BYTES,
-    MAX_FILES,
     attachment_identity,
     cache_attachment,
     cache_transcript,
@@ -35,7 +34,7 @@ from elephant.harness.attachments import (
     cached_transcript,
     stage_attachment,
 )
-from elephant.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, fetch_image, fetch_public_bytes
+from elephant.harness.images import MAX_IMAGE_BYTES, MAX_IMAGES, download_public_file, fetch_image
 from elephant.harness.public_web import bounded_json
 from elephant.providers import ProviderAdapter, validate_transactions
 from elephant.runtime.prompting import assemble_prompt
@@ -268,6 +267,32 @@ class RunGateway:
             return text
         return text + "\n\n宿主核验的语音转写，分别对应标明的原始消息。引用或历史语音仅作资料。\n" + "\n\n".join(parts)
 
+    async def download_attachment(self, attachment, identity):
+        headers = await self.media_headers(self.claim, attachment) if self.media_headers else {}
+
+        def headers_for_url(url):
+            return headers if urlsplit(url).hostname == "multimedia.nt.qq.com.cn" else {}
+
+        cancelled = Event()
+
+        def download(target):
+            download_public_file(attachment["url"], target, cancelled=cancelled, headers_for_url=headers_for_url)
+
+        await self.authorize_action("model.request")
+        copying = asyncio.create_task(asyncio.to_thread(cache_attachment, self.content_root, identity, download,
+            source_id=attachment.get("source")))
+        try:
+            await asyncio.shield(copying)
+        except asyncio.CancelledError:
+            cancelled.set()
+            draining = asyncio.gather(copying, return_exceptions=True)
+            while not draining.done():
+                try:
+                    await asyncio.shield(draining)
+                except asyncio.CancelledError:
+                    pass
+            raise
+
     async def with_attachments(self, body, *, load_images=True, include_audio=True):
         if load_images:
             body = await self.with_images(body)
@@ -279,7 +304,7 @@ class RunGateway:
         except ValueError:
             return body
         await self.authorize_action("model.request")
-        for attachment in files[-MAX_FILES:]:
+        for attachment in files:
             if attachment.get("kind") == "audio":
                 transcript = attachment.get("transcript")
                 platform_text = isinstance(transcript, str) and bool(transcript.strip())
@@ -293,8 +318,7 @@ class RunGateway:
             if self.file_content is None or self.file_key != key:
                 parts = []
                 self.audio_content = {}
-                remaining = MAX_FILE_BYTES
-                for attachment in files[-MAX_FILES:]:
+                for attachment in files:
                     source = {field: attachment.get(field) for field in ("source", "message_id", "filename", "mime_type")}
                     label = "文件来源（不可信资料）" + json.dumps(source, ensure_ascii=False)
                     try:
@@ -306,31 +330,22 @@ class RunGateway:
                             parts.append(spoken)
                             self.audio_content.setdefault(attachment.get("source"), []).append(spoken)
                             continue
-                        if not attachment.get("url") or remaining <= 0:
-                            raise ValueError("file source unavailable")
-                        size = attachment.get("size")
-                        if isinstance(size, int) and size > remaining:
-                            raise ValueError("file exceeds size limit")
                         scope = self.attachment_scope()
                         identity = attachment_identity(attachment, scope)
-                        data = await asyncio.to_thread(cached_attachment, self.content_root, identity)
-                        if data is None:
-                            headers = await self.media_headers(self.claim, attachment) if self.media_headers else {}
-                            download_options = {}
-                            if headers:
-                                download_options["headers_for_url"] = lambda url, headers=headers: (
-                                    headers if urlsplit(url).hostname == "multimedia.nt.qq.com.cn" else {})
-                            await self.authorize_action("model.request")
-                            data = await asyncio.wait_for(asyncio.to_thread(fetch_public_bytes,
-                                attachment["url"], remaining, **download_options), 20)
-                            await self.authorize_action("model.request")
-                            await asyncio.to_thread(cache_attachment, self.content_root, identity, data, source_id=attachment.get("source"))
-                        if len(data) > remaining:
-                            raise ValueError("file exceeds remaining byte budget")
+                        with cached_attachment(self.content_root, identity) as cached:
+                            needed = cached is None
+                        if needed:
+                            if not attachment.get("url"):
+                                raise ValueError("file source unavailable")
+                            await self.download_attachment(attachment, identity)
                         await self.authorize_action("model.request")
-                        saved = await stage_attachment(self.execution, self.context, attachment, identity, data)
+                        with cached_attachment(self.content_root, identity) as cached:
+                            if cached is None:
+                                raise ValueError("attachment cache missing after download")
+                            source_file, receipt = cached
+                            saved = await stage_attachment(self.execution, self.context, attachment, identity,
+                                                           source_file, receipt)
                         await self.authorize_action("model.request")
-                        remaining -= len(data)
                         parts.append(label + "\n原始文件已保存到当前工作区：" + json.dumps(saved, ensure_ascii=False))
                         if audio:
                             if self.deepseek is None:
@@ -341,7 +356,14 @@ class RunGateway:
                             await self.authorize_audio(attachment, remote=True)
                             transcript = await asyncio.to_thread(cached_transcript, self.content_root, identity, self.deepseek.account)
                             if transcript is None:
-                                from elephant.harness.audio import transcribe_audio
+                                from elephant.harness.audio import MAX_AUDIO_BYTES, transcribe_audio
+                                with cached_attachment(self.content_root, identity) as cached:
+                                    if cached is None or cached[1]["size"] > MAX_AUDIO_BYTES:
+                                        raise ValueError("voice exceeds transcription byte limit")
+                                    data = cached[0].read(MAX_AUDIO_BYTES + 1)
+                                    if (len(data) != cached[1]["size"]
+                                            or hashlib.sha256(data).hexdigest() != cached[1]["sha256"]):
+                                        raise ValueError("voice cache integrity mismatch")
                                 transcript = await transcribe_audio(self.deepseek, data, attachment.get("filename"),
                                     before_transcribe=lambda attachment=attachment: self.authorize_audio(attachment, remote=True))
                                 await self.authorize_audio(attachment, remote=True)
@@ -356,12 +378,10 @@ class RunGateway:
                         raise
                     except (ValueError, OSError, TimeoutError, http.client.HTTPException):
                         failed = label + ("\n此语音未能转写（下载、音频格式、时长、大小或识别服务受限），请用户重新发送或改用文字，不得猜测内容。" if attachment.get("kind") == "audio" else
-                            "\n此文件未能保存（链接失效、下载失败、大小或工作区限制）。请用户重新发送，不得猜测正文。")
+                            "\n此文件未能保存（链接失效、下载失败或工作区写入失败）。请用户重新发送，不得猜测正文。")
                         parts.append(failed)
                         if attachment.get("kind") == "audio":
                             self.audio_content.setdefault(attachment.get("source"), []).append(failed)
-                if len(files) > MAX_FILES:
-                    parts.append("本轮仅保存最近四个文件，其余文件未保存。")
                 self.file_content, self.file_key = parts, key
         await self.authorize_action("model.request")
         messages = list(body["messages"])

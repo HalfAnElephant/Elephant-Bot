@@ -112,7 +112,7 @@ class AlternateExecution:
         assert context.workspace.startswith("/remote-test/")
         if path in self.files:
             raise FileExistsError(path)
-        self.files[path] = content
+        self.files[path] = content if isinstance(content, bytes) else b"".join(content)
 
     def export_artifacts(self, workspace, archive, paths):
         self.exported = (workspace, archive, paths)
