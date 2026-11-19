@@ -105,6 +105,7 @@ def wav_data(samples=b"\x00\x00" * 1600):
     return output.getvalue()
 
 
+@pytest.mark.skipif(audio.shutil.which("ffmpeg") is None, reason="optional FFmpeg decoder is not installed")
 async def test_real_ffmpeg_normalizes_wave_for_asr():
     api = ASRReceiver()
     result = await audio.transcribe_audio(api, wav_data(), "voice.wav")
@@ -112,7 +113,18 @@ async def test_real_ffmpeg_normalizes_wave_for_asr():
     assert api.requests[0][1] == "voice.wav"
 
 
-async def test_authorization_is_rechecked_after_decoding_before_upload():
+@pytest.fixture
+def pcm_decoder(monkeypatch):
+    monkeypatch.setattr(audio.shutil, "which", lambda _: "/fixture/ffmpeg")
+
+    async def decode(argv, *, stdin, stdout):
+        import wave
+        with wave.open(stdin.name, "rb") as source:
+            stdout.write(source.readframes(source.getnframes()))
+    monkeypatch.setattr(audio, "_run_decoder", decode)
+
+
+async def test_authorization_is_rechecked_after_decoding_before_upload(pcm_decoder):
     api = ASRReceiver()
 
     async def denied():
@@ -139,7 +151,7 @@ async def test_empty_voice_rejected_before_asr():
     assert not api.requests
 
 
-async def test_audio_over_120_seconds_and_8_mib_is_transcribed_in_segments(tmp_path):
+async def test_audio_over_120_seconds_and_8_mib_is_transcribed_in_segments(tmp_path, pcm_decoder):
     path = tmp_path / "long.wav"
     path.write_bytes(wav_data(b"\x00\x00" * (audio.SAMPLE_RATE * 300)))
     assert path.stat().st_size > 8 * 1024 * 1024
@@ -153,6 +165,11 @@ async def test_audio_over_120_seconds_and_8_mib_is_transcribed_in_segments(tmp_p
 
 async def test_invalid_audio_does_not_reach_asr(tmp_path, monkeypatch):
     monkeypatch.setattr(audio.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(audio.shutil, "which", lambda _: "/fixture/ffmpeg")
+
+    async def invalid(*args, **kwargs):
+        raise ValueError("audio decoding failed")
+    monkeypatch.setattr(audio, "_run_decoder", invalid)
     api = ASRReceiver()
     with pytest.raises(ValueError, match="decoding failed"):
         await audio.transcribe_audio(api, b"unsupported format")

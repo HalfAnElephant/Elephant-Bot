@@ -48,8 +48,6 @@ jobs:
           enable-cache: true
       - run: uv sync --python "$(cat .python-version)"
       - run: npm ci --ignore-scripts
-      - name: Install audio decoder
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Record environment and require Pi fixtures
         run: |
           mkdir -p test-results
@@ -64,7 +62,7 @@ jobs:
       - name: Python regression
         run: |
           uv run pytest -q --junitxml=test-results/pytest.xml 2>&1 | tee test-results/pytest.log
-          uv run python -c 'import xml.etree.ElementTree as ET; assert not ET.parse("test-results/pytest.xml").findall(".//skipped"), "CI requires all fixtures to run"'
+          uv run python scripts/check_test_skips.py test-results/pytest.xml
       - name: Console regression
         if: ${{ !cancelled() }}
         run: node --test tests/console_ui.test.cjs 2>&1 | tee test-results/console.log
@@ -115,8 +113,6 @@ jobs:
           assert not writable, f"System installer would reject writable archive entries: {writable}"
           PY
           git rev-parse HEAD > dist/REVISION
-      - name: Install local audio dependency
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install and check the extracted release
         run: |
           mkdir "$RUNNER_TEMP/release"

@@ -64,8 +64,35 @@ class RuntimeClient:
     async def invoke(self, operation, body):
         result = await self._invoke(operation, body)
         if body.run_id and operation != "recovery-status":
-            self.leader.observe_operation((body.run_id, body.fencing_token, body.worker_id), operation, body.payload or {}, result)
+            if operation == "result":
+                await self._disk(self.leader.observe_operation,
+                    (body.run_id, body.fencing_token, body.worker_id), operation, body.payload or {}, result)
+            else:
+                self.leader.observe_operation((body.run_id, body.fencing_token, body.worker_id), operation, body.payload or {}, result)
         return result
+
+    async def _disk(self, function, *args, **kwargs):
+        pending = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            # Cancellation must drain disk work before shutdown can close the database.
+            while not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001 — preserve cancellation after draining the transaction.
+                    break
+            if not pending.cancelled():
+                pending.exception()
+            raise
+
+    def _renew(self, identity):
+        with self.service.db.engine.connect() as conn:
+            role = conn.execute(select(runs.c.role).where(runs.c.id == identity[0])).scalar_one_or_none()
+        method = self.leader.renew if role in {"leader", "skill_review"} else self.service.renew
+        return method(*identity)
 
     async def _invoke(self, operation, body):
         if operation == "claim":
@@ -103,11 +130,17 @@ class RuntimeClient:
             return await self.core.mail.invoke(identity, body.payload)
         if operation == "jobs":
             return await self.core.job_runtime.invoke(identity, body.payload)
+        if operation == "renew":
+            return await self._disk(self._renew, identity)
         with self.service.db.engine.connect() as conn:
             role = conn.execute(select(runs.c.role).where(runs.c.id == body.run_id)).scalar_one_or_none()
         values = body.model_dump(exclude_none=True)
         for key in ("worker_id", "run_id", "fencing_token", "payload"):
             values.pop(key, None)
+        if role in {"leader", "skill_review"} and operation == "result":
+            return await self._disk(self.leader.complete, *identity, values["result"],
+                stopped=values.get("stopped", False), quiescent=values.get("quiescent", False),
+                process=values.get("process"), receipt=values.get("receipt"))
         if role in {"leader", "skill_review"}:
             return await self.leader.invoke(operation, identity, body.payload, **values)
         if operation == "result":

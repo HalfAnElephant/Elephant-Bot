@@ -278,6 +278,16 @@ class Outbox:
     async def dispatch_once(self, adapters, budget=0, pre_send=None):
         proactive = [name for name, adapter in adapters.items()
                      if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
+        # A blocked tail must not consume the bounded batch ahead of healthy
+        # conversations. Recheck the dependency below before claiming a send.
+        earlier = outbox.alias("earlier_part")
+        blocked_part = select(earlier.c.id).where(
+            earlier.c.conversation_id == outbox.c.conversation_id,
+            earlier.c.origin_kind == outbox.c.origin_kind,
+            earlier.c.origin_id == outbox.c.origin_id,
+            earlier.c.part_no < outbox.c.part_no,
+            earlier.c.state != "SENT",
+        ).correlate(outbox).exists()
         with self.db.engine.connect() as c:
             rows = (
                 c.execute(
@@ -286,7 +296,8 @@ class Outbox:
                                and_(outbox.c.state == "WAITING_FOR_TRIGGER",
                                     func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
                                     func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
-                           or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()))
+                           or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()),
+                           ~blocked_part)
                     .order_by(outbox.c.created_at, outbox.c.conversation_id, outbox.c.origin_id,
                               outbox.c.part_no, outbox.c.id)
                     .limit(50)
