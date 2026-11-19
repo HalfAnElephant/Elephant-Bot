@@ -577,7 +577,7 @@ async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
 
 
-@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous"])
+@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous", "independent"])
 async def test_leader_publication_respects_steering_receipt(leader_stream, disposition):
     from elephant.domain import TextSegment
     from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
@@ -590,6 +590,7 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
     claim = s.core.sessions.claim("fixture")
     assert not claim["public_answer_events"]
     extra = s.event.model_copy(update={"event_id": "additional-input", "platform_message_id": "additional-message",
+        "reply_to": s.event.platform_message_id if disposition != "independent" else None,
         "segments": (TextSegment(text="重点测乱序"),),
         "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
     extra, _ = s.core.inbox.accept(extra)
@@ -598,7 +599,9 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
     receipt = {"kind": "turn_finished", "session_id": claim["session_id"], "run_id": claim["run_id"],
                "session_revision": "leaf", "input_ids": list(claim["source_ids"]), "inflight": 0, "tools_paired": True,
                "summary": "已记录测试要求。"}
-    if disposition != "unseen":
+    if disposition == "independent":
+        assert await s.core.leader.invoke("inputs", identity) == []
+    elif disposition != "unseen":
         candidates = await s.core.leader.invoke("inputs", identity)
         assert [item["id"] for item in candidates] == [extra.event_id]
         assert "重点测乱序" in candidates[0]["text"]
@@ -623,7 +626,7 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
     else:
         assert len(published) == 1
         assert set(handled) == set(receipt["input_ids"] if disposition == "covered" else claim["source_ids"])
-        if disposition == "deferred":
+        if disposition in {"deferred", "independent"}:
             assert s.core.sessions.claim("fixture")["source_ids"] == [extra.event_id]
 
 
@@ -749,6 +752,7 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     try:
         await asyncio.wait_for(starting.wait(), 15)
         extra = s.event.model_copy(update={"event_id": extra_id, "platform_message_id": "additional-message",
+            "reply_to": s.event.platform_message_id,
             "segments": (TextSegment(text="重点测乱序"),),
             "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
         extra, _ = s.core.inbox.accept(extra)
@@ -863,6 +867,7 @@ async def test_steered_task_revision_uses_real_supplement_provenance(runtime):
     claim = runtime.sessions.claim("leader")
     identity = (claim["run_id"], claim["fencing_token"], "leader")
     extra = runtime.event.model_copy(update={"event_id": "source-correction", "platform_message_id": "new",
+        "reply_to": runtime.event.platform_message_id,
         "segments": (TextSegment(text="只读验证"),)})
     extra, _ = Inbox(runtime.db).accept(extra)
     runtime.sessions.enqueue(extra, runtime.access)

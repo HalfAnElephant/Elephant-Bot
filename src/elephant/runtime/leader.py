@@ -80,7 +80,7 @@ class LeaderRuntime:
         if not mutation and root_id and not self.service.graph.handoff_valid(root):
             raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
-        if effect != "read" and self.unseen_steering(conn, claim, claim.get("steering_seen", ())):
+        if effect != "read" and self.has_unreviewed_input(conn, claim, claim.get("steering_seen", ())):
             raise PermissionError("Review pending user input before starting an external operation")
         if effect != "read" and not personal:
             if claim["purpose"] == "user" and not root_id and run["role"] == "leader":
@@ -134,11 +134,14 @@ class LeaderRuntime:
             return []
         trigger = InboundEvent.model_validate_json(claim["event_json"])
         access = self.sessions.access_for_claim(claim)
+        offered = claim.get("steered_inputs", ())
         rows = conn.execute(select(dialogue_inputs).outerjoin(leader_events,
             (leader_events.c.source_kind == "user") & (leader_events.c.source_id == dialogue_inputs.c.id)).where(
             dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"],
             dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
             dialogue_inputs.c.created_at <= claim["steer_until"],
+            func.json_extract(dialogue_inputs.c.event_json, "$.reply_to") == trigger.platform_message_id,
+            dialogue_inputs.c.id.in_(offered) if offered else True,
         ).order_by(leader_events.c.seq.nulls_last(), dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(8)).mappings()
         candidates = []
         for row in rows:
@@ -155,7 +158,7 @@ class LeaderRuntime:
                 "若是独立请求，不要回答它，在 task_outcome 的 deferred_input_ids 中登记它，并继续回答本轮原请求。若用 tasks_send_input 修订任务，source_input_id 填这条补充的 ID。\n" + event.text})
         return candidates
 
-    def unrouted_steering(self, conn, claim):
+    def has_unrouted_input(self, conn, claim, *, linked_only=False):
         if not claim.get("steer_until"):
             return False
         event = InboundEvent.model_validate_json(claim["event_json"])
@@ -168,14 +171,26 @@ class LeaderRuntime:
         pending = conn.execute(select(inbox.c.event_json).where(
             inbox.c.conversation_id == event.conversation.key, inbox.c.principal_id == event.principal.key,
             inbox.c.seq > primary_seq, inbox.c.event_type == "message.created", inbox.c.state == "PENDING",
-            ~routed)).scalars()
+            ~routed, (func.json_extract(inbox.c.event_json, "$.reply_to") == event.platform_message_id)
+            if linked_only else True)).scalars()
         return any(self.core.allowed(new) and not new.sender_is_bot and (
             new.conversation.surface in {"private", "guild_private"} or new.mentions_bot or new.reply_to)
             for raw in pending if (new := InboundEvent.model_validate_json(raw)).text)
 
-    def unseen_steering(self, conn, claim, seen):
-        return self.unrouted_steering(conn, claim) or any(
-            item["id"] not in seen for item in self.steering_candidates(conn, claim))
+    def has_unreviewed_input(self, conn, claim, seen):
+        if not claim.get("steer_until"):
+            return False
+        primary = conn.scalar(select(leader_events.c.seq).where(
+            leader_events.c.source_kind == "user", leader_events.c.source_id == claim["source_ids"][0]))
+        if primary is not None:
+            pending = conn.execute(select(dialogue_inputs.c.event_json).join(leader_events,
+                (leader_events.c.source_kind == "user") & (leader_events.c.source_id == dialogue_inputs.c.id)).where(
+                dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"],
+                leader_events.c.seq > primary, dialogue_inputs.c.handled_at.is_(None),
+                dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.id.not_in(seen))).scalars()
+            if any(self.core.allowed(InboundEvent.model_validate_json(raw)) for raw in pending):
+                return True
+        return self.has_unrouted_input(conn, claim)
 
     def receipt(self, conn, run, claim, payload):
         expected = set(claim["source_ids"]) | set(claim.get("task_input_ids", []))
@@ -190,7 +205,7 @@ class LeaderRuntime:
         kind = payload.get("kind")
         if kind not in {"input_persisted", "input_consumed", "turn_finished", "run_yielded"}:
             raise ValueError("invalid session receipt kind")
-        if claim.get("steer_until") and kind != "input_persisted":
+        if offered and kind != "input_persisted":
             seen = set(claim.get("steering_seen", [])) | (set(confirmed) & offered)
             claim["steering_seen"] = sorted(seen)
             claim["observed_event_seq"] = conn.execute(select(func.max(leader_events.c.seq)).where(
@@ -294,7 +309,7 @@ class LeaderRuntime:
         root_id = claim.get("target_root_task_id")
         graph = self.service.graph
         self.authorize(conn, run, claim, {"action": "task.execute"})
-        if operation in {"tasks.submit", "tasks.cancel", "tasks.send_input"} and self.unseen_steering(
+        if operation in {"tasks.submit", "tasks.cancel", "tasks.send_input"} and self.has_unreviewed_input(
                 conn, claim, claim.get("steering_seen", ())):
             raise PermissionError("Review pending user input before changing a goal")
         if operation == "tasks.submit":
@@ -536,7 +551,7 @@ class LeaderRuntime:
                 turn = context["leader_turn"]
                 retries = turn.get("publish_retries", 0)
                 stale_draft = ambiguous or bool((seen & offered) - available) or (
-                    (bool(available - seen) or self.unrouted_steering(conn, claim)) and retries < 2)
+                    (bool(available - seen) or (not offered and self.has_unrouted_input(conn, claim, linked_only=True))) and retries < 1)
                 if stale_draft:
                     turn["publish_retries"] = retries + 1
                     if ambiguous:
@@ -967,26 +982,29 @@ class LeaderRuntime:
             return {"state": run.state, "discard_spool": False, "archive_spool": closed}
         if operation in {"inputs", "input-ack"}:
             with self.db.engine.connect() as conn:
-                _run, claim = self.lease(conn, *identity)
-                if not claim.get("steer_until"):
-                    return [] if operation == "inputs" else {"accepted": False}
-            with self.db.transaction() as conn:
                 run, claim = self.lease(conn, *identity)
-                if not claim.get("steer_until"):
-                    return [] if operation == "inputs" else {"accepted": False}
-                self.authorize(conn, run, claim, {"action": "task.execute"})
+                seen = claim.get("steering_seen", ())
                 if operation == "input-ack":
-                    return {"accepted": payload.get("input_id") in claim.get("steering_seen", ())}
+                    return {"accepted": payload.get("input_id") in seen}
                 if run["receipt_json"]:
                     return []
+                candidates = [item for item in self.steering_candidates(conn, claim) if item["id"] not in seen]
+                if not candidates:
+                    return []
+                if claim["steered_inputs"]:
+                    self.authorize(conn, run, claim, {"action": "task.execute"})
+                    return candidates
+            with self.db.transaction() as conn:
+                run, claim = self.lease(conn, *identity)
+                if run["receipt_json"] or claim.get("steered_inputs"):
+                    return []
                 candidates = self.steering_candidates(conn, claim)
-                known = claim["steered_inputs"]
-                fresh = [item for item in candidates if item["id"] not in known][:8 - len(known)]
-                if fresh:
-                    known.extend(item["id"] for item in fresh)
+                if candidates:
+                    self.authorize(conn, run, claim, {"action": "task.execute"})
+                    claim["steered_inputs"] = [item["id"] for item in candidates]
                     conn.execute(update(runs).where(runs.c.id == run_id).values(
                         request_json=json.dumps(claim, ensure_ascii=False)))
-                return [item for item in candidates if item["id"] in known]
+                return candidates
         if operation in {"authorize", "control"}:
             # Provider streaming checks every chunk; readers must not acquire SQLite's writer lock.
             with self.db.engine.connect() as conn:

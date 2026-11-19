@@ -55,7 +55,7 @@ QQ 和邮箱的加密凭据还依赖原来的 Base64 32 字节 `ELEPHANT_CREDENT
 
 当前版本保留废弃配额的解析，但 `execution.max_active/sustained_limit`、`orchestration.pending_inputs_per_owner/pending_root_tasks_per_owner/child_parallelism/max_task_depth/max_nodes_per_root` 已不控制准入，显式写在启动 YAML 中会告警。模型并发使用 `orchestration.model_request_limit`，单任务预算使用 `execution` 中的 budget。OneBot/NapCat 配置及旧候选技能配置会被拒绝，迁移到官方 QQ 和现有 Hermes 字段后再启动。
 
-`orchestration.leader_steering_dialogues` 接受逻辑会话 ID 列表，默认为空。开启后，会话内的纯文本补充可在 Pi 的请求或工具边界进入正在运行的用户轮次。Leader 通过 `task_outcome.covered_input_ids` 确认本轮已经处理的补充，通过 `deferred_input_ids` 明确留待下一轮的请求。若本轮看过补充却没有交代如何处理，Core 会丢弃定稿并单独重做原请求。附件和结构化输入留在队列中。每轮最多接纳 8 条补充，发布竞争最多重做 2 次。试点会话在正文定稿前可以显示 QQ「输入中」，正文经事务提交后发送。有有效回复上下文时，Delivery 可用 QQ 原生流式终帧投递。
+`orchestration.leader_steering_dialogues` 接受逻辑会话 ID 列表，默认为空。开启后，只有明确引用本轮用户消息的纯文本补充，才可在 Pi 的请求或工具边界进入这一轮。普通后续消息直接排入下一轮。Leader 通过 `task_outcome.covered_input_ids` 确认本轮已经处理的补充，通过 `deferred_input_ids` 明确留待下一轮的请求。若本轮看过补充却没有交代如何处理，Core 会丢弃定稿并单独重做原请求。附件和结构化输入留在队列中。每轮至多接纳一批补充，最多 8 条。尚未接纳的引用补充至多触发一次发布重做。试点会话在正文定稿前可以显示 QQ「输入中」，正文经事务提交后发送。有有效回复上下文时，Delivery 可用 QQ 原生流式终帧投递。
 
 空闲进程缓存数量由 `execution.warm_idle_max` 决定，设为 `0` 关闭缓存，保留时间由 `warm_ttl_seconds` 决定。`warm_max` 保留兼容，当前任务领取流程会用 `warm_idle_max` 覆盖缓存上限，因此关闭缓存应设置 `warm_idle_max=0`。忙进程按任务动态创建，模型请求按 `model_request_limit` 等待容量。实际内存随活动 Pi 进程数和原生会话大小增长，部署资源用[控制面与混合负载基线](runbooks/control-plane-baseline.md)测量。
 
