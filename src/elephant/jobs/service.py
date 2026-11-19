@@ -19,7 +19,7 @@ from elephant.domain.execution import ExecutionPlan, RunBudget, TaskGoal, WaitCo
 from elephant.domain.messages import AccessContext, InboundEvent, Surface
 from elephant.domain.tasks import TaskResult, validate_user_facing_text
 from elephant.harness.launcher import verify_stop_marker
-from elephant.jobs.streaming import PUBLIC_KINDS, validate_public_event
+from elephant.jobs.streaming import PUBLIC_KINDS, reserve_stream_order, validate_public_event
 from elephant.permissions import PermissionService
 from elephant.storage.schema import outbox as outbox_table
 from elephant.storage.stream_schema import stream_runs
@@ -654,6 +654,7 @@ class TaskService:
                 return {"acknowledged": seq}
             if seq != run["last_seq"] + 1:
                 raise ValueError("event sequence gap")
+            reserve_stream_order(c, run_id, payload)
             c.execute(insert(events).values(event_id=event_id, run_id=run_id, seq=seq, payload=encoded))
             c.execute(update(runs).where(runs.c.id == run_id).values(last_seq=seq))
             return {"acknowledged": seq}

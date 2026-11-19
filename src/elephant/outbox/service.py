@@ -11,7 +11,7 @@ from elephant.adapters.qq_official.streaming import OfficialStream
 from elephant.domain import OutboundEnvelope, SendReceipt, Surface, stable_id
 from elephant.storage.agent_schema import dialogue_inputs, leader_events
 from elephant.storage.schema import outbox, reply_counters
-from elephant.storage.stream_schema import stream_messages, stream_runs
+from elephant.storage.stream_schema import next_delivery_sequence, stream_messages, stream_runs
 
 from .presentation import chat_bubbles, plain_text, split_text
 
@@ -70,7 +70,7 @@ class Outbox:
                 state="PENDING",
                 attempts=0,
                 created_at=self.clock.now().isoformat(),
-                enqueue_seq=select(func.coalesce(func.max(outbox.c.enqueue_seq), 0) + 1).scalar_subquery(),
+                enqueue_seq=next_delivery_sequence(),
                 origin_id=envelope.origin_id,
                 origin_kind=envelope.origin_kind,
                 part_no=envelope.part_no,
@@ -289,7 +289,7 @@ class Outbox:
             renewed.append(row["id"])
         return renewed
 
-    def pending_rows(self, adapters, *, only_target=None, exclude_targets=()):
+    def pending_rows(self, adapters, *, only_target=None, exclude_targets=(), before_seq=None, through=None):
         proactive = [name for name, adapter in adapters.items()
                      if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
         # A blocked tail must not consume the bounded batch ahead of healthy
@@ -315,6 +315,10 @@ class Outbox:
         )
         if only_target is not None:
             candidates = candidates.where(outbox.c.conversation_id == only_target)
+        if before_seq is not None:
+            candidates = candidates.where(outbox.c.enqueue_seq < before_seq)
+        if through is not None:
+            candidates = candidates.where(outbox.c.created_at <= through)
         candidates = candidates.subquery()
         with self.db.engine.connect() as c:
             return (
@@ -339,10 +343,11 @@ class Outbox:
             for row in rows:
                 group.create_task(dispatch(row))
 
-    async def dispatch_target(self, target, adapters, budget, pre_send):
-        rows = self.pending_rows(adapters, only_target=target)
+    async def dispatch_target(self, target, adapters, budget, pre_send, *, before_seq=None, through=None):
+        rows = self.pending_rows(adapters, only_target=target, before_seq=before_seq, through=through)
         if rows:
             await self._dispatch_row(rows[0], adapters, budget, pre_send)
+        return bool(rows)
 
     async def _dispatch_row(self, row, adapters, budget, pre_send):
         with self.db.transaction() as c:

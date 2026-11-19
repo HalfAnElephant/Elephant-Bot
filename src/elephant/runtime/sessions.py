@@ -303,11 +303,19 @@ class SessionService:
                         conn.execute(update(leader_inbox).where(leader_inbox.c.target_session_id == dialogue["session_id"],
                             leader_inbox.c.handled_at.is_(None)).values(target_session_id=replacement))
                         continue
+                waiting_ids = func.json_each(dialogue_inputs.c.context_json, "$.leader_turn.wait_for_inputs").table_valued("value")
+                dependency = dialogue_inputs.alias("waiting_input")
+                blocked = select(waiting_ids.c.value).select_from(waiting_ids.outerjoin(
+                    dependency, dependency.c.id == waiting_ids.c.value).outerjoin(
+                    inbox, inbox.c.id == waiting_ids.c.value))
+                blocked = blocked.where(
+                    (dependency.c.id.is_not(None) & dependency.c.handled_at.is_(None))
+                    | (dependency.c.id.is_(None) & (inbox.c.state == "PENDING"))).correlate(dialogue_inputs).exists()
                 user = conn.execute(select(dialogue_inputs, leader_events.c.seq.label("arrival_seq")).outerjoin(leader_events,
                     (leader_events.c.source_kind == "user") & (leader_events.c.source_id == dialogue_inputs.c.id))
                     .where(dialogue_inputs.c.dialogue_id == dialogue["id"],
                     dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
-                    dialogue_inputs.c.id.not_in(pending_sources))
+                    dialogue_inputs.c.id.not_in(pending_sources), ~blocked)
                     .order_by(leader_events.c.seq.nulls_last(), dialogue_inputs.c.created_at, dialogue_inputs.c.id)
                     .limit(1)).mappings().first()
                 opted_in = dialogue["id"] in self.settings.orchestration.leader_steering_dialogues

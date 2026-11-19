@@ -95,11 +95,19 @@ export default function (pi: ExtensionAPI) {
       if (envelope.protocol_recovery === true && !waiting) {
         return {action: "transform", text: "上一轮把工具调用协议写进了正文，宿主未执行其中的调用。请依据当前会话中已持久化的真实工具回执继续处理。已完成的操作应复用回执，需要核实时先读回。需要调用工具时使用原生结构化工具接口，完成后给出自然语言汇报。"};
       }
-      if (!envelope.input_id || typeof envelope.text !== "string" || waiting) return {action: "handled"};
-      if (activeInputs.has(envelope.input_id)) return {action: "handled"};
-      activeInputs.add(envelope.input_id);
-      pi.appendEntry("qqbot-input", {id: envelope.input_id});
-      return persistInput(`[[elephant-input:${envelope.input_id}]]\n` + envelope.text, [envelope.input_id]);
+      if (waiting) return {action: "handled"};
+      const incoming = Array.isArray(envelope.inputs) ? envelope.inputs : [envelope];
+      const ids: string[] = [];
+      const texts: string[] = [];
+      for (const input of incoming) {
+        if (!input || typeof input.input_id !== "string" || typeof input.text !== "string" ||
+            activeInputs.has(input.input_id)) continue;
+        activeInputs.add(input.input_id);
+        ids.push(input.input_id);
+        pi.appendEntry("qqbot-input", {id: input.input_id});
+        texts.push(`[[elephant-input:${input.input_id}]]\n` + input.text);
+      }
+      return ids.length ? persistInput(texts.join("\n\n"), ids) : {action: "handled"};
     }
     binding = {...current, binding_id: envelope.binding_id};
     waiting = false;

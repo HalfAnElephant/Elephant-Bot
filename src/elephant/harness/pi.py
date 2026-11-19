@@ -471,6 +471,18 @@ class PiRunnerAdapter:
                         raise RuntimeError(str(event.get("error", "RPC command rejected")))
                     return event.get("data", {})
 
+    async def append_inputs(self, inputs):
+        async with self.input_lock:
+            if not self.busy or not self.accepting_input or not self.gateway or self.gateway.waiting:
+                raise RuntimeError("run is not accepting steering input")
+            fresh = [{"input_id": item["id"], "text": item["text"]}
+                     for item in inputs if item["id"] not in self.steered_inputs]
+            if not fresh:
+                return
+            await self.command("steer", wait=True, message=json.dumps(
+                {"binding_id": self.gateway.binding, "inputs": fresh}, ensure_ascii=False))
+            self.steered_inputs.update(item["input_id"] for item in fresh)
+
     async def append_input(self, input_id, text, *, host_notice=False):
         async with self.input_lock:
             if not self.busy or not self.accepting_input or not self.gateway or self.gateway.waiting:

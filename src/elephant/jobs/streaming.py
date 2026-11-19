@@ -16,7 +16,7 @@ from elephant.adapters.qq_official.streaming import OfficialStream, send_typing
 from elephant.domain import InboundEvent, OutboundEnvelope, SendReceipt, Surface, stable_id
 from elephant.domain.tasks import validate_user_facing_text
 from elephant.storage.schema import outbox, reply_counters
-from elephant.storage.stream_schema import stream_messages, stream_runs
+from elephant.storage.stream_schema import next_delivery_sequence, stream_messages, stream_runs
 from elephant.storage.task_schema import events, notifications, runs, tasks
 
 PUBLIC_KINDS = frozenset({"public_answer_start", "public_answer_delta", "public_answer_end", "public_answer_final"})
@@ -39,11 +39,17 @@ def validate_public_event(payload):
     validate_user_facing_text(text)
 
 
+def reserve_stream_order(conn, run_id, payload):
+    if payload.get("kind") in PUBLIC_KINDS - {"public_answer_start"} and payload.get("text"):
+        conn.execute(update(stream_runs).where(stream_runs.c.run_id == run_id,
+            stream_runs.c.enqueue_seq.is_(None)).values(enqueue_seq=next_delivery_sequence()))
+
+
 class StreamDelivery:
     def __init__(self, core):
         self.core, self.db, self.clock = core, core.db, core.clock
         self.lock = asyncio.Lock()
-        self.slots = asyncio.Semaphore(8)
+        self.last_target = ""
         self.inflight = {}
         self.live = {}
 
@@ -429,26 +435,33 @@ class StreamDelivery:
                 if task.done():
                     del self.inflight[target]
                     task.result()
-            targets = {}
-            with self.db.engine.connect() as c:
-                open_answer = select(stream_messages.c.id).where(
-                    stream_messages.c.run_id == stream_runs.c.run_id, stream_messages.c.kind == "answer",
-                    stream_messages.c.state == "OPEN").correlate(stream_runs).exists()
-                gates = c.execute(select(stream_runs, runs).join(
-                    runs, runs.c.id == stream_runs.c.run_id
-                ).where(stream_runs.c.state.in_(["ACTIVE", "UNKNOWN", "DISABLED"]))
-                    .order_by(open_answer.desc(), runs.c.started_at, stream_runs.c.run_id)).mappings().all()
-                for row in gates:
-                    event, _task = self._source(c, row)
-                    target = event.conversation.key
-                    if target not in self.inflight:
-                        targets.setdefault(target, []).append({column.name: row[column] for column in stream_runs.c})
+            capacity = 8 - len(self.inflight)
+            if capacity:
+                targets = {}
+                with self.db.engine.connect() as c:
+                    open_answer = select(stream_messages.c.id).where(
+                        stream_messages.c.run_id == stream_runs.c.run_id, stream_messages.c.kind == "answer",
+                        stream_messages.c.state == "OPEN").correlate(stream_runs).exists()
+                    gates = c.execute(select(stream_runs, runs, open_answer.label("open_answer")).join(
+                        runs, runs.c.id == stream_runs.c.run_id
+                    ).where(stream_runs.c.state.in_(["ACTIVE", "UNKNOWN", "DISABLED"]))
+                        .order_by(open_answer.desc(), stream_runs.c.enqueue_seq.nulls_first(),
+                            runs.c.started_at, stream_runs.c.run_id)).mappings().all()
+                    for row in gates:
+                        event, _task = self._source(c, row)
+                        target = event.conversation.key
+                        if target not in self.inflight:
+                            gate = {column.name: row[column] for column in stream_runs.c}
+                            targets.setdefault(target, []).append({**gate, "started_at": row["started_at"],
+                                "open_answer": row["open_answer"]})
 
-            if include_outbox:
-                for row in self.core.outbox.pending_rows(self.core.adapters, exclude_targets=tuple(self.inflight)):
-                    targets.setdefault(row["conversation_id"], [])
-            for target, gates in targets.items():
-                self.inflight[target] = asyncio.create_task(self._dispatch_target(target, gates, include_outbox))
+                if include_outbox:
+                    for row in self.core.outbox.pending_rows(self.core.adapters, exclude_targets=tuple(self.inflight)):
+                        targets.setdefault(row["conversation_id"], [])
+                ordered = sorted(targets, key=lambda target: (target <= self.last_target, target))
+                for target in ordered[:capacity]:
+                    self.inflight[target] = asyncio.create_task(self._dispatch_target(target, targets[target], include_outbox))
+                    self.last_target = target
             batch = dict(self.inflight)
         if wait and batch:
             # A manual tick can await its attempts. The background loop admits newly arrived targets meanwhile.
@@ -470,18 +483,22 @@ class StreamDelivery:
         await asyncio.gather(*pending, return_exceptions=True)
 
     async def _dispatch_target(self, target, gates, include_outbox):
-        async with self.slots:
-            for gate in gates:
-                await self._dispatch_gate(gate)
-                with self.db.engine.connect() as c:
-                    reserved = c.execute(select(stream_messages.c.id).where(
-                        stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
-                        stream_messages.c.state == "OPEN").limit(1)).first()
-                if reserved:
-                    return
-            if include_outbox:
-                await self.core.outbox.dispatch_target(target, self.core.adapters,
-                    self.core.settings.send_budget_per_minute, self.core.pre_send)
+        outbox = self.core.outbox if include_outbox else None
+        args = (target, self.core.adapters, self.core.settings.send_budget_per_minute, self.core.pre_send) if include_outbox else ()
+        for gate in gates:
+            if (include_outbox and gate["state"] == "ACTIVE" and not gate["open_answer"]
+                    and await outbox.dispatch_target(*args, before_seq=gate["enqueue_seq"],
+                        through=gate["started_at"] if gate["enqueue_seq"] is None else None)):
+                return
+            await self._dispatch_gate(gate)
+            with self.db.engine.connect() as c:
+                reserved = c.execute(select(stream_messages.c.id).where(
+                    stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
+                    stream_messages.c.state == "OPEN").limit(1)).first()
+            if reserved:
+                return
+        if include_outbox:
+            await outbox.dispatch_target(*args)
 
     async def _dispatch_gate(self, gate):
         with self.db.engine.connect() as c:

@@ -577,7 +577,7 @@ async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
 
 
-@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous", "independent"])
+@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous", "invalid", "independent"])
 async def test_leader_publication_respects_steering_receipt(leader_stream, disposition):
     from elephant.domain import TextSegment
     from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
@@ -610,6 +610,8 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
             receipt["outcome"] = {"covered_input_ids": [extra.event_id]}
         elif disposition == "deferred":
             receipt["outcome"] = {"deferred_input_ids": [extra.event_id]}
+        elif disposition == "invalid":
+            receipt["outcome"] = {"covered_input_ids": ["unverified-input"]}
     result = {"status": "completed", "summary": "已记录测试要求。"}
     s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
     s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
@@ -618,11 +620,11 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
         handled = conn.execute(select(dialogue_inputs.c.id).where(dialogue_inputs.c.handled_at.is_not(None))).scalars().all()
         sequenced = conn.execute(select(leader_events.c.source_id).order_by(leader_events.c.seq)).scalars().all()
     assert sequenced == [*claim["source_ids"], extra.event_id]
-    if disposition in {"unseen", "ambiguous"}:
+    if disposition in {"unseen", "ambiguous", "invalid"}:
         assert not handled and not published
         retry = s.core.sessions.claim("fixture")
         assert retry["source_ids"] == claim["source_ids"]
-        assert retry.get("steer_without_supplements", False) == (disposition == "ambiguous")
+        assert retry.get("steer_without_supplements", False) == (disposition in {"ambiguous", "invalid"})
     else:
         assert len(published) == 1
         assert set(handled) == set(receipt["input_ids"] if disposition == "covered" else claim["source_ids"])
@@ -638,9 +640,6 @@ async def test_core_streaming_and_regular_delivery_share_target_slots(leader_str
     adapter.config = adapter.config.model_copy(update={"allowed_users": ("300", "301"), "proactive_verified": True})
     target = s.event.conversation
     other = target.model_copy(update={"remote_conversation_id": "301"})
-    with s.core.db.transaction() as conn:
-        s.core.outbox.enqueue_text(conn, target=target, text="same",
-            origin_kind="command", origin_id="same", allow_proactive=True, ttl_seconds=3600)
     claim = s.core.sessions.claim("fixture")
     await append(s.core, claim, 1, "public_answer_delta", "正在检查")
     entered, release, independent = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -661,6 +660,8 @@ async def test_core_streaming_and_regular_delivery_share_target_slots(leader_str
     try:
         await asyncio.wait_for(entered.wait(), 3)
         with s.core.db.transaction() as conn:
+            s.core.outbox.enqueue_text(conn, target=target, text="same",
+                origin_kind="command", origin_id="same", allow_proactive=True, ttl_seconds=3600)
             s.core.outbox.enqueue_text(conn, target=other, text="other",
                 origin_kind="command", origin_id="other", allow_proactive=True, ttl_seconds=3600)
         await s.core.deliver(wait=False)
@@ -681,7 +682,6 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     import asyncio
     from pathlib import Path
 
-    from elephant.domain import TextSegment
     from elephant.harness.pool import SessionPool
     from elephant.jobs.worker import GeneralRun, Spool, Worker
     from elephant.providers import ModelCapacity
@@ -701,7 +701,7 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     entered, release = asyncio.Event(), asyncio.Event()
     starting, boot = asyncio.Event(), asyncio.Event()
     requests, runners = [], []
-    extra_id = "live-steering"
+    extra_ids = []
 
     def frames(delta, stop):
         chunk = {"id": "steer-test", "object": "chat.completion.chunk", "model": "offline", "created": 1}
@@ -724,7 +724,7 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
         if len(requests) == 2:
             call = {"index": 0, "id": "cover-input", "type": "function",
                     "function": {"name": "task_outcome",
-                                 "arguments": json.dumps({"status": "completed", "covered_input_ids": [extra_id]})}}
+                                 "arguments": json.dumps({"status": "completed", "covered_input_ids": extra_ids})}}
             return httpx.Response(200, headers=headers, content=frames({"tool_calls": [call]}, "tool_calls"))
         return httpx.Response(200, headers=headers, content=frames({"content": "已纳入乱序检查。"}, "stop"))
 
@@ -751,17 +751,21 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     execution = asyncio.create_task(worker.once())
     try:
         await asyncio.wait_for(starting.wait(), 15)
-        extra = s.event.model_copy(update={"event_id": extra_id, "platform_message_id": "additional-message",
-            "reply_to": s.event.platform_message_id,
-            "segments": (TextSegment(text="重点测乱序"),),
-            "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
-        extra, _ = s.core.inbox.accept(extra)
-        await s.core.process(extra)
+        for index, text in enumerate(("重点测乱序", "也要记录耗时")):
+            msg = f"real-quote-{index}"
+            extra = adapter.normalize({"op": 0, "id": msg, "t": "C2C_MESSAGE_CREATE", "d": {
+                "id": msg, "author": {"user_openid": "300"}, "content": text,
+                "timestamp": s.core.clock.now().isoformat(), "message_reference": {
+                    "message_id": s.event.platform_message_id}}})
+            assert [segment.type for segment in extra.segments] == ["text", "reply"]
+            extra, _ = s.core.inbox.accept(extra)
+            extra_ids.append(extra.event_id)
+            await s.core.process(extra)
         assert not runners[0].accepting_input
         boot.set()
         await asyncio.wait_for(entered.wait(), 15)
         async with asyncio.timeout(10):
-            while extra_id not in runners[0].steered_inputs:
+            while not set(extra_ids) <= runners[0].steered_inputs:
                 assert not execution.done()
                 await asyncio.sleep(0.02)
         assert "重点测乱序" not in requests[0]
@@ -769,12 +773,14 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
         assert len(s.calls) == 1 and json.loads(s.calls[0].content)["msg_type"] == 6
         release.set()
         assert await asyncio.wait_for(execution, 20)
-        assert "重点测乱序" in requests[1]
+        assert len(requests) == 3
+        assert "重点测乱序" in requests[1] and "也要记录耗时" in requests[1]
         await s.core.deliver()
         assert len(s.calls) == 2 and json.loads(s.calls[1].content)["content_raw"] == "已纳入乱序检查。"
         with s.core.db.engine.connect() as conn:
-            assert conn.execute(select(dialogue_inputs.c.handled_at).where(
-                dialogue_inputs.c.id == extra_id)).scalar_one()
+            handled = conn.execute(select(dialogue_inputs.c.handled_at).where(
+                dialogue_inputs.c.id.in_(extra_ids))).scalars().all()
+            assert len(handled) == len(extra_ids) and all(handled)
             receipt = conn.execute(select(leader_events.c.payload_json).where(
                 leader_events.c.source_kind == "delivery")).scalar_one()
             assert json.loads(receipt)["state"] == "SENT"
@@ -883,10 +889,11 @@ async def test_steered_task_revision_uses_real_supplement_provenance(runtime):
         assert sources and all(source == (extra.event_id, "只读验证") for source in sources)
 
 
-def test_new_worker_result_supersedes_draft_progress(runtime):
+@pytest.mark.parametrize("children", [1, 2])
+def test_new_worker_result_supersedes_draft_progress(runtime, children):
     from elephant.storage.task_schema import notifications
 
-    root_goal(runtime)
+    root_goal(runtime, children=children)
     worker = runtime.service.claim("worker")
     with runtime.db.transaction() as conn:
         child = conn.execute(select(tasks).where(tasks.c.id == worker["task_id"])).mappings().one()
@@ -901,7 +908,12 @@ def test_new_worker_result_supersedes_draft_progress(runtime):
     leader_complete(runtime, progress, "仍在检查")
     with runtime.db.engine.connect() as conn:
         assert not conn.scalar(select(notifications.c.id).where(notifications.c.body == "仍在检查"))
-    assert runtime.sessions.claim("leader")["purpose"] == "finalize"
+    next_claim = runtime.sessions.claim("leader")
+    assert next_claim["purpose"] == ("finalize" if children == 1 else "progress")
+    assert set(progress["source_ids"]) < set(next_claim["source_ids"])
+    leader_complete(runtime, next_claim, "第一个子任务已完成")
+    with runtime.db.engine.connect() as conn:
+        assert conn.scalar(select(notifications.c.id).where(notifications.c.body == "第一个子任务已完成"))
 
 
 async def test_committed_draft_ignores_future_recalled_session_source(leader_stream):
@@ -932,3 +944,95 @@ async def test_committed_draft_ignores_future_recalled_session_source(leader_str
     envelope = OutboundEnvelope.model_validate_json(saved)
     assert not s.core.validate_context(s.core.access(s.event), {"session_id": claim["session_id"]})
     assert s.core.pre_send(envelope)
+
+
+async def test_independent_input_defers_goal_without_consuming_original(runtime):
+    from elephant.domain import TextSegment
+    from elephant.storage.agent_schema import dialogue_inputs
+
+    r = runtime
+    queued = r.sessions.enqueue(r.event, r.access)
+    config = r.sessions.settings.orchestration.model_copy(update={"leader_steering_dialogues": (queued["dialogue_id"],)})
+    r.sessions.settings = r.sessions.settings.model_copy(update={"orchestration": config})
+
+    def complete(claim, body):
+        return r.leader.complete(claim["run_id"], claim["fencing_token"], "leader",
+            {"status": "completed", "summary": body}, stopped=True, quiescent=False,
+            receipt={"kind": "turn_finished", "summary": body, "session_id": claim["session_id"],
+                     "run_id": claim["run_id"], "session_revision": "leaf", "input_ids": claim["source_ids"],
+                     "inflight": 0, "tools_paired": True})
+
+    original = r.sessions.claim("leader")
+    extra = r.event.model_copy(update={"event_id": "unrelated", "platform_message_id": "unrelated-msg",
+        "segments": (TextSegment(text="另一件独立的事"),)})
+    r.sessions.enqueue(extra, r.access)
+    payload = {"operation": "tasks.submit", "call_id": "allocation",
+               "arguments": {"goal": "交给 Worker", "children": [{"goal": "计算", "delegation_key": "worker"}]}}
+    first = await r.leader.invoke("tasks", (original["run_id"], original["fencing_token"], "leader"), payload)
+    assert first == {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+    complete(original, "等待处理新消息")
+    with r.db.engine.connect() as conn:
+        assert not conn.scalar(select(dialogue_inputs.c.handled_at).where(dialogue_inputs.c.id == r.event.event_id))
+        assert not conn.scalar(select(outbox.c.id))
+        assert not conn.scalar(select(tasks.c.id))
+    other = r.sessions.claim("leader")
+    assert other["source_ids"] == [extra.event_id]
+    complete(other, "独立消息已处理")
+    retry = r.sessions.claim("leader")
+    assert retry["source_ids"] == original["source_ids"]
+    accepted = await r.leader.invoke("tasks", (retry["run_id"], retry["fencing_token"], "leader"), payload)
+    assert accepted["task_id"]
+
+
+async def test_older_outbox_row_precedes_unopened_native_stream(leader_stream):
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"proactive_verified": True})
+    claim = s.core.sessions.claim("fixture")
+    s.core.clock.advance(.1)
+    with s.core.db.transaction() as conn:
+        s.core.outbox.enqueue_text(conn, target=s.event.conversation, text="先入队",
+            origin_kind="command", origin_id="older", allow_proactive=True)
+    await append(s.core, claim, 1, "public_answer_delta", "后来的流")
+    await s.core.deliver()
+    await s.core.deliver()
+    assert [req.url.path.rsplit("/", 1)[-1] for req in s.calls] == ["messages", "stream_messages"]
+
+
+async def test_background_target_admission_stays_bounded(leader_stream):
+    import asyncio
+
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    targets = tuple(str(n + 1000) for n in range(120))
+    adapter.config = adapter.config.model_copy(update={"allowed_users": targets, "proactive_verified": True,
+                                                        "official_bot_messages_per_minute": 600})
+    entered = []
+    all_entered, release = asyncio.Event(), asyncio.Event()
+
+    async def transport(req):
+        if req.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        entered.append(req.url.path)
+        if len(entered) == 8:
+            all_entered.set()
+        await release.wait()
+        return httpx.Response(200, json={"id": req.url.path})
+
+    adapter.client._transport = httpx.MockTransport(transport)
+    with s.core.db.transaction() as conn:
+        for user in targets:
+            target = s.event.conversation.model_copy(update={"remote_conversation_id": user})
+            s.core.outbox.enqueue_text(conn, target=target, text="压力测试",
+                origin_kind="command", origin_id=user, allow_proactive=True)
+    try:
+        await s.core.deliver(wait=False)
+        await asyncio.wait_for(all_entered.wait(), 3)
+        for _ in range(3):
+            await s.core.deliver(wait=False)
+        assert len(s.core.stream_delivery.inflight) == len(entered) == 8
+    finally:
+        release.set()
+    for _ in range(16):
+        await s.core.deliver()
+    assert len(set(entered)) == len(entered) == len(targets)
