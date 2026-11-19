@@ -9,7 +9,7 @@ def task_schemas():
         "tasks.wait": ("Persist all/any dependency on this task's children, safely yield and release execution capacity.", WaitSpec.model_json_schema()),
         "tasks.take_over": ("Take over the bound goal after all Workers have stopped and external operations are reconciled. Enables direct business execution for this decision turn.",
                             {"type": "object", "properties": {}, "additionalProperties": False}),
-        "tasks.send_input": ("Communicate new user information or revised constraints to existing work with followup; answer a real open question with answer and its question_id; notify carries information without revising the goal.", TaskInputSpec.model_json_schema()),
+        "tasks.send_input": ("Communicate new user information or revised constraints to existing work with followup; answer a real open question with answer and its question_id; notify carries information without revising the goal. Use source_input_id when the instruction came from a supplementary input received during this turn.", TaskInputSpec.model_json_schema()),
         "tasks.report_progress": ("Report an evidence-backed milestone; plans and heartbeats are not verified progress.", ProgressSpec.model_json_schema()),
         "tasks.status": ("Read a task's true execution, verification and delivery state.",
                          {"type": "object", "properties": {"task_ref": {"type": "string"}}, "required": ["task_ref"], "additionalProperties": False}),

@@ -6,14 +6,14 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 
 from elephant.domain import InboundEvent, stable_id
 from elephant.domain.agents import TaskInputSpec
 from elephant.domain.tasks import TaskResult, validate_user_facing_text
 from elephant.jobs.streaming import PUBLIC_KINDS, validate_public_event
 from elephant.storage.action_schema import operations
-from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
+from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events, leader_inbox
 from elephant.storage.schema import outbox, reply_counters
 from elephant.storage.stream_schema import stream_runs
 from elephant.storage.task_schema import (
@@ -80,6 +80,8 @@ class LeaderRuntime:
         if not mutation and root_id and not self.service.graph.handoff_valid(root):
             raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
+        if effect != "read" and self.unseen_steering(conn, claim, claim.get("steering_seen", ())):
+            raise PermissionError("Review pending user input before starting an external operation")
         if effect != "read" and not personal:
             if claim["purpose"] == "user" and not root_id and run["role"] == "leader":
                 if self.sessions.owner(event) is None:
@@ -127,16 +129,71 @@ class LeaderRuntime:
         conn.execute(update(runs).where(runs.c.id == run["id"]).values(budget_json=json.dumps(used), accounted_at=now.isoformat()))
         self._persist_turn_budget(conn, run, claim, used)
 
+    def steering_candidates(self, conn, claim):
+        if not claim.get("steer_until"):
+            return []
+        trigger = InboundEvent.model_validate_json(claim["event_json"])
+        access = self.sessions.access_for_claim(claim)
+        rows = conn.execute(select(dialogue_inputs).outerjoin(leader_events,
+            (leader_events.c.source_kind == "user") & (leader_events.c.source_id == dialogue_inputs.c.id)).where(
+            dialogue_inputs.c.dialogue_id == claim["context"]["dialogue_id"],
+            dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None),
+            dialogue_inputs.c.created_at <= claim["steer_until"],
+        ).order_by(leader_events.c.seq.nulls_last(), dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(8)).mappings()
+        candidates = []
+        for row in rows:
+            event = InboundEvent.model_validate_json(row["event_json"])
+            if (event.principal != trigger.principal or event.conversation != trigger.conversation or not event.text
+                    or any(segment.type != "text" for segment in event.segments) or not self.core.allowed(event)):
+                continue
+            context = json.loads(row["context_json"])
+            validator = getattr(self.core, "validate_context", None)
+            if validator and not validator(access, context):
+                continue
+            candidates.append({"id": row["id"], "text":
+                "这是一条同会话的新用户消息。若它补充本轮请求，请处理它，并在 task_outcome 的 covered_input_ids 中登记其 ID。"
+                "若是独立请求，留给下一轮。若用 tasks_send_input 修订任务，source_input_id 填这条补充的 ID。\n" + event.text})
+        return candidates
+
+    def unseen_steering(self, conn, claim, seen):
+        return any(item["id"] not in seen for item in self.steering_candidates(conn, claim))
+
     def receipt(self, conn, run, claim, payload):
         expected = set(claim["source_ids"]) | set(claim.get("task_input_ids", []))
         confirmed = payload.get("input_ids")
+        offered = set(claim.get("steered_inputs", []))
         if (payload.get("session_id") != claim["session_id"] or not isinstance(confirmed, list)
-                or set(confirmed) != expected or not isinstance(payload.get("session_revision"), str)
+                or not all(isinstance(item, str) for item in confirmed)
+                or not expected <= set(confirmed) <= expected | offered
+                or not isinstance(payload.get("session_revision"), str)
                 or payload.get("run_id") != run["id"]):
             raise PermissionError("session receipt does not match the claimed inputs")
         kind = payload.get("kind")
         if kind not in {"input_persisted", "input_consumed", "turn_finished", "run_yielded"}:
             raise ValueError("invalid session receipt kind")
+        if claim.get("steer_until") and kind != "input_persisted":
+            seen = set(claim.get("steering_seen", [])) | (set(confirmed) & offered)
+            claim["steering_seen"] = sorted(seen)
+            claim["observed_event_seq"] = conn.execute(select(func.max(leader_events.c.seq)).where(
+                leader_events.c.dialogue_id == claim["context"]["dialogue_id"],
+                leader_events.c.source_kind == "user",
+                leader_events.c.source_id.in_([*claim["source_ids"], *seen]))).scalar_one()
+            manifest = [item for raw in conn.execute(select(dialogue_inputs.c.context_json).where(
+                dialogue_inputs.c.id.in_(seen))).scalars() for item in json.loads(raw).get("source_manifest", ())]
+            if manifest:
+                claim["context"]["steering_sources"] = True
+                graph = self.service.graph
+                graph.merge_source_dependencies(claim["context"], (), manifest)
+                history = conn.execute(select(sessions.c.manifest_json).where(
+                    sessions.c.id == claim["session_id"])).scalar_one_or_none()
+                if history:
+                    history = json.loads(history)
+                    history.update(steering_sources=True, workspace_id=claim["context"].get("workspace_id", "personal"))
+                    graph.merge_source_dependencies(history, (), manifest)
+                    conn.execute(update(sessions).where(sessions.c.id == claim["session_id"]).values(
+                        manifest_json=json.dumps(history, ensure_ascii=False)))
+            conn.execute(update(runs).where(runs.c.id == run["id"]).values(
+                request_json=json.dumps(claim, ensure_ascii=False)))
         now = self.clock.now().isoformat()
         table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
         values = {"persisted_at": now}
@@ -218,6 +275,9 @@ class LeaderRuntime:
         root_id = claim.get("target_root_task_id")
         graph = self.service.graph
         self.authorize(conn, run, claim, {"action": "task.execute"})
+        if operation in {"tasks.submit", "tasks.cancel", "tasks.send_input"} and self.unseen_steering(
+                conn, claim, claim.get("steering_seen", ())):
+            raise PermissionError("Review pending user input before changing a goal")
         if operation == "tasks.submit":
             if purpose != "user":
                 raise PermissionError("only real user turns can create a root goal")
@@ -252,6 +312,14 @@ class LeaderRuntime:
             raise KeyError("task unavailable")
         if root_id and (task["root_task_id"] or task["id"]) != root_id:
             raise PermissionError("Leader attempt is bound to another root")
+        spec = TaskInputSpec.model_validate_json(json.dumps(args)) if operation == "tasks.send_input" else None
+        if spec and spec.source_input_id is not None:
+            if (spec.source_input_id not in claim.get("steering_seen", ())
+                    or not any(item["id"] == spec.source_input_id for item in self.steering_candidates(conn, claim))):
+                raise PermissionError("Task revision must reference a verified supplementary input")
+            raw = conn.execute(select(dialogue_inputs.c.event_json).where(
+                dialogue_inputs.c.id == spec.source_input_id)).scalar_one()
+            event = InboundEvent.model_validate_json(raw)
         if purpose == "user" and operation in {"tasks.cancel", "tasks.send_input"}:
             if task["requester"] != event.principal.key or task["origin_dialogue_id"] != claim["context"]["dialogue_id"]:
                 raise PermissionError("task belongs to another user or dialogue")
@@ -268,8 +336,7 @@ class LeaderRuntime:
             self.service.permissions.require(access, "task.cancel", "task:" + task["id"])
             graph.cancel_tree(conn, task)
             return {"accepted": True, "state": "CANCEL_REQUESTED"}
-        if operation == "tasks.send_input":
-            spec = TaskInputSpec.model_validate_json(json.dumps(args))
+        if spec:
             if purpose != "user":
                 raise PermissionError("this Leader turn cannot revise the goal")
             if spec.kind != "notify":
@@ -425,7 +492,35 @@ class LeaderRuntime:
                 return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
             protocol_failure = (not result.agent_authored and result.status == "failed" and run["role"] == "leader"
                 and "model_tool_protocol_recovery_failed" in result.limitations)
-            if not result.agent_authored and not protocol_failure:
+            stale_draft, covered = False, []
+            if result.agent_authored and claim.get("steer_until"):
+                outcome = proof.get("outcome")
+                summary = proof.get("summary")
+                if (not isinstance(summary, str) or summary[:10000] != result.summary
+                        or (outcome is not None and not isinstance(outcome, dict))):
+                    raise PermissionError("Leader publication does not match its durable draft")
+                covered = (outcome or {}).get("covered_input_ids", [])
+                seen = set(proof["input_ids"])
+                available = {item["id"] for item in self.steering_candidates(conn, claim)}
+                offered = set(claim["steered_inputs"])
+                if (not isinstance(covered, list) or len(covered) > 8 or not all(isinstance(item, str) for item in covered)
+                        or not set(covered) <= seen & offered):
+                    raise PermissionError("Leader publication covers unverified supplementary input")
+                primary = conn.execute(select(dialogue_inputs).where(
+                    dialogue_inputs.c.id == claim["source_ids"][0])).mappings().one()
+                context = json.loads(primary["context_json"])
+                turn = context["leader_turn"]
+                retries = turn.get("publish_retries", 0)
+                stale_draft = bool((seen & offered) - available) or (bool(available - seen) and retries < 2)
+                if stale_draft:
+                    turn["publish_retries"] = retries + 1
+                    conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == primary["id"]).values(
+                        context_json=json.dumps(context, ensure_ascii=False)))
+                elif covered:
+                    conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id.in_(covered),
+                        dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.handled_at.is_(None)).values(
+                        claimed_attempt_id=run_id, persisted_at=now, consumed_at=now, handled_at=now, state="HANDLED"))
+            if stale_draft or (not result.agent_authored and not protocol_failure):
                 if discarded_entry:
                     conn.execute(update(runs).where(runs.c.id == run_id).values(
                         receipt_json=json.dumps({"discarded_submit_entry": discarded_entry})))
@@ -449,7 +544,8 @@ class LeaderRuntime:
                 waits.c.state.in_(["INTENT", "WAITING"]))).mappings().first()
             self.authorize(conn, run, claim, {"action": "task.execute"}, ending_wait=bool(pending_wait),
                 reporting_failure=protocol_failure)
-            target = None
+            target = notice = None
+            published_chat = False
             if claim.get("target_root_task_id"):
                 target = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
             if pending_wait:
@@ -533,17 +629,22 @@ class LeaderRuntime:
                     self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif run["role"] != "skill_review":
                 event = InboundEvent.model_validate_json(claim["event_json"])
+                published_chat = True
                 self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
                     origin_kind="chat", origin_id="turn:" + claim["session_id"] + ":" + claim["source_ids"][0],
                     reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
                     anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True,
-                    defer_reply=claim.get("public_answer_events", False))
+                    defer_reply=claim.get("public_answer_events", False), fixed_publication=bool(claim.get("steer_until")))
                 if claim.get("public_answer_events"):
                     self.core.stream_delivery.hold_result(conn, run_id, "chat",
                         "turn:" + claim["session_id"] + ":" + claim["source_ids"][0])
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]), table.c.claimed_attempt_id == run_id).values(
                 handled_at=now, **({"state": "HANDLED"} if table is dialogue_inputs else {"output_ref": run_id})))
+            if published_chat or notice is not None:
+                conn.execute(update(leader_events).where(leader_events.c.source_kind == (
+                    "user" if table is dialogue_inputs else "worker"),
+                    leader_events.c.source_id.in_([*claim["source_ids"], *covered])).values(published_run_id=run_id))
             if run["role"] == "skill_review":
                 self.sessions.learning.finish_review(conn, run_id)
                 self._review_marks.pop(run_id, None)
@@ -828,7 +929,29 @@ class LeaderRuntime:
                 raise PermissionError("unknown recovery source")
             closed = run.state in {"FINISHED", "RECOVERED"} and not run.slot_reserved and run.quiescent_at is not None
             return {"state": run.state, "discard_spool": False, "archive_spool": closed}
-        if operation in {"authorize", "control", "inputs"}:
+        if operation in {"inputs", "input-ack"}:
+            with self.db.engine.connect() as conn:
+                _run, claim = self.lease(conn, *identity)
+                if not claim.get("steer_until"):
+                    return [] if operation == "inputs" else {"accepted": False}
+            with self.db.transaction() as conn:
+                run, claim = self.lease(conn, *identity)
+                if not claim.get("steer_until"):
+                    return [] if operation == "inputs" else {"accepted": False}
+                self.authorize(conn, run, claim, {"action": "task.execute"})
+                if operation == "input-ack":
+                    return {"accepted": payload.get("input_id") in claim.get("steering_seen", ())}
+                if run["receipt_json"]:
+                    return []
+                candidates = self.steering_candidates(conn, claim)
+                known = claim["steered_inputs"]
+                fresh = [item for item in candidates if item["id"] not in known][:8 - len(known)]
+                if fresh:
+                    known.extend(item["id"] for item in fresh)
+                    conn.execute(update(runs).where(runs.c.id == run_id).values(
+                        request_json=json.dumps(claim, ensure_ascii=False)))
+                return [item for item in candidates if item["id"] in known]
+        if operation in {"authorize", "control"}:
             # Provider streaming checks every chunk; readers must not acquire SQLite's writer lock.
             with self.db.engine.connect() as conn:
                 conn.exec_driver_sql("BEGIN")
@@ -905,8 +1028,12 @@ class LeaderRuntime:
                         with self.db.engine.connect() as conn:
                             current, current_claim = self.lease(conn, *identity)
                             return self.authorize(conn, current, current_claim, action)
+                    def authorize_dispatch(conn, action):
+                        current, current_claim = self.lease(conn, *identity)
+                        return self.authorize(conn, current, current_claim, {
+                            "action": action["name"], "resources": action["resources"], "effect": action["effect"]})
                     return await self.service.ledger_operation(context, payload, [claim["task_id"]],
-                        authorize, deduplicate=True)
+                        authorize, deduplicate=True, authorize_dispatch=authorize_dispatch)
                 return await self.service.ledger(*identity, payload)
             return self.service.ask(*identity, payload)
         if operation == "skills":
@@ -964,6 +1091,8 @@ class LeaderRuntime:
                 if run["role"] != "leader":
                     raise PermissionError("only the Leader can send user-facing progress")
                 self.authorize(conn, run, claim, {"action": "notification.send"})
+                if claim.get("commit_publication"):
+                    return {"accepted": False, "reason": "leader_draft_unpublished"}
                 text = TaskResult(status="completed", summary=payload["text"]).summary
                 validate_user_facing_text(text)
                 notice_id = stable_id("leader-progress", claim["session_id"], claim["source_ids"][0], text)
@@ -1028,8 +1157,8 @@ class LeaderRuntime:
                 seq = values["seq"]
                 if not isinstance(seq, int) or seq < 1 or len(encoded.encode()) > 2 * 1024 * 1024:
                     raise ValueError("invalid event sequence or payload")
-                if payload.get("kind") in PUBLIC_KINDS and not conn.execute(select(stream_runs.c.run_id).where(
-                        stream_runs.c.run_id == run_id)).first():
+                if payload.get("kind") in PUBLIC_KINDS and (not claim.get("public_answer_events")
+                        or not conn.execute(select(stream_runs.c.run_id).where(stream_runs.c.run_id == run_id)).first()):
                     raise PermissionError("public answer stream was not enabled for this run")
                 prior = conn.execute(select(events).where(events.c.event_id == values["event_id"])).mappings().first()
                 if prior:

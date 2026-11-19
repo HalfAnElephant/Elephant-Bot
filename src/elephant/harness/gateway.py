@@ -132,7 +132,7 @@ class RunGateway:
         self.revoked, self.waiting = False, False
         self.outcome, self.evidence, self.artifacts = None, [], []
         # Previously accepted tasks retain their original notification policy.
-        self.notify_before_tools = claim.get("context", {}).get("notify_before_tools", False)
+        self.notify_before_tools = not claim.get("commit_publication") and claim.get("context", {}).get("notify_before_tools", False)
         self.progress_announced = False
         self.observations, self.effects, self.content = {}, {}, {}
         self.file_content = None

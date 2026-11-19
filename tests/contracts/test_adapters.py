@@ -160,7 +160,7 @@ async def test_D02_D03_unknown_and_expired(official_config, incoming, clock, off
     await qq.stop()
 
 
-async def test_removed_adapter_deliveries_become_terminal_before_official_queue_continues(
+async def test_removed_adapter_deliveries_become_terminal_without_blocking_other_targets(
     official_config, incoming, clock, official_event, db
 ):
     calls = []
@@ -188,10 +188,6 @@ async def test_removed_adapter_deliveries_become_terminal_before_official_queue_
     with db.engine.connect() as conn:
         assert set(conn.execute(select(outbox.c.state).where(outbox.c.id.in_(retired_ids))).scalars()) == {"FAILED"}
         assert conn.execute(select(outbox.c.receipt_json).where(outbox.c.id == retired_ids[0])).scalar_one()
-        assert conn.execute(select(outbox.c.state).where(outbox.c.id == official_id)).scalar_one() == "PENDING"
-
-    await outgoing.dispatch_once({"qq": qq})
-    with db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.state).where(outbox.c.id == official_id)).scalar_one() == "SENT"
     assert calls[-1].url.path.endswith("messages")
     await qq.stop()

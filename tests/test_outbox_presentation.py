@@ -253,9 +253,6 @@ async def test_removed_adapter_rows_are_terminal_and_do_not_starve_later_deliver
     adapter = Adapter(clock)
     await service.dispatch_once({"qq": adapter})
     assert {row["state"] for row in rows(db) if row["id"] in stale_ids} == {"FAILED"}
-    assert next(row for row in rows(db) if row["id"] == current)["state"] == "PENDING"
-
-    await service.dispatch_once({"qq": adapter})
     assert [item.text for item, _ in adapter.sent] == ["new"]
     assert next(row for row in rows(db) if row["id"] == current)["state"] == "SENT"
 

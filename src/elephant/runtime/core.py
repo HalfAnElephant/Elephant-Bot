@@ -383,9 +383,9 @@ class Core:
                 history = conn.execute(select(sessions.c.manifest_json).where(
                     sessions.c.id == context["session_id"])).scalar_one_or_none()
                 history = json.loads(history) if history else {}
-                if history.get("task_sources"):
+                if history.get("task_sources") or history.get("steering_sources"):
                     context = dict(context)
-                    self.tasks.graph.merge_source_dependencies(context, history["task_sources"],
+                    self.tasks.graph.merge_source_dependencies(context, history.get("task_sources", ()),
                         history.get("source_manifest", ()))
             try:
                 self.mail.receipts(conn, event, context, access=access)
@@ -552,7 +552,7 @@ class Core:
             from elephant.storage.stream_schema import stream_messages, stream_runs
 
             with self.db.engine.connect() as conn:
-                stream = conn.execute(select(stream_messages.c.envelope_json, runs)
+                stream = conn.execute(select(stream_messages.c.envelope_json, stream_messages.c.kind, runs)
                     .join(runs, runs.c.id == stream_messages.c.run_id)
                     .join(stream_runs, stream_runs.c.run_id == runs.c.id).where(
                         stream_messages.c.id == envelope.origin_id.removeprefix("qq-stream:"),
@@ -560,7 +560,8 @@ class Core:
                 if not stream or stream["envelope_json"] != envelope.model_dump_json():
                     return False
                 claim = json.loads(stream["request_json"])
-                if claim["purpose"] != "user" or not claim.get("public_answer_events"):
+                if claim["purpose"] != "user" or not (claim.get("public_answer_events")
+                        or (stream["kind"] == "typing" and claim.get("typing_only"))):
                     return False
                 source = conn.execute(select(dialogue_inputs).where(
                     dialogue_inputs.c.id == claim["source_ids"][0],
@@ -655,9 +656,8 @@ class Core:
         if dispatch:
             await self.deliver()
 
-    async def deliver(self):
-        await self.stream_delivery.dispatch_once()
-        await self.outbox.dispatch_once(self.adapters, self.settings.send_budget_per_minute, self.pre_send)
+    async def deliver(self, *, wait=True):
+        await self.stream_delivery.dispatch_once(include_outbox=True, wait=wait)
 
     async def maintenance(self):
         for recover in (self.recovery.recover_workers, self.leader.recover):
@@ -719,7 +719,7 @@ class Core:
         self.leader.recover()
         self.knowledge.recover_mutations()
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
-        self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
+        self.supervisor.start("delivery", lambda: self.deliver(wait=False), interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
         self.supervisor.start("schedules", self.schedules.step, interval=1, critical=True)
@@ -732,6 +732,7 @@ class Core:
     async def stop(self):
         self.stopping = True
         await self.supervisor.stop()
+        await self.stream_delivery.stop()
         if self.scheduler:
             await self.scheduler.close()
         await self.openviking.close()

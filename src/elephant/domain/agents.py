@@ -37,6 +37,7 @@ class TaskInputSpec(DTO):
     kind: Literal["followup", "answer", "notify"]
     text: str = Field(min_length=1, max_length=16000)
     question_id: str | None = None
+    source_input_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class WaitSpec(DTO):

@@ -5,9 +5,11 @@ from random import Random
 from uuid import uuid4
 
 from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from elephant.adapters.qq_official.streaming import OfficialStream
 from elephant.domain import OutboundEnvelope, SendReceipt, Surface, stable_id
+from elephant.storage.agent_schema import dialogue_inputs, leader_events
 from elephant.storage.schema import outbox, reply_counters
 from elephant.storage.stream_schema import stream_messages, stream_runs
 
@@ -43,13 +45,15 @@ class Outbox:
         old = c.execute(select(outbox.c.id).where(outbox.c.dedupe_key == key)).scalar()
         if old:
             return old
-        if envelope.origin_kind == "chat" and envelope.purpose == "result" and envelope.origin_id.startswith("turn:"):
+        if (envelope.origin_kind == "chat" and envelope.purpose == "result" and not envelope.fixed_publication
+                and envelope.origin_id.startswith("turn:")):
             prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
             c.execute(update(outbox).where(outbox.c.conversation_id == envelope.target.key,
                 outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
                 outbox.c.origin_id != envelope.origin_id,
                 func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
                 func.json_extract(outbox.c.envelope_json, "$.text") == envelope.text,
+                func.json_extract(outbox.c.envelope_json, "$.fixed_publication").is_(None),
                 outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
                 .values(state="SUPERSEDED"))
         if defer_reply and envelope.reply_context:
@@ -118,6 +122,7 @@ class Outbox:
         notification_sequence=0,
         purpose=None,
         defer_reply=False,
+        fixed_publication=False,
     ):
         ids = []
         if (target.adapter_instance_id in self.markdown_adapters and target.surface in {"private", "group", "guild_channel", "guild_private"}
@@ -158,6 +163,7 @@ class Outbox:
                         parent_task_id=parent_task_id,
                         notification_sequence=notification_sequence,
                         purpose=purpose,
+                        fixed_publication=fixed_publication,
                     ), defer_reply=defer_reply,
                 )
             )
@@ -190,7 +196,9 @@ class Outbox:
 
     def recover(self):
         with self.db.transaction() as c:
-            c.execute(update(outbox).where(outbox.c.state == "SENDING").values(state="UNKNOWN"))
+            interrupted = c.execute(select(outbox.c.id).where(outbox.c.state == "SENDING")).scalars().all()
+            for delivery_id in interrupted:
+                self._receipt(delivery_id, SendReceipt(state="UNKNOWN", error_code="INTERRUPTED_SEND"), connection=c)
             candidates = c.execute(select(outbox).where(
                 outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
                 func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
@@ -207,7 +215,7 @@ class Outbox:
                         outbox.c.enqueue_seq > row["enqueue_seq"], outbox.c.state == "SENT",
                         func.json_extract(outbox.c.envelope_json, "$.purpose") == "result")
                         .order_by(outbox.c.enqueue_seq.desc()).limit(1)).scalar_one_or_none()
-                    if newer:
+                    if newer and not envelope.fixed_publication:
                         if OutboundEnvelope.model_validate_json(newer).text == envelope.text:
                             c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="SUPERSEDED"))
                         continue
@@ -245,7 +253,8 @@ class Outbox:
                 if (envelope.purpose != "result" or not envelope.origin_id.startswith("turn:")
                         or envelope.requester is None or envelope.expires_at <= self.clock.now()):
                     continue
-                if not envelope.allow_proactive and not (event.reply_to and event.reply_to == envelope.anchor_message_id):
+                if (not envelope.fixed_publication and not envelope.allow_proactive
+                        and not (event.reply_to and event.reply_to == envelope.anchor_message_id)):
                     prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
                     if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
                             outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
@@ -279,7 +288,7 @@ class Outbox:
             renewed.append(row["id"])
         return renewed
 
-    async def dispatch_once(self, adapters, budget=0, pre_send=None):
+    def pending_rows(self, adapters, *, only_target=None, exclude_targets=()):
         proactive = [name for name, adapter in adapters.items()
                      if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
         # A blocked tail must not consume the bounded batch ahead of healthy
@@ -301,11 +310,13 @@ class Outbox:
                             func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
                             func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
                    or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()),
-                   ~blocked_part)
-            .subquery()
+                   ~blocked_part, outbox.c.conversation_id.not_in(exclude_targets))
         )
+        if only_target is not None:
+            candidates = candidates.where(outbox.c.conversation_id == only_target)
+        candidates = candidates.subquery()
         with self.db.engine.connect() as c:
-            rows = (
+            return (
                 c.execute(
                     select(outbox).join(candidates, candidates.c.id == outbox.c.id)
                     .where(candidates.c.target_rank == 1)
@@ -315,6 +326,8 @@ class Outbox:
                 .mappings()
                 .all()
             )
+    async def dispatch_once(self, adapters, budget=0, pre_send=None):
+        rows = self.pending_rows(adapters)
         slots = asyncio.Semaphore(8)
 
         async def dispatch(row):
@@ -324,6 +337,11 @@ class Outbox:
         async with asyncio.TaskGroup() as group:
             for row in rows:
                 group.create_task(dispatch(row))
+
+    async def dispatch_target(self, target, adapters, budget, pre_send):
+        rows = self.pending_rows(adapters, only_target=target)
+        if rows:
+            await self._dispatch_row(rows[0], adapters, budget, pre_send)
 
     async def _dispatch_row(self, row, adapters, budget, pre_send):
         with self.db.transaction() as c:
@@ -346,7 +364,13 @@ class Outbox:
             return
         adapter = adapters.get(envelope.target.adapter_instance_id)
         if adapter is None:
-            self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED"))
+            with self.db.transaction() as c:
+                retired = c.execute(select(outbox.c.id).where(
+                    outbox.c.conversation_id == envelope.target.key,
+                    outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))).scalars().all()
+                receipt = SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED")
+                for delivery_id in retired:
+                    self._receipt(delivery_id, receipt, connection=c)
             return
         if pre_send and not pre_send(envelope):
             self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="STALE_CONTEXT"))
@@ -487,7 +511,8 @@ class Outbox:
     def _receipt(self, delivery_id, receipt, *, connection=None):
         with self.db.transaction() if connection is None else nullcontext(connection) as c:
             previous = c.execute(select(outbox.c.state, outbox.c.conversation_id, outbox.c.envelope_json,
-                outbox.c.enqueue_seq).where(
+                outbox.c.enqueue_seq, outbox.c.attempts, outbox.c.origin_kind, outbox.c.origin_id,
+                outbox.c.task_id).where(
                 outbox.c.id == delivery_id)).mappings().one()
             c.execute(
                 update(outbox)
@@ -502,6 +527,23 @@ class Outbox:
                     else None,
                 )
             )
+
+            dialogue_id = None
+            origin = previous["origin_id"] or ""
+            if previous["origin_kind"] == "chat" and origin.startswith(("turn:", "progress:")):
+                turn = origin if origin.startswith("turn:") else origin.split(":", 2)[-1]
+                _, _, source = turn.removeprefix("turn:").partition(":")
+                dialogue_id = c.execute(select(dialogue_inputs.c.dialogue_id).where(
+                    dialogue_inputs.c.id == source)).scalar_one_or_none()
+            elif previous["origin_kind"] == "task" and previous["task_id"]:
+                from elephant.storage.task_schema import tasks
+                dialogue_id = c.execute(select(tasks.c.origin_dialogue_id).where(
+                    tasks.c.id == previous["task_id"])).scalar_one_or_none()
+            if dialogue_id:
+                c.execute(sqlite_insert(leader_events).values(dialogue_id=dialogue_id, source_kind="delivery",
+                    source_id=stable_id(delivery_id, str(previous["attempts"]), receipt.state),
+                    payload_json=receipt.model_dump_json()).on_conflict_do_nothing(
+                    index_elements=[leader_events.c.source_kind, leader_events.c.source_id]))
 
             if previous["state"] == "SENDING":
                 due = self.clock.now() + self._spacing(delivery_id)
@@ -519,7 +561,7 @@ class Outbox:
                 if not remaining:
                     now = self.clock.now()
                     envelope = OutboundEnvelope.model_validate_json(previous["envelope_json"])
-                    if (envelope.origin_kind == "chat" and envelope.purpose == "result"
+                    if (envelope.origin_kind == "chat" and envelope.purpose == "result" and not envelope.fixed_publication
                             and envelope.origin_id.startswith("turn:")):
                         prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
                         c.execute(update(outbox).where(outbox.c.conversation_id == envelope.target.key,
@@ -528,6 +570,7 @@ class Outbox:
                             outbox.c.enqueue_seq < previous["enqueue_seq"],
                             func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
                             func.json_extract(outbox.c.envelope_json, "$.text") == envelope.text,
+                            func.json_extract(outbox.c.envelope_json, "$.fixed_publication").is_(None),
                             outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
                             .values(state="SUPERSEDED"))
                     c.execute(update(notifications).where(notifications.c.id == origin).values(state="SENT"))

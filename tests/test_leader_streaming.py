@@ -575,3 +575,286 @@ async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
     assert len(s.calls) == 1 and json.loads(s.calls[0].content)["msg_id"] == "followup-message"
     with s.core.db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
+
+
+@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen"])
+async def test_leader_publication_respects_steering_receipt(leader_stream, disposition):
+    from elephant.domain import TextSegment
+    from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
+
+    s = leader_stream
+    with s.core.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = s.core.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    s.core.sessions.settings = s.core.settings.model_copy(update={"orchestration": config})
+    claim = s.core.sessions.claim("fixture")
+    assert not claim["public_answer_events"]
+    extra = s.event.model_copy(update={"event_id": "additional-input", "platform_message_id": "additional-message",
+        "segments": (TextSegment(text="重点测乱序"),),
+        "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
+    extra, _ = s.core.inbox.accept(extra)
+    await s.core.process(extra)
+    identity = (claim["run_id"], claim["fencing_token"], "fixture")
+    receipt = {"kind": "turn_finished", "session_id": claim["session_id"], "run_id": claim["run_id"],
+               "session_revision": "leaf", "input_ids": list(claim["source_ids"]), "inflight": 0, "tools_paired": True,
+               "summary": "已记录测试要求。"}
+    if disposition != "unseen":
+        candidates = await s.core.leader.invoke("inputs", identity)
+        assert [item["id"] for item in candidates] == [extra.event_id]
+        assert "重点测乱序" in candidates[0]["text"]
+        receipt["input_ids"].append(extra.event_id)
+        if disposition == "covered":
+            receipt["outcome"] = {"covered_input_ids": [extra.event_id]}
+    result = {"status": "completed", "summary": "已记录测试要求。"}
+    s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
+    s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
+    with s.core.db.engine.connect() as conn:
+        published = conn.execute(select(outbox.c.id)).scalars().all()
+        handled = conn.execute(select(dialogue_inputs.c.id).where(dialogue_inputs.c.handled_at.is_not(None))).scalars().all()
+        sequenced = conn.execute(select(leader_events.c.source_id).order_by(leader_events.c.seq)).scalars().all()
+    assert sequenced == [*claim["source_ids"], extra.event_id]
+    if disposition == "unseen":
+        assert not handled and not published
+        assert s.core.sessions.claim("fixture")["source_ids"] == claim["source_ids"]
+    else:
+        assert len(published) == 1
+        assert set(handled) == set(receipt["input_ids"] if disposition == "covered" else claim["source_ids"])
+        if disposition == "deferred":
+            assert s.core.sessions.claim("fixture")["source_ids"] == [extra.event_id]
+
+
+async def test_core_streaming_and_regular_delivery_share_target_slots(leader_stream):
+    import asyncio
+
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"allowed_users": ("300", "301"), "proactive_verified": True})
+    target = s.event.conversation
+    other = target.model_copy(update={"remote_conversation_id": "301"})
+    with s.core.db.transaction() as conn:
+        s.core.outbox.enqueue_text(conn, target=target, text="same",
+            origin_kind="command", origin_id="same", allow_proactive=True, ttl_seconds=3600)
+    claim = s.core.sessions.claim("fixture")
+    await append(s.core, claim, 1, "public_answer_delta", "正在检查")
+    entered, release, independent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def request(req):
+        if req.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        s.calls.append(req)
+        if req.url.path.endswith("/stream_messages"):
+            entered.set()
+            await release.wait()
+        elif req.url.path == "/v2/users/301/messages":
+            independent.set()
+        return httpx.Response(200, json={"id": req.url.path})
+
+    adapter.client._transport = httpx.MockTransport(request)
+    await s.core.deliver(wait=False)
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        with s.core.db.transaction() as conn:
+            s.core.outbox.enqueue_text(conn, target=other, text="other",
+                origin_kind="command", origin_id="other", allow_proactive=True, ttl_seconds=3600)
+        await s.core.deliver(wait=False)
+        await asyncio.wait_for(independent.wait(), 3)
+        assert not any(req.url.path == "/v2/users/300/messages" for req in s.calls)
+    finally:
+        release.set()
+        await s.core.deliver()
+    assert [req.url.path for req in s.calls if "/300/" in req.url.path] == ["/v2/users/300/stream_messages"]
+    await append(s.core, claim, 2, "public_answer_end", "正在检查")
+    await s.core.deliver()
+    assert [req.url.path for req in s.calls if "/300/" in req.url.path] == [
+        "/v2/users/300/stream_messages", "/v2/users/300/stream_messages", "/v2/users/300/messages",
+    ]
+
+
+async def test_real_pi_steer_merges_supplement_before_final_publication(leader_stream, tmp_path):
+    import asyncio
+    from pathlib import Path
+
+    from elephant.domain import TextSegment
+    from elephant.harness.pool import SessionPool
+    from elephant.jobs.worker import GeneralRun, Spool, Worker
+    from elephant.providers import ModelCapacity
+    from elephant.runtime.scheduler import RuntimeClient
+    from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
+
+    pi = Path("node_modules/.bin/pi").resolve()
+    if not pi.exists():
+        pytest.skip("locked pi package is not installed")
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"typing_enabled": True})
+    with s.core.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = s.core.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    s.core.sessions.settings = s.core.settings.model_copy(update={"orchestration": config})
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests, runners = [], []
+    extra_id = "live-steering"
+
+    def frames(delta, stop):
+        chunk = {"id": "steer-test", "object": "chat.completion.chunk", "model": "offline", "created": 1}
+        first = {**chunk, "choices": [{"index": 0, "delta": {"role": "assistant", **delta}, "finish_reason": None}]}
+        last = {**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": stop}],
+                "usage": {"prompt_tokens": 300, "completion_tokens": 30}}
+        return "".join("data: " + json.dumps(item, ensure_ascii=False) + "\n\n" for item in (first, last)).encode() + b"data: [DONE]\n\n"
+
+    class PausedAnswer(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await asyncio.wait_for(release.wait(), 15)
+            yield frames({"content": "这份草稿还没有考虑补充。"}, "stop")
+
+    def upstream(request):
+        requests.append(request.content.decode())
+        headers = {"content-type": "text/event-stream"}
+        if len(requests) == 1:
+            return httpx.Response(200, headers=headers, stream=PausedAnswer())
+        if len(requests) == 2:
+            call = {"index": 0, "id": "cover-input", "type": "function",
+                    "function": {"name": "task_outcome",
+                                 "arguments": json.dumps({"status": "completed", "covered_input_ids": [extra_id]})}}
+            return httpx.Response(200, headers=headers, content=frames({"tool_calls": [call]}, "tool_calls"))
+        return httpx.Response(200, headers=headers, content=frames({"content": "已纳入乱序检查。"}, "stop"))
+
+    client = RuntimeClient(s.core, s.core.leader)
+    args = SimpleNamespace(workspace=str(tmp_path / "workers"), archive=str(tmp_path / "artifacts"),
+        pi=str(pi), model="offline", model_endpoint="https://model.invalid/v1/chat/completions", worker_id="fixture")
+
+    def factory(claim, process_id, session_id):
+        runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
+        runner.gateway.transport = httpx.MockTransport(upstream)
+        runners.append(runner)
+        return runner
+
+    pool = SessionPool(factory)
+    worker = Worker(client, "fixture", Spool(tmp_path / "spool"), None, pool=pool)
+    execution = asyncio.create_task(worker.once())
+    try:
+        await asyncio.wait_for(entered.wait(), 15)
+        extra = s.event.model_copy(update={"event_id": extra_id, "platform_message_id": "additional-message",
+            "segments": (TextSegment(text="重点测乱序"),),
+            "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
+        extra, _ = s.core.inbox.accept(extra)
+        await s.core.process(extra)
+        async with asyncio.timeout(10):
+            while extra_id not in runners[0].steered_inputs:
+                assert not execution.done()
+                await asyncio.sleep(0.02)
+        assert "重点测乱序" not in requests[0]
+        await s.core.deliver()
+        assert len(s.calls) == 1 and json.loads(s.calls[0].content)["msg_type"] == 6
+        release.set()
+        assert await asyncio.wait_for(execution, 20)
+        assert "重点测乱序" in requests[1]
+        await s.core.deliver()
+        assert len(s.calls) == 2 and json.loads(s.calls[1].content)["content_raw"] == "已纳入乱序检查。"
+        with s.core.db.engine.connect() as conn:
+            assert conn.execute(select(dialogue_inputs.c.handled_at).where(
+                dialogue_inputs.c.id == extra_id)).scalar_one()
+            receipt = conn.execute(select(leader_events.c.payload_json).where(
+                leader_events.c.source_kind == "delivery")).scalar_one()
+            assert json.loads(receipt)["state"] == "SENT"
+    finally:
+        release.set()
+        if not execution.done():
+            execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+        await pool.close()
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_user_revision_guards_operation_start_but_preserves_started_receipt(leader_stream, started):
+    from elephant.domain import TextSegment
+    from elephant.storage.action_schema import operations
+    from elephant.storage.agent_schema import dialogues
+
+    s = leader_stream
+    with s.core.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = s.core.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    s.core.sessions.settings = s.core.settings.model_copy(update={"orchestration": config})
+    claim = s.core.sessions.claim("fixture")
+    identity = (claim["run_id"], claim["fencing_token"], "fixture")
+    prepared = await s.core.leader.invoke("ledger", identity, {"operation": "prepare",
+        "operation_id": "write-fixture", "arguments_hash": "fixture", "arguments": {},
+        "action": {"name": "workspace.file.write", "effect": "write", "resources": []}})
+    assert prepared["state"] == "PREPARED"
+    begin = {"operation": "transition", "operation_id": "write-fixture",
+             "expected": "PREPARED", "state": "DISPATCHED", "result": {}}
+    if started:
+        assert (await s.core.leader.invoke("ledger", identity, begin))["changed"]
+    extra = s.event.model_copy(update={"event_id": "correction", "platform_message_id": "correction-message",
+        "segments": (TextSegment(text="改成只读检查"),),
+        "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "correction-message"})})
+    extra, _ = s.core.inbox.accept(extra)
+    await s.core.process(extra)
+    if started:
+        assert (await s.core.leader.invoke("ledger", identity, {**begin, "expected": "DISPATCHED",
+            "state": "VERIFIED", "result": {"observed": True}}))["changed"]
+    else:
+        with pytest.raises(PermissionError, match="Review pending user input"):
+            await s.core.leader.invoke("ledger", identity, begin)
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(operations.c.state)).scalar_one() == ("VERIFIED" if started else "PREPARED")
+
+
+def test_pilot_orders_worker_result_and_user_input_in_one_dialogue(runtime):
+    from elephant.domain import TextSegment
+    from elephant.storage.agent_schema import dialogues, leader_events
+
+    root_goal(runtime)
+    worker_complete(runtime)
+    with runtime.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = runtime.sessions.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    runtime.sessions.settings = runtime.sessions.settings.model_copy(update={"orchestration": config})
+    extra = runtime.event.model_copy(update={"event_id": "after-worker",
+        "segments": (TextSegment(text="现在说另一件事"),)})
+    runtime.sessions.enqueue(extra, runtime.access)
+    runtime.service.stream_eligibility = lambda _event: True
+    worker_turn = runtime.sessions.claim("leader")
+    assert worker_turn["purpose"] == "finalize" and not worker_turn["public_answer_events"]
+    assert runtime.sessions.claim("second") is None
+    leader_complete(runtime, worker_turn)
+    with runtime.db.engine.connect() as conn:
+        joined = conn.execute(select(leader_events.c.source_kind, leader_events.c.published_run_id)
+            .order_by(leader_events.c.seq)).all()
+        assert joined[-1] == ("user", None)
+        assert any(item == ("worker", worker_turn["run_id"]) for item in joined[:-1])
+    user_turn = runtime.sessions.claim("leader")
+    assert user_turn["source_ids"] == [extra.event_id]
+    assert user_turn["session_id"] == worker_turn["session_id"]
+
+
+async def test_steered_task_revision_uses_real_supplement_provenance(runtime):
+    from elephant.domain import TextSegment
+    from elephant.ingress.service import Inbox
+    from elephant.storage.agent_schema import dialogues
+    from elephant.storage.task_schema import inputs
+
+    root = root_goal(runtime)
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    with runtime.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = runtime.sessions.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    runtime.sessions.settings = runtime.sessions.settings.model_copy(update={"orchestration": config})
+    claim = runtime.sessions.claim("leader")
+    identity = (claim["run_id"], claim["fencing_token"], "leader")
+    extra = runtime.event.model_copy(update={"event_id": "source-correction", "platform_message_id": "new",
+        "segments": (TextSegment(text="只读验证"),)})
+    extra, _ = Inbox(runtime.db).accept(extra)
+    runtime.sessions.enqueue(extra, runtime.access)
+    assert [item["id"] for item in await runtime.leader.invoke("inputs", identity)] == [extra.event_id]
+    await runtime.leader.invoke("session-receipt", identity, {"kind": "input_consumed",
+        "session_id": claim["session_id"], "run_id": claim["run_id"], "session_revision": "fixture",
+        "input_ids": [*claim["source_ids"], extra.event_id]})
+    await runtime.leader.invoke("tasks", identity, {"operation": "tasks.send_input", "call_id": "revision-fixture",
+        "arguments": {"task_ref": root["task_id"], "kind": "followup", "text": "模型改写",
+                      "source_input_id": extra.event_id}})
+    with runtime.db.engine.connect() as conn:
+        sources = conn.execute(select(inputs.c.source_event_id, inputs.c.text).where(inputs.c.kind == "followup")).all()
+        assert sources and all(source == (extra.event_id, "只读验证") for source in sources)

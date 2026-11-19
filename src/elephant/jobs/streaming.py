@@ -43,6 +43,8 @@ class StreamDelivery:
     def __init__(self, core):
         self.core, self.db, self.clock = core, core.db, core.clock
         self.lock = asyncio.Lock()
+        self.slots = asyncio.Semaphore(8)
+        self.inflight = {}
         self.live = {}
 
     def eligible(self, event):
@@ -261,8 +263,11 @@ class StreamDelivery:
                 return
             pending = (outbox.c.origin_id == origin_id) & (outbox.c.origin_kind == origin_kind)
             if gate["state"] in {"UNKNOWN", "RECONCILIATION"}:
-                c.execute(update(outbox).where(pending, outbox.c.state == "STREAM_PENDING").values(
-                    state="UNKNOWN", receipt_json=json.dumps({"state": "UNKNOWN", "error_code": "STREAM_RECEIPT_UNCERTAIN"})))
+                deliveries = c.execute(select(outbox.c.id).where(pending,
+                    outbox.c.state == "STREAM_PENDING")).scalars().all()
+                for delivery_id in deliveries:
+                    self.core.outbox._receipt(delivery_id, SendReceipt(state="UNKNOWN",
+                        error_code="STREAM_RECEIPT_UNCERTAIN"), connection=c)
                 c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="RECONCILIATION"))
                 self._drop_live(run_id)
                 return
@@ -418,46 +423,101 @@ class StreamDelivery:
             c.execute(update(stream_messages).where(stream_messages.c.id == row["id"]).values(
                 state=receipt.state if receipt else "UNKNOWN", error=receipt.error_code if receipt else "SEND_EXCEPTION"))
 
-    async def dispatch_once(self):
+    async def dispatch_once(self, *, include_outbox=False, wait=True):
         async with self.lock:
+            for target, task in tuple(self.inflight.items()):
+                if task.done():
+                    del self.inflight[target]
+                    task.result()
+            targets = {}
             with self.db.engine.connect() as c:
-                gates = [dict(row) for row in c.execute(select(stream_runs).where(
-                    stream_runs.c.state.in_(["ACTIVE", "UNKNOWN", "DISABLED"]))).mappings()]
+                open_answer = select(stream_messages.c.id).where(
+                    stream_messages.c.run_id == stream_runs.c.run_id, stream_messages.c.kind == "answer",
+                    stream_messages.c.state == "OPEN").correlate(stream_runs).exists()
+                gates = c.execute(select(stream_runs, runs).join(
+                    runs, runs.c.id == stream_runs.c.run_id
+                ).where(stream_runs.c.state.in_(["ACTIVE", "UNKNOWN", "DISABLED"]))
+                    .order_by(open_answer.desc(), runs.c.started_at, stream_runs.c.run_id)).mappings().all()
+                for row in gates:
+                    event, _task = self._source(c, row)
+                    target = event.conversation.key
+                    if target not in self.inflight:
+                        targets.setdefault(target, []).append({column.name: row[column] for column in stream_runs.c})
+
+            if include_outbox:
+                for row in self.core.outbox.pending_rows(self.core.adapters, exclude_targets=tuple(self.inflight)):
+                    targets.setdefault(row["conversation_id"], [])
+            for target, gates in targets.items():
+                self.inflight[target] = asyncio.create_task(self._dispatch_target(target, gates, include_outbox))
+            batch = dict(self.inflight)
+        if wait and batch:
+            # A manual tick can await its attempts. The background loop admits newly arrived targets meanwhile.
+            results = await asyncio.gather(*(asyncio.shield(task) for task in batch.values()), return_exceptions=True)
+            async with self.lock:
+                for target, task in batch.items():
+                    if self.inflight.get(target) is task:
+                        del self.inflight[target]
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+
+    async def stop(self):
+        async with self.lock:
+            pending = list(self.inflight.values())
+            self.inflight.clear()
+            for task in pending:
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _dispatch_target(self, target, gates, include_outbox):
+        async with self.slots:
             for gate in gates:
+                await self._dispatch_gate(gate)
                 with self.db.engine.connect() as c:
-                    run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
-                    _event, task = self._source(c, run)
-                    terminal = run["state"] != "RUNNING"
-                    stopping = ((task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION"})
-                                or (task and task["state"] == "FAILED" and not run["result_json"])
-                                or run["state"] in {"CANCELLED", "NEEDS_RECONCILIATION", "FAILED", "RECOVERED"})
-                if gate["state"] == "ACTIVE" and not stopping:
-                    with self.db.engine.connect() as c:
-                        items = [dict(row) for row in c.execute(select(events).where(events.c.run_id == gate["run_id"],
-                            events.c.seq > gate["cursor_seq"]).order_by(events.c.seq).limit(200)).mappings()]
-                    for item in items:
-                        try:
-                            await self._event(gate, item)
-                        except (ValueError, KeyError, TypeError):
-                            self._disable(gate["run_id"], "INVALID_PUBLIC_ANSWER")
-                        with self.db.transaction() as c:
-                            c.execute(update(stream_runs).where(stream_runs.c.run_id == gate["run_id"]).values(
-                                cursor_seq=item["seq"]))
-                            state = c.execute(select(stream_runs.c.state).where(
-                                stream_runs.c.run_id == gate["run_id"])).scalar_one()
-                        if state != "ACTIVE":
-                            break
-                    with self.db.engine.connect() as c:
-                        state = c.execute(select(stream_runs.c.state).where(
-                            stream_runs.c.run_id == gate["run_id"])).scalar_one()
-                        buffered = [dict(row) for row in c.execute(select(stream_messages).where(
-                            stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
-                            stream_messages.c.state.in_(["NEW", "OPEN"]),
-                            stream_messages.c.text != stream_messages.c.sent_text)).mappings()]
-                    if state == "ACTIVE":
-                        for row in buffered:
-                            await self._send(row, row["text"])
-                        if not terminal:
-                            await self._typing(gate)
-                await self._close_if_settled(gate["run_id"])
-                self._resolve_result(gate["run_id"])
+                    reserved = c.execute(select(stream_messages.c.id).where(
+                        stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
+                        stream_messages.c.state == "OPEN").limit(1)).first()
+                if reserved:
+                    return
+            if include_outbox:
+                await self.core.outbox.dispatch_target(target, self.core.adapters,
+                    self.core.settings.send_budget_per_minute, self.core.pre_send)
+
+    async def _dispatch_gate(self, gate):
+        with self.db.engine.connect() as c:
+            run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
+            _event, task = self._source(c, run)
+            terminal = run["state"] != "RUNNING"
+            stopping = ((task and task["state"] in {"CANCELLED", "CANCEL_REQUESTED", "EXPIRED", "NEEDS_RECONCILIATION"})
+                        or (task and task["state"] == "FAILED" and not run["result_json"])
+                        or run["state"] in {"CANCELLED", "NEEDS_RECONCILIATION", "FAILED", "RECOVERED"})
+        if gate["state"] == "ACTIVE" and not stopping:
+            with self.db.engine.connect() as c:
+                items = [dict(row) for row in c.execute(select(events).where(events.c.run_id == gate["run_id"],
+                    events.c.seq > gate["cursor_seq"]).order_by(events.c.seq).limit(200)).mappings()]
+            for item in items:
+                try:
+                    await self._event(gate, item)
+                except (ValueError, KeyError, TypeError):
+                    self._disable(gate["run_id"], "INVALID_PUBLIC_ANSWER")
+                with self.db.transaction() as c:
+                    c.execute(update(stream_runs).where(stream_runs.c.run_id == gate["run_id"]).values(
+                        cursor_seq=item["seq"]))
+                    state = c.execute(select(stream_runs.c.state).where(
+                        stream_runs.c.run_id == gate["run_id"])).scalar_one()
+                if state != "ACTIVE":
+                    break
+            with self.db.engine.connect() as c:
+                state = c.execute(select(stream_runs.c.state).where(
+                    stream_runs.c.run_id == gate["run_id"])).scalar_one()
+                buffered = [dict(row) for row in c.execute(select(stream_messages).where(
+                    stream_messages.c.run_id == gate["run_id"], stream_messages.c.kind == "answer",
+                    stream_messages.c.state.in_(["NEW", "OPEN"]),
+                    stream_messages.c.text != stream_messages.c.sent_text)).mappings()]
+            if state == "ACTIVE":
+                for row in buffered:
+                    await self._send(row, row["text"])
+                if not terminal:
+                    await self._typing(gate)
+        await self._close_if_settled(gate["run_id"])
+        self._resolve_result(gate["run_id"])

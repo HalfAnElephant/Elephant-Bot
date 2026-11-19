@@ -20,7 +20,13 @@ from elephant.dialogue.planner import plan_turn
 from elephant.domain import InboundEvent, Surface, stable_id
 from elephant.domain.execution import TaskGoal, TurnInput
 from elephant.storage.action_schema import operations
-from elephant.storage.agent_schema import agent_events, dialogue_inputs, dialogues, leader_inbox
+from elephant.storage.agent_schema import (
+    agent_events,
+    dialogue_inputs,
+    dialogues,
+    leader_events,
+    leader_inbox,
+)
 from elephant.storage.memory_sync_schema import (
     memory_barriers,
     memory_operations,
@@ -391,9 +397,13 @@ class KnowledgeRuntime:
                     tasks.c.root_task_id == root["id"])), inputs.c.consumed_at.is_(None)).values(
                         consumed_at=now, state="SUPERSEDED"))
                 if not blocked:
-                    conn.execute(insert(leader_inbox).values(id=stable_id(root["id"], "memory-replan", str(revision)),
+                    source_id = stable_id(root["id"], "memory-replan", str(revision))
+                    conn.execute(insert(leader_inbox).values(id=source_id,
                         target_session_id=current["coordinator_session_id"], root_task_id=root["id"],
                         event_id=marker["operation_ids"][-1], resume_reason="memory_replan", source_revision=revision, created_at=now))
+                    if root["origin_dialogue_id"]:
+                        conn.execute(insert(leader_events).values(
+                            dialogue_id=root["origin_dialogue_id"], source_kind="worker", source_id=source_id))
             self.core.tasks.wakeup.set()
 
     def rotate(self, scope, identity, receipt):

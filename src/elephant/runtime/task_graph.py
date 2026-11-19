@@ -9,7 +9,7 @@ from elephant.domain.agents import ChildSpec, GoalSpec, ProgressSpec, WaitSpec
 from elephant.domain.execution import ExecutionPlan, TaskGoal
 from elephant.harness.artifacts import artifact_path
 from elephant.storage.action_schema import operations
-from elephant.storage.agent_schema import agent_events, leader_inbox
+from elephant.storage.agent_schema import agent_events, leader_events, leader_inbox
 from elephant.storage.job_schema import jobs
 from elephant.storage.schema import outbox
 from elephant.storage.task_schema import inputs, notifications, observations, runs, tasks, waits
@@ -40,9 +40,13 @@ class TaskGraph:
             root = self.root(conn, task)
             if (task["id"] == root["id"] or task["parent_task_id"] == root["id"]
                     or kind in {"needs_attention", "needs_input"}) and root["state"] not in TERMINAL | {"CANCEL_REQUESTED"}:
-                conn.execute(insert(leader_inbox).values(id=stable_id(root["id"], event_id),
+                source_id = stable_id(root["id"], event_id)
+                conn.execute(insert(leader_inbox).values(id=source_id,
                     target_session_id=root["coordinator_session_id"], root_task_id=root["id"],
                     event_id=event_id, resume_reason=kind, source_revision=root["goal_revision"], created_at=now))
+                if root["origin_dialogue_id"]:
+                    conn.execute(insert(leader_events).values(
+                        dialogue_id=root["origin_dialogue_id"], source_kind="worker", source_id=source_id))
         return event_id
 
     def root(self, conn, task):
