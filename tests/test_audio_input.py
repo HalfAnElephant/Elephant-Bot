@@ -132,19 +132,23 @@ async def test_real_silk_decode_in_child_process(tencent):
     assert result["text"] == "查天气" and len(api.requests) == 1
 
 
-@pytest.mark.parametrize("data", [b"", b"x" * (audio.MAX_AUDIO_BYTES + 1)])
-async def test_voice_input_size_rejected_before_asr(data):
+async def test_empty_voice_rejected_before_asr():
     api = ASRReceiver()
-    with pytest.raises(ValueError, match="8 MiB"):
-        await audio.transcribe_audio(api, data)
+    with pytest.raises(ValueError, match="empty"):
+        await audio.transcribe_audio(api, b"")
     assert not api.requests
 
 
-async def test_audio_over_120_seconds_is_rejected_before_asr():
+async def test_audio_over_120_seconds_and_8_mib_is_transcribed_in_segments(tmp_path):
+    path = tmp_path / "long.wav"
+    path.write_bytes(wav_data(b"\x00\x00" * (audio.SAMPLE_RATE * 300)))
+    assert path.stat().st_size > 8 * 1024 * 1024
     api = ASRReceiver()
-    with pytest.raises(ValueError, match="120 seconds"):
-        await audio.transcribe_audio(api, wav_data(b"\x00\x00" * (audio.SAMPLE_RATE * 120 + 1)))
-    assert not api.requests
+    with path.open("rb") as incoming:
+        result = await audio.transcribe_audio(api, incoming)
+    assert len(api.requests) == 3
+    assert all(len(data) <= 8 * 1024 * 1024 for data, _ in api.requests)
+    assert result == {"text": "查天气\n查天气\n查天气", "duration_ms": 300}
 
 
 async def test_invalid_audio_does_not_reach_asr(tmp_path, monkeypatch):

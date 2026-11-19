@@ -7,6 +7,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -172,8 +173,8 @@ class TaskService:
             },
         }
 
-    def cancel(self, public_id, access):
-        with self.db.transaction() as c:
+    def cancel(self, public_id, access, *, conn=None):
+        with (self.db.transaction() if conn is None else nullcontext(conn)) as c:
             row = self._visible(c, public_id, access)
             self.permissions.require(access, "task.cancel", "task:" + row["id"])
             if row["root_task_id"] and hasattr(self, "graph"):
@@ -241,7 +242,9 @@ class TaskService:
         attention = state in {"BLOCKED", "FAILED", "EXPIRED"}
         stored_state = "WAITING_CHILDREN" if task["kind"] == "goal" and attention else state
         conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=stored_state, result_json=result.model_dump_json()))
-        if task["root_task_id"] and hasattr(self, "graph"):
+        if task["root_task_id"] and hasattr(self, "graph") and state == "CANCELLED":
+            self.graph.settle_cancelled(conn, task, task["stop_reason"], wake=True)
+        elif task["root_task_id"] and hasattr(self, "graph"):
             settled = {**dict(task), "state": stored_state}
             self.graph.event(conn, settled, "needs_attention" if attention else "child_result",
                 {"result": result.model_dump(mode="json")},
@@ -549,7 +552,8 @@ class TaskService:
                 values["runner_stopped_at"] = now
             if process:
                 values.update(process_id=process["id"], process_epoch=process["epoch"], binding_generation=process["generation"])
-            values["state"] = "YIELDED" if wait or child_wait else "FINISHED"
+            cancelled = state in {"CANCELLED", "CANCEL_REQUESTED"}
+            values["state"] = "YIELDED" if (wait or child_wait) and not cancelled else "FINISHED"
             c.execute(update(runs).where(runs.c.id == run_id).values(**values))
             if run["process_id"]:
                 from elephant.storage.task_schema import processes, sessions
@@ -561,7 +565,12 @@ class TaskService:
                     identity = json.loads(c.execute(select(processes.c.identity_json).where(processes.c.id == run["process_id"])).scalar_one())
                     identity.update(actual_session_id=process["actual_session_id"], actual_session_file=process.get("actual_session_file"))
                     c.execute(update(processes).where(processes.c.id == run["process_id"]).values(identity_json=json.dumps(identity)))
-            if child_wait:
+            if cancelled:
+                if state == "CANCELLED" and task["root_task_id"]:
+                    self.graph.settle_cancelled(c, task, task["stop_reason"], wake=True)
+                elif wait:
+                    c.execute(update(waits).where(waits.c.id == wait["id"]).values(state="CANCELLED"))
+            elif child_wait:
                 condition = json.loads(task["wait_json"])
                 condition["yielded"] = True
                 c.execute(update(tasks).where(tasks.c.id == task["id"]).values(wait_json=json.dumps(condition)))
@@ -577,8 +586,6 @@ class TaskService:
                 self.graph.settled(c, settled_task, run_id, result.model_dump(mode="json"))
             elif not result.agent_authored:
                 state = self._queue_failure_notice(c, task, result, state)
-            elif state == "CANCELLED":
-                pass
             elif notification_run:
                 self._notification(c, task, run_id, result.summary, "result", "important", "result:" + run_id)
             elif c.execute(select(inputs.c.id).where(inputs.c.task_id == task["id"], inputs.c.state == "PENDING")).first():
@@ -652,7 +659,6 @@ class TaskService:
             return {"acknowledged": seq}
 
     def _validate_result(self, result):
-        total = 0
         if len(result.artifacts) > 20 or len(result.evidence) > 60:
             raise ValueError("result exceeds manifest budget")
         for artifact in result.artifacts:
@@ -667,8 +673,7 @@ class TaskService:
                 fd = os.open(artifact_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
                 try:
                     info = os.fstat(fd)
-                    total += info.st_size
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or total > 20 * 1024 * 1024:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != artifact.size:
                         raise ValueError("unsafe archive file")
                     digest = hashlib.sha256()
                     read_bytes = 0
@@ -677,7 +682,7 @@ class TaskService:
                         if read_bytes > info.st_size:
                             raise ValueError("archive changed during verification")
                         digest.update(chunk)
-                    if info.st_size != artifact.size or digest.hexdigest() != artifact.sha256:
+                    if read_bytes != artifact.size or digest.hexdigest() != artifact.sha256:
                         raise ValueError("archive digest mismatch")
                 finally:
                     os.close(fd)
@@ -1020,13 +1025,13 @@ class TaskService:
                 return "[用户发送了语音，请根据带来源的语音转写理解本次输入]"
         return text
 
-    def add_input(self, public_id, event, access, text, question_id=None, *, selected_by=None):
+    def add_input(self, public_id, event, access, text, question_id=None, *, selected_by=None, conn=None):
         text = self._input_text(event, text)
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 16000:
             raise ValueError("input must contain 1..16000 characters")
         if access.principal != event.principal or access.conversation != event.conversation:
             raise PermissionError("input identity mismatch")
-        with self.db.transaction() as c:
+        with (self.db.transaction() if conn is None else nullcontext(conn)) as c:
             task = self._visible(c, public_id, access)
             if task["requester"] != event.principal.key:
                 raise PermissionError("task input requires the original authenticated subject")
@@ -1055,10 +1060,11 @@ class TaskService:
             return {"accepted": True, "input_id": input_id}
 
     def open_input_waits(self):
+        deadline = func.coalesce(waits.c.expires_at, waits.c.delivery_deadline)
         return select(waits.c.id, waits.c.task_id).join(tasks, tasks.c.id == waits.c.task_id).where(
             waits.c.kind == "input", tasks.c.state.in_(["RUNNING", "WAITING_INPUT"]),
             waits.c.state.in_(["INTENT", "WAITING"]),
-            (waits.c.expires_at.is_(None)) | (waits.c.expires_at > self.clock.now().isoformat()),
+            (deadline.is_(None)) | (deadline > self.clock.now().isoformat()),
             ~select(inputs.c.id).where(inputs.c.question_id == waits.c.id, inputs.c.task_id == waits.c.task_id).exists())
 
     def _open_input_wait(self, conn, task_id, question_id):

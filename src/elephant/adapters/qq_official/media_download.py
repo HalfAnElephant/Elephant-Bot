@@ -44,7 +44,7 @@ async def inbound_media_headers(core, claim, attachment) -> dict:
     manifest = {"kind": "inbox", "id": source.event_id, "digest": hashlib.sha256(raw.encode()).hexdigest()}
     if manifest not in context.get("source_manifest", ()):
         raise PermissionError("QQ media source is absent from the run's verified context")
-    if not any(segment.type in {"audio", "file"} and segment.source_url == url
+    if not any(segment.type in {"audio", "file", "image"} and (segment.image_url or segment.source_url) == url
             and segment.attachment_ref == attachment.get("attachment_ref") for segment in source.segments):
         raise PermissionError("QQ media URL does not belong to the accepted attachment")
     adapter = core.adapters.get(source.conversation.adapter_instance_id)

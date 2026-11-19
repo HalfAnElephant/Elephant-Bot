@@ -1,5 +1,6 @@
 """Export only regular, single-link files through descriptor-relative opens."""
 
+import codecs
 import hashlib
 import json
 import os
@@ -29,7 +30,7 @@ def artifact_path(relative, *, mime_types=None):
     return path, mime_type
 
 
-def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, mime_types=None):
+def export_artifacts(workspace, archive, paths, max_bytes=None, *, mime_types=None):
     if len(paths) > 20:
         raise ValueError("too many artifacts")
     mime_types = dict(DEFAULT_ARTIFACT_MIME_TYPES if mime_types is None else mime_types)
@@ -60,40 +61,43 @@ def export_artifacts(workspace, archive, paths, max_bytes=20 * 1024 * 1024, *, m
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise ValueError("artifact must be a regular single-link file")
                     total += info.st_size
-                    if total > max_bytes:
+                    if max_bytes is not None and total > max_bytes:
                         raise ValueError("artifact budget exceeded")
-                    content = bytearray()
-                    while chunk := os.read(fd, min(65536, max_bytes - len(content) + 1)):
-                        content.extend(chunk)
-                        if len(content) > info.st_size or len(content) > max_bytes:
-                            raise ValueError("artifact changed or exceeded budget")
-                    after = os.fstat(fd)
-                    if (
-                        after.st_size != info.st_size
-                        or after.st_mtime_ns != info.st_mtime_ns
-                        or len(content) != info.st_size
-                    ):
-                        raise ValueError("artifact changed during export")
-                    if mime_type.startswith("text/") or mime_type == "application/json":
-                        content.decode("utf-8")
+                    digest = hashlib.sha256()
+                    decoder = codecs.getincrementaldecoder("utf-8")() if (
+                        mime_type.startswith("text/") or mime_type == "application/json") else None
+                    size = 0
+                    artifact_id = str(uuid4())
+                    destination_fd = os.open(artifact_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                             0o600, dir_fd=archive_fd)
+                    created.append(artifact_id)
+                    with os.fdopen(destination_fd, "wb") as output:
+                        while chunk := os.read(fd, 65536):
+                            size += len(chunk)
+                            if size > info.st_size:
+                                raise ValueError("artifact changed during export")
+                            if decoder:
+                                decoder.decode(chunk)
+                            digest.update(chunk)
+                            output.write(chunk)
+                        after = os.fstat(fd)
+                        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns, size) != (
+                                info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_size):
+                            raise ValueError("artifact changed during export")
+                        if decoder:
+                            decoder.decode(b"", final=True)
+                        output.flush()
+                        os.fsync(output.fileno())
                 finally:
                     os.close(fd)
             finally:
                 os.close(directory)
-            artifact_id = str(uuid4())
-            destination_fd = os.open(artifact_id, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                     0o600, dir_fd=archive_fd)
-            created.append(artifact_id)
-            with os.fdopen(destination_fd, "wb") as output:
-                output.write(content)
-                output.flush()
-                os.fsync(output.fileno())
             exported.append(
                 {
                     "id": artifact_id,
                     "relative_path": str(path),
-                    "size": len(content),
-                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": size,
+                    "sha256": digest.hexdigest(),
                     "mime_type": mime_type,
                 }
             )

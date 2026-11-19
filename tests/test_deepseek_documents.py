@@ -26,6 +26,7 @@ class DeepSeekFixture:
         self.save_on_error = False
 
     async def upload(self, data, filename, purpose):
+        data = data.read()
         self.uploads.append((data, filename, purpose))
         if self.error and not self.save_on_error:
             raise self.error
@@ -74,6 +75,15 @@ def references(body):
             for part in message["content"] if part["type"] == "file"]
 
 
+async def test_document_upload_accepts_more_than_the_old_local_limit(fixture):
+    path = fixture.workspace / "big.pdf"
+    with path.open("wb") as source:
+        source.truncate(21 * 1024 * 1024)
+    result = await fixture.service.parse({"path": path.name}, fixture.context)
+    assert result["file_id"] == "file-api-1"
+    assert len(fixture.api.uploads[0][0]) == path.stat().st_size
+
+
 async def test_parse_registers_a_read_capability_and_attaches_verified_file(fixture):
     registry = CapabilityRegistry()
     fixture.service.register(registry)
@@ -111,7 +121,7 @@ async def test_ocr_reads_original_without_changing_durable_document_receipts(fix
         "pages": [{"index": 0, "text": "Original document text", "finish_reason": "length"}]}
 
     async def recognize(data, filename):
-        calls.append((data, filename))
+        calls.append((data.read(), filename))
         return expected
 
     fixture.api.ocr = recognize
@@ -152,7 +162,7 @@ async def test_ocr_rechecks_authorization_and_scope(fixture, monkeypatch, phase)
         return data
 
     async def recognize(data, filename):
-        calls.append((data, filename))
+        calls.append((data.read(), filename))
         fixture.authorized = False
         return {"page_count": 1, "pages": []}
 
@@ -180,7 +190,7 @@ async def test_gateway_ocr_archives_large_text_with_scoped_resource_grants(fixtu
         return await core(operation, payload)
 
     async def recognize(data, filename):
-        assert data == b"%PDF fixture" and filename == "document.pdf"
+        assert data.read() == b"%PDF fixture" and filename == "document.pdf"
         return expected
 
     fixture.api.ocr = recognize

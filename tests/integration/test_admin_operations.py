@@ -1,6 +1,5 @@
 import hashlib
 import json
-from uuid import uuid4
 
 import httpx
 import pytest
@@ -10,6 +9,8 @@ from sqlalchemy import select, update
 from elephant.app import create_app
 from elephant.config import Settings
 from elephant.domain import AccessContext, InboundEvent
+from elephant.domain.tasks import TaskResult
+from elephant.harness.artifacts import export_artifacts
 from elephant.storage.task_schema import tasks
 
 
@@ -123,13 +124,15 @@ def test_config_rollback_and_artifact_download_boundary(tmp_path, official_confi
                           "success_checks": [], "requested_outputs": []}],
         }, "artifact-download-test", core.sessions.binding(), {})
         task = c.execute(select(tasks).where(tasks.c.public_id == task_view["public_id"])).mappings().one()
-    core.tasks.archive_root.mkdir()
-    content = b'verified report'
-    artifact_id = str(uuid4())
+    workspace = tmp_path / "workspace"
+    (workspace / "outputs").mkdir(parents=True)
+    content = b'a' * (21 * 1024 * 1024) + b'verified report'
+    (workspace / "outputs/report.md").write_bytes(content)
+    artifact, = export_artifacts(workspace, core.tasks.archive_root, ["outputs/report.md"])
     digest = hashlib.sha256(content).hexdigest()
-    path = core.tasks.archive_root/artifact_id
-    path.write_bytes(content)
-    result = {'status':'completed', 'summary':'complete', 'artifacts':[{'id':artifact_id, 'relative_path':'outputs/report.md', 'mime_type':'text/markdown','size':len(content),'sha256':digest}]}
+    path = core.tasks.archive_root / artifact["id"]
+    result = {'status': 'completed', 'summary': 'complete', 'artifacts': [artifact]}
+    core.tasks._validate_result(TaskResult.model_validate(result))
     with core.db.transaction() as c:
         c.execute(update(tasks).where(tasks.c.id==task['id']).values(state='SUCCEEDED',result_json=json.dumps(result)))
     auth = {'Authorization':'Bearer admin-test-token'}

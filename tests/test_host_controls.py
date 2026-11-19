@@ -10,8 +10,9 @@ from sqlalchemy import insert, select, update
 
 from elephant.app import create_app
 from elephant.config import OwnerConfig, QQOwnerBinding, Settings
+from elephant.domain import OutboundEnvelope
 from elephant.permissions import PermissionRule
-from elephant.storage.agent_schema import dialogue_inputs
+from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
 from elephant.storage.schema import audit_events, outbox
 from elephant.storage.task_schema import inputs, model_requests, notifications, runs, tasks, waits
 
@@ -78,7 +79,7 @@ async def control_runtime(tmp_path, official_config, official_event, clock):
             core.tasks.graph.event(conn, child, "needs_input", {"question_id": name, "public_text": "请选择参数"},
                 event_id="question-" + name, wake=True)
 
-    def question_notice():
+    def question_notice(*, sent=True):
         claim = core.sessions.claim("question-leader")
         assert claim["purpose"] == "question"
         core.leader.complete(claim["run_id"], claim["fencing_token"], "question-leader",
@@ -88,7 +89,9 @@ async def control_runtime(tmp_path, official_config, official_event, clock):
         message = str(uuid4())
         with core.db.transaction() as conn:
             notice = conn.execute(select(notifications).where(notifications.c.run_id == claim["run_id"])).mappings().one()
-            conn.execute(update(outbox).where(outbox.c.origin_id == notice["id"]).values(state="SENT", platform_message_id=message))
+            if sent:
+                conn.execute(update(outbox).where(outbox.c.origin_id == notice["id"])
+                    .values(state="SENT", platform_message_id=message))
         return message
 
     yield SimpleNamespace(core=core, event=event, root=root, receive=receive, response=response,
@@ -297,9 +300,9 @@ async def test_recalled_task_notice_cannot_route_a_new_reply(control_runtime):
     r.no_model_input()
 
 
-@pytest.mark.parametrize("recall_before_write", [False, True])
+@pytest.mark.parametrize(("withdrawn", "quoted"), [(None, False), (None, True), ("answer", False), ("selection", False)])
 async def test_multiple_open_questions_require_child_selection_and_preserve_exact_answer(
-        control_runtime, monkeypatch, recall_before_write):
+        control_runtime, withdrawn, quoted):
     r = control_runtime
     root = r.root(children=2)
     first, second = child_rows(r, root["task_id"])
@@ -315,19 +318,23 @@ async def test_multiple_open_questions_require_child_selection_and_preserve_exac
         r.core.inbox.accept(event.model_copy(update={"event_id": "recall-" + event.event_id,
             "event_type": "message.recalled"}))
 
-    if recall_before_write:
-        add_input = r.core.tasks.add_input
-
-        def withdraw_then_apply(*args, selected_by, **kwargs):
-            recall(selected_by)
-            return add_input(*args, selected_by=selected_by, **kwargs)
-
-        monkeypatch.setattr(r.core.tasks, "add_input", withdraw_then_apply)
-    selected = await r.receive(r.event("选择 1"))
-    if recall_before_write:
+    if quoted:
+        with r.core.db.transaction() as conn:
+            conn.execute(update(outbox).where(outbox.c.origin_id == source.event_id)
+                .values(state="SENT", platform_message_id="selection-menu"))
+    choice = r.event("选择 1", reply_to="selection-menu" if quoted else None)
+    if withdrawn:
+        recall(source if withdrawn == "answer" else choice)
+    selected = await r.receive(choice)
+    if withdrawn:
         with r.core.db.engine.connect() as conn:
             assert not conn.execute(select(inputs)).first()
             assert set(conn.execute(select(waits.c.state)).scalars()) == {"WAITING"}
+            envelope = OutboundEnvelope.model_validate_json(conn.scalar(select(outbox.c.envelope_json)
+                .where(outbox.c.origin_id == selected.event_id)))
+            assert "请重新发送内容" in envelope.text
+        assert r.core.pre_send(envelope) == (withdrawn == "answer")
+        assert r.core.controls.route(selected) == r.response(selected)
         r.no_model_input()
         return
     with r.core.db.engine.connect() as conn:
@@ -345,7 +352,8 @@ async def test_multiple_open_questions_require_child_selection_and_preserve_exac
     r.no_model_input()
 
 
-async def test_leader_question_notice_binds_its_actual_wait_over_other_open_questions(control_runtime):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_leader_question_notice_binds_its_actual_wait_over_other_open_questions(control_runtime, legacy):
     r = control_runtime
     root = r.root(children=2)
     first, second = child_rows(r, root["task_id"])
@@ -359,6 +367,10 @@ async def test_leader_question_notice_binds_its_actual_wait_over_other_open_ques
     with r.core.db.transaction() as conn:
         notice = conn.execute(select(notifications).where(notifications.c.run_id == claim["run_id"])).mappings().one()
         conn.execute(update(outbox).where(outbox.c.origin_id == notice["id"]).values(state="SENT", platform_message_id="leader-question-message"))
+        if legacy:
+            conn.execute(update(waits).where(waits.c.id == "bound-question").values(notification_id="bound-question"))
+            claim.pop("question_ids")
+            conn.execute(update(runs).where(runs.c.id == claim["run_id"]).values(request_json=json.dumps(claim)))
     r.question(second["id"], "new-unrelated-question")
     await r.receive(r.event("确认第一项参数", reply_to="leader-question-message"))
     with r.core.db.engine.connect() as conn:
@@ -367,6 +379,44 @@ async def test_leader_question_notice_binds_its_actual_wait_over_other_open_ques
         assert not conn.execute(select(inputs).where(inputs.c.task_id == second["id"])).first()
         assert conn.execute(select(waits.c.state).where(waits.c.id == "new-unrelated-question")).scalar_one() == "WAITING"
     r.no_model_input()
+
+
+async def test_question_remains_deliverable_after_an_unrelated_worker_revision(control_runtime):
+    r = control_runtime
+    root = r.root(children=2)
+    first, second = child_rows(r, root["task_id"])
+    r.question(first["id"], "relayed-question")
+    r.question_notice(sent=False)
+    with r.core.db.engine.connect() as conn:
+        notice_id = conn.scalar(select(notifications.c.id).where(notifications.c.purpose == "question"))
+        assert conn.scalar(select(waits.c.notification_id).where(waits.c.id == "relayed-question")) == notice_id
+        envelope = OutboundEnvelope.model_validate_json(conn.scalar(select(outbox.c.envelope_json)
+            .where(outbox.c.origin_id == notice_id)))
+    revised = await r.receive(r.event("补充 " + second["public_id"] + " 只看今年"))
+    assert r.response(revised) == "已收到补充内容。"
+    assert r.core.pre_send(envelope)
+    answer = await r.receive(r.event("回答 " + first["public_id"] + " 参数 A"))
+    assert r.response(answer) == "已收到补充内容。"
+    assert not r.core.pre_send(envelope)
+
+
+async def test_question_relay_and_worker_failure_keep_separate_bindings(control_runtime):
+    r = control_runtime
+    root = r.root(children=2)
+    first, second = child_rows(r, root["task_id"])
+    r.question(first["id"], "answer-during-escalation")
+    worker = r.core.tasks.claim("worker")
+    assert worker["task_id"] == second["id"]
+    r.core.tasks.submit(worker["run_id"], worker["fencing_token"], "worker",
+        {"status": "failed", "summary": "无法访问数据", "agent_authored": False})
+    message = r.question_notice()
+    answer = await r.receive(r.event("参数 A", reply_to=message))
+    with r.core.db.engine.connect() as conn:
+        row = conn.execute(select(inputs).where(inputs.c.source_id == answer.event_id)).mappings().one()
+        assert row["task_id"] == first["id"] and row["question_id"] == "answer-during-escalation"
+        assert conn.scalar(select(leader_inbox.c.handled_at).where(
+            leader_inbox.c.resume_reason == "needs_attention")) is None
+    assert r.core.sessions.claim("leader")["purpose"] == "attention"
 
 
 @pytest.mark.parametrize("action", ["task.read", "task.cancel", "task.input"])
@@ -397,22 +447,57 @@ async def test_natural_control_uses_current_dialogue_without_touching_another_ac
 async def test_lost_cancel_receipt_retries_the_bound_target_without_retargeting(control_runtime, monkeypatch):
     r = control_runtime
     first = r.root()
-    original_cancel = r.core.tasks.cancel
+    original_reply = r.core.reply
 
-    def lost_reply(reference, access):
-        original_cancel(reference, access)
+    def lost_reply(*args, **kwargs):
         raise RuntimeError("simulated response loss after committed cancellation")
 
-    monkeypatch.setattr(r.core.tasks, "cancel", lost_reply)
+    monkeypatch.setattr(r.core, "reply", lost_reply)
     source = await r.receive(r.event("取消刚才那个"))
     assert task_state(r, first["task_id"]) == "CANCELLED" and r.response(source) is None
     assert r.core.inbox.pending() == [source]
     second = r.root(title="随后创建的新任务")
-    monkeypatch.setattr(r.core.tasks, "cancel", original_cancel)
+    monkeypatch.setattr(r.core, "reply", original_reply)
     await r.core.tick(dispatch=False)
     assert r.response(source) == "已取消。"
     assert not r.core.inbox.pending()
     assert task_state(r, second["task_id"]) == "WAITING_CHILDREN"
+    r.no_model_input()
+
+
+@pytest.mark.parametrize("replay", [False, True])
+async def test_qq_channel_cancel_recalled_before_commit_does_not_cancel(control_runtime, clock, monkeypatch, replay):
+    from contracts.test_adapters import signed
+
+    r = control_runtime
+    qq = r.core.adapters["qq"]
+    message = {"id": "channel-task", "channel_id": "channel", "author": {"id": "300"},
+        "timestamp": clock.now().isoformat(), "content": "检查项目"}
+    root = r.root(source=qq.normalize({"op": 0, "t": "AT_MESSAGE_CREATE", "d": message}))
+    cancellation = {**message, "id": "channel-cancel", "content": "取消 " + root["public_id"]}
+    created = {"op": 0, "t": "AT_MESSAGE_CREATE", "d": cancellation}
+    recalled = {"op": 0, "t": "PUBLIC_MESSAGE_DELETE",
+        "d": {"message": cancellation, "op_user": {"id": "300"}}}
+    assert qq.callback(*signed(qq, created, clock)) == {"op": 12}
+    if replay:
+        original_cancel = r.core.tasks.cancel
+
+        def interrupted_cancel(*args, **kwargs):
+            original_cancel(*args, **kwargs)
+            raise RuntimeError("cancel interrupted before commit")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(r.core.tasks, "cancel", interrupted_cancel)
+            with pytest.raises(RuntimeError, match="persisted task control needs replay"):
+                await r.core.tick(dispatch=False)
+        assert task_state(r, root["task_id"]) == "WAITING_CHILDREN"
+        assert r.core.inbox.pending()
+    assert qq.callback(*signed(qq, recalled, clock)) == {"op": 12}
+    assert r.core.inbox.pending()[0].event_type == "message.recalled"
+    await r.core.tick(dispatch=False)
+    await r.core.tick(dispatch=False)
+    assert task_state(r, root["task_id"]) == "WAITING_CHILDREN"
+    assert not r.core.inbox.pending()
     r.no_model_input()
 
 
@@ -439,20 +524,19 @@ async def test_lost_answer_receipt_reuses_exact_question_even_after_task_closes(
     child = child_rows(r, root["task_id"])[0]
     r.question(child["id"], "durable-answer-question")
     message = r.question_notice()
-    original_add = r.core.tasks.add_input
+    original_reply = r.core.reply
 
     def lost_reply(*args, **kwargs):
-        original_add(*args, **kwargs)
         raise RuntimeError("simulated response loss after committed answer")
 
-    monkeypatch.setattr(r.core.tasks, "add_input", lost_reply)
+    monkeypatch.setattr(r.core, "reply", lost_reply)
     source = await r.receive(r.event("原始答案？", reply_to=message))
     assert r.response(source) is None
     assert r.core.inbox.pending() == [source]
     with r.core.db.transaction() as conn:
         conn.execute(update(tasks).where(tasks.c.root_task_id == root["task_id"]).values(state="SUCCEEDED"))
     r.root(title="随后对话")
-    monkeypatch.setattr(r.core.tasks, "add_input", original_add)
+    monkeypatch.setattr(r.core, "reply", original_reply)
     await r.core.tick(dispatch=False)
     assert r.response(source) == "已收到补充内容。"
     with r.core.db.engine.connect() as conn:
@@ -704,3 +788,49 @@ async def test_answer_after_old_execution_deadline_remains_bound_to_open_questio
         assert row["kind"] == "answer" and row["text"] == "继续"
         assert not conn.execute(select(inputs).where(inputs.c.task_id == second["id"])).first()
         assert conn.execute(select(waits.c.state).where(waits.c.id == "long-question")).scalar_one() == "CONSUMED"
+
+
+async def test_second_reply_to_combined_questions_is_not_auto_rebound(control_runtime):
+    r = control_runtime
+    root = r.root(children=2)
+    first, second = child_rows(r, root["task_id"])
+    r.question(first["id"], "first-question")
+    r.question(second["id"], "second-question")
+    message = r.question_notice()
+    await r.receive(r.event("回答 " + first["public_id"] + " 参数甲", reply_to=message))
+    with r.core.db.engine.connect() as conn:
+        assert conn.scalar(select(inputs.c.question_id)) == "first-question"
+    await r.receive(r.event("补充说明：第一项的参数甲要保留", reply_to=message))
+    with r.core.db.engine.connect() as conn:
+        assert conn.scalar(select(waits.c.state).where(waits.c.id == "second-question")) == "WAITING"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_question_relay_send_starts_answer_window(control_runtime, legacy):
+    from elephant.domain import SendReceipt
+
+    r = control_runtime
+    r.root()
+    worker = r.core.tasks.claim("worker")
+    ident = worker["run_id"], worker["fencing_token"], "worker"
+    r.core.tasks.ask(*ident, {"question_id": "review-real-wait", "text": "请确认参数", "checkpoint": "waiting"})
+    r.core.tasks.submit(*ident, {"status": "waiting_input", "summary": "等待参数"}, receipt={
+        "kind": "run_yielded", "run_id": worker["run_id"], "session_id": worker["session_id"],
+        "session_revision": "review-yield", "input_ids": worker["context"]["source_input_ids"],
+        "inflight": 0, "tools_paired": True})
+    r.question_notice(sent=False)
+    message = "worker-question-relay"
+    with r.core.db.transaction() as conn:
+        delivery_id = conn.scalar(select(outbox.c.id).join(notifications, notifications.c.id == outbox.c.origin_id)
+            .where(notifications.c.purpose == "question"))
+        if legacy:
+            conn.execute(update(waits).where(waits.c.id == "review-real-wait")
+                .values(notification_id="review-real-wait"))
+        envelope = OutboundEnvelope.model_validate_json(conn.scalar(select(outbox.c.envelope_json)
+            .where(outbox.c.id == delivery_id)))
+    assert r.core.pre_send(envelope)
+    r.core.outbox._receipt(delivery_id, SendReceipt(state="SENT", platform_message_id=message))
+    with r.core.db.engine.connect() as conn:
+        wait = conn.execute(select(waits).where(waits.c.id == "review-real-wait")).mappings().one()
+        assert wait["delivered_at"] == r.core.clock.now().isoformat()
+        assert wait["expires_at"] == (r.core.clock.now() + timedelta(hours=1)).isoformat()

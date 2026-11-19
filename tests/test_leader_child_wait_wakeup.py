@@ -9,7 +9,7 @@ from test_leader_dispatch_recovery import native_pending_submit
 from elephant.adapters.pi.sessions import restore_tool_results, unfinished_tools
 from elephant.domain import TextSegment
 from elephant.storage.agent_schema import agent_events, leader_inbox
-from elephant.storage.task_schema import runs, tasks
+from elephant.storage.task_schema import runs, tasks, waits
 
 runtime = agent_runtime
 
@@ -38,6 +38,32 @@ def test_worker_revision_preserves_child_wait_and_enters_the_resumed_claim(runti
     resumed = runtime.service.claim("parent")
     assert resumed["task_id"] == parent["task_id"]
     assert resumed["continuation"]["inputs"] == [{"id": revision["input_id"], "text": source.text}]
+
+
+def test_cancelled_worker_closes_its_question_and_wakes_parent(runtime):
+    root_goal(runtime)
+    parent = runtime.service.claim("parent")
+    parent_identity = (parent["run_id"], parent["fencing_token"], "parent")
+    child = runtime.service.task_operation(*parent_identity, {"operation": "tasks.spawn", "call_id": "spawn-check",
+        "arguments": {"goal": "核对事实", "delegation_key": "facts"}})
+    runtime.service.task_operation(*parent_identity, {"operation": "tasks.wait", "call_id": "await-check",
+        "arguments": {"children": [child["task_id"]]}})
+    assert runtime.service.submit(*parent_identity, {"status": "waiting_children", "summary": "等待核对"}, receipt={
+        "kind": "run_yielded", "run_id": parent["run_id"], "session_id": parent["session_id"],
+        "session_revision": "parent-yield", "input_ids": parent["context"]["source_input_ids"],
+        "inflight": 0, "tools_paired": True})["state"] == "WAITING_CHILDREN"
+    worker = runtime.service.claim("child")
+    identity = (worker["run_id"], worker["fencing_token"], "child")
+    runtime.service.ask(*identity, {"question_id": "pending-question", "text": "确认范围？", "checkpoint": "等待确认"})
+    assert runtime.service.cancel(child["public_id"], runtime.access)["state"] == "CANCEL_REQUESTED"
+    result = {"status": "failed", "summary": "已停止", "agent_authored": False}
+    assert runtime.service.submit(*identity, result)["state"] == "CANCELLED"
+    assert runtime.service.submit(*identity, result)["state"] == "CANCELLED"
+    assert runtime.service.claim("parent")["task_id"] == parent["task_id"]
+    with runtime.db.engine.connect() as conn:
+        assert conn.scalar(select(waits.c.state).where(waits.c.id == "pending-question")) == "CANCELLED"
+        assert conn.scalar(select(func.count()).select_from(agent_events).where(
+            agent_events.c.task_id == parent["task_id"], agent_events.c.kind == "children_ready")) == 1
 
 
 def finish_wait(runtime, claim, ending, arguments, accepted):
@@ -145,3 +171,23 @@ async def test_root_wait_any_revokes_remaining_work_and_waits_for_stop(runtime, 
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == root["task_id"])).scalar_one() == "SUCCEEDED"
         assert conn.execute(select(func.count()).select_from(agent_events).where(
             agent_events.c.task_id == root["task_id"], agent_events.c.kind == "children_ready")).scalar_one() == 1
+
+
+def test_cancel_during_child_wait_still_wakes_root(runtime):
+    root = root_goal(runtime)
+    parent = runtime.service.claim("parent")
+    ident = parent["run_id"], parent["fencing_token"], "parent"
+    child = runtime.service.task_operation(*ident, {"operation": "tasks.spawn", "call_id": "spawn-check",
+        "arguments": {"goal": "核对事实", "delegation_key": "facts"}})
+    runtime.service.task_operation(*ident, {"operation": "tasks.wait", "call_id": "await-check",
+        "arguments": {"children": [child["task_id"]]}})
+    with runtime.db.engine.connect() as conn:
+        ref = conn.scalar(select(tasks.c.public_id).where(tasks.c.id == parent["task_id"]))
+    assert runtime.service.cancel(ref, runtime.access)["state"] == "CANCEL_REQUESTED"
+    assert runtime.service.submit(*ident, {"status": "failed", "agent_authored": False,
+        "summary": "已停止"})["state"] == "CANCELLED"
+    with runtime.db.engine.connect() as conn:
+        other = list(conn.execute(select(tasks.c.state).where(tasks.c.root_task_id == root["task_id"])).scalars())
+        assert other.count("CANCELLED") == 2
+    resumed = runtime.sessions.claim("leader")
+    assert resumed and resumed["purpose"] == "finalize"

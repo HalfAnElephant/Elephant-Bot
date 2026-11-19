@@ -214,7 +214,7 @@ class RuntimeRecovery:
             conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(state=state, stop_reason=reason,
                 result_json=result.model_dump_json()))
             if state in TERMINAL and task["root_task_id"]:
-                settled = {**dict(current), "state": state}
+                settled = {**dict(current), "state": state, "stop_reason": reason}
                 self.service.graph.settled(conn, settled, run["id"], result.model_dump(mode="json"))
         self.service.wakeup.set()
         return {"task_id": task["id"], "run_id": run["id"], "state": state}

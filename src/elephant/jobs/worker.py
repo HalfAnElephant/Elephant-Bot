@@ -47,7 +47,9 @@ class Spool:
 
     def save(self, payload, *, run_id=None, seq=None):
         data = json.dumps(payload, ensure_ascii=False).encode()
-        total = sum(path.stat().st_size for path in self.directory.rglob("*") if path.is_file())
+        # Only files replayed by the Worker belong to its event/result quota.
+        pending = (*self.directory.glob("*.json"), *self.directory.glob("events/*/*.json"))
+        total = sum(path.stat().st_size for path in pending if path.is_file())
         if total + len(data) > self.max_bytes:
             raise RuntimeError("spool full")
         if run_id is None:
@@ -409,7 +411,18 @@ class Worker:
                     paths.extend(claim.get("goal_spec", {}).get("requested_outputs", []))
                 execution_world = getattr(gateway, "execution", None)
                 export = execution_world.export_artifacts if execution_world else export_artifacts
-                result["artifacts"] = export(gateway.workspace, harness.archive, list(dict.fromkeys(paths)))
+                exporting = asyncio.create_task(asyncio.to_thread(
+                    export, gateway.workspace, harness.archive, list(dict.fromkeys(paths))))
+                try:
+                    result["artifacts"] = await asyncio.shield(exporting)
+                except asyncio.CancelledError:
+                    draining = asyncio.gather(exporting, return_exceptions=True)
+                    while not draining.done():
+                        try:
+                            await asyncio.shield(draining)
+                        except asyncio.CancelledError:
+                            pass
+                    raise
             if not harness.stopped_verified and not getattr(harness, "quiescent_verified", False):
                 raise RuntimeError("runner returned without verified stop or quiescence")
             payload = {**identity, "result": result, "stopped": harness.stopped_verified,

@@ -18,6 +18,7 @@ from elephant.storage.task_schema import (
     events,
     inputs,
     model_requests,
+    notification_question_ids,
     observations,
     processes,
     runs,
@@ -462,6 +463,10 @@ class LeaderRuntime:
                 notice = self.service._notification(conn, target, run_id, result.summary, purpose,
                     "important" if claim["purpose"] == "attention" else "normal",
                     stable_id("leader", run_id), defer_reply=claim.get("public_answer_events", False))
+                if purpose == "question":
+                    notice_id = notice["notification_id"]
+                    question_ids = claim.get("question_ids") or notification_question_ids(conn, notice_id)
+                    conn.execute(update(waits).where(waits.c.id.in_(question_ids)).values(notification_id=notice_id))
                 if claim.get("public_answer_events"):
                     self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif run["role"] != "skill_review":

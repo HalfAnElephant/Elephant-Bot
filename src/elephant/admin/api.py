@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -11,9 +12,10 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
+from starlette.background import BackgroundTask
 
 from elephant.config import Settings
 from elephant.configuration import changes
@@ -601,29 +603,43 @@ def router(core, authenticate):
         root = Path(core.tasks.archive_root).resolve()
         if not re.fullmatch(r"[a-f0-9-]{36}", item["id"]):
             raise HTTPException(409, "invalid artifact reference")
+        snapshot = tempfile.TemporaryFile()  # noqa: SIM115 - The streaming response owns the file.
         try:
-            fd = os.open(root / item["id"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as source:
-                info = os.fstat(source.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 20 * 1024 * 1024:
-                    raise HTTPException(409, "artifact unavailable")
-                content = source.read(20 * 1024 * 1024 + 1)
-        except OSError as error:
-            raise HTTPException(409, "artifact unavailable") from error
-        if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != digest:
-            raise HTTPException(409, "artifact digest changed")
-        visible = core.tasks.get(row["public_id"], access)
-        if visible.get("context_revoked"):
-            raise HTTPException(409, "artifact handoff sources are no longer authorized")
-        filename = PurePosixPath(item.get("relative_path") or item["id"]).name[:255] or item["id"]
-        return Response(
-            content,
-            media_type="application/octet-stream",
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename, safe=""),
-            },
-        )
+            try:
+                fd = os.open(root / item["id"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as source:
+                    info = os.fstat(source.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != item["size"]:
+                        raise HTTPException(409, "artifact unavailable")
+                    actual = hashlib.sha256()
+                    remaining = item["size"]
+                    while chunk := source.read(min(65536, remaining + 1)):
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            raise HTTPException(409, "artifact digest changed")
+                        actual.update(chunk)
+                        snapshot.write(chunk)
+                    if remaining or actual.hexdigest() != digest:
+                        raise HTTPException(409, "artifact digest changed")
+            except OSError as error:
+                raise HTTPException(409, "artifact unavailable") from error
+            if core.tasks.get(row["public_id"], access).get("context_revoked"):
+                raise HTTPException(409, "artifact handoff sources are no longer authorized")
+            snapshot.seek(0)
+            filename = PurePosixPath(item.get("relative_path") or item["id"]).name[:255] or item["id"]
+            return StreamingResponse(
+                iter(lambda: snapshot.read(65536), b""),
+                media_type="application/octet-stream",
+                background=BackgroundTask(snapshot.close),
+                headers={
+                    "Content-Length": str(item["size"]),
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename, safe=""),
+                },
+            )
+        except BaseException:
+            snapshot.close()
+            raise
 
     return router
 

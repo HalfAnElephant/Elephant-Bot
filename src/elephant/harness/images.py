@@ -2,6 +2,7 @@
 
 import base64
 import http.client
+import io
 import socket
 import threading
 import time
@@ -9,15 +10,28 @@ from urllib.parse import urljoin, urlsplit
 
 from elephant.harness.public_web import PinnedHTTPS, public_addresses
 
-MAX_IMAGES = 4
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+class ImageExceedsRequestBudget(ValueError):
+    pass
 
 
 def fetch_public_bytes(url, max_bytes, *, headers_for_url=None):
-    if not 0 < max_bytes <= 20 * 1024 * 1024:
+    if max_bytes <= 0:
         raise ValueError("invalid attachment byte limit")
+    with io.BytesIO() as target:
+        _transfer(url, target, max_bytes=max_bytes, headers_for_url=headers_for_url)
+        return target.getvalue()
+
+
+def download_public_file(url, target, *, cancelled, headers_for_url=None):
+    _transfer(url, target, cancelled=cancelled, headers_for_url=headers_for_url)
+
+
+def _transfer(url, target, *, max_bytes=None, cancelled=None, headers_for_url=None):
     deadline = time.monotonic() + 15
     for _ in range(4):
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError("attachment download cancelled")
         parsed = urlsplit(url)
         # QQ sometimes emits HTTP links for QQ CDNs that also serve HTTPS.
         if (parsed.scheme == "http" and parsed.hostname and not parsed.username and not parsed.password
@@ -60,19 +74,32 @@ def fetch_public_bytes(url, max_bytes, *, headers_for_url=None):
                 continue
             if response.status != 200 or response.getheader("Content-Encoding", "identity") != "identity":
                 raise ValueError("image download failed")
-            content = bytearray()
+            if max_bytes is None:
+                timer.cancel()
+                timer = None
+                sock.settimeout(15)
+            remaining = max_bytes
             while True:
-                sock.settimeout(connection.remaining())
-                chunk = response.read1(min(65536, max_bytes + 1 - len(content)))
+                if cancelled is not None and cancelled.is_set():
+                    raise InterruptedError("attachment download cancelled")
+                if remaining is not None:
+                    sock.settimeout(connection.remaining())
+                chunk = response.read1(65536 if remaining is None else min(65536, remaining + 1))
                 if not chunk:
                     break
-                content.extend(chunk)
-                if len(content) > max_bytes:
-                    raise ValueError("image exceeds size limit")
-            connection.remaining()
-            return bytes(content)
+                if remaining is not None:
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ImageExceedsRequestBudget("image exceeds size limit")
+                target.write(chunk)
+            if getattr(response, "length", None):
+                raise http.client.IncompleteRead(b"", response.length)
+            if max_bytes is not None:
+                connection.remaining()
+            return
         except (OSError, http.client.HTTPException):
-            connection.remaining()
+            if timer is not None:
+                connection.remaining()
             raise
         finally:
             if timer is not None:

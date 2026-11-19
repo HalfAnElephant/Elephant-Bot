@@ -31,7 +31,14 @@ from elephant.outbox.service import Outbox
 from elephant.permissions import PermissionService, PermissionSubject
 from elephant.pi_installation import runtime_pi_path
 from elephant.storage.schema import audit_events, inbox, outbox, runtime_state
-from elephant.storage.task_schema import notifications, runs, sessions, tasks
+from elephant.storage.task_schema import (
+    notification_question_ids,
+    notifications,
+    runs,
+    sessions,
+    tasks,
+    waits,
+)
 
 from .control import TurnRouter
 from .leader import LeaderRuntime
@@ -339,13 +346,13 @@ class Core:
             "images": [{"source": source.event_id, "message_id": source.platform_message_id, "url": segment.image_url or segment.source_url,
                         "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
                         "attachment_ref": segment.attachment_ref}
-                       for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"][-16:],
+                       for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"],
             "files": [{"source": source.event_id, "message_id": source.platform_message_id,
                 "url": segment.source_url, "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
                 "attachment_ref": segment.attachment_ref,
                 **({"kind": "audio", "transcript": segment.transcript, "quoted": segment.quoted,
                     "is_current_input": source.event_id == event.event_id} if segment.type == "audio" else {})}
-                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}][-16:],
+                for source, _body in reversed(sources) for segment in source.segments if segment.type in {"file", "audio"}],
             "now": self.clock.now().isoformat(), "timezone": self.settings.timezone,
             "limits": self.settings.context.limits(self.settings.model.context_window,
                 self.settings.execution.interactive_budget.output_tokens_per_call),
@@ -613,16 +620,26 @@ class Core:
                 task["notice_run_reason"] == "notification" and task["notice_purpose"] == "result"
             ):
                 return False
+            event = InboundEvent.model_validate_json(task["event_json"])
+            access = self.access(event)
             with self.db.engine.connect() as conn:
-                if not stream_cleanup and task["root_task_id"] and task["notification_run_id"]:
+                if not stream_cleanup and task["notice_purpose"] == "question":
+                    question_ids = notification_question_ids(conn, envelope.origin_id)
+                    open_questions = self.tasks.open_input_waits().where(waits.c.id.in_(question_ids))
+                    if not conn.execute(open_questions.limit(1)).first():
+                        return False
+                    question_tasks = conn.execute(select(tasks).join(waits, waits.c.task_id == tasks.c.id)
+                        .where(waits.c.id.in_(question_ids))).mappings()
+                    if any(not self.tasks.graph.may_read(row["id"], access)
+                           or not self.validate_context(access, json.loads(row["context_json"])) for row in question_tasks):
+                        return False
+                elif not stream_cleanup and task["root_task_id"] and task["notification_run_id"]:
                     root_revision = conn.execute(select(tasks.c.goal_revision).where(
                         tasks.c.id == task["root_task_id"])).scalar_one()
                     if task["notice_revision"] != root_revision:
                         return False
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
-            event = InboundEvent.model_validate_json(task["event_json"])
-            access = self.access(event)
             return (self.permissions.check(access, "notification.send", "conversation:" + envelope.target.key).allowed
                     and self.validate_context(access, json.loads(task["context_json"])))
         return True

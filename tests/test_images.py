@@ -165,6 +165,24 @@ async def test_cached_images_yield_to_growing_tool_history(gateway, monkeypatch)
     assert "image_url" in str(g.image_content)
 
 
+async def test_images_beyond_inline_budget_are_saved_as_originals(gateway, monkeypatch, tmp_path):
+    def reject(_url, limit):
+        assert limit > 8 * 1024 * 1024
+        raise images.ImageExceedsRequestBudget("too large to inline")
+
+    def download(_url, target, **_options):
+        for _ in range(13):
+            target.write(b"i" * 1024 * 1024)
+
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", reject)
+    monkeypatch.setattr("elephant.harness.gateway.download_public_file", download)
+    gateway.gateway.provider.max_bytes = 16 * 1024 * 1024
+    body = await gateway.gateway.with_images({"messages": [{"role": "user", "content": "look"}]})
+    saved, = tmp_path.glob("attachment-*")
+    assert saved.stat().st_size == 13 * 1024 * 1024
+    assert saved.name in str(body)
+
+
 @pytest.mark.parametrize("messages", [None, ["invalid"], [{"role": ["invalid"]}],
                                       [{"role": "tool", "tool_call_id": "orphan"}]])
 async def test_invalid_image_request_rejected_before_download(gateway, monkeypatch, messages):
@@ -181,10 +199,11 @@ async def test_invalid_image_request_rejected_before_download(gateway, monkeypat
 
 async def test_original_files_reach_workspaces_cached_across_worker_handoff(gateway, monkeypatch, tmp_path):
     loads = []
-    def load(url, limit):
+    def load(url, target, **options):
         loads.append(url)
-        return b'ORIGINAL_FILE_BYTES'
-    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', load)
+        for _ in range(24):
+            target.write(b'Z' * 1024 * 1024)
+    monkeypatch.setattr('elephant.harness.gateway.download_public_file', load)
     claim = {**gateway.claim, 'context': {'scope': 'conversation', 'workspace_id': 'alpha', 'files': [
         {'source': 'original-event', 'message_id': '43', 'attachment_ref': 'file-ref',
          'filename': 'slides.pptx', 'url': 'https://cdn.example/file'}]}}
@@ -199,7 +218,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
     assert 'ORIGINAL_FILE_BYTES' not in str(first)
     assert 'https://cdn.example/file' not in str(first)
     original = list(tmp_path.glob('attachment-*'))
-    assert len(original) == 1 and original[0].read_bytes() == b'ORIGINAL_FILE_BYTES'
+    assert len(original) == 1 and original[0].stat().st_size == 24 * 1024 * 1024
     # A new Worker workspace reuses the authorized original after its URL expires.
     work = tmp_path / 'worker'
     work.mkdir()
@@ -208,7 +227,7 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
     gateway.gateway.bind({**claim, 'task_id': 'worker', 'run_id': 'worker-run'})
     def expired(*args):
         raise AssertionError('cached original must survive an expired URL')
-    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', expired)
+    monkeypatch.setattr('elephant.harness.gateway.download_public_file', expired)
     await gateway.gateway.with_attachments(body)
     assert len(list(work.glob('attachment-*'))) == 1
     gateway.allowed = False
@@ -216,10 +235,23 @@ async def test_original_files_reach_workspaces_cached_across_worker_handoff(gate
         await gateway.gateway.with_attachments(body)
 
 
+async def test_files_are_staged_beyond_the_old_per_turn_count(gateway, monkeypatch, tmp_path):
+    def load(url, target, **options):
+        target.write(url.encode())
+
+    monkeypatch.setattr('elephant.harness.gateway.download_public_file', load)
+    files = [{'source': 'e', 'attachment_ref': str(i), 'filename': f'file-{i}.txt',
+              'url': f'https://cdn.example/{i}'} for i in range(5)]
+    gateway.gateway.revoke()
+    gateway.gateway.bind({**gateway.claim, 'context': {'files': files}})
+    await gateway.gateway.with_attachments({'messages': [{'role': 'user', 'content': 'Read'}]})
+    assert {path.read_text() for path in tmp_path.glob('attachment-*')} == {item['url'] for item in files}
+
+
 async def test_document_download_failure_is_explicit(gateway, monkeypatch):
-    def failed(*args):
+    def failed(*args, **kwargs):
         raise ValueError('expired')
-    monkeypatch.setattr('elephant.harness.gateway.fetch_public_bytes', failed)
+    monkeypatch.setattr('elephant.harness.gateway.download_public_file', failed)
     gateway.gateway.revoke()
     gateway.gateway.bind({**gateway.claim, 'context': {'files': [
         {'source': 'e', 'message_id': '1', 'filename': 'original.pdf', 'url': 'https://cdn.example/file'}]}})

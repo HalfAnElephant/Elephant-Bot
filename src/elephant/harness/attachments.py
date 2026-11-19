@@ -11,9 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-MAX_FILES = 4
-MAX_FILE_BYTES = 20 * 1024 * 1024
-MAX_CACHE_BYTES = 256 * 1024 * 1024
+COPY_CHUNK = 1024 * 1024
 
 
 def attachment_identity(attachment, scope):
@@ -41,19 +39,27 @@ def _cache_lock(root, *, exclusive=False):
     finally:
         os.close(descriptor)
 
-def _read_regular(path, limit):
+def _open_regular(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
-            raise ValueError('attachment cache requires a bounded regular file')
+    source = os.fdopen(fd, 'rb')
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        source.close()
+        raise ValueError('attachment cache requires a regular file without hardlinks')
+    return source
+
+
+def _read_regular(path, limit):
+    with _open_regular(path) as source:
+        if os.fstat(source.fileno()).st_size > limit:
+            raise ValueError('attachment cache exceeds byte limit')
         data = source.read(limit + 1)
     if len(data) > limit:
         raise ValueError('attachment cache exceeds byte limit')
     return data
 
 
-def _cached_attachment(root, identity):
+def _cached_receipt(root, identity):
     if not re.fullmatch(r"[0-9a-f]{64}", identity):
         raise ValueError("invalid attachment cache identity")
     directory = root / identity
@@ -63,25 +69,32 @@ def _cached_attachment(root, identity):
         receipt = json.loads(_read_regular(directory / 'receipt.json', 4096))
     except FileNotFoundError:
         return None
-    if not re.fullmatch(r'[0-9a-f]{64}', receipt.get('sha256', '')):
+    if (not isinstance(receipt, dict) or not re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('sha256')))
+            or type(receipt.get('size')) is not int or receipt['size'] < 0):
         raise ValueError('invalid attachment cache receipt')
-    data = _read_regular(directory / receipt['sha256'], MAX_FILE_BYTES)
-    if len(data) != receipt['size'] or hashlib.sha256(data).hexdigest() != receipt['sha256']:
-        raise ValueError('attachment cache integrity mismatch')
-    os.utime(directory, None, follow_symlinks=False)
-    return data
+    return receipt
 
 
+@contextmanager
 def cached_attachment(content_root, identity):
     root = _cache_root(content_root)
     with _cache_lock(root):
-        return _cached_attachment(root, identity)
+        receipt = _cached_receipt(root, identity)
+        source = None
+        if receipt is not None:
+            os.utime(root / identity, None, follow_symlinks=False)
+            source = _open_regular(root / identity / receipt['sha256'])
+    if source is None:
+        yield None
+    else:
+        with source:
+            yield source, receipt
 
 
 def cached_transcript(content_root, identity, account):
     root = _cache_root(content_root)
     with _cache_lock(root):
-        if _cached_attachment(root, identity) is None:
+        if _cached_receipt(root, identity) is None:
             return None
         if not re.fullmatch(r"[0-9a-f]{64}", account):
             raise ValueError("invalid transcription account")
@@ -99,7 +112,7 @@ def cache_transcript(content_root, identity, account, result):
 
     root = _cache_root(content_root)
     with _cache_lock(root, exclusive=True):
-        if _cached_attachment(root, identity) is None or not re.fullmatch(r"[0-9a-f]{64}", account):
+        if _cached_receipt(root, identity) is None or not re.fullmatch(r"[0-9a-f]{64}", account):
             raise ValueError("transcription requires a preserved original and account")
         encoded = json.dumps(result, ensure_ascii=False)
         if len(encoded.encode()) > 65536:
@@ -107,30 +120,33 @@ def cache_transcript(content_root, identity, account, result):
         atomic_write(root / identity / ("asr-" + account + ".json"), encoded)
 
 
-def cache_attachment(content_root, identity, data, *, source_id):
-    if len(data) > MAX_FILE_BYTES:
-        raise ValueError('attachment exceeds byte limit')
+def cache_attachment(content_root, identity, download, *, source_id):
     root = _cache_root(content_root)
-    with _cache_lock(root, exclusive=True):
-        existing = _cached_attachment(root, identity)
-        if existing is not None:
-            if existing != data:
-                raise ValueError('original attachment identity changed')
+    with _cache_lock(root):
+        if _cached_receipt(root, identity) is not None:
             return
-        usage = sum(entry.stat(follow_symlinks=False).st_size for directory in root.iterdir()
-            if directory.is_dir() and not directory.is_symlink() for entry in directory.iterdir()
-            if entry.is_file() and not entry.is_symlink())
-        if usage + len(data) + 4096 > MAX_CACHE_BYTES:
-            raise ValueError('inbound attachment cache budget exhausted')
-        digest = hashlib.sha256(data).hexdigest()
         temporary = Path(tempfile.mkdtemp(prefix='.incoming-', dir=root))
-        try:
-            receipt = json.dumps({'sha256': digest, 'size': len(data), 'source_id': source_id}).encode()
-            for name, content in ((digest, data), ('receipt.json', receipt)):
-                with (temporary / name).open('xb') as target:
-                    target.write(content)
-                    target.flush()
-                    os.fsync(target.fileno())
+    try:
+        incoming = temporary / 'body'
+        with incoming.open('x+b') as target:
+            download(target)
+            target.flush()
+            os.fsync(target.fileno())
+            size = target.tell()
+            target.seek(0)
+            digest = hashlib.file_digest(target, 'sha256').hexdigest()
+        incoming.rename(temporary / digest)
+        receipt = {'sha256': digest, 'size': size, 'source_id': source_id}
+        with (temporary / 'receipt.json').open('x', encoding='utf-8') as target:
+            json.dump(receipt, target)
+            target.flush()
+            os.fsync(target.fileno())
+        with _cache_lock(root, exclusive=True):
+            existing = _cached_receipt(root, identity)
+            if existing is not None:
+                if existing != receipt:
+                    raise ValueError('original attachment identity changed')
+                return
             directory = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 os.fsync(directory)
@@ -142,8 +158,8 @@ def cache_attachment(content_root, identity, data, *, source_id):
                 os.fsync(directory)
             finally:
                 os.close(directory)
-        finally:
-            shutil.rmtree(temporary, ignore_errors=True)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 def cleanup_attachment_cache(content_root, db, now, *, retention_seconds=30 * 86400):
@@ -198,17 +214,35 @@ def attachment_path(attachment, identity):
     return 'attachment-' + identity + '-' + name
 
 
-async def stage_attachment(execution, context, attachment, identity, data):
+async def stage_attachment(execution, context, attachment, identity, source, receipt):
     path = attachment_path(attachment, identity)
+    existing = False
+    digest = hashlib.sha256()
+    size = 0
+
+    def chunks():
+        nonlocal size
+        while chunk := source.read(COPY_CHUNK):
+            size += len(chunk)
+            digest.update(chunk)
+            yield chunk
+        if size != receipt['size'] or digest.hexdigest() != receipt['sha256']:
+            raise ValueError('attachment cache integrity mismatch')
+
     try:
-        await execution.write_file(context, path, data)
+        await execution.write_file(context, path, chunks())
     except FileExistsError:
-        existing = await execution.read_file(context, path, 0, MAX_FILE_BYTES + 1)
-        if existing != data:
-            raise ValueError('existing workspace attachment differs; refusing overwrite') from None
-    saved = await execution.read_file(context, path, 0, MAX_FILE_BYTES + 1)
-    if saved != data:
-        raise ValueError('saved attachment integrity mismatch')
+        existing = True
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := await execution.read_file(context, path, size, min(COPY_CHUNK, receipt['size'] - size + 1)):
+        size += len(chunk)
+        digest.update(chunk)
+        if size > receipt['size']:
+            break
+    if size != receipt['size'] or digest.hexdigest() != receipt['sha256']:
+        raise ValueError('existing workspace attachment differs; refusing overwrite' if existing
+                         else 'saved attachment integrity mismatch')
     return {'source': attachment.get('source'), 'message_id': attachment.get('message_id'),
         'filename': attachment.get('filename'), 'mime_type': attachment.get('mime_type'),
-        'path': path, 'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
+        'path': path, 'sha256': receipt['sha256'], 'size': size}

@@ -303,7 +303,7 @@ class TaskGraph:
         return all(self.service.permissions.check(subject, "task.read", "task:" + task_id).allowed
                    for subject in subjects if subject is not None)
 
-    def status(self, conn, task, *, access=None, viewer=None):
+    def status(self, conn, task, *, access=None, viewer=None, source_tasks=None):
         root, context, replanning, revoked_handoff, stale_task = self._projection_context(conn, task, access)
         validator = self.service.context_validator if access is not None else None
 
@@ -350,7 +350,7 @@ class TaskGraph:
             notices.reverse()
         from .progress import task_progress
         projection = task_progress(self, conn, task, root, access=access, may_read=may_read, stale=stale_task,
-                                   delivery_states=delivery)
+                                   delivery_states=delivery, source_tasks=source_tasks)
         projection["delivery"]["outbox_states"] = [state for _, _, state in result_deliveries if state is not None]
         return {"task_id": task["id"], "public_id": task["public_id"], "kind": task["kind"],
             "environment": ExecutionPlan.model_validate_json(task["plan_json"]).environment,
@@ -382,6 +382,9 @@ class TaskGraph:
                 raise PermissionError("revoked Jobs have not been proven stopped")
 
     def settled(self, conn, task, run_id, result):
+        if task["state"] == "CANCELLED":
+            self.settle_cancelled(conn, task, task["stop_reason"], wake=True)
+            return
         self.event(conn, task, "child_result", {"result": result}, attempt_id=run_id,
                    event_id="result:" + run_id, wake=True)
         attention = task["state"] in {"FAILED", "BLOCKED", "EXPIRED", "PARTIAL"}
@@ -480,6 +483,16 @@ class TaskGraph:
                     continue
             raise ValueError("root success check not verified: " + check)
 
+    def settle_cancelled(self, conn, task, reason, *, wake):
+        conn.execute(update(waits).where(waits.c.task_id == task["id"],
+            waits.c.state.in_(["INTENT", "WAITING"])).values(state="CANCELLED"))
+        notify_parent = wake and bool(task["parent_task_id"])
+        self.event(conn, task, "cancelled", {"reason": reason},
+            event_id=stable_id(task["id"], "cancelled"), wake=notify_parent)
+        if notify_parent:
+            parent = conn.execute(select(tasks).where(tasks.c.id == task["parent_task_id"])).mappings().one()
+            self.wake_parent(conn, parent)
+
     def cancel_tree(self, conn, task, reason="user_cancel"):
         ids, frontier = {task["id"]}, {task["id"]}
         while frontier:
@@ -492,7 +505,7 @@ class TaskGraph:
             while parent_id in rows and parent_id not in active:
                 active.add(parent_id)
                 parent_id = rows[parent_id]["parent_task_id"]
-        cancelled = set()
+        cancelled = []
         for row in rows.values():
             if row["state"] in TERMINAL:
                 continue
@@ -500,15 +513,9 @@ class TaskGraph:
             state = "CANCEL_REQUESTED" if row["id"] in active or not jobs_quiescent else "CANCELLED"
             conn.execute(update(tasks).where(tasks.c.id == row["id"]).values(state=state, stop_reason=reason))
             if state == "CANCELLED":
-                cancelled.add(row["id"])
-                self.event(conn, row, "cancelled", {"reason": reason},
-                    event_id=stable_id(row["id"], "cancelled"), wake=row["id"] == task["id"] and bool(task["parent_task_id"]))
-        if cancelled:
-            conn.execute(update(waits).where(waits.c.task_id.in_(cancelled), waits.c.state.in_(["INTENT", "WAITING"]))
-                .values(state="CANCELLED"))
-        if task["id"] in cancelled and task["parent_task_id"]:
-            parent = conn.execute(select(tasks).where(tasks.c.id == task["parent_task_id"])).mappings().one()
-            self.wake_parent(conn, parent)
+                cancelled.append(row)
+        for row in cancelled:
+            self.settle_cancelled(conn, row, reason, wake=row["id"] == task["id"])
         conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id.in_(ids),
             leader_inbox.c.handled_at.is_(None)).values(handled_at=self.clock.now().isoformat(), output_ref="SUPERSEDED"))
         self.service.wakeup.set()

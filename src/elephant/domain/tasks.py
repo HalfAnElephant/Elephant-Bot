@@ -24,7 +24,7 @@ class Artifact(DTO):
     id: str = Field(pattern=r"^[0-9a-f-]{36}$")
     relative_path: str = Field(min_length=1, max_length=512)
     mime_type: str = Field(min_length=1, max_length=128)
-    size: int = Field(ge=0, le=20 * 1024 * 1024)
+    size: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

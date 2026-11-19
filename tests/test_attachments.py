@@ -1,9 +1,10 @@
-"""Original file staging is bounded, recoverable and isolated from executable content."""
+"""Original file staging is streamed, recoverable and isolated from executable content."""
 import asyncio
 import hashlib
 import json
 import os
 import threading
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -20,20 +21,29 @@ def source(filename='report.docx'):
             'filename': filename, 'url': 'https://cdn.example/file'}
 
 
+def cache(content_root, identity, payload, *, source_id):
+    attachments.cache_attachment(content_root, identity, lambda target: target.write(payload), source_id=source_id)
+
+
+async def stage(execution, context, item, identity, data):
+    receipt = {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+    return await attachments.stage_attachment(execution, context, item, identity, BytesIO(data), receipt)
+
+
 async def test_original_binary_is_saved_verbatim_with_stable_metadata(tmp_path):
     context = SimpleNamespace(workspace=str(tmp_path))
     original = b'PK\x03\x04opaque original document\x00\xff'
     item = source()
     identity = attachments.attachment_identity(item, {'workspace_id': 'alpha'})
     world = LocalExecution()
-    first = await attachments.stage_attachment(world, context, item, identity, original)
-    again = await attachments.stage_attachment(world, context, item, identity, original)
+    first = await stage(world, context, item, identity, original)
+    again = await stage(world, context, item, identity, original)
     assert first == again
     assert (tmp_path / first['path']).read_bytes() == original
     assert first['sha256'] == hashlib.sha256(original).hexdigest()
     assert first['filename'] == 'report.docx' and first['size'] == len(original)
     with pytest.raises(ValueError, match='refusing overwrite'):
-        await attachments.stage_attachment(world, context, item, identity, b'different content')
+        await stage(world, context, item, identity, b'different content')
     assert (tmp_path / first['path']).read_bytes() == original
 
 
@@ -49,37 +59,47 @@ async def test_filename_and_existing_link_cannot_escape_workspace(tmp_path):
     assert '/' not in path and '\\' not in path
     (work / path).symlink_to(outside)
     with pytest.raises((ValueError, OSError)):
-        await attachments.stage_attachment(LocalExecution(), context, item, identity, b'changed')
+        await stage(LocalExecution(), context, item, identity, b'changed')
     assert outside.read_bytes() == b'preserved'
 
 
-def test_cache_recovery_is_scoped_and_checks_original_hash(tmp_path):
+async def test_cache_recovery_is_scoped_and_checks_original_hash(tmp_path):
     item = source()
     alpha = attachments.attachment_identity(item, {'workspace_id': 'alpha'})
     beta = attachments.attachment_identity(item, {'workspace_id': 'beta'})
-    attachments.cache_attachment(tmp_path, alpha, b'original', source_id=item['source'])
-    assert attachments.cached_attachment(tmp_path, alpha) == b'original'
-    assert attachments.cached_attachment(tmp_path, beta) is None
+    cache(tmp_path, alpha, b'original', source_id=item['source'])
+    with attachments.cached_attachment(tmp_path, alpha) as cached:
+        assert cached[0].read() == b'original'
+    with attachments.cached_attachment(tmp_path, beta) as cached:
+        assert cached is None
     receipt = json.loads((tmp_path / 'inbound' / alpha / 'receipt.json').read_text())
     (tmp_path / 'inbound' / alpha / receipt['sha256']).write_bytes(b'tampered')
-    with pytest.raises(ValueError, match='integrity'):
-        attachments.cached_attachment(tmp_path, alpha)
+    with (attachments.cached_attachment(tmp_path, alpha) as cached,
+          pytest.raises(ValueError, match='integrity')):
+        await attachments.stage_attachment(LocalExecution(), SimpleNamespace(workspace=str(tmp_path)),
+                                            item, alpha, *cached)
+    assert not list(tmp_path.glob('attachment-*'))
 
 
-def test_cache_and_download_budgets_are_enforced(tmp_path, monkeypatch):
-    identity = attachments.attachment_identity(source(), {})
-    monkeypatch.setattr(attachments, 'MAX_FILE_BYTES', 3)
-    with pytest.raises(ValueError, match='byte limit'):
-        attachments.cache_attachment(tmp_path, identity, b'1234', source_id='event')
-    monkeypatch.setattr(attachments, 'MAX_CACHE_BYTES', 4097)
-    with pytest.raises(ValueError, match='budget exhausted'):
-        attachments.cache_attachment(tmp_path, identity, b'12', source_id='event')
+def test_failed_download_leaves_no_published_cache(tmp_path):
+    item = source()
+    identity = attachments.attachment_identity(item, {})
+
+    def interrupted(target):
+        target.write(b'partial')
+        raise OSError('download interrupted')
+
+    with pytest.raises(OSError, match='download interrupted'):
+        attachments.cache_attachment(tmp_path, identity, interrupted, source_id=item['source'])
+    with attachments.cached_attachment(tmp_path, identity) as cached:
+        assert cached is None
+    assert not list((tmp_path / 'inbound').glob('.incoming-*'))
 
 
 def test_cache_gc_preserves_active_sources(db, clock, tmp_path):
     identities = [attachments.attachment_identity(source(name), {}) for name in ('active.pdf', 'idle.pptx')]
     for identity, event in zip(identities, ('active', 'idle'), strict=True):
-        attachments.cache_attachment(tmp_path, identity, b'original', source_id=event)
+        cache(tmp_path, identity, b'original', source_id=event)
         old = clock.now().timestamp() - 3600
         os.utime(tmp_path / 'inbound' / identity, (old, old))
     with db.transaction() as conn:
@@ -106,7 +126,7 @@ def test_cache_gc_keeps_originals_needed_by_future_schedules(db, clock, tmp_path
     from elephant.storage.schedule_schema import schedules
     item = source('annual-report.pptx')
     identity = attachments.attachment_identity(item, {})
-    attachments.cache_attachment(tmp_path, identity, b'original', source_id=item['source'])
+    cache(tmp_path, identity, b'original', source_id=item['source'])
     old = clock.now().timestamp() - 40 * 86400
     os.utime(tmp_path / 'inbound' / identity, (old, old))
     with db.transaction() as conn:
@@ -166,6 +186,7 @@ async def test_process_exit_after_atomic_publish_leaves_readable_single_link_fil
     import sys
     script = '''
 import asyncio, os, sys
+from io import BytesIO
 from types import SimpleNamespace
 from elephant.adapters.execution import world
 publish = world._publish_exclusive

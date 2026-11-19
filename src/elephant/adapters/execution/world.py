@@ -75,7 +75,10 @@ class LocalExecution:
                         0o600, dir_fd=directory)
                     created = True
                     with os.fdopen(fd, "wb") as target:
-                        target.write(content)
+                        if isinstance(content, bytes):
+                            target.write(content)
+                        else:
+                            target.writelines(content)
                         target.flush()
                         os.fsync(target.fileno())
                 except OSError as error:

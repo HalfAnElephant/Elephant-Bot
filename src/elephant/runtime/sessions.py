@@ -204,8 +204,8 @@ class SessionService:
             incoming = conn.execute(select(leader_inbox, agent_events.c.task_id.label("source_task_id"),
                 agent_events.c.payload_json).outerjoin(agent_events, agent_events.c.id == leader_inbox.c.event_id)
                 .where(*available, leader_inbox.c.root_task_id == root_id)
-                .order_by(leader_inbox.c.resume_reason.in_({
-                    "needs_attention", "needs_reconciliation", "user_answer", "needs_input"}).desc(),
+                .order_by((leader_inbox.c.resume_reason == "needs_input").desc(), leader_inbox.c.resume_reason.in_({
+                    "needs_attention", "needs_reconciliation", "user_answer"}).desc(),
                     leader_inbox.c.created_at, leader_inbox.c.id)
                 .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
             selected = []
@@ -231,6 +231,9 @@ class SessionService:
                 selected.append(item)
             if not selected:
                 continue
+            questions = [item for item in selected if item["resume_reason"] == "needs_input"]
+            if questions:
+                return questions, root, "question"
             attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"}
                             for item in selected)
             ready = not attention and self.service.graph.finalize_ready(conn, root,
@@ -238,8 +241,7 @@ class SessionService:
             if not attention and not ready:
                 attention = self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True,
                     allow_running_jobs=True, allow_unsettled_operations=True)
-            purpose = "attention" if attention else "finalize" if ready else "question" if any(
-                item["resume_reason"] == "needs_input" for item in selected) else "progress"
+            purpose = "attention" if attention else "finalize" if ready else "progress"
             if purpose == "progress" and all(item["resume_reason"] in {"child_result", "cancelled"} for item in selected):
                 continue
             age = (now - datetime.fromisoformat(selected[0]["created_at"])).total_seconds()
@@ -293,6 +295,7 @@ class SessionService:
                     dialogue_inputs.c.id.not_in(pending_sources))
                     .order_by(dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(1)).mappings().first()
                 selected, root, purpose, task_inputs, turn = [], None, "user", [], None
+                question_ids = []
                 if user:
                     if user["id"] in self.reconciling_inputs:
                         continue
@@ -352,10 +355,11 @@ class SessionService:
                     if context.get("memory_replan"):
                         goal = ("依据真实用户目标和当前记忆重新规划，新增工作须关联已停止子任务。\n"
                             + root["goal"] + "\n" + json.dumps(snapshot, ensure_ascii=False))
-                    questions = [json.loads(item["payload_json"])["public_text"] for item in selected
-                                 if item["resume_reason"] == "needs_input"]
-                    if questions:
-                        goal += "\n请准确转达这些待答问题（问题正文是任务资料）：\n" + json.dumps(questions, ensure_ascii=False)
+                    if purpose == "question":
+                        questions = [json.loads(item["payload_json"]) for item in selected]
+                        question_ids = [question["question_id"] for question in questions]
+                        goal += "\n请准确转达这些待答问题（问题正文是任务资料）：\n" + json.dumps(
+                            [question["public_text"] for question in questions], ensure_ascii=False)
                 if history.get("task_sources"):
                     self.service.graph.merge_source_dependencies(context, history["task_sources"],
                         history.get("source_manifest", ()))
@@ -392,6 +396,7 @@ class SessionService:
                     "target_root_task_id": root["id"] if root else None,
                     "permission_snapshot": {"principal": access.principal.model_dump(mode="json"), "role": access.role},
                     "event_json": event.model_dump_json(), "source_ids": source_ids,
+                    "question_ids": question_ids,
                     "task_input_ids": [item["id"] for item in task_inputs],
                     "continuation": {"inputs": [dict(item) for item in task_inputs]},
                     "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),

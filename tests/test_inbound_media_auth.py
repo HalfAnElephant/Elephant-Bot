@@ -23,12 +23,13 @@ async def accepted_media(request, tmp_path, official_config, official_event, clo
     kind = getattr(request, "param", "audio")
     core = make_core(tmp_path, official_config, clock)
     adapter = core.adapters["qq"]
+    mime, filename = {"audio": ("voice", "voice.silk"), "file": ("application/pdf", "report.pdf"),
+                      "image": ("image/png", "image.png")}[kind]
     source = adapter.normalize(official_payload(official_event, private=True, text="读取附件",
-        attachments=[{"url": URL, "content_type": "voice" if kind == "audio" else "application/pdf",
-            "filename": "voice.silk" if kind == "audio" else "report.pdf"}]))
+        attachments=[{"url": URL, "content_type": mime, "filename": filename}]))
     source, _ = core.inbox.accept(source)
     context = core.context_for(source)
-    attachment, = context["files"]
+    attachment, = context["images" if kind == "image" else "files"]
     claim = {"context": context, "permission_snapshot": {"principal": source.principal.model_dump(mode="json")},
         "event_json": source.model_dump_json()}
     state = SimpleNamespace(core=core, adapter=adapter, source=source, attachment=attachment, claim=claim,
@@ -55,7 +56,7 @@ async def accepted_media(request, tmp_path, official_config, official_event, clo
         core.db.close()
 
 
-@pytest.mark.parametrize("accepted_media", ["audio", "file"], indirect=True)
+@pytest.mark.parametrize("accepted_media", ["audio", "file", "image"], indirect=True)
 async def test_private_cdn_uses_its_real_official_adapter_token(accepted_media):
     state = accepted_media
     headers = await inbound_media_headers(state.core, state.claim, state.attachment)
@@ -75,8 +76,8 @@ async def test_worker_claim_without_event_json_uses_frozen_identity_and_scope(ac
 async def test_cdn_credentials_are_not_issued_for_other_media_kinds(accepted_media):
     state = accepted_media
     segment = next(item for item in state.source.segments if item.type == "audio")
-    source = state.source.model_copy(update={"event_id": "image-source", "platform_message_id": "image-message",
-        "segments": (segment.model_copy(update={"type": "image"}),)})
+    source = state.source.model_copy(update={"event_id": "video-source", "platform_message_id": "video-message",
+        "segments": (segment.model_copy(update={"type": "video"}),)})
     source, _ = state.core.inbox.accept(source)
     claim = {"context": state.core.context_for(source), "permission_snapshot": state.claim["permission_snapshot"],
         "event_json": source.model_dump_json()}

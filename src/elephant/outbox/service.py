@@ -448,7 +448,7 @@ class Outbox:
                     self._defer(c, pending_id, due)
 
             if receipt.state == "SENT":
-                from elephant.storage.task_schema import notifications, waits
+                from elephant.storage.task_schema import notification_question_ids, notifications, waits
                 origin = c.execute(select(outbox.c.origin_id).where(outbox.c.id == delivery_id)).scalar_one()
                 remaining = c.execute(select(outbox.c.id).where(outbox.c.origin_id == origin,
                     outbox.c.state != "SENT")).first()
@@ -467,6 +467,7 @@ class Outbox:
                             outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
                             .values(state="SUPERSEDED"))
                     c.execute(update(notifications).where(notifications.c.id == origin).values(state="SENT"))
-                    c.execute(update(waits).where(waits.c.notification_id == origin,
-                        waits.c.delivered_at.is_(None)).values(delivered_at=now.isoformat(),
+                    linked = (waits.c.id.in_(notification_question_ids(c, origin))
+                              if envelope.purpose == "question" else waits.c.notification_id == origin)
+                    c.execute(update(waits).where(linked, waits.c.delivered_at.is_(None)).values(delivered_at=now.isoformat(),
                             expires_at=(now + timedelta(hours=1)).isoformat()))

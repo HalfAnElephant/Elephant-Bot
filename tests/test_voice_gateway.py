@@ -43,14 +43,13 @@ def voice_host(tmp_path, monkeypatch):
             "message": {"role": "assistant", "content": "收到你的口述请求。"}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 10}})
 
-    def download(url, limit):
+    def download(url, target, **options):
         state.downloads.append(url)
-        assert limit >= len(VOICE)
-        return VOICE
+        target.write(VOICE)
 
     async def convert(api, data, filename=None, *, before_transcribe=None):
-        assert data == VOICE and filename == "voice.silk"
-        state.conversions.append(data)
+        assert data.read() == VOICE and filename == "voice.silk"
+        state.conversions.append(VOICE)
         if state.deny_after_decode:
             state.core.deny_audio = True
         if before_transcribe is not None:
@@ -73,7 +72,7 @@ def voice_host(tmp_path, monkeypatch):
             "context": {"scope": conversation, "workspace_id": workspace_id, "files": [file]}})
         return gateway
 
-    monkeypatch.setattr("elephant.harness.gateway.fetch_public_bytes", download)
+    monkeypatch.setattr("elephant.harness.gateway.download_public_file", download)
     monkeypatch.setattr(audio, "transcribe_audio", convert)
     state.make = make
     return state
@@ -125,13 +124,13 @@ async def test_private_cdn_download_uses_current_binding_and_keeps_tokens_out_of
         bindings.append((claim["run_id"], attachment["source"]))
         return {"Authorization": "QQBot host-media-token"}
 
-    def download(url, limit, *, headers_for_url):
+    def download(url, target, *, headers_for_url, cancelled):
         assert headers_for_url(url) == {"Authorization": "QQBot host-media-token"}
         assert headers_for_url("https://other.example/voice") == {}
-        return VOICE
+        target.write(VOICE)
 
     gateway.media_headers = media_headers
-    monkeypatch.setattr("elephant.harness.gateway.fetch_public_bytes", download)
+    monkeypatch.setattr("elephant.harness.gateway.download_public_file", download)
     assert (await send_voice(gateway)).status_code == 200
     next_file = {**gateway.claim["context"]["files"][0], "source": "new-source"}
     claim = {**gateway.claim, "run_id": "next-run",

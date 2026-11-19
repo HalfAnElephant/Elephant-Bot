@@ -1,4 +1,4 @@
-"""Bounded QQ voice decoding before DeepSeek's complete-audio transcription API."""
+"""Decode QQ voice and send bounded segments to DeepSeek ASR."""
 
 import asyncio
 import io
@@ -7,9 +7,10 @@ import shutil
 import sys
 import tempfile
 import wave
+from contextlib import nullcontext
 from pathlib import Path
+from typing import BinaryIO
 
-MAX_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_AUDIO_SECONDS = 120
 SAMPLE_RATE = 16000
 DECODE_TIMEOUT = 20
@@ -58,34 +59,54 @@ async def _run_decoder(argv, *, stdin=None, stdout=None):
         raise ValueError("audio decoding failed")
 
 
-async def transcribe_audio(api, data: bytes, filename: str | None = None, *, before_transcribe=None) -> dict:
-    if not isinstance(data, bytes) or not data or len(data) > MAX_AUDIO_BYTES:
-        raise ValueError("voice input must contain 1 byte to 8 MiB of audio")
+async def transcribe_audio(api, data: bytes | BinaryIO, filename: str | None = None, *, before_transcribe=None) -> dict:
     with tempfile.TemporaryDirectory(prefix="elephant-audio-") as directory:
         source, pcm = Path(directory) / "input", Path(directory) / "audio.pcm"
-        source.write_bytes(data)
-        if data.startswith((b"#!SILK_V3", b"\x02#!SILK_V3")):
-            await _run_decoder([sys.executable, "-I", "-c", SILK_DECODER, str(source), str(pcm),
-                                str(MAX_PCM_BYTES + SAMPLE_RATE * 2)])
-        else:
-            ffmpeg = shutil.which("ffmpeg")
-            if ffmpeg is None:
-                raise ValueError("ffmpeg is required to decode audio")
-            with source.open("rb") as incoming, pcm.open("xb") as outgoing:
-                # Descriptors permit seeking while excluding network and arbitrary file URLs.
-                await _run_decoder([ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "fd,pipe",
-                    "-i", "fd:", "-map", "0:a:0", "-vn", "-t", str(MAX_AUDIO_SECONDS + 1),
-                    "-ac", "1", "-ar", str(SAMPLE_RATE), "-codec:a", "pcm_s16le", "-f", "s16le",
-                    "-fs", str(MAX_PCM_BYTES + SAMPLE_RATE * 2), "pipe:1"], stdin=incoming, stdout=outgoing)
-        if pcm.stat().st_size > MAX_PCM_BYTES:
-            raise ValueError("voice input exceeds 120 seconds")
-        samples = pcm.read_bytes()
-        if not samples or len(samples) % 2:
+        pcm_limit = shutil.disk_usage(directory).free // 2
+        if isinstance(data, bytes):
+            source.write_bytes(data)
+        with source.open("rb") if isinstance(data, bytes) else nullcontext(data) as incoming:
+            header = incoming.read(10)
+            incoming.seek(0)
+            if not header:
+                raise ValueError("voice input is empty")
+            if header.startswith((b"#!SILK_V3", b"\x02#!SILK_V3")):
+                if not isinstance(data, bytes):
+                    with source.open("xb") as output:
+                        shutil.copyfileobj(incoming, output)
+                await _run_decoder([sys.executable, "-I", "-c", SILK_DECODER, str(source), str(pcm), str(pcm_limit)])
+            else:
+                ffmpeg = shutil.which("ffmpeg")
+                if ffmpeg is None:
+                    raise ValueError("ffmpeg is required to decode audio")
+                with pcm.open("xb") as outgoing:
+                    # Descriptors permit seeking while excluding network and arbitrary file URLs.
+                    os.lseek(incoming.fileno(), 0, os.SEEK_SET)
+                    await _run_decoder([ffmpeg, "-nostdin", "-v", "error", "-protocol_whitelist", "fd,pipe",
+                        "-i", "fd:", "-map", "0:a:0", "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
+                        "-codec:a", "pcm_s16le", "-f", "s16le", "-fs", str(pcm_limit), "pipe:1"],
+                        stdin=incoming, stdout=outgoing)
+        size = pcm.stat().st_size
+        if size >= pcm_limit:
+            raise ValueError("insufficient temporary disk space for decoded voice")
+        if not size or size % 2:
             raise ValueError("audio decoding produced no complete samples")
-    with io.BytesIO() as output:
-        with wave.open(output, "wb") as recording:
-            recording.setparams((1, 2, SAMPLE_RATE, 0, "NONE", "NONE"))
-            recording.writeframes(samples)
-        if before_transcribe is not None:
-            await before_transcribe()
-        return await api.transcribe(output.getvalue(), "voice.wav")
+        with pcm.open("rb") as decoded:
+            first, duration, text = None, 0, ""
+            while samples := decoded.read(MAX_PCM_BYTES):
+                with io.BytesIO() as output:
+                    with wave.open(output, "wb") as recording:
+                        recording.setparams((1, 2, SAMPLE_RATE, 0, "NONE", "NONE"))
+                        recording.writeframes(samples)
+                    if before_transcribe is not None:
+                        await before_transcribe()
+                    response = await api.transcribe(output.getvalue(), "voice.wav")
+                if first is None:
+                    first = response
+                duration += response["duration_ms"]
+                text = (text + ("\n" if text else "") + response["text"])[:10001]
+            if size <= MAX_PCM_BYTES:
+                return first
+            if len(text) > 10000:
+                text = text[:9950] + "\n[转写过长，已截断。]"
+            return {"text": text, "duration_ms": duration}
