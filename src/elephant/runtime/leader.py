@@ -114,12 +114,12 @@ class LeaderRuntime:
                 conn.execute(update(learning_sessions).where(learning_sessions.c.session_id == source["session_id"])
                     .values(pending_json=json.dumps(pending, ensure_ascii=False)))
 
-    def _account_turn(self, conn, run, claim):
+    def _account_turn(self, conn, run, claim, *, through=None):
         if claim["purpose"] != "user" and run["role"] != "skill_review":
             return
         used = json.loads(run["budget_json"])
         now = self.clock.now()
-        elapsed = max(0, (now - datetime.fromisoformat(run["accounted_at"])).total_seconds()) if run["accounted_at"] else 0
+        elapsed = max(0, ((through or now) - datetime.fromisoformat(run["accounted_at"])).total_seconds()) if run["accounted_at"] else 0
         used["active_seconds"] = min(claim["plan"]["budget"]["active_seconds"], used.get("active_seconds", 0) + elapsed)
         conn.execute(update(runs).where(runs.c.id == run["id"]).values(budget_json=json.dumps(used), accounted_at=now.isoformat()))
         self._persist_turn_budget(conn, run, claim, used)
@@ -530,10 +530,19 @@ class LeaderRuntime:
                     result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
         proof = json.loads(run["receipt_json"]) if run["receipt_json"] else None
         mutation = claim.get("memory_mutation")
+        discarded_entry = None
         try:
             adapter = resolve_harness(self.core, claim.get("binding", {}))
             path = adapter.session_path(Path(self.db.path).resolve().parent, run, process)
-            pending = () if mutation else adapter.unfinished_tools(path)
+            discarded = set()
+            with self.db.engine.connect() as conn:
+                for raw in conn.execute(select(runs.c.receipt_json).where(runs.c.session_id == run["session_id"],
+                        runs.c.role == "leader", runs.c.state == "RECOVERED", runs.c.receipt_json.is_not(None))).scalars():
+                    receipt = json.loads(raw)
+                    # Only the host writes this receipt shape, not the runner's normal boundary receipts.
+                    if isinstance(receipt, dict) and set(receipt) == {"discarded_submit_entry"}:
+                        discarded.add(receipt["discarded_submit_entry"])
+            pending = () if mutation else adapter.unfinished_tools(path, discarded=discarded)
             submitted = [call for call in pending if call.get("name") == "tasks_submit"]
             if claim.get("target_root_task_id") and claim["purpose"] in {"attention", "finalize"}:
                 if pending:
@@ -544,7 +553,7 @@ class LeaderRuntime:
             elif pending:
                 if run["role"] != "leader" or claim["purpose"] != "user":
                     raise ValueError("native dispatch recovery requires an isolated owner submission")
-                receipts = []
+                receipts, discard = [], None
                 with self.db.engine.connect() as conn:
                     source = conn.execute(select(dialogue_inputs).where(
                         dialogue_inputs.c.id == claim["source_ids"][0],
@@ -555,17 +564,27 @@ class LeaderRuntime:
                     for call in submitted:
                         task, committed_intent = self.service.graph.dispatch_receipt(conn, owner,
                             stable_id(owner, source["id"], call["id"]))
+                        if (not task and not proof and len(pending) == 1 and len(claim["source_ids"]) == 1
+                                and not claim.get("target_root_task_id") and source["owner_id"] == owner
+                                and source["claimed_attempt_id"] == run_id and source["handled_at"] is None):
+                            discard = adapter.aborted_submit(path, call, run_id=run_id, input_ids=claim["source_ids"])
+                            if discard:
+                                break
                         intent = GoalSpec.model_validate_json(json.dumps(call["arguments"])).model_dump(mode="json")
                         if (not task or task["origin_dialogue_id"] != source["dialogue_id"]
                                 or task["coordinator_session_id"] != claim["session_id"]
                                 or GoalSpec.model_validate(committed_intent).model_dump(mode="json") != intent):
                             raise ValueError("native dispatch has no matching committed host intent")
                         receipts.append({"call": call, "result": self.service.graph.status(conn, task)})
-                receipts.extend({"call": call, "is_error": True, "result": {
-                    "state": "INTERRUPTED", "stopped": True,
-                    "instruction": "上次调用随进程中断。先核对操作记录中的 UNKNOWN 结果，不重复执行。",
-                }} for call in pending if call.get("name") != "tasks_submit")
-                adapter.restore_tool_results(path, receipts)
+                if discard:
+                    adapter.discard_aborted_submit(path, discard)
+                    discarded_entry = discard["entry"]["id"]
+                else:
+                    receipts.extend({"call": call, "is_error": True, "result": {
+                        "state": "INTERRUPTED", "stopped": True,
+                        "instruction": "上次调用随进程中断。先核对操作记录中的 UNKNOWN 结果，不重复执行。",
+                    }} for call in pending if call.get("name") != "tasks_submit")
+                    adapter.restore_tool_results(path, receipts)
         except (OSError, ValueError, KeyError):
             with self.db.transaction() as conn:
                 conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
@@ -578,6 +597,7 @@ class LeaderRuntime:
         except (OSError, ValueError, KeyError):
             # The accepted input remains queued until its native log can be resumed.
             proof = None
+        reopen = bool(mutation or (proof and proof.get("summary")))
         now = self.clock.now().isoformat()
         with self.db.transaction() as conn:
             current = conn.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
@@ -611,8 +631,9 @@ class LeaderRuntime:
                     conn.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
                     self.service.wakeup.set()
                     return {"run_id": run_id, "state": "RECOVERED"}
-            conn.execute(update(runs).where(runs.c.id == run_id).values(state="RUNNING",
-                lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
+            if reopen:
+                conn.execute(update(runs).where(runs.c.id == run_id).values(state="RUNNING",
+                    lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
         if mutation:
             outcome = self.complete(run_id, run["fencing"], run["worker"],
                 {"status": "completed", "summary": mutation["summary"], "agent_authored": False},
@@ -631,10 +652,15 @@ class LeaderRuntime:
             current = conn.execute(select(runs).where(runs.c.id == run_id)).mappings().one()
             if not current["slot_reserved"]:
                 return {"run_id": run_id, "state": current["state"]}
+            if not reopen and current["lease"] > self.clock.now().isoformat():
+                raise PermissionError("Leader lease was renewed during recovery")
+            self._account_turn(conn, current, claim, through=datetime.fromisoformat(run["lease"]))
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
                 table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(claimed_attempt_id=None))
-            self._account_turn(conn, current, claim)
+            if discarded_entry:
+                conn.execute(update(runs).where(runs.c.id == run_id).values(
+                    receipt_json=json.dumps({"discarded_submit_entry": discarded_entry})))
             if run["role"] == "skill_review":
                 self.sessions.learning.finish_review(conn, run_id, retry=True)
                 self._review_marks.pop(run_id, None)
@@ -699,6 +725,13 @@ class LeaderRuntime:
         return {"operation_id": operation_id, "state": current["state"],
             "result": json.loads(current["result_json"]), "changed": bool(changed)}
 
+    def _control_state(self, conn, run, claim):
+        try:
+            self.authorize(conn, run, claim, {"action": "task.execute"})
+        except PermissionError:
+            return "CANCEL_REQUESTED"
+        return run["state"]
+
     async def invoke(self, operation, identity, payload=None, **values):
         run_id, fencing, worker_id = identity
         payload = payload or {}
@@ -712,6 +745,16 @@ class LeaderRuntime:
                 raise PermissionError("unknown recovery source")
             closed = run.state in {"FINISHED", "RECOVERED"} and not run.slot_reserved and run.quiescent_at is not None
             return {"state": run.state, "discard_spool": False, "archive_spool": closed}
+        if operation in {"authorize", "control", "inputs"}:
+            # Provider streaming checks every chunk; readers must not acquire SQLite's writer lock.
+            with self.db.engine.connect() as conn:
+                conn.exec_driver_sql("BEGIN")
+                run, claim = self.lease(conn, *identity)
+                if operation == "authorize":
+                    return self.authorize(conn, run, claim, payload)
+                if operation == "control":
+                    return {"state": self._control_state(conn, run, claim), "delivery": "ATTACHED"}
+                return []
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))
@@ -822,8 +865,6 @@ class LeaderRuntime:
                     self.service._verify_result_refs(conn, result, {"id": claim["task_id"],
                         "retry_of_task_id": None, "rework_of_task_id": None})
                 return {"accepted": True}
-            if operation == "authorize":
-                return self.authorize(conn, run, claim, payload)
             if operation == "tasks":
                 return self.task_tool(conn, run, claim, payload)
             if operation == "session-receipt":
@@ -836,17 +877,11 @@ class LeaderRuntime:
                 if not changed.rowcount:
                     raise ValueError("usage request was not reserved")
                 return {"recorded": True}
-            if operation in {"control", "renew"}:
-                state = run["state"]
-                try:
-                    self.authorize(conn, run, claim, {"action": "task.execute"})
-                except PermissionError:
-                    state = "CANCEL_REQUESTED"
-                if operation == "renew":
-                    conn.execute(update(runs).where(runs.c.id == run_id).values(lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
+            if operation == "renew":
+                state = self._control_state(conn, run, claim)
+                conn.execute(update(runs).where(runs.c.id == run_id).values(
+                    lease=(self.clock.now() + timedelta(seconds=30)).isoformat()))
                 return {"state": state, "delivery": "ATTACHED"}
-            if operation == "inputs":
-                return []
             if operation == "notify":
                 if run["role"] != "leader":
                     raise PermissionError("only the Leader can send user-facing progress")

@@ -4,6 +4,8 @@ import json
 import logging
 from itertools import pairwise
 from pathlib import Path
+from sqlite3 import SQLITE_BUSY
+from sqlite3 import OperationalError as SQLiteError
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -11,6 +13,7 @@ import httpx
 import pytest
 from conftest import runtime_client_for
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from elephant.domain.messages import AccessContext, ConversationRef, InboundEvent, PrincipalRef, Surface
 from elephant.harness.gateway import RunGateway
@@ -323,6 +326,65 @@ async def test_event_persistence_error_does_not_drop_failure_result(environment,
         assert conn.execute(select(tasks.c.failure_notice_json)).scalar_one()
 
 
+@pytest.mark.parametrize("busy_once", [False, True])
+async def test_active_heartbeat_renews_while_event_flush_is_waiting(environment, tmp_path, clock, monkeypatch, busy_once):
+    from elephant.jobs import worker as worker_module
+
+    service, _task, client = environment
+    claim = service.claim("worker")
+    blocked = asyncio.Event()
+    renewals = asyncio.Queue()
+    busy = asyncio.Event()
+    renew = service.renew
+
+    def renew_with_busy(*args):
+        if busy_once and blocked.is_set() and not busy.is_set():
+            busy.set()
+            error = SQLiteError("database is locked")
+            error.sqlite_errorcode = SQLITE_BUSY
+            raise OperationalError(None, None, error)
+        return renew(*args)
+
+    monkeypatch.setattr(service, "renew", renew_with_busy)
+
+    class WaitingWorker(Worker):
+        async def flush_events(self, run_id=None):
+            blocked.set()
+            await asyncio.Future()
+
+        async def call(self, operation, **payload):
+            result = await super().call(operation, **payload)
+            if operation == "renew" and blocked.is_set():
+                renewals.put_nowait(result["lease_expires_at"])
+            return result
+
+    class WaitingRunner:
+        stopped_verified = False
+
+        async def run(self, _goal):
+            await asyncio.Future()
+
+        async def stop(self):
+            self.stopped_verified = True
+            return True
+
+    monkeypatch.setattr(worker_module, "LEASE_HEARTBEAT_SECONDS", 0.01)
+    worker = WaitingWorker(client, "worker", Spool(tmp_path / "spool"), lambda _: WaitingRunner())
+    run = asyncio.create_task(worker.once(claim))
+    try:
+        await asyncio.wait_for(blocked.wait(), 2)
+        clock.advance(25)
+        assert await asyncio.wait_for(renewals.get(), 2) > clock.now().isoformat()
+        clock.advance(10)
+        assert await asyncio.wait_for(renewals.get(), 2) > clock.now().isoformat()
+        assert busy.is_set() == busy_once
+    finally:
+        worker.begin_shutdown()
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+    assert not any(task.get_name() == "elephant-lease:" + claim["run_id"] for task in asyncio.all_tasks())
+
+
 async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp_path, clock, monkeypatch):
     from elephant.jobs import worker as worker_module
 
@@ -352,7 +414,11 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
             nonlocal original_expiry
             with service.db.engine.connect() as conn:
                 original_expiry = conn.execute(select(runs.c.lease)).scalar_one()
-            clock.advance(25)
+            for _ in range(5):
+                # Drive the active heartbeat at the same pace as the fake database clock.
+                await asyncio.wait_for(sleeping.get(), timeout=5)
+                clock.advance(5)
+                ticks.put_nowait(None)
             raise ValueError("Failure before verified stop")
 
         async def stop(self):
@@ -371,7 +437,7 @@ async def test_stop_heartbeat_preserves_lease_beyond_old_expiry(environment, tmp
     worker = Worker(client, "worker", Spool(tmp_path / "spool"), None, pool=pool)
     assert await worker.once()
     assert clock.now().isoformat() > original_expiry
-    assert len(renewals) == 10
+    assert len(renewals) == 15  # Five renewals during execution and ten through verified stop.
     assert all(a < b for a, b in pairwise(renewals))
     with service.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0

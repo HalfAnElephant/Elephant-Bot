@@ -3,10 +3,12 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
+from sqlite3 import SQLITE_BUSY, SQLITE_LOCKED
 from types import SimpleNamespace
 
 import httpx
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from elephant.adapters.deepseek import DeepSeekAPI
 from elephant.capabilities.gateway import standard_registry
@@ -50,6 +52,12 @@ class RuntimeClient:
                 logger.warning("Session receipt rejected run_id=%s kind=%s inflight=%s tools_paired=%s detail=%s",
                     body.run_id, payload.get("kind"), payload.get("inflight"), payload.get("tools_paired"), error)
             return httpx.Response(409, json={"detail": str(error)}, request=request)
+        except OperationalError as error:
+            code = getattr(error.orig, "sqlite_errorcode", None)
+            # SQLite extended result codes carry the primary code in the low byte.
+            if path != "/internal/tasks/renew" or not isinstance(code, int) or code & 0xFF not in {SQLITE_BUSY, SQLITE_LOCKED}:
+                raise
+            return httpx.Response(503, json={"detail": "lease store busy"}, request=request)
         except (ValueError, LookupError, TypeError) as error:
             return httpx.Response(422, json={"detail": str(error)}, request=request)
 

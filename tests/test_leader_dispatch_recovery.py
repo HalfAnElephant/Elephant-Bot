@@ -15,12 +15,14 @@ from elephant.adapters.pi.sessions import branch_entries, load_entries, unfinish
 from elephant.jobs.worker import GeneralRun
 from elephant.providers import ModelCapacity
 from elephant.runtime.scheduler import RuntimeClient
+from elephant.storage.agent_schema import dialogue_inputs
 from elephant.storage.task_schema import runs, tasks
 
 runtime = agent_runtime
 
 
-def native_pending_submit(runtime, claim, arguments, *, tool_name="tasks_submit"):
+def native_pending_submit(runtime, claim, arguments, *, tool_name="tasks_submit", stop_reason="toolUse",
+                          run_sources=None):
     path = runtime.path / "leader-session.jsonl"
     executable = Path("node_modules/.bin/pi").resolve(strict=True)
     module = executable.parents[1] / "index.js"
@@ -29,16 +31,18 @@ import {readFileSync} from 'node:fs';
 const body = JSON.parse(readFileSync(0, 'utf8'));
 const {SessionManager} = await import(body.module);
 const session = SessionManager.open(body.path);
+session.appendCustomEntry('elephant-run', {run_id: body.run, role: 'leader', purpose: 'user', source_event_ids: body.run_sources});
 session.appendCustomEntry('elephant-source', {id: body.source, kind: 'user'});
 session.appendMessage({role: 'user', content: [{type: 'text', text: '[[elephant-input:' + body.source + ']]\\n检查项目'}], timestamp: Date.now()});
 session.appendCustomEntry('elephant-consumed', {input_ids: [body.source], run_id: body.run});
 session.appendMessage({role: 'assistant', content: [{type: 'toolCall', id: 'native-submit-call', name: body.tool_name, arguments: body.arguments}],
-  api: 'openai-completions', provider: 'qqbot', model: 'offline', stopReason: 'toolUse', timestamp: Date.now(),
+  api: 'openai-completions', provider: 'qqbot', model: 'offline', stopReason: body.stop_reason, timestamp: Date.now(),
   usage: {input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}});
 """
     subprocess.run(["node", "--input-type=module", "-e", script], input=json.dumps({"module": module.as_uri(),
         "path": str(path), "source": claim["source_ids"][0], "run": claim["run_id"],
-        "arguments": arguments, "tool_name": tool_name}),
+        "arguments": arguments, "tool_name": tool_name, "stop_reason": stop_reason,
+        "run_sources": claim["source_ids"] if run_sources is None else run_sources}),
         capture_output=True, text=True, timeout=20, check=True)
     with runtime.db.transaction() as conn:
         conn.execute(update(runs).where(runs.c.id == claim["run_id"]).values(session=str(path)))
@@ -147,6 +151,81 @@ async def test_uncommitted_or_changed_submit_intent_retains_writer_without_nativ
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 1
         assert conn.execute(select(func.count()).select_from(tasks).where(tasks.c.kind == "goal")).scalar_one() == int(committed)
+
+
+@pytest.mark.parametrize("crash_after_edit", [False, True])
+def test_aborted_partial_submit_releases_and_requeues_without_faking_tool_result(runtime, monkeypatch, crash_after_edit):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, old, {}, stop_reason="aborted")
+    original = path.read_bytes()
+    runtime.clock.advance(32)
+    if crash_after_edit:
+        with monkeypatch.context() as patch:
+            def interrupted(*_args, **_kwargs):
+                raise RuntimeError("interrupted before database commit")
+            patch.setattr(runtime.leader, "_account_turn", interrupted)
+            with pytest.raises(RuntimeError, match="before database commit"):
+                runtime.leader.recover_attempt(old["run_id"])
+        assert runtime.sessions.claim("replacement") is None
+    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "RECOVERED"
+    assert path.read_bytes().startswith(original)
+    entries = load_entries(path)
+    edits = [entry for entry in entries if entry["type"] == "context_edit"]
+    assert len(edits) == 1 and edits[0]["replacement"] is None
+    assert not any(entry.get("message", {}).get("role") == "toolResult" for entry in entries)
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(tasks)).scalar_one() == 0
+        context = json.loads(conn.execute(select(dialogue_inputs.c.context_json)).scalar_one())
+        assert context["leader_turn"]["used"]["active_seconds"] == 30
+        assert conn.execute(select(runs.c.slot_reserved)).scalar_one() == 0
+    retry = runtime.sessions.claim("replacement")
+    assert retry["source_ids"] == old["source_ids"]
+    # Once recorded by the host, the tombstone does not obstruct later recovery of this session.
+    with runtime.db.transaction() as conn:
+        conn.execute(update(runs).where(runs.c.id == retry["run_id"]).values(session=str(path)))
+    runtime.clock.advance(31)
+    assert runtime.leader.recover_attempt(retry["run_id"])["state"] == "RECOVERED"
+    assert load_entries(path) == entries
+
+
+@pytest.mark.parametrize("blocker", ["tool_use", "committed", "wrong_sources"])
+async def test_partial_submit_without_abort_proof_or_with_receipt_retains_slot(runtime, blocker):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    if blocker == "committed":
+        response = await submit_tool(runtime, old, {"goal": "检查项目", "children": [
+            {"goal": "独立检查", "delegation_key": "primary"}]})
+        assert response.status_code == 200
+    path = native_pending_submit(runtime, old, {}, stop_reason="toolUse" if blocker == "tool_use" else "aborted",
+                                 run_sources=["wrong-source"] if blocker == "wrong_sources" else None)
+    before = path.read_bytes()
+    runtime.clock.advance(31)
+    assert runtime.leader.recover_attempt(old["run_id"])["state"] == "NEEDS_RECONCILIATION"
+    assert runtime.sessions.claim("replacement") is None
+    assert path.read_bytes() == before
+
+
+async def test_leader_runtime_reads_do_not_wait_for_sqlite_writer(runtime):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    core = runtime.leader.core
+    client = RuntimeClient(core, runtime.leader)
+    request = {"worker_id": "leader", "run_id": claim["run_id"], "fencing_token": claim["fencing_token"]}
+    with runtime.db.transaction():
+        allowed = await client.post("/internal/tasks/authorize", json={**request, "payload": {"action": "model.request"}})
+        control = await client.post("/internal/tasks/control", json=request)
+        inputs = await client.post("/internal/tasks/inputs", json=request)
+        assert allowed.status_code == 200 and allowed.json()["allowed"]
+        assert control.status_code == 200 and control.json()["state"] == "RUNNING"
+        assert inputs.status_code == 200 and inputs.json() == []
+        core.allowed = lambda _: False
+        denied = await client.post("/internal/tasks/authorize", json={**request, "payload": {"action": "model.request"}})
+        control = await client.post("/internal/tasks/control", json=request)
+        assert denied.status_code == 409 and control.json()["state"] == "CANCEL_REQUESTED"
+        runtime.clock.advance(31)
+        expired = await client.post("/internal/tasks/inputs", json=request)
+        assert expired.status_code == 409
 
 
 def test_interrupted_direct_tool_releases_writer_with_recovery_receipt(runtime):
