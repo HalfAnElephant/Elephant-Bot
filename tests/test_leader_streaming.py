@@ -577,7 +577,7 @@ async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
 
 
-@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous", "invalid", "independent"])
+@pytest.mark.parametrize("disposition", ["covered", "covered_with_primary", "deferred", "unseen", "ambiguous", "invalid", "independent"])
 async def test_leader_publication_respects_steering_receipt(leader_stream, disposition):
     from elephant.domain import TextSegment
     from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
@@ -606,8 +606,11 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
         assert [item["id"] for item in candidates] == [extra.event_id]
         assert "重点测乱序" in candidates[0]["text"]
         receipt["input_ids"].append(extra.event_id)
-        if disposition == "covered":
-            receipt["outcome"] = {"covered_input_ids": [extra.event_id]}
+        if disposition in {"covered", "covered_with_primary"}:
+            covered_ids = [extra.event_id]
+            if disposition == "covered_with_primary":
+                covered_ids.extend(claim["source_ids"])
+            receipt["outcome"] = {"covered_input_ids": covered_ids}
         elif disposition == "deferred":
             receipt["outcome"] = {"deferred_input_ids": [extra.event_id]}
         elif disposition == "invalid":
@@ -627,7 +630,8 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
         assert retry.get("steer_without_supplements", False) == (disposition in {"ambiguous", "invalid"})
     else:
         assert len(published) == 1
-        assert set(handled) == set(receipt["input_ids"] if disposition == "covered" else claim["source_ids"])
+        includes_extra = disposition in {"covered", "covered_with_primary"}
+        assert set(handled) == set(receipt["input_ids"] if includes_extra else claim["source_ids"])
         if disposition in {"deferred", "independent"}:
             assert s.core.sessions.claim("fixture")["source_ids"] == [extra.event_id]
 

@@ -47,8 +47,9 @@ def test_leader_stream_upgrade_preserves_existing_delivery_receipts(tmp_path):
                      "VALUES ('old-message','old-run','answer','answer','UNKNOWN','{}','2026-11-13')")
     migrate(str(path), backup=False)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT * FROM qq_stream_runs").fetchone() == (
-            "old-run", "old-task", "UNKNOWN", 8, "INTERRUPTED_SEND", None, None)
+        assert conn.execute("SELECT run_id, task_id, state, cursor_seq, error, result_origin_kind, "
+                            "result_origin_id, enqueue_seq FROM qq_stream_runs").fetchone() == (
+            "old-run", "old-task", "UNKNOWN", 8, "INTERRUPTED_SEND", None, None, None)
         assert conn.execute("SELECT state FROM qq_stream_messages").fetchone() == ("UNKNOWN",)
         conn.execute("INSERT INTO qq_stream_runs (run_id,task_id,state) VALUES ('leader',NULL,'ACTIVE')")
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)

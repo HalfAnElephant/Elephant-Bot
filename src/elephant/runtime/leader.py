@@ -557,7 +557,8 @@ class LeaderRuntime:
                 described = set()
                 if all(isinstance(ids, list) and len(ids) <= 8 and all(isinstance(item, str) for item in ids)
                        for ids in (covered, deferred)):
-                    described = set(covered) | set(deferred)
+                    covered = set(covered) - set(claim["source_ids"])
+                    described = covered | set(deferred)
                 if not described or not described <= observed or set(covered) & set(deferred):
                     covered, described = [], set()
                 ambiguous = bool(observed - described)

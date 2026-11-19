@@ -119,7 +119,12 @@ async def test_platform_acceptance_survives_process_exit_without_resend(
         first_row = rows[first]
         assert first_row["state"] == "UNKNOWN" and first_row["attempts"] == 1
         assert first_row["sent_at"] is None and first_row["platform_message_id"] is None
-        assert first_row["receipt_json"] is None
+        if isolated_restore:
+            assert first_row["receipt_json"] is None
+        else:
+            assert json.loads(first_row["receipt_json"]) == {
+                "state": "UNKNOWN", "platform_message_id": None, "error_code": "INTERRUPTED_SEND",
+            }
         for key in ("dedupe_key", "envelope_json", "attempted_at", "origin_id"):
             assert first_row[key] == attempted[key]
         assert rows[second]["state"] == "SENT" and rows[second]["attempts"] == 1

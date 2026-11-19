@@ -246,7 +246,7 @@ export default function (pi: ExtensionAPI) {
         condition: Type.Object({capability: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown()),
           path: Type.String({description: "Dot path into the observed read result. For job.inspect use state or exit_code; GitHub stdout is decoded JSON."}),
           equals: Type.Unknown(), interval_seconds: Type.Optional(Type.Integer({minimum: 15, maximum: 3600}))})})},
-    {name: "task_outcome", description: "Record the actual goal outcome when partial, blocked, failed, needing external verification, or exporting completed workspace attachments. The final assistant message is the user-facing narrative.",
+    {name: "task_outcome", description: "Record the actual goal outcome when partial, blocked, failed, needing external verification, or exporting completed workspace attachments. When you receive supplementary inputs, record every supplied supplement ID in covered_input_ids or deferred_input_ids before the final answer, including on success. Use only supplement IDs in these lists. The final assistant message is the user-facing narrative.",
       parameters: Type.Object({status: Type.Union([Type.Literal("completed"), Type.Literal("partial"), Type.Literal("blocked"), Type.Literal("failed")]),
         attachments: Type.Optional(Type.Array(Type.String({minLength: 1, maxLength: 1024}), {maxItems: 20})),
         observation_refs: Type.Optional(Type.Array(Type.String())), effect_refs: Type.Optional(Type.Array(Type.String())),
