@@ -13,8 +13,8 @@ from elephant.domain.agents import TaskInputSpec
 from elephant.domain.tasks import TaskResult, validate_user_facing_text
 from elephant.jobs.streaming import PUBLIC_KINDS, validate_public_event
 from elephant.storage.action_schema import operations
-from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events, leader_inbox
-from elephant.storage.schema import outbox, reply_counters
+from elephant.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_events, leader_inbox
+from elephant.storage.schema import inbox, outbox, reply_counters
 from elephant.storage.stream_schema import stream_runs
 from elephant.storage.task_schema import (
     events,
@@ -155,8 +155,27 @@ class LeaderRuntime:
                 "若是独立请求，留给下一轮。若用 tasks_send_input 修订任务，source_input_id 填这条补充的 ID。\n" + event.text})
         return candidates
 
+    def unrouted_steering(self, conn, claim):
+        if not claim.get("steer_until"):
+            return False
+        event = InboundEvent.model_validate_json(claim["event_json"])
+        primary_seq = conn.scalar(select(inbox.c.seq).where(inbox.c.id == event.event_id))
+        selected = conn.scalar(select(focus.c.dialogue_id).where(
+            focus.c.key == stable_id(event.conversation.key, event.principal.key)))
+        if primary_seq is None or selected != claim["context"]["dialogue_id"]:
+            return False
+        routed = select(dialogue_inputs.c.id).where(dialogue_inputs.c.id == inbox.c.id).exists()
+        pending = conn.execute(select(inbox.c.event_json).where(
+            inbox.c.conversation_id == event.conversation.key, inbox.c.principal_id == event.principal.key,
+            inbox.c.seq > primary_seq, inbox.c.event_type == "message.created", inbox.c.state == "PENDING",
+            ~routed)).scalars()
+        return any(self.core.allowed(new) and not new.sender_is_bot and (
+            new.conversation.surface in {"private", "guild_private"} or new.mentions_bot or new.reply_to)
+            for raw in pending if (new := InboundEvent.model_validate_json(raw)).text)
+
     def unseen_steering(self, conn, claim, seen):
-        return any(item["id"] not in seen for item in self.steering_candidates(conn, claim))
+        return self.unrouted_steering(conn, claim) or any(
+            item["id"] not in seen for item in self.steering_candidates(conn, claim))
 
     def receipt(self, conn, run, claim, payload):
         expected = set(claim["source_ids"]) | set(claim.get("task_input_ids", []))
@@ -511,7 +530,8 @@ class LeaderRuntime:
                 context = json.loads(primary["context_json"])
                 turn = context["leader_turn"]
                 retries = turn.get("publish_retries", 0)
-                stale_draft = bool((seen & offered) - available) or (bool(available - seen) and retries < 2)
+                stale_draft = bool((seen & offered) - available) or (
+                    (bool(available - seen) or self.unrouted_steering(conn, claim)) and retries < 2)
                 if stale_draft:
                     turn["publish_retries"] = retries + 1
                     conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == primary["id"]).values(
@@ -548,6 +568,12 @@ class LeaderRuntime:
             published_chat = False
             if claim.get("target_root_task_id"):
                 target = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
+            newer_result = claim["purpose"] == "progress" and conn.scalar(select(leader_inbox.c.id).where(
+                leader_inbox.c.target_session_id == claim["session_id"],
+                leader_inbox.c.root_task_id == claim["target_root_task_id"],
+                leader_inbox.c.source_revision == claim["basis_goal_revision"],
+                leader_inbox.c.resume_reason.in_(["child_result", "needs_input", "needs_attention"]),
+                leader_inbox.c.handled_at.is_(None), leader_inbox.c.claimed_attempt_id.is_(None)).limit(1))
             if pending_wait:
                 conn.execute(update(waits).where(waits.c.id == pending_wait["id"]).values(state="WAITING"))
                 conn.execute(update(tasks).where(tasks.c.id == target["id"]).values(state="WAITING_INPUT"))
@@ -616,6 +642,8 @@ class LeaderRuntime:
                         defer_reply=claim.get("public_answer_events", False))
                     if claim.get("public_answer_events"):
                         self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
+            elif newer_result:
+                pass  # The queued Worker event wakes a new turn with the current snapshot.
             elif claim["purpose"] in {"progress", "question", "attention"} and result.agent_authored:
                 purpose = "question" if claim["purpose"] == "question" else "progress"
                 notice = self.service._notification(conn, target, run_id, result.summary, purpose,
@@ -640,7 +668,8 @@ class LeaderRuntime:
                         "turn:" + claim["session_id"] + ":" + claim["source_ids"][0])
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]), table.c.claimed_attempt_id == run_id).values(
-                handled_at=now, **({"state": "HANDLED"} if table is dialogue_inputs else {"output_ref": run_id})))
+                handled_at=now, **({"state": "HANDLED"} if table is dialogue_inputs else {
+                    "output_ref": "SUPERSEDED" if newer_result else run_id})))
             if published_chat or notice is not None:
                 conn.execute(update(leader_events).where(leader_events.c.source_kind == (
                     "user" if table is dialogue_inputs else "worker"),

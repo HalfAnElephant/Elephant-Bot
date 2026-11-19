@@ -766,8 +766,8 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
         await pool.close()
 
 
-@pytest.mark.parametrize("started", [False, True])
-async def test_user_revision_guards_operation_start_but_preserves_started_receipt(leader_stream, started):
+@pytest.mark.parametrize(("started", "routed"), [(False, False), (False, True), (True, True)])
+async def test_user_revision_guards_operation_start_but_preserves_started_receipt(leader_stream, started, routed):
     from elephant.domain import TextSegment
     from elephant.storage.action_schema import operations
     from elephant.storage.agent_schema import dialogues
@@ -791,7 +791,8 @@ async def test_user_revision_guards_operation_start_but_preserves_started_receip
         "segments": (TextSegment(text="改成只读检查"),),
         "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "correction-message"})})
     extra, _ = s.core.inbox.accept(extra)
-    await s.core.process(extra)
+    if routed:
+        await s.core.process(extra)
     if started:
         assert (await s.core.leader.invoke("ledger", identity, {**begin, "expected": "DISPATCHED",
             "state": "VERIFIED", "result": {"observed": True}}))["changed"]
@@ -858,3 +859,54 @@ async def test_steered_task_revision_uses_real_supplement_provenance(runtime):
     with runtime.db.engine.connect() as conn:
         sources = conn.execute(select(inputs.c.source_event_id, inputs.c.text).where(inputs.c.kind == "followup")).all()
         assert sources and all(source == (extra.event_id, "只读验证") for source in sources)
+
+
+def test_new_worker_result_supersedes_draft_progress(runtime):
+    from elephant.storage.task_schema import notifications
+
+    root_goal(runtime)
+    worker = runtime.service.claim("worker")
+    with runtime.db.transaction() as conn:
+        child = conn.execute(select(tasks).where(tasks.c.id == worker["task_id"])).mappings().one()
+        runtime.service.graph.event(conn, child, "worker_update", {"public_text": "仍在检查"}, wake=True)
+    runtime.clock.advance(3)
+    progress = runtime.sessions.claim("leader")
+    assert progress["purpose"] == "progress"
+    runtime.service.submit(worker["run_id"], worker["fencing_token"], "worker",
+        {"status": "completed", "summary": "检查完成"}, receipt={"kind": "turn_finished",
+            "session_id": worker["context"]["session_id"], "run_id": worker["run_id"], "session_revision": "leaf",
+            "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True})
+    leader_complete(runtime, progress, "仍在检查")
+    with runtime.db.engine.connect() as conn:
+        assert not conn.scalar(select(notifications.c.id).where(notifications.c.body == "仍在检查"))
+    assert runtime.sessions.claim("leader")["purpose"] == "finalize"
+
+
+async def test_committed_draft_ignores_future_recalled_session_source(leader_stream):
+    from elephant.domain import OutboundEnvelope, TextSegment
+    from elephant.storage.agent_schema import dialogues
+    from elephant.storage.task_schema import sessions
+
+    s = leader_stream
+    with s.core.db.engine.connect() as conn:
+        dialogue = conn.execute(select(dialogues.c.id)).scalar_one()
+    config = s.core.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
+    s.core.sessions.settings = s.core.settings.model_copy(update={"orchestration": config})
+    claim = s.core.sessions.claim("fixture")
+    result = {"status": "completed", "summary": "已提交的旧定稿"}
+    s.core.leader.complete(claim["run_id"], claim["fencing_token"], "fixture", result, stopped=True,
+        quiescent=False, receipt={"kind": "turn_finished", "summary": result["summary"],
+            "session_id": claim["session_id"], "run_id": claim["run_id"], "session_revision": "leaf",
+            "input_ids": claim["source_ids"], "inflight": 0, "tools_paired": True})
+    later, _ = s.core.inbox.accept(s.event.model_copy(update={"event_id": "later-source",
+        "platform_message_id": "later-source", "segments": (TextSegment(text="后来另一个话题"),)}))
+    history = s.core.context_for(later)
+    history["steering_sources"] = True
+    with s.core.db.transaction() as conn:
+        conn.execute(sessions.insert().values(id=claim["session_id"], scope_key=claim["session_id"],
+            session_file="fixture.jsonl", epoch=1, manifest_json=json.dumps(history)))
+        saved = conn.scalar(select(outbox.c.envelope_json))
+    s.core.inbox.accept(later.model_copy(update={"event_id": "recall-later", "event_type": "message.recalled"}))
+    envelope = OutboundEnvelope.model_validate_json(saved)
+    assert not s.core.validate_context(s.core.access(s.event), {"session_id": claim["session_id"]})
+    assert s.core.pre_send(envelope)

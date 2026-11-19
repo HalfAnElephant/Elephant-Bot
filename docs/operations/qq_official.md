@@ -165,3 +165,13 @@ https://github.com/tencent-connect/botpy/tree/e25f3e84bad7217357d8200a9d12939b58
 文档解析和 OCR 受 DeepSeek 对应接口限制。长语音使用 DeepSeek 转写时拆成每段最长 120 秒的 WAV，按顺序合并转写。标准任务产物按块校验、归档和下载，无固定总字节配额。
 
 真实 QQ 各 surface 的附件 URL、权限与模型多模态兼容性仍需客户端验收。
+
+## 本地混合压测
+
+在仓库根目录安装 Python 与锁定的 Pi 依赖后，设置环境变量 `OPENCODE_GO_API_KEY`，运行以下命令。
+
+```sh
+uv run python scripts/stress_qq_delivery.py --targets 3 --messages 3 --tasks 2 --concurrency 4 --timeout 180
+```
+
+脚本使用真实 OpenCode Go DeepSeek V4.1 Flash，所有 QQ 输入和回执通过本地模拟端点。普通会话并发提交独立请求并重放回调，另有已验证的模拟用户请求 Leader 委派 Worker。标准输出为 JSON，分别记录回复和任务定稿的延迟分位数、Outbox 延迟、重复回调、重复或缺失回复、顺序异常和 Worker 分配结果。断言失败返回非零退出码。

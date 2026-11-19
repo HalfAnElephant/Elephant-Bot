@@ -322,3 +322,25 @@ def test_outbox_sequence_migration_backfills_legacy_rows(db):
     with db.engine.connect() as conn:
         rows = conn.execute(select(outbox.c.id, outbox.c.enqueue_seq, outbox.c.state).order_by(outbox.c.enqueue_seq)).all()
     assert rows == [("z-first", 1, "UNKNOWN"), ("a-second", 2, "PENDING")]
+
+
+async def test_quota_blocked_targets_release_candidate_slots(db, clock):
+    from test_outbox_presentation import Adapter
+
+    service = Outbox(db, clock)
+    with db.transaction() as conn:
+        for index in range(51):
+            target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+                surface=Surface.PRIVATE, remote_conversation_id=str(index))
+            for role in ("prior", "next") if index < 50 else ("next",):
+                ident = f"{index}:{role}"
+                service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=target, text=ident,
+                    origin_kind="command", origin_id=ident, expires_at=clock.now() + timedelta(minutes=5)))
+                if role == "prior":
+                    conn.execute(update(outbox).where(outbox.c.id == ident).values(
+                        state="SENT", attempted_at=clock.now().isoformat(), sent_at=clock.now().isoformat()))
+    clock.advance(5)
+    adapter = Adapter(clock)
+    await service.dispatch_once({"qq": adapter}, budget=1)
+    await service.dispatch_once({"qq": adapter}, budget=1)
+    assert [envelope.text for envelope, _at in adapter.sent] == ["50:next"]

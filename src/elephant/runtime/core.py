@@ -597,13 +597,16 @@ class Core:
             event = InboundEvent.model_validate_json(source["event_json"])
             if event.conversation != envelope.target or event.principal != envelope.requester:
                 return False
-            mutation = json.loads(completed["request_json"]).get("memory_mutation", {}) if completed else {}
+            committed_claim = json.loads(completed["request_json"]) if completed else {}
+            mutation = committed_claim.get("memory_mutation", {})
             result = json.loads(completed["result_json"] or "{}") if completed else {}
             if (mutation.get("summary") == envelope.text and result.get("summary") == envelope.text
                     and result.get("agent_authored") is False):
                 return self.sessions.owner(event) is not None and self.allowed(event)
-            if settled or not self.validate_context(self.access(event), {
-                    **json.loads(source["context_json"]), "session_id": session_id}):
+            delivery_context = ({key: value for key, value in committed_claim["context"].items() if key != "session_id"}
+                if envelope.fixed_publication and committed_claim.get("commit_publication") else {
+                    **json.loads(source["context_json"]), "session_id": session_id})
+            if settled or not self.validate_context(self.access(event), delivery_context):
                 return False
         if envelope.origin_kind == "task":
             with self.db.engine.connect() as conn:

@@ -137,6 +137,7 @@ class Outbox:
                     persona_version=persona_version, policy_version=policy_version,
                     anchor_message_id=anchor_message_id, requester=requester,
                     parent_task_id=parent_task_id, notification_sequence=notification_sequence, purpose=purpose,
+                    fixed_publication=fixed_publication,
                 ), defer_reply=defer_reply)]
         bubbles = [text] if defer_reply or origin_kind == "command" or purpose == "question" else chat_bubbles(text)
         parts = [part for bubble in bubbles for part in split_text(plain_text(bubble))]
@@ -441,8 +442,11 @@ class Outbox:
                     self._defer(c, envelope.delivery_id, now + timedelta(seconds=60))
                     return
             if effective_budget:
+                rate_time = func.coalesce(outbox.c.sent_at, outbox.c.attempted_at)
                 used = c.execute(
-                    select(func.count())
+                    select(rate_time)
+                    .order_by(rate_time.desc())
+                    .offset(effective_budget - 1).limit(1)
                     .select_from(outbox)
                     .where(
                         outbox.c.conversation_id == envelope.target.key,
@@ -456,8 +460,9 @@ class Outbox:
                             ),
                         ),
                     )
-                ).scalar_one()
-                if used >= effective_budget:
+                ).scalar_one_or_none()
+                if used:
+                    self._defer(c, envelope.delivery_id, datetime.fromisoformat(used) + timedelta(seconds=60, microseconds=1))
                     return
             claimed = c.execute(
                 update(outbox)
