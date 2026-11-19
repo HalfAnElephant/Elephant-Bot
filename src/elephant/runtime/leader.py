@@ -130,7 +130,7 @@ class LeaderRuntime:
         self._persist_turn_budget(conn, run, claim, used)
 
     def steering_candidates(self, conn, claim):
-        if not claim.get("steer_until"):
+        if not claim.get("steer_until") or claim.get("steer_without_supplements"):
             return []
         trigger = InboundEvent.model_validate_json(claim["event_json"])
         access = self.sessions.access_for_claim(claim)
@@ -152,7 +152,7 @@ class LeaderRuntime:
                 continue
             candidates.append({"id": row["id"], "text":
                 "这是一条同会话的新用户消息。若它补充本轮请求，请处理它，并在 task_outcome 的 covered_input_ids 中登记其 ID。"
-                "若是独立请求，留给下一轮。若用 tasks_send_input 修订任务，source_input_id 填这条补充的 ID。\n" + event.text})
+                "若是独立请求，不要回答它，在 task_outcome 的 deferred_input_ids 中登记它，并继续回答本轮原请求。若用 tasks_send_input 修订任务，source_input_id 填这条补充的 ID。\n" + event.text})
         return candidates
 
     def unrouted_steering(self, conn, claim):
@@ -519,21 +519,28 @@ class LeaderRuntime:
                         or (outcome is not None and not isinstance(outcome, dict))):
                     raise PermissionError("Leader publication does not match its durable draft")
                 covered = (outcome or {}).get("covered_input_ids", [])
+                deferred = (outcome or {}).get("deferred_input_ids", [])
                 seen = set(proof["input_ids"])
                 available = {item["id"] for item in self.steering_candidates(conn, claim)}
                 offered = set(claim["steered_inputs"])
-                if (not isinstance(covered, list) or len(covered) > 8 or not all(isinstance(item, str) for item in covered)
-                        or not set(covered) <= seen & offered):
+                if any(not isinstance(ids, list) or len(ids) > 8 or not all(isinstance(item, str) for item in ids)
+                       for ids in (covered, deferred)):
+                    raise PermissionError("Leader publication names invalid supplementary inputs")
+                described = set(covered) | set(deferred)
+                if not described <= seen & offered or set(covered) & set(deferred):
                     raise PermissionError("Leader publication covers unverified supplementary input")
+                ambiguous = bool((seen & offered) - described)
                 primary = conn.execute(select(dialogue_inputs).where(
                     dialogue_inputs.c.id == claim["source_ids"][0])).mappings().one()
                 context = json.loads(primary["context_json"])
                 turn = context["leader_turn"]
                 retries = turn.get("publish_retries", 0)
-                stale_draft = bool((seen & offered) - available) or (
+                stale_draft = ambiguous or bool((seen & offered) - available) or (
                     (bool(available - seen) or self.unrouted_steering(conn, claim)) and retries < 2)
                 if stale_draft:
                     turn["publish_retries"] = retries + 1
+                    if ambiguous:
+                        turn["steer_without_supplements"] = True
                     conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == primary["id"]).values(
                         context_json=json.dumps(context, ensure_ascii=False)))
                 elif covered:

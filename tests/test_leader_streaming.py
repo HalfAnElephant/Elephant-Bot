@@ -577,7 +577,7 @@ async def test_new_ingress_retriggers_persisted_chat_result(leader_stream):
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
 
 
-@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen"])
+@pytest.mark.parametrize("disposition", ["covered", "deferred", "unseen", "ambiguous"])
 async def test_leader_publication_respects_steering_receipt(leader_stream, disposition):
     from elephant.domain import TextSegment
     from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_events
@@ -605,6 +605,8 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
         receipt["input_ids"].append(extra.event_id)
         if disposition == "covered":
             receipt["outcome"] = {"covered_input_ids": [extra.event_id]}
+        elif disposition == "deferred":
+            receipt["outcome"] = {"deferred_input_ids": [extra.event_id]}
     result = {"status": "completed", "summary": "已记录测试要求。"}
     s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
     s.core.leader.complete(*identity, result, stopped=True, quiescent=False, receipt=receipt)
@@ -613,9 +615,11 @@ async def test_leader_publication_respects_steering_receipt(leader_stream, dispo
         handled = conn.execute(select(dialogue_inputs.c.id).where(dialogue_inputs.c.handled_at.is_not(None))).scalars().all()
         sequenced = conn.execute(select(leader_events.c.source_id).order_by(leader_events.c.seq)).scalars().all()
     assert sequenced == [*claim["source_ids"], extra.event_id]
-    if disposition == "unseen":
+    if disposition in {"unseen", "ambiguous"}:
         assert not handled and not published
-        assert s.core.sessions.claim("fixture")["source_ids"] == claim["source_ids"]
+        retry = s.core.sessions.claim("fixture")
+        assert retry["source_ids"] == claim["source_ids"]
+        assert retry.get("steer_without_supplements", False) == (disposition == "ambiguous")
     else:
         assert len(published) == 1
         assert set(handled) == set(receipt["input_ids"] if disposition == "covered" else claim["source_ids"])
@@ -692,6 +696,7 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     config = s.core.settings.orchestration.model_copy(update={"leader_steering_dialogues": (dialogue,)})
     s.core.sessions.settings = s.core.settings.model_copy(update={"orchestration": config})
     entered, release = asyncio.Event(), asyncio.Event()
+    starting, boot = asyncio.Event(), asyncio.Event()
     requests, runners = [], []
     extra_id = "live-steering"
 
@@ -727,6 +732,14 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     def factory(claim, process_id, session_id):
         runner = GeneralRun(args, claim, client, process_id, session_id, ModelCapacity())
         runner.gateway.transport = httpx.MockTransport(upstream)
+        start = runner.start
+
+        async def delayed_start():
+            starting.set()
+            await boot.wait()
+            await start()
+
+        runner.start = delayed_start
         runners.append(runner)
         return runner
 
@@ -734,12 +747,15 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     worker = Worker(client, "fixture", Spool(tmp_path / "spool"), None, pool=pool)
     execution = asyncio.create_task(worker.once())
     try:
-        await asyncio.wait_for(entered.wait(), 15)
+        await asyncio.wait_for(starting.wait(), 15)
         extra = s.event.model_copy(update={"event_id": extra_id, "platform_message_id": "additional-message",
             "segments": (TextSegment(text="重点测乱序"),),
             "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "additional-message"})})
         extra, _ = s.core.inbox.accept(extra)
         await s.core.process(extra)
+        assert not runners[0].accepting_input
+        boot.set()
+        await asyncio.wait_for(entered.wait(), 15)
         async with asyncio.timeout(10):
             while extra_id not in runners[0].steered_inputs:
                 assert not execution.done()
@@ -759,6 +775,7 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
                 leader_events.c.source_kind == "delivery")).scalar_one()
             assert json.loads(receipt)["state"] == "SENT"
     finally:
+        boot.set()
         release.set()
         if not execution.done():
             execution.cancel()

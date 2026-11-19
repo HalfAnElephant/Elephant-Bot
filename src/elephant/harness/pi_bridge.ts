@@ -243,7 +243,8 @@ export default function (pi: ExtensionAPI) {
         attachments: Type.Optional(Type.Array(Type.String({minLength: 1, maxLength: 1024}), {maxItems: 20})),
         observation_refs: Type.Optional(Type.Array(Type.String())), effect_refs: Type.Optional(Type.Array(Type.String())),
         unresolved_items: Type.Optional(Type.Array(Type.String())),
-        covered_input_ids: Type.Optional(Type.Array(Type.String(), {maxItems: 8}))})},
+        covered_input_ids: Type.Optional(Type.Array(Type.String(), {maxItems: 8})),
+        deferred_input_ids: Type.Optional(Type.Array(Type.String(), {maxItems: 8}))})},
   ];
   function register(definition: any) {
     const withUserMessage = binding?.role === "leader" && messageTools.has(definition.name);

@@ -436,6 +436,8 @@ class SessionService:
                     if user:
                         claim["steer_until"] = claim["deadline"]
                         claim["steered_inputs"] = []
+                        if turn.get("steer_without_supplements"):
+                            claim["steer_without_supplements"] = True
                 conn.execute(insert(runs).values(id=run_id, task_id=task_id,
                     worker=worker_id, fencing=fencing, lease=(now + timedelta(seconds=30)).isoformat(), slot_reserved=1,
                     session=dialogue["session_id"] + ".jsonl", session_id=dialogue["session_id"], last_seq=0,
