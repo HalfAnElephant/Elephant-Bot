@@ -47,7 +47,9 @@ class Spool:
 
     def save(self, payload, *, run_id=None, seq=None):
         data = json.dumps(payload, ensure_ascii=False).encode()
-        total = sum(path.stat().st_size for path in self.directory.rglob("*") if path.is_file())
+        # Only files replayed by the Worker belong to its event/result quota.
+        pending = (*self.directory.glob("*.json"), *self.directory.glob("events/*/*.json"))
+        total = sum(path.stat().st_size for path in pending if path.is_file())
         if total + len(data) > self.max_bytes:
             raise RuntimeError("spool full")
         if run_id is None:

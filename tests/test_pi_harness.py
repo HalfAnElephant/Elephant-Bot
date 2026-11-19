@@ -106,11 +106,20 @@ def test_artifact_rejects_symlink_directory_and_changed_binary(tmp_path, monkeyp
 
 
 def test_spool_bound(tmp_path):
-    spool = Spool(tmp_path, max_bytes=30)
+    spool = Spool(tmp_path, max_bytes=31)
+    for name in ("content/inbound/original", "rejected", "events"):
+        (tmp_path / name).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "content/inbound/original/receipt.json").write_bytes(b"x" * 100)
+    (tmp_path / "rejected/result.json").write_bytes(b"x" * 100)
     path = spool.save({"value": "ok"})
     assert json.loads(path.read_text()) == {"value": "ok"}
     with pytest.raises(RuntimeError):
-        spool.save({"value": "x" * 40})
+        spool.save({"value": "x" * 5}, run_id="run", seq=1)
+    event = spool.save({}, run_id="run", seq=1)
+    with pytest.raises(RuntimeError):
+        spool.save({"value": "x" * 3})
+    event.unlink()
+    assert spool.save({"value": "x" * 3}).is_file()
 
 
 @pytest.mark.asyncio

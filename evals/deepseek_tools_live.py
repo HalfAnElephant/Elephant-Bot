@@ -125,7 +125,10 @@ async def exercise(report):
                 gateway.claim["context"]["files"] = [{"source": "voice-fixture", "message_id": "voice",
                     "kind": "audio", "filename": "voice.silk", "url": "https://fixture.example/voice.silk",
                     "is_current_input": True, "quoted": False}]
-                with patch("elephant.harness.gateway.fetch_public_bytes", return_value=speech):
+                def download_voice(_url, target, **_options):
+                    target.write(speech)
+
+                with patch("elephant.harness.gateway.download_public_file", side_effect=download_voice):
                     binding = await client.post("/binding", headers={
                         "Authorization": "Bearer " + gateway.process_token}, json={"binding_id": gateway.binding})
                     require(binding.status_code == 200, "voice input preparation failed")
