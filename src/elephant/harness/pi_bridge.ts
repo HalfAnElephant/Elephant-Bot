@@ -12,7 +12,7 @@ export default function (pi: ExtensionAPI) {
   let progressNoticeAccepted = false;
   let replyMessagesRemaining: number | null = null;
   const messageTools = new Set(["capability_search", "capability_invoke", "content_read"]);
-  const deliveredInputs = new Set<string>();
+  const appliedInputs = new Set<string>();
   let activeInputs = new Set<string>();
   let finalSummary = "";
   let outcome: any = null;
@@ -21,6 +21,39 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry("elephant-input-persisting", {session_id: binding.session_id,
       input_ids: ids, sha256: inputHash(text)});
     return {action: "transform" as const, text};
+  }
+  function persistedInputs(ctx: any) {
+    const found = new Set<string>();
+    const pending = new Map<string, string[]>();
+    let legacySource: string | null = null;
+    let legacyHasManifest = false;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom" && entry.customType === "elephant-consumed") {
+        for (const id of entry.data.input_ids || []) found.add(id);
+      }
+      if (entry.type === "custom" && entry.customType === "elephant-source") {
+        legacySource = entry.data.id;
+        legacyHasManifest = false;
+      }
+      if (entry.type === "custom" && entry.customType === "elephant-input-persisting") {
+        legacyHasManifest = true;
+        if (entry.data.session_id === binding.session_id) pending.set(entry.data.sha256, entry.data.input_ids);
+      }
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const content = entry.message.content;
+      const text = typeof content === "string" ? content : content.filter((part: any) => part.type === "text")
+        .map((part: any) => part.text).join("\n");
+      const hash = inputHash(text);
+      const ids = pending.get(hash);
+      if (ids) {
+        for (const id of ids) found.add(id);
+        pending.delete(hash);
+      } else if (!legacyHasManifest && legacySource && text.startsWith(`[[elephant-input:${legacySource}]]\n`)) {
+        found.add(legacySource);
+      }
+      legacySource = null;
+    }
+    return found;
   }
   async function request(path: string, body: unknown, token: string, signal?: AbortSignal) {
     const response = await fetch(base + path, {method: "POST", headers: {
@@ -63,7 +96,7 @@ export default function (pi: ExtensionAPI) {
         return {action: "transform", text: "上一轮把工具调用协议写进了正文，宿主未执行其中的调用。请依据当前会话中已持久化的真实工具回执继续处理。已完成的操作应复用回执，需要核实时先读回。需要调用工具时使用原生结构化工具接口，完成后给出自然语言汇报。"};
       }
       if (!envelope.input_id || typeof envelope.text !== "string" || waiting) return {action: "handled"};
-      if (deliveredInputs.has(envelope.input_id)) return {action: "handled"};
+      if (activeInputs.has(envelope.input_id)) return {action: "handled"};
       activeInputs.add(envelope.input_id);
       pi.appendEntry("qqbot-input", {id: envelope.input_id});
       return persistInput(`[[elephant-input:${envelope.input_id}]]\n` + envelope.text, [envelope.input_id]);
@@ -76,36 +109,14 @@ export default function (pi: ExtensionAPI) {
     finalSummary = "";
     outcome = null;
     activeInputs = new Set(binding.input_ids || []);
-    deliveredInputs.clear();
+    appliedInputs.clear();
     pi.registerProvider("qqbot", {
       baseUrl: base + "/v1", api: "openai-completions", apiKey: binding.model_token,
       models: [{id: binding.model, name: binding.model, reasoning: false, input: ["text"],
         contextWindow: binding.model_window, maxTokens: binding.output_tokens,
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}}],
     });
-    let persisted: any = null;
-    let legacySource: string | null = null;
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === "elephant-consumed") {
-        for (const id of (entry.data as any).input_ids || []) deliveredInputs.add(id);
-      }
-      if (entry.type === "custom" && entry.customType === "elephant-input-persisting") persisted = entry.data;
-      if (entry.type === "custom" && entry.customType === "elephant-source") legacySource = (entry.data as any).id;
-      if (entry.type === "message" && entry.message.role === "user") {
-        const content = entry.message.content;
-        const text = typeof content === "string" ? content : content.filter((part: any) => part.type === "text")
-          .map((part: any) => part.text).join("\n");
-        if (persisted?.session_id === binding.session_id && persisted.sha256 === inputHash(text)) {
-          for (const id of persisted.input_ids || []) if (activeInputs.has(id)) deliveredInputs.add(id);
-        } else if (!persisted && legacySource && activeInputs.has(legacySource)
-                   && text.startsWith(`[[elephant-input:${legacySource}]]\n`)) {
-          // Older logs recorded the trusted primary source before writing its body.
-          deliveredInputs.add(legacySource);
-        }
-        persisted = null;
-        legacySource = null;
-      }
-    }
+    const deliveredInputs = persistedInputs(ctx);
     for (const definition of definitions) register(definition);
     for (const schema of binding.native_tools || []) {
       register({name: schema.name.replace("tasks.", "tasks_").replace("schedules.", "schedules_"), description: schema.description,
@@ -147,25 +158,21 @@ export default function (pi: ExtensionAPI) {
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
       details: {kind: "runtime"}}};
   });
-  function durable(ctx: any) {
+  function durable(ctx: any, inputIds = [...appliedInputs]) {
     const path = ctx.sessionManager.getSessionFile();
     if (!path) throw new Error("Durable session file is required");
     const fd = openSync(path, "r");
     try { fsyncSync(fd); } finally { closeSync(fd); }
     return {session_revision: ctx.sessionManager.getLeafId(), session_id: binding.session_id,
-      run_id: binding.run_id, input_ids: [...activeInputs]};
+      run_id: binding.run_id, input_ids: inputIds};
   }
   pi.on("before_provider_request", async (_event, ctx) => {
     if (!binding?.session_id) return;
-    const text = JSON.stringify(ctx.sessionManager.getBranch());
-    for (const id of activeInputs) {
-      if (!deliveredInputs.has(id) && !text.includes(`[[elephant-input:${id}]]`)) {
-        throw new Error("Input has not reached the durable session: " + id);
-      }
-    }
-    pi.appendEntry("elephant-consumed", {input_ids: [...activeInputs], run_id: binding.run_id});
-    await request("/session-receipt", {...durable(ctx), kind: "input_consumed"}, binding.tool_token);
-    for (const id of activeInputs) deliveredInputs.add(id);
+    const persisted = persistedInputs(ctx);
+    const ready = [...activeInputs].filter(id => persisted.has(id));
+    pi.appendEntry("elephant-consumed", {input_ids: ready, run_id: binding.run_id});
+    await request("/session-receipt", {...durable(ctx, ready), kind: "input_consumed"}, binding.tool_token);
+    for (const id of ready) appliedInputs.add(id);
   });
   pi.on("turn_end", (event, ctx) => {
     const message: any = event.message;

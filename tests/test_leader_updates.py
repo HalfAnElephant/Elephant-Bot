@@ -1,4 +1,5 @@
 """User revisions cross the Leader/Worker boundary once and keep chat turns independent."""
+import pytest
 from sqlalchemy import func, select
 from test_agent_runtime import leader_complete, root_goal
 from test_agent_runtime import runtime as agent_runtime
@@ -50,12 +51,27 @@ def test_followups_reach_running_worker_once_and_release_chat_turn(runtime):
 
 
 def test_active_tasks_stay_in_selected_dialogue(runtime):
-    root_goal(runtime)
+    root = root_goal(runtime)
     with runtime.db.transaction() as conn:
         runtime.sessions.dialogue(conn, runtime.event, new_title="其他对话")
     runtime.sessions.enqueue(runtime.event, runtime.access)
     claim = runtime.sessions.claim("leader")
     assert claim["context"]["active_tasks"] == []
+    with pytest.raises(PermissionError, match="another user or dialogue"):
+        send_followup(runtime, claim, root, "cross-dialogue-revision")
+
+
+@pytest.mark.parametrize("text", ["继续检查一下。", "请重新考虑 T-unknown 的范围。"])
+def test_leader_cannot_retarget_an_ambiguous_or_unavailable_reference(runtime, text):
+    root = root_goal(runtime)
+    root_goal(runtime, key="other-active-root")
+    event = runtime.event.model_copy(update={"segments": (TextSegment(text=text),)})
+    runtime.sessions.enqueue(event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    with pytest.raises(PermissionError, match="identify one task"):
+        send_followup(runtime, claim, root, "guessed-revision")
+    with runtime.db.engine.connect() as conn:
+        assert not conn.execute(select(inputs)).first()
 
 
 def test_original_call_key_replay_keeps_preexisting_revision(runtime):

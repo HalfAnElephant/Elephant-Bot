@@ -56,6 +56,21 @@ def test_unpersisted_and_cross_identity_media_cannot_become_source_receipts(runt
         assert not conn.execute(select(inbox)).first()
 
 
+def test_worker_addressed_media_stays_with_that_worker(runtime):
+    root = root_goal(runtime, children=2)
+    event, _ = Inbox(runtime.db).accept(media_event(runtime))
+    with runtime.db.engine.connect() as conn:
+        target = conn.execute(select(tasks).where(tasks.c.parent_task_id == root["task_id"])).mappings().first()
+    runtime.service.add_input(target["public_id"], event, runtime.access, "")
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(inputs.c.task_id)).scalar_one() == target["id"]
+        for row in conn.execute(select(tasks).where(tasks.c.root_task_id == root["task_id"])).mappings():
+            context = json.loads(row["context_json"])
+            assert bool(context.get("files")) == bool(context.get("images")) == (row["id"] == target["id"])
+            if row["id"] == root["task_id"]:
+                assert context["source_manifest"][0]["id"] == event.event_id
+
+
 def test_worker_plain_notification_records_fact_without_leader_wakeup(runtime):
     root_goal(runtime)
     claim = runtime.service.claim('worker')

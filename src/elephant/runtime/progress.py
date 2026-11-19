@@ -9,7 +9,7 @@ from elephant.domain.tasks import Artifact
 from elephant.storage.action_schema import operations
 from elephant.storage.agent_schema import agent_events
 from elephant.storage.job_schema import jobs
-from elephant.storage.task_schema import observations, runs, tasks, waits
+from elephant.storage.task_schema import inputs, observations, runs, tasks, waits
 
 
 def milestone_spec(payload_json):
@@ -44,7 +44,7 @@ def registered_artifacts(conn, task_ids):
     return found
 
 
-def task_progress(graph, conn, task, root, *, access, may_read, stale, delivery_states):
+def task_progress(graph, conn, task, root, *, access, may_read, stale, delivery_states, source_tasks=None):
     budget = {"used": json.loads(task["budget_json"]),
               "limits": None if task["kind"] == "goal" else json.loads(task["plan_json"]).get("budget", {}),
               "scope": "tree_usage" if task["kind"] == "goal" else "task"}
@@ -83,25 +83,33 @@ def task_progress(graph, conn, task, root, *, access, may_read, stale, delivery_
             continue
         visible.append(row)
     ids = [row["id"] for row in visible]
+    if source_tasks is not None:
+        source_tasks.update((row["id"], {"context": json.loads(row["context_json"])}) for row in visible)
+
+    def current_evidence(task_id, revision):
+        # Other work can advance the root revision without changing this task's evidence.
+        return ~select(inputs.c.id).where(inputs.c.task_id == task_id,
+            inputs.c.kind.in_({"followup", "answer"}), inputs.c.goal_revision > revision).exists()
+
     times = []
     completed = []
     for row in visible:
         if row["kind"] != "goal" and row["state"] == "SUCCEEDED":
             completed.append({"kind": "task", "reference": row["id"], "label": row["goal"][:300]})
     for row in conn.execute(select(observations).join(runs, runs.c.id == observations.c.run_id).where(
-            observations.c.task_id.in_(ids), runs.c.basis_goal_revision == root["goal_revision"])).mappings():
+            observations.c.task_id.in_(ids), current_evidence(observations.c.task_id, runs.c.basis_goal_revision))).mappings():
         completed.append({"kind": "observation", "reference": row["id"], "label": "已保存资料核对记录"})
         times.append(row["retrieved_at"])
     for row in conn.execute(select(operations).join(runs, runs.c.id == operations.c.run_id).where(
             operations.c.task_id.in_(ids), operations.c.state == "VERIFIED",
-            runs.c.basis_goal_revision == root["goal_revision"])).mappings():
+            current_evidence(operations.c.task_id, runs.c.basis_goal_revision))).mappings():
         completed.append({"kind": "operation", "reference": row["id"], "label": "已核实操作回执"})
         times.append(row["updated_at"])
     for artifact_id, artifact in registered_artifacts(conn, ids).items():
         completed.append({"kind": "artifact", "reference": artifact_id,
                           "label": artifact["relative_path"], "sha256": artifact["sha256"]})
     milestones = conn.execute(select(agent_events).where(agent_events.c.task_id.in_(ids),
-        agent_events.c.source_revision == root["goal_revision"], agent_events.c.kind.in_({
+        current_evidence(agent_events.c.task_id, agent_events.c.source_revision), agent_events.c.kind.in_({
             "milestone", "child_result", "finished", "children_ready"}))
         .order_by(agent_events.c.created_at.desc(), agent_events.c.seq.desc())).mappings().all()
     latest = None

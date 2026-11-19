@@ -281,6 +281,9 @@ test('task view keeps completion, external operation and message delivery separa
   assert.equal(view.deliveryUnknown, true);
   const sentOnly = taskDetail({...task, deliveries: [{state: 'SENT'}]});
   assert.equal(sentOnly.delivery, '有结果发送成功记录。');
+  assert.equal(taskDetail({state: 'SUCCEEDED', progress: {delivery: {
+    required: true, delivered: false, states: ['ACCEPTED'], outbox_states: ['WAITING_FOR_TRIGGER'],
+  }}}).delivery, '结果等待可回复的消息。');
   assert.equal(taskDetail({state: 'FAILED', progress: {delivery: {required: false}}}).delivery,
     '控制台任务，不会发送外部消息。');
   assert.equal(taskDetail({state: 'FAILED'}).tone, 'danger');

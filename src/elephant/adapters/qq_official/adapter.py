@@ -104,6 +104,8 @@ class OfficialAdapter:
 
     def normalize(self, payload):
         kind, data = payload.get("t"), payload["d"]
+        if kind in {"MESSAGE_DELETE", "PUBLIC_MESSAGE_DELETE", "DIRECT_MESSAGE_DELETE"}:
+            return self._normalize_recall(kind, data, payload.get("id"))
         if kind not in {
             "GROUP_AT_MESSAGE_CREATE",
             "GROUP_MESSAGE_CREATE",
@@ -179,6 +181,27 @@ class OfficialAdapter:
             ),
             trace_id=str(uuid4()),
         )
+
+    def _normalize_recall(self, kind, data, platform_event_id):
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict):
+            raise TypeError("missing QQ recall message")
+        direct = kind == "DIRECT_MESSAGE_DELETE"
+        remote = message.get("guild_id" if direct else "channel_id")
+        message_id = message.get("id")
+        operator = next((user["id"] for user in (data.get("op_user"), message.get("author"))
+                         if isinstance(user, dict) and user.get("id")), None)
+        if any(not isinstance(value, str) or not value for value in (remote, message_id, operator)):
+            raise ValueError("missing QQ recall identity")
+        ref = ConversationRef(deployment_id=self.deployment_id, adapter_instance_id=self.config.instance_id,
+            bot_identity_id=self.config.bot_id, surface=Surface.GUILD_PRIVATE if direct else Surface.GUILD_CHANNEL,
+            remote_conversation_id=remote)
+        now = self.clock.now()
+        return InboundEvent(event_id=stable_id(ref.key, "message.recalled", message_id),
+            platform_event_id=platform_event_id, event_type="message.recalled", conversation=ref,
+            principal=PrincipalRef(adapter_instance_id=self.config.instance_id,
+                identity_namespace="qq_app:" + str(self.config.app_id), remote_user_id=operator),
+            platform_message_id=message_id, occurred_at=now, received_at=now, trace_id=str(uuid4()))
 
     def reply_policy(self, surface):
         if surface == Surface.PRIVATE:

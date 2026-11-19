@@ -10,6 +10,7 @@ from test_host_controls import child_rows, task_state
 from test_host_controls import control_runtime as control_runtime  # noqa: PLC0414
 from test_project_scopes import project_core as project_core  # noqa: PLC0414
 
+from elephant.permissions import PermissionRule
 from elephant.storage.agent_schema import agent_events, leader_inbox
 from elephant.storage.task_schema import inputs, runs, tasks
 
@@ -234,6 +235,9 @@ async def test_control_delivery_accepts_unchanged_facts_and_ignores_budget_heart
     assert all(runtime.core.controls.delivery_valid(item) is True for item in envelopes)
     unrelated = envelopes[0].model_copy(update={"origin_id": "ordinary-chat"})
     assert runtime.core.controls.delivery_valid(unrelated) is None
+    runtime.core.permissions.upsert(PermissionRule(id="deny-evidence-task", effect="deny",
+        actions=("task.read",), resources=("task:" + claim["task_id"],)), expected_version=0, actor="test")
+    assert all(runtime.core.controls.delivery_valid(item) is False for item in envelopes)
 
 
 @pytest.mark.parametrize("kind", ["status", "selection", "list"])
@@ -269,12 +273,12 @@ async def test_control_delivery_matches_rendered_markdown_and_plain_bubbles(cont
     assert runtime.core.controls.delivery_valid(envelopes[0].model_copy(update={"part_no": 100})) is False
 
 
-async def test_control_status_body_and_fingerprint_share_one_transaction(control_runtime, monkeypatch):
+async def test_control_status_body_and_sources_share_one_transaction(control_runtime, monkeypatch):
     runtime = control_runtime
     root = runtime.root(goal="原目标")
     original = runtime.core.controls._status_response
     status = runtime.core.tasks.graph.status
-    freeze = runtime.core.controls._freeze_delivery
+    capture_sources = runtime.core.controls._status_sources
     rendered, reads, frozen = [], [], []
 
     def read(conn, *args, **kwargs):
@@ -283,7 +287,7 @@ async def test_control_status_body_and_fingerprint_share_one_transaction(control
 
     def capture(conn, *args, **kwargs):
         frozen.append((id(conn), conn.connection.driver_connection.in_transaction))
-        return freeze(conn, *args, **kwargs)
+        return capture_sources(conn, *args, **kwargs)
 
     def render(view):
         response = original(view)
@@ -292,7 +296,7 @@ async def test_control_status_body_and_fingerprint_share_one_transaction(control
 
     monkeypatch.setattr(runtime.core.controls, "_status_response", render)
     monkeypatch.setattr(runtime.core.tasks.graph, "status", read)
-    monkeypatch.setattr(runtime.core.controls, "_freeze_delivery", capture)
+    monkeypatch.setattr(runtime.core.controls, "_status_sources", capture)
     source = await runtime.receive(runtime.event("/任务 " + root["public_id"]))
     assert rendered == [0]
     assert reads == frozen and len(reads) == 1 and reads[0][1] is True
@@ -300,7 +304,7 @@ async def test_control_status_body_and_fingerprint_share_one_transaction(control
     assert runtime.core.controls.delivery_valid(envelope) is True
     with runtime.core.db.transaction() as conn:
         conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(goal_revision=1))
-    assert runtime.core.controls.delivery_valid(envelope) is False
+    assert runtime.core.controls.delivery_valid(envelope) is True
 
 
 def test_control_old_body_stays_invalid_after_memory_replan_completes(project_core):
@@ -341,3 +345,50 @@ async def test_control_cancel_confirmation_survives_business_context_revocation(
         conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(context_json=json.dumps({
             "source_manifest": [{"kind": "inbox", "id": "revoked-business-source", "digest": "a" * 64}]})))
     assert runtime.core.controls.delivery_valid(envelope) is True
+
+
+async def test_result_delivery_does_not_invalidate_status_snapshot(control_runtime):
+    from elephant.storage.schema import outbox
+    from elephant.storage.task_schema import notifications
+
+    r = control_runtime
+    root = r.root()
+    with r.core.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.root_task_id == root["task_id"]).values(state="SUCCEEDED"))
+    result_message = r.notice(root["task_id"], purpose="result")
+    request = await r.receive(r.event("查看 " + root["public_id"]))
+    with r.core.db.transaction() as conn:
+        result_origin = conn.scalar(select(outbox.c.origin_id).where(outbox.c.platform_message_id == result_message))
+        conn.execute(update(notifications).where(notifications.c.id == result_origin).values(state="SENT"))
+    assert all(r.core.pre_send(env) for env in control_deliveries(r, request))
+
+
+async def test_scoped_followup_preserves_verified_sibling_receipt(control_runtime, tmp_path):
+    r = control_runtime
+    root = r.root(children=2)
+    worker = r.core.tasks.claim("worker")
+    ident = worker["run_id"], worker["fencing_token"], "worker"
+    ref = "review-verified-effect"
+    await r.core.tasks.ledger(*ident, {"operation": "prepare", "operation_id": ref, "arguments_hash": "fixture-hash",
+        "arguments": {"path": "effect.txt"}, "action": {"name": "workspace.file.write", "effect": "write",
+            "resources": ["workspace:" + str(tmp_path)]}})
+    await r.core.tasks.ledger(*ident, {"operation": "transition", "operation_id": ref,
+        "expected": "PREPARED", "state": "DISPATCHED", "result": {}})
+    (tmp_path / "effect.txt").write_text("执行一次\n")
+    await r.core.tasks.ledger(*ident, {"operation": "transition", "operation_id": ref,
+        "expected": "DISPATCHED", "state": "VERIFIED", "result": {"verified_effect": "file_content_matches"}})
+    r.core.tasks.submit(*ident, {"status": "completed", "summary": "已完成", "effect_refs": [ref]}, receipt={
+        "kind": "turn_finished", "run_id": worker["run_id"], "session_id": worker["session_id"],
+        "session_revision": "review-finish", "input_ids": worker["context"]["source_input_ids"],
+        "inflight": 0, "tools_paired": True})
+    target = next(child for child in child_rows(r, root["task_id"]) if child["id"] != worker["task_id"])
+
+    def progress():
+        with r.core.db.engine.connect() as conn:
+            row = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+            return r.core.tasks.graph.status(conn, row)["progress"]["verified_counts"]
+
+    assert progress()["operation"] == 1
+    await r.receive(r.event("补充 " + target["public_id"] + " 参数甲"))
+    assert progress()["task"] == 1
+    assert progress()["operation"] == 1

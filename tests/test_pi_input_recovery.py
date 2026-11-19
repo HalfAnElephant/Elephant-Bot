@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("scenario", ["body", "before_body", "before_cursor", "body_batch", "legacy", "legacy_forged", "forged", "wrong_session", "wrong_hash", "other_input"])
+@pytest.mark.parametrize("scenario", ["body", "before_body", "before_cursor", "body_batch", "legacy", "legacy_forged", "forged", "wrong_session", "wrong_hash", "other_input", "warm_burst"])
 def test_native_input_recovery_requires_trusted_matching_persisted_body(tmp_path, scenario):
     bridge = Path(__file__).resolve().parents[1] / "src/elephant/harness/pi_bridge.ts"
     native = tmp_path / "native.jsonl"
@@ -23,7 +23,8 @@ let binding = {generation: 1, session_id: "logical-session", run_id: "old-run", 
   native_tools: [], tool_token: "tool", model_token: "model"};
 if (scenario === "body_batch") binding.input_ids.push("inbox-2");
 let branch = [], hooks, receipts = [], sequence = 0;
-const manager = {getBranch: () => branch, getSessionFile: () => NATIVE, getLeafId: () => "leaf"};
+const manager = {getBranch: () => branch, getSessionFile: () => NATIVE, getLeafId: () => "leaf",
+  buildSessionProjection: () => ({messages: branch.filter(e => e.type === "message").map(e => e.message)})};
 const ctx = {sessionManager: manager};
 function boot() {
   hooks = {};
@@ -60,7 +61,7 @@ if (scenario === "other_input") manifest.data.input_ids = ["other-inbox"];
 binding = {...binding, generation: 2, run_id: "recovered-run"};
 boot();
 const recovered = await hooks.input(event, ctx);
-const deduplicated = ["body", "before_cursor", "body_batch", "legacy", "legacy_forged"].includes(scenario);
+const deduplicated = ["body", "before_cursor", "body_batch", "legacy", "legacy_forged", "warm_burst"].includes(scenario);
 assert.equal(recovered.text.includes("Trusted result facts"), !deduplicated);
 if (scenario === "legacy_forged") assert.equal(recovered.text.includes("Real new continuation"), true);
 assert.equal(branch.filter(entry => entry.type === "message").length, scenario === "before_body" ? 0 : 1);
@@ -72,6 +73,26 @@ assert.equal(receipts.length, 1);
 assert.equal(receipts[0].kind, "input_consumed");
 assert.equal(receipts[0].run_id, "recovered-run");
 assert.deepEqual(receipts[0].input_ids, binding.input_ids);
+if (scenario === "warm_burst") {
+  const steer = (id, text) => hooks.input({text: JSON.stringify({binding_id: "host-binding", input_id: id, text})}, ctx);
+  const first = await steer("steer-1", "First revision");
+  await steer("steer-2", "Second revision");
+  assert.equal((await steer("steer-2", "Second revision")).action, "handled");
+  branch.push({type: "message", message: {role: "user", content: first.text}});
+  await hooks.before_provider_request({}, ctx);
+  assert.deepEqual(receipts.at(-1).input_ids, ["inbox-1", "steer-1"]);
+  await hooks.agent_settled({aborted: false}, ctx);
+  assert.equal(receipts.at(-1).kind, "turn_finished");
+  assert.deepEqual(receipts.at(-1).input_ids, ["inbox-1", "steer-1"]);
+  // Simulate recovery at the body boundary without the native or host cursor.
+  branch = branch.filter(entry => !["elephant-consumed", "elephant-turn-boundary"].includes(entry.customType));
+  binding = {...binding, generation: 3, run_id: "warm-retry", input_ids: ["inbox-1", "steer-1", "steer-2"],
+    continuation: {inputs: [{id: "steer-1", text: "First revision"}, {id: "steer-2", text: "Second revision"}]}};
+  boot();
+  const resumed = await hooks.input(event, ctx);
+  assert.equal(resumed.text.includes("First revision"), false);
+  assert.equal(resumed.text.includes("Second revision"), true);
+}
 '''
     script = script.replace("BRIDGE", json.dumps(str(bridge))).replace("SCENARIO", json.dumps(scenario))
     extension_view = bridge.parents[3] / "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"

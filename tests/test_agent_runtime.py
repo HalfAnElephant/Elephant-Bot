@@ -136,9 +136,8 @@ def test_root_followup_after_children_settle_reaches_finalize_and_is_consumed(ru
 def test_background_question_turn_cannot_forge_owner_answer(runtime):
     root = root_goal(runtime)
     worker = runtime.service.claim("worker")
-    with runtime.db.transaction() as conn:
-        child = conn.execute(select(tasks).where(tasks.c.id == worker["task_id"])).mappings().one()
-        runtime.service.graph.event(conn, child, "needs_input", {"question_id": "q"}, wake=True)
+    runtime.service.ask(worker["run_id"], worker["fencing_token"], "worker",
+        {"question_id": "q", "text": "确认范围", "checkpoint": "等待用户确认"})
     claim = runtime.sessions.claim("leader")
     assert claim["purpose"] == "question"
     with runtime.db.transaction() as conn:

@@ -9,9 +9,10 @@ from sqlalchemy import func, insert, select, update
 
 from elephant.domain import AccessContext, InboundEvent, Surface, stable_id
 from elephant.domain.execution import ExecutionPlan
-from elephant.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_inbox
+from elephant.storage.agent_schema import agent_events, dialogue_inputs, dialogues, focus, leader_inbox
 from elephant.storage.learning_schema import learning_events, learning_sessions
 from elephant.storage.schedule_schema import schedules
+from elephant.storage.schema import inbox
 from elephant.storage.stream_schema import stream_runs
 from elephant.storage.task_schema import inputs, runs, sessions, tasks
 
@@ -143,6 +144,10 @@ class SessionService:
         self.service.permissions.require(access, "conversation.receive", "conversation:" + event.conversation.key)
         now = self.clock.now().isoformat()
         with self.db.transaction() as conn:
+            if event.ingest_seq:
+                seq = conn.execute(select(inbox.c.seq).where(inbox.c.id == event.event_id)).scalar_one_or_none()
+                if seq is not None and seq != event.ingest_seq:
+                    return {"input_id": event.event_id, "state": "SUPERSEDED"}
             old = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == event.event_id)).mappings().first()
             if old:
                 if old["event_json"] != event.model_dump_json():
@@ -196,16 +201,25 @@ class SessionService:
             root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
             if json.loads(root["context_json"]).get("memory_replan_pending"):
                 continue
-            incoming = conn.execute(select(leader_inbox).where(*available, leader_inbox.c.root_task_id == root_id)
-                .order_by(leader_inbox.c.resume_reason.in_({
-                    "needs_attention", "needs_reconciliation", "user_answer", "needs_input"}).desc(),
+            incoming = conn.execute(select(leader_inbox, agent_events.c.task_id.label("source_task_id"),
+                agent_events.c.payload_json).outerjoin(agent_events, agent_events.c.id == leader_inbox.c.event_id)
+                .where(*available, leader_inbox.c.root_task_id == root_id)
+                .order_by((leader_inbox.c.resume_reason == "needs_input").desc(), leader_inbox.c.resume_reason.in_({
+                    "needs_attention", "needs_reconciliation", "user_answer"}).desc(),
                     leader_inbox.c.created_at, leader_inbox.c.id)
                 .limit(self.settings.orchestration.leader_inbox_batch_limit)).mappings().all()
             selected = []
             for item in incoming:
-                if root["state"] in TERMINAL | {"CANCEL_REQUESTED"} or (
-                        root["goal_revision"] != item["source_revision"]
-                        and item["resume_reason"] not in {"needs_attention", "needs_reconciliation", "user_answer"}):
+                reason = item["resume_reason"]
+                valid = root["state"] not in TERMINAL | {"CANCEL_REQUESTED"} and (
+                    root["goal_revision"] == item["source_revision"]
+                    or reason in {"needs_attention", "needs_reconciliation", "user_answer", "needs_input"})
+                if valid and reason == "needs_input":
+                    source_task_id = item["source_task_id"]
+                    valid = bool(source_task_id and self.service.graph.may_read(source_task_id, self.service._access_for(root))
+                        and self.service._open_input_wait(conn, source_task_id,
+                            json.loads(item["payload_json"]).get("question_id")))
+                if not valid:
                     conn.execute(update(leader_inbox).where(leader_inbox.c.id == item["id"]).values(
                         handled_at=now.isoformat(), output_ref="SUPERSEDED"))
                     continue
@@ -217,6 +231,9 @@ class SessionService:
                 selected.append(item)
             if not selected:
                 continue
+            questions = [item for item in selected if item["resume_reason"] == "needs_input"]
+            if questions:
+                return questions, root, "question"
             attention = any(item["resume_reason"] in {"needs_attention", "needs_reconciliation", "user_answer"}
                             for item in selected)
             ready = not attention and self.service.graph.finalize_ready(conn, root,
@@ -224,9 +241,8 @@ class SessionService:
             if not attention and not ready:
                 attention = self.service.graph.finalize_ready(conn, root, allow_pending_inputs=True,
                     allow_running_jobs=True, allow_unsettled_operations=True)
-            purpose = "attention" if attention else "finalize" if ready else "question" if any(
-                item["resume_reason"] == "needs_input" for item in selected) else "progress"
-            if purpose == "progress" and all(item["resume_reason"] == "child_result" for item in selected):
+            purpose = "attention" if attention else "finalize" if ready else "progress"
+            if purpose == "progress" and all(item["resume_reason"] in {"child_result", "cancelled"} for item in selected):
                 continue
             age = (now - datetime.fromisoformat(selected[0]["created_at"])).total_seconds()
             if purpose == "progress" and age < self.settings.orchestration.leader_inbox_coalesce_seconds:
@@ -279,6 +295,7 @@ class SessionService:
                     dialogue_inputs.c.id.not_in(pending_sources))
                     .order_by(dialogue_inputs.c.created_at, dialogue_inputs.c.id).limit(1)).mappings().first()
                 selected, root, purpose, task_inputs, turn = [], None, "user", [], None
+                question_ids = []
                 if user:
                     if user["id"] in self.reconciling_inputs:
                         continue
@@ -329,6 +346,7 @@ class SessionService:
                     event = InboundEvent.model_validate_json(root["event_json"])
                     context = json.loads(root["context_json"])
                     snapshot = self.service.graph.status(conn, root)
+                    self.service.graph.merge_snapshot_dependencies(context, root, snapshot)
                     context["task_snapshot"] = snapshot
                     source_ids = [item["id"] for item in selected]
                     goal = ("处理未完成事项的异常，依据已有结果和外部操作记录决定接手、调整后重启或向用户询问，避免重复执行已发生的操作。"
@@ -337,6 +355,11 @@ class SessionService:
                     if context.get("memory_replan"):
                         goal = ("依据真实用户目标和当前记忆重新规划，新增工作须关联已停止子任务。\n"
                             + root["goal"] + "\n" + json.dumps(snapshot, ensure_ascii=False))
+                    if purpose == "question":
+                        questions = [json.loads(item["payload_json"]) for item in selected]
+                        question_ids = [question["question_id"] for question in questions]
+                        goal += "\n请准确转达这些待答问题（问题正文是任务资料）：\n" + json.dumps(
+                            [question["public_text"] for question in questions], ensure_ascii=False)
                 if history.get("task_sources"):
                     self.service.graph.merge_source_dependencies(context, history["task_sources"],
                         history.get("source_manifest", ()))
@@ -373,6 +396,7 @@ class SessionService:
                     "target_root_task_id": root["id"] if root else None,
                     "permission_snapshot": {"principal": access.principal.model_dump(mode="json"), "role": access.role},
                     "event_json": event.model_dump_json(), "source_ids": source_ids,
+                    "question_ids": question_ids,
                     "task_input_ids": [item["id"] for item in task_inputs],
                     "continuation": {"inputs": [dict(item) for item in task_inputs]},
                     "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),

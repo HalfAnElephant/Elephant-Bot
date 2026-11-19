@@ -18,6 +18,7 @@ from elephant.storage.task_schema import (
     events,
     inputs,
     model_requests,
+    notification_question_ids,
     observations,
     processes,
     runs,
@@ -26,6 +27,7 @@ from elephant.storage.task_schema import (
     waits,
 )
 
+from .control import task_references
 from .task_graph import TERMINAL
 
 
@@ -247,6 +249,13 @@ class LeaderRuntime:
             raise KeyError("task unavailable")
         if root_id and (task["root_task_id"] or task["id"]) != root_id:
             raise PermissionError("Leader attempt is bound to another root")
+        if purpose == "user" and operation in {"tasks.cancel", "tasks.send_input"}:
+            if task["requester"] != event.principal.key or task["origin_dialogue_id"] != claim["context"]["dialogue_id"]:
+                raise PermissionError("task belongs to another user or dialogue")
+            references = task_references(event.text)
+            if references and references != {task["public_id"]} or (
+                    not references and len(claim["context"].get("active_tasks", ())) > 1):
+                raise PermissionError("ask the user to identify one task before changing it")
         if operation == "tasks.status":
             self.service.permissions.require(access, "task.read", "task:" + task["id"])
             return self._task_snapshots(conn, run, claim, [task], access)[0]
@@ -454,6 +463,10 @@ class LeaderRuntime:
                 notice = self.service._notification(conn, target, run_id, result.summary, purpose,
                     "important" if claim["purpose"] == "attention" else "normal",
                     stable_id("leader", run_id), defer_reply=claim.get("public_answer_events", False))
+                if purpose == "question":
+                    notice_id = notice["notification_id"]
+                    question_ids = claim.get("question_ids") or notification_question_ids(conn, notice_id)
+                    conn.execute(update(waits).where(waits.c.id.in_(question_ids)).values(notification_id=notice_id))
                 if claim.get("public_answer_events"):
                     self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
             elif run["role"] != "skill_review":
@@ -878,6 +891,7 @@ class LeaderRuntime:
                     raise PermissionError("session already has a writer")
                 history = json.loads(known["manifest_json"]) if known else dict(claim["binding"])
                 if claim["context"].get("task_sources"):
+                    history["workspace_id"] = claim["context"].get("workspace_id", "personal")
                     self.service.graph.merge_source_dependencies(history, claim["context"]["task_sources"],
                         claim["context"].get("source_manifest", ()))
                 if known:

@@ -31,9 +31,16 @@ from elephant.outbox.service import Outbox
 from elephant.permissions import PermissionService, PermissionSubject
 from elephant.pi_installation import runtime_pi_path
 from elephant.storage.schema import audit_events, inbox, outbox, runtime_state
-from elephant.storage.task_schema import notifications, runs, sessions, tasks
+from elephant.storage.task_schema import (
+    notification_question_ids,
+    notifications,
+    runs,
+    sessions,
+    tasks,
+    waits,
+)
 
-from .control import HostTaskControls
+from .control import TurnRouter
 from .leader import LeaderRuntime
 from .sessions import SessionService
 from .task_graph import TaskGraph
@@ -71,7 +78,7 @@ class Core:
         self.sessions.harnesses = self.harnesses
         self.sessions.runtime_binding = {**harness.binding, "execution_world": self.execution.world_id}
         self.leader = LeaderRuntime(self, self.sessions)
-        self.controls = HostTaskControls(self)
+        self.controls = TurnRouter(self)
         self.model_client = model_client or httpx.AsyncClient(timeout=settings.model.timeout_seconds)
         self.openviking = OpenVikingMemory(db, clock, settings.memory.openviking)
         from .knowledge import KnowledgeRuntime
@@ -469,6 +476,7 @@ class Core:
         return "当前对话：" + selected["title"]
 
     async def process(self, event):
+        retry, error_code = False, None
         try:
             if not self.allowed(event) or event.sender_is_bot or event.event_type != "message.created":
                 return
@@ -508,11 +516,18 @@ class Core:
                 else:
                     text = "这次请求暂时无法处理，请检查内容后再试。"
                 self.reply(event, text)
-        except Exception:
+        except asyncio.CancelledError:
+            retry = True
+            raise
+        except Exception as error:
             logger.exception("Input failed")
-            return
+            retry = True  # Preserve pending ingress if the receipt lookup also fails.
+            retry = self.controls.replayable(event)
+            error_code = type(error).__name__
+            return False if retry else None
         finally:
-            self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
+            if not retry:
+                self.inbox.finish(event.event_id, error=error_code, expected_seq=event.ingest_seq)
 
     def pre_send(self, envelope, *, stream_cleanup=False):
         if stream_cleanup:
@@ -605,24 +620,38 @@ class Core:
                 task["notice_run_reason"] == "notification" and task["notice_purpose"] == "result"
             ):
                 return False
+            event = InboundEvent.model_validate_json(task["event_json"])
+            access = self.access(event)
             with self.db.engine.connect() as conn:
-                if not stream_cleanup and task["root_task_id"] and task["notification_run_id"]:
+                if not stream_cleanup and task["notice_purpose"] == "question":
+                    question_ids = notification_question_ids(conn, envelope.origin_id)
+                    open_questions = self.tasks.open_input_waits().where(waits.c.id.in_(question_ids))
+                    if not conn.execute(open_questions.limit(1)).first():
+                        return False
+                    question_tasks = conn.execute(select(tasks).join(waits, waits.c.task_id == tasks.c.id)
+                        .where(waits.c.id.in_(question_ids))).mappings()
+                    if any(not self.tasks.graph.may_read(row["id"], access)
+                           or not self.validate_context(access, json.loads(row["context_json"])) for row in question_tasks):
+                        return False
+                elif not stream_cleanup and task["root_task_id"] and task["notification_run_id"]:
                     root_revision = conn.execute(select(tasks.c.goal_revision).where(
                         tasks.c.id == task["root_task_id"])).scalar_one()
                     if task["notice_revision"] != root_revision:
                         return False
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
-            event = InboundEvent.model_validate_json(task["event_json"])
-            access = self.access(event)
             return (self.permissions.check(access, "notification.send", "conversation:" + envelope.target.key).allowed
                     and self.validate_context(access, json.loads(task["context_json"])))
         return True
 
     async def tick(self, *, dispatch=True):
         self.restore_silences()
+        retry = False
         for event in self.inbox.pending():
-            await self.process(event)
+            if await self.process(event) is False:
+                retry = True
+        if retry:
+            raise RuntimeError("persisted task control needs replay")
         if dispatch:
             await self.deliver()
 

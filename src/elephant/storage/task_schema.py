@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Table, Text, UniqueConstraint
+import json
+
+from sqlalchemy import Column, Integer, String, Table, Text, UniqueConstraint, select
 
 from elephant.storage.schema import metadata
 
@@ -181,3 +183,26 @@ for column in (
     Column("persisted_at", String), Column("consumed_at", String),
 ):
     inputs.append_column(column)
+
+
+def notification_question_ids(conn, notification_id):
+    ids = set(conn.scalars(select(waits.c.id).where(waits.c.notification_id == notification_id,
+        waits.c.kind == "input")))
+    if ids:
+        return ids
+    # Earlier relay notifications stored their question sources only in the Leader claim.
+    from elephant.storage.agent_schema import agent_events, leader_inbox
+
+    notice = conn.execute(select(notifications.c.task_id, runs.c.request_json)
+        .join(runs, runs.c.id == notifications.c.run_id)
+        .where(notifications.c.id == notification_id, notifications.c.purpose == "question")).first()
+    if not notice:
+        return ids
+    claim = json.loads(notice.request_json)
+    if claim.get("purpose") != "question" or claim.get("target_root_task_id") != notice.task_id:
+        return ids
+    payloads = conn.scalars(select(agent_events.c.payload_json).join(
+        leader_inbox, leader_inbox.c.event_id == agent_events.c.id).where(
+        leader_inbox.c.root_task_id == notice.task_id,
+        leader_inbox.c.id.in_(claim.get("source_ids", ())), agent_events.c.kind == "needs_input"))
+    return {json.loads(payload)["question_id"] for payload in payloads}
