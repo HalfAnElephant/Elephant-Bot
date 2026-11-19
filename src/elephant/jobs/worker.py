@@ -31,6 +31,8 @@ from elephant.harness.pi import MAX_EVENT, PiHarness, compaction_settings
 from elephant.harness.pool import PoolAcquisitionError, SessionPool
 
 logger = logging.getLogger(__name__)
+LEASE_HEARTBEAT_SECONDS = 5
+
 
 class CapabilityServer(uvicorn.Server):
     @contextmanager
@@ -253,18 +255,37 @@ class Worker:
 
     async def lease_heartbeat(self, identity):
         # Renewal preserves supervisor ownership only. It never updates runner authority or deadlines.
+        due = time.monotonic()
+        last_success = next_debug = next_warning = None
         while True:
+            started = time.monotonic()
+            failure = None
             try:
                 await self.call("renew", **identity)
             except httpx.HTTPStatusError as error:
-                if error.response.status_code == 409:
-                    logger.warning("Lease ownership lost during runner stop or result delivery run_id=%s; preserving recovery evidence",
-                                   identity["run_id"])
-                    return
-                logger.exception("Lease heartbeat failed run_id=%s", identity["run_id"])
-            except httpx.TransportError:
-                logger.exception("Lease heartbeat unavailable run_id=%s", identity["run_id"])
-            await asyncio.sleep(5)
+                failure = error.response.status_code
+            except httpx.TransportError as error:
+                failure = type(error).__name__
+            except Exception:
+                logger.exception("Lease heartbeat stopped unexpectedly run_id=%s", identity["run_id"])
+                raise
+            finished = time.monotonic()
+            timing = (identity["run_id"], finished - started,
+                "n/a" if last_success is None else f"{finished - last_success:.3f}", max(0, started - due))
+            diagnostics = "run_id=%s elapsed_s=%.3f since_success_s=%s lag_s=%.3f"
+            if failure == 409:
+                logger.warning("Lease ownership lost; preserving recovery evidence " + diagnostics, *timing)
+                return
+            if failure is None:
+                last_success = finished
+                if next_debug is None or finished >= next_debug:
+                    logger.debug("Lease renewed " + diagnostics, *timing)
+                    next_debug = finished + 30
+            elif next_warning is None or finished >= next_warning:
+                logger.warning("Lease heartbeat failed status=%s " + diagnostics, failure, *timing)
+                next_warning = finished + 30
+            due = finished + LEASE_HEARTBEAT_SECONDS
+            await asyncio.sleep(LEASE_HEARTBEAT_SECONDS)
 
     async def replay(self):
         await self.flush_events()
@@ -338,8 +359,7 @@ class Worker:
         use_pool = self.pool is not None and claim.get("protocol_version", 1) >= 2
         harness = execution = path = None
         committed = False
-        heartbeat = None
-        last_renewed = time.monotonic()
+        heartbeat = asyncio.create_task(self.lease_heartbeat(identity), name="elephant-lease:" + claim["run_id"])
         try:
             harness = await self.pool.acquire(claim) if use_pool else self.harness_factory(claim)
             if inspect.isawaitable(harness):
@@ -355,10 +375,7 @@ class Worker:
                 done, _ = await asyncio.wait({execution}, timeout=0.15)
                 if done:
                     break
-                operation = "renew" if time.monotonic() - last_renewed >= 10 else "control"
-                lease = await self.call(operation, **identity)
-                if operation == "renew":
-                    last_renewed = time.monotonic()
+                lease = await self.call("control", **identity)
                 if execution.done():
                     break
                 if getattr(harness, "gateway", None):
@@ -372,7 +389,6 @@ class Worker:
                 if hasattr(harness, "renewed"):
                     harness.renewed()
                 if lease["state"] != "RUNNING":
-                    heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
                     await self.stop_execution(harness, execution)
                     payload = {**identity, "result": {"status": "failed", "agent_authored": False,
                         "summary": "Execution stopped after run authority changed."},
@@ -402,7 +418,6 @@ class Worker:
                             if not execution.done() and getattr(harness, "accepting_input", True):
                                 raise
                             break
-            heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             result = execution.result().model_dump(mode="json")
             if gateway:
                 result["evidence"] = gateway.evidence
@@ -439,8 +454,6 @@ class Worker:
                 # The next daemon recovers the original run from durable evidence.
                 await self.stop_execution(harness, execution)
                 raise
-            if heartbeat is None:
-                heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             stopped = await self.stop_execution(harness, execution)
             if path is None:
                 payload = {**identity, "result": {"status": "failed", "agent_authored": False,
@@ -456,8 +469,6 @@ class Worker:
                                      self.worker_id, claim["run_id"], path)
             raise
         except Exception as error:
-            if heartbeat is None:
-                heartbeat = asyncio.create_task(self.lease_heartbeat(identity))
             if path is not None and isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 422:
                 self.quarantine_result(path, error)
                 path = None
@@ -496,9 +507,8 @@ class Worker:
                         execution.cancel()
                     await asyncio.gather(execution, return_exceptions=True)
             finally:
-                if heartbeat is not None:
-                    heartbeat.cancel()
-                    await asyncio.gather(heartbeat, return_exceptions=True)
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 def configured_github(args):

@@ -196,10 +196,14 @@ def boundary_receipts(path):
             if entry.get("type") == "custom" and entry.get("customType") == "elephant-turn-boundary"]
 
 
-def unfinished_tools(path):
+def unfinished_tools(path, *, discarded=()):
+    branch = branch_entries(load_entries(path))
+    edits = {entry.get("targetId"): entry["replacement"] for entry in branch if entry.get("type") == "context_edit"
+             and "replacement" in entry and entry.get("targetId") in discarded}
+    hidden = {target for target, replacement in edits.items() if replacement is None}
     pending = {}
-    for entry in branch_entries(load_entries(path)):
-        if entry.get("type") != "message":
+    for entry in branch:
+        if entry.get("type") != "message" or entry["id"] in hidden:
             continue
         message = entry.get("message", {})
         if message.get("role") == "assistant":
@@ -209,6 +213,54 @@ def unfinished_tools(path):
         elif message.get("role") == "toolResult":
             pending.pop(message.get("toolCallId"), None)
     return tuple(pending.values())
+
+
+def aborted_submit(path, call, *, run_id, input_ids):
+    """Recognize only the incomplete, non-executed call at this stopped turn's tail."""
+    args = call.get("arguments")
+    if call.get("name") != "tasks_submit" or not isinstance(args, dict) or {"goal", "children"} <= args.keys():
+        return None
+    entries = load_entries(path)
+    branch = branch_entries(entries)
+    if not branch:
+        return None
+    leaf = branch[-1]
+    edited = (leaf.get("type") == "context_edit" and "replacement" in leaf and leaf["replacement"] is None)
+    if edited and (len(branch) < 2 or leaf.get("targetId") != branch[-2]["id"]):
+        return None
+    candidate = branch[-2] if edited else leaf
+    message = candidate.get("message", {})
+    tools = [part for part in message.get("content", ()) if isinstance(part, dict) and part.get("type") == "toolCall"]
+    if (candidate.get("type") != "message" or message.get("role") != "assistant"
+            or message.get("stopReason") != "aborted" or tools != [call]):
+        return None
+    current = consumed = False
+    for entry in branch[: -2 if edited else -1]:
+        if entry.get("type") != "custom":
+            continue
+        kind, data = entry.get("customType"), entry.get("data", {})
+        if kind == "elephant-run":
+            current = (data.get("run_id"), data.get("role"), data.get("purpose"), data.get("source_event_ids")) == (
+                run_id, "leader", "user", input_ids)
+            consumed = False
+        elif kind == "elephant-consumed":
+            consumed = current and data.get("run_id") == run_id and data.get("input_ids") == input_ids
+        elif kind == "elephant-turn-boundary":
+            current = consumed = False
+    if not consumed:
+        return None
+    # A duplicated call ID or a result, even off-branch, is not evidence of a partial call.
+    occurrences = 0
+    for entry in entries:
+        msg = entry.get("message", {})
+        if msg.get("role") == "toolResult" and msg.get("toolCallId") == call["id"]:
+            return None
+        if msg.get("role") == "assistant":
+            occurrences += sum(1 for part in msg.get("content", ()) if isinstance(part, dict)
+                               and part.get("type") == "toolCall" and part.get("id") == call["id"])
+    if occurrences != 1:
+        return None
+    return {"entry": candidate, "revision": leaf["id"], "edited": edited}
 
 
 def mutation_calls(path, *, run_id, input_ids):
@@ -229,12 +281,22 @@ def mutation_calls(path, *, run_id, input_ids):
 
 def restore_tool_results(path, receipts, *, pi_executable):
     """Append genuine host receipts through Pi's native writer after verified stop."""
+    _write_recovery(path, receipts, pi_executable=pi_executable)
+
+
+def discard_aborted_submit(path, discard, *, pi_executable):
+    _write_recovery(path, (), pi_executable=pi_executable, discard=discard)
+
+
+def _write_recovery(path, receipts, *, pi_executable, discard=None):
     native = load_entries(path)
     if not native or native[0].get("type") != "session" or native[0].get("version") != 3:
         raise ValueError("native recovery requires a current Pi session header")
     entries = branch_entries(native)
-    if not entries or not receipts:
-        raise ValueError("native recovery requires an existing session and receipts")
+    if not entries or (not receipts and not discard):
+        raise ValueError("native recovery requires an existing session and evidence")
+    if discard and entries[-1]["id"] != discard["revision"]:
+        raise ValueError("native session revision changed")
     executable = Path(shutil.which(pi_executable) or pi_executable).resolve(strict=True)
     module = None
     for parent in executable.parents:
@@ -247,7 +309,7 @@ def restore_tool_results(path, receipts, *, pi_executable):
     if module is None or not module.is_file():
         raise ValueError("locked Pi public SessionManager API is unavailable")
     payload = json.dumps({"module": module.as_uri(), "path": str(Path(path).resolve()),
-        "revision": entries[-1]["id"], "receipts": receipts}, ensure_ascii=False)
+        "revision": entries[-1]["id"], "receipts": receipts, "discard": discard}, ensure_ascii=False)
     if len(payload.encode()) > 1024 * 1024:
         raise ValueError("native recovery receipts exceed the bounded transport")
     script = """
@@ -272,6 +334,19 @@ for (const receipt of body.receipts) {
 for (const receipt of body.receipts) {
   session.appendMessage({role: 'toolResult', toolCallId: receipt.call.id, toolName: receipt.call.name,
     content: [{type: 'text', text: JSON.stringify(receipt.result)}], details: {}, isError: receipt.is_error === true, timestamp: Date.now()});
+}
+if (body.discard) {
+  const {entry, edited} = body.discard;
+  const branch = session.getBranch();
+  if (!isDeepStrictEqual(branch.at(edited ? -2 : -1), entry)) throw new Error('Native aborted entry changed');
+  if (edited) {
+    const leaf = branch.at(-1);
+    if (leaf.type !== 'context_edit' || leaf.targetId !== entry.id || leaf.replacement !== null) {
+      throw new Error('Native context edit changed');
+    }
+  } else {
+    session.appendContextEdit(entry.id, null);
+  }
 }
 const fd = openSync(body.path, 'r');
 try { fsyncSync(fd); } finally { closeSync(fd); }

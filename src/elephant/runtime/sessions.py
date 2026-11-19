@@ -478,27 +478,24 @@ class SessionLearning:
             state_json=json.dumps(asdict(state)), updated_at=self.clock.now().isoformat(), **values))
 
     def observe(self, identity, operation, payload, result=None):
-
         run_id, fencing, worker_id = identity
+        if operation == "reserve-budget" and payload.get("kind") in {"business", "completion", "notification"}:
+            event_id, kind = "model:" + payload["request_id"], "iteration"
+        elif operation == "skills" and payload.get("operation") == "skill_manage":
+            event_id, kind = "skill:" + str(payload.get("call_id") or uuid4()), "skill_manage"
+        elif operation == "result":
+            event_id, kind = "finished:" + run_id, "finished"
+        else:
+            return
         with self.db.transaction() as conn:
             run = conn.execute(select(runs).where(runs.c.id == run_id, runs.c.fencing == fencing,
                 runs.c.worker == worker_id)).mappings().first()
-            if not run or run["role"] == "skill_review":
+            if not run or run["role"] == "skill_review" or (kind == "finished" and run["slot_reserved"]):
                 return
             loaded = self.state(conn, run)
             if not loaded:
                 return
             claim, state, _row = loaded
-            event_id, kind = None, None
-            if operation == "reserve-budget" and payload.get("kind") in {"business", "completion", "notification"}:
-                event_id, kind = "model:" + payload["request_id"], "iteration"
-            elif operation == "skills" and payload.get("operation") == "skill_manage":
-                event_id = "skill:" + str(payload.get("call_id") or uuid4())
-                kind = "skill_manage"
-            elif operation == "result" and not run["slot_reserved"]:
-                event_id, kind = "finished:" + run_id, "finished"
-            if event_id is None:
-                return
             key = stable_id(claim["session_id"], event_id)
             if conn.execute(select(learning_events.c.id).where(learning_events.c.id == key)).first():
                 return

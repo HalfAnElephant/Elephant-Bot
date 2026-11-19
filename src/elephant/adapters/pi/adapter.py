@@ -19,12 +19,16 @@ class PiAdapter:
     review_snapshot = staticmethod(sessions.review_snapshot)
     boundary_receipts = staticmethod(sessions.boundary_receipts)
     unfinished_tools = staticmethod(sessions.unfinished_tools)
+    aborted_submit = staticmethod(sessions.aborted_submit)
 
     def __init__(self, executable=None):
         self.executable = executable or "node_modules/.bin/pi"
 
     def restore_tool_results(self, path, receipts):
         return sessions.restore_tool_results(path, receipts, pi_executable=self.executable)
+
+    def discard_aborted_submit(self, path, discard):
+        return sessions.discard_aborted_submit(path, discard, pi_executable=self.executable)
 
     def create(self, args, claim, client, process_id, session_id, capacity):
         from elephant.jobs.worker import GeneralRun
