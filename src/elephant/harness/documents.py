@@ -5,13 +5,15 @@ import math
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryFile
 from uuid import uuid4
 
 from elephant.adapters.deepseek import DeepSeekError
 from elephant.capabilities.types import Action, Capability
 from elephant.configuration import atomic_write
-from elephant.harness.attachments import _cache_lock, _read_regular
+from elephant.harness.attachments import COPY_CHUNK, _cache_lock, _read_regular
 
 REFERENCE = "deepseek-document:"
 PURPOSES = ("text_recognition", "rich_layout_recognition", "user_data")
@@ -19,7 +21,10 @@ RECOGNITION_SUFFIXES = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".png", ".jpg"
                         ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 FILE_LIFETIME = 30 * 86400
 PENDING_SECONDS = 300
-MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_FILE_BYTES = 100 * 1024 * 1024
+FILE_UPLOAD_BYTES = {".png": 64 * 1024 * 1024, ".jpg": 64 * 1024 * 1024, ".jpeg": 64 * 1024 * 1024,
+                     ".webp": 64 * 1024 * 1024, ".gif": 64 * 1024 * 1024}
+USER_DATA_BYTES = 32 * 1024 * 1024
 MAX_RECEIPTS = 4096
 MAX_RECEIPT_BYTES = 16384
 
@@ -66,6 +71,22 @@ class DeepSeekDocuments:
     def classify_ocr(arguments, context):
         return Action("document.ocr", DeepSeekDocuments.classify(arguments, context).resources)
 
+    @asynccontextmanager
+    async def _snapshot(self, context, path, limit):
+        digest = hashlib.sha256()
+        size = 0
+        with TemporaryFile() as snapshot:
+            while chunk := await self.execution.read_file(context, path, size, min(COPY_CHUNK, limit - size + 1)):
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError(f"document must be a nonempty file within the upload limit of {limit} bytes")
+                digest.update(chunk)
+                snapshot.write(chunk)
+            if not size:
+                raise ValueError("document must be a nonempty file")
+            snapshot.seek(0)
+            yield snapshot, size, digest.hexdigest()
+
     async def ocr(self, arguments, context):
         path = arguments.get("path")
         if not isinstance(path, str) or not 1 <= len(path) <= 4096:
@@ -73,15 +94,13 @@ class DeepSeekDocuments:
         scope = self.scope()
         resources = self.classify_ocr(arguments, context).resources
         await self._authorize("document.ocr", scope, resources=resources)
-        data = await self.execution.read_file(context, path, 0, MAX_FILE_BYTES + 1)
-        if not 0 < len(data) <= MAX_FILE_BYTES:
-            raise ValueError("document must be a nonempty file of at most 20 MiB")
         suffix = PurePosixPath(path).suffix.lower()
         extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
-        await self._authorize("document.ocr", scope, resources=resources)
-        result = await self.api.ocr(data, "document" + extension)
-        await self._authorize("document.ocr", scope, resources=resources)
-        return result
+        async with self._snapshot(context, path, MAX_FILE_BYTES) as (snapshot, _, _):
+            await self._authorize("document.ocr", scope, resources=resources)
+            result = await self.api.ocr(snapshot, "document" + extension)
+            await self._authorize("document.ocr", scope, resources=resources)
+            return result
 
     def _identity(self, scope, purpose, digest):
         return hashlib.sha256(json.dumps([scope, self.api.account, purpose, digest], sort_keys=True).encode()).hexdigest()
@@ -227,35 +246,35 @@ class DeepSeekDocuments:
         scope = self.scope()
         resources = self.classify(arguments, context).resources
         await self._authorize("document.parse", scope, resources=resources)
-        data = await self.execution.read_file(context, path, 0, MAX_FILE_BYTES + 1)
-        if not 0 < len(data) <= MAX_FILE_BYTES:
-            raise ValueError("document must be a nonempty file of at most 20 MiB")
-        digest = hashlib.sha256(data).hexdigest()
-        identity = self._identity(scope, purpose, digest)
-        extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
-        metadata = {"scope": scope, "account": self.api.account, "purpose": purpose, "sha256": digest,
-                    "size": len(data), "filename": "elephant-document-" + identity + extension}
-        receipt, upload = self._reserve(identity, scope, metadata)
-        if not upload and receipt["state"] == "pending":
-            recovered = await self._recover(receipt, scope, resources)
-            if recovered:
-                receipt = self._publish(identity, scope, recovered)
-            else:
-                receipt, upload = self._reserve(identity, scope, metadata, receipt["attempt"])
-                if not upload and receipt["state"] == "pending":
-                    raise ValueError("document upload is still pending; retry document.parse after 300 seconds")
-        if upload:
+        limit = MAX_FILE_BYTES
+        if purpose == "user_data":
+            limit = min(limit, FILE_UPLOAD_BYTES.get(suffix, USER_DATA_BYTES))
+        async with self._snapshot(context, path, limit) as (snapshot, size, digest):
+            identity = self._identity(scope, purpose, digest)
+            extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+            metadata = {"scope": scope, "account": self.api.account, "purpose": purpose, "sha256": digest,
+                        "size": size, "filename": "elephant-document-" + identity + extension}
+            receipt, upload = self._reserve(identity, scope, metadata)
+            if not upload and receipt["state"] == "pending":
+                recovered = await self._recover(receipt, scope, resources)
+                if recovered:
+                    receipt = self._publish(identity, scope, recovered)
+                else:
+                    receipt, upload = self._reserve(identity, scope, metadata, receipt["attempt"])
+                    if not upload and receipt["state"] == "pending":
+                        raise ValueError("document upload is still pending; retry document.parse after 300 seconds")
+            if upload:
+                await self._authorize("document.parse", scope, resources=resources)
+                try:
+                    remote = await self.api.upload(snapshot, receipt["filename"], purpose)
+                except DeepSeekError as error:
+                    if error.status_code is not None and 400 <= error.status_code < 500 and error.status_code != 408:
+                        self._clear(identity, scope, receipt["attempt"])
+                    raise
+                ready = self._ready(receipt, remote)
+                receipt = self._publish(identity, scope, ready)
             await self._authorize("document.parse", scope, resources=resources)
-            try:
-                remote = await self.api.upload(data, receipt["filename"], purpose)
-            except DeepSeekError as error:
-                if error.status_code is not None and 400 <= error.status_code < 500 and error.status_code != 408:
-                    self._clear(identity, scope, receipt["attempt"])
-                raise
-            ready = self._ready(receipt, remote)
-            receipt = self._publish(identity, scope, ready)
-        await self._authorize("document.parse", scope, resources=resources)
-        return self._result(identity, receipt)
+            return self._result(identity, receipt)
 
     async def with_documents(self, body, context):
         messages = body.get("messages")

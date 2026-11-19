@@ -650,7 +650,6 @@ class TaskService:
             return {"acknowledged": seq}
 
     def _validate_result(self, result):
-        total = 0
         if len(result.artifacts) > 20 or len(result.evidence) > 60:
             raise ValueError("result exceeds manifest budget")
         for artifact in result.artifacts:
@@ -665,8 +664,7 @@ class TaskService:
                 fd = os.open(artifact_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
                 try:
                     info = os.fstat(fd)
-                    total += info.st_size
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or total > 20 * 1024 * 1024:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != artifact.size:
                         raise ValueError("unsafe archive file")
                     digest = hashlib.sha256()
                     read_bytes = 0
@@ -675,7 +673,7 @@ class TaskService:
                         if read_bytes > info.st_size:
                             raise ValueError("archive changed during verification")
                         digest.update(chunk)
-                    if info.st_size != artifact.size or digest.hexdigest() != artifact.sha256:
+                    if read_bytes != artifact.size or digest.hexdigest() != artifact.sha256:
                         raise ValueError("archive digest mismatch")
                 finally:
                     os.close(fd)

@@ -165,6 +165,24 @@ async def test_cached_images_yield_to_growing_tool_history(gateway, monkeypatch)
     assert "image_url" in str(g.image_content)
 
 
+async def test_images_beyond_inline_budget_are_saved_as_originals(gateway, monkeypatch, tmp_path):
+    def reject(_url, limit):
+        assert limit > 8 * 1024 * 1024
+        raise images.ImageExceedsRequestBudget("too large to inline")
+
+    def download(_url, target, **_options):
+        for _ in range(13):
+            target.write(b"i" * 1024 * 1024)
+
+    monkeypatch.setattr("elephant.harness.gateway.fetch_image", reject)
+    monkeypatch.setattr("elephant.harness.gateway.download_public_file", download)
+    gateway.gateway.provider.max_bytes = 16 * 1024 * 1024
+    body = await gateway.gateway.with_images({"messages": [{"role": "user", "content": "look"}]})
+    saved, = tmp_path.glob("attachment-*")
+    assert saved.stat().st_size == 13 * 1024 * 1024
+    assert saved.name in str(body)
+
+
 @pytest.mark.parametrize("messages", [None, ["invalid"], [{"role": ["invalid"]}],
                                       [{"role": "tool", "tool_call_id": "orphan"}]])
 async def test_invalid_image_request_rejected_before_download(gateway, monkeypatch, messages):

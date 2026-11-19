@@ -48,8 +48,8 @@ def voice_host(tmp_path, monkeypatch):
         target.write(VOICE)
 
     async def convert(api, data, filename=None, *, before_transcribe=None):
-        assert data == VOICE and filename == "voice.silk"
-        state.conversions.append(data)
+        assert data.read() == VOICE and filename == "voice.silk"
+        state.conversions.append(VOICE)
         if state.deny_after_decode:
             state.core.deny_audio = True
         if before_transcribe is not None:

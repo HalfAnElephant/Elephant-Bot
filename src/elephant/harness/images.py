@@ -10,12 +10,13 @@ from urllib.parse import urljoin, urlsplit
 
 from elephant.harness.public_web import PinnedHTTPS, public_addresses
 
-MAX_IMAGES = 4
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+class ImageExceedsRequestBudget(ValueError):
+    pass
 
 
 def fetch_public_bytes(url, max_bytes, *, headers_for_url=None):
-    if not 0 < max_bytes <= 20 * 1024 * 1024:
+    if max_bytes <= 0:
         raise ValueError("invalid attachment byte limit")
     with io.BytesIO() as target:
         _transfer(url, target, max_bytes=max_bytes, headers_for_url=headers_for_url)
@@ -89,7 +90,7 @@ def _transfer(url, target, *, max_bytes=None, cancelled=None, headers_for_url=No
                 if remaining is not None:
                     remaining -= len(chunk)
                     if remaining < 0:
-                        raise ValueError("image exceeds size limit")
+                        raise ImageExceedsRequestBudget("image exceeds size limit")
                 target.write(chunk)
             if getattr(response, "length", None):
                 raise http.client.IncompleteRead(b"", response.length)

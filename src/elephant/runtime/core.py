@@ -339,7 +339,7 @@ class Core:
             "images": [{"source": source.event_id, "message_id": source.platform_message_id, "url": segment.image_url or segment.source_url,
                         "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
                         "attachment_ref": segment.attachment_ref}
-                       for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"][-16:],
+                       for source, _body in reversed(sources) for segment in source.segments if segment.type == "image"],
             "files": [{"source": source.event_id, "message_id": source.platform_message_id,
                 "url": segment.source_url, "filename": segment.filename, "mime_type": segment.mime_type, "size": segment.size,
                 "attachment_ref": segment.attachment_ref,
