@@ -12,7 +12,14 @@ from sqlalchemy import select, update
 from test_worker_failures import environment as worker_environment
 
 from elephant.adapters.qq_official.adapter import OfficialAdapter
-from elephant.domain import AccessContext, ConversationRef, InboundEvent, OutboundEnvelope, Surface
+from elephant.domain import (
+    AccessContext,
+    ConversationRef,
+    InboundEvent,
+    OutboundEnvelope,
+    ReplyContext,
+    Surface,
+)
 from elephant.ingress.service import Inbox
 from elephant.jobs.worker import Spool, Worker
 from elephant.outbox.service import Outbox
@@ -241,3 +248,77 @@ def test_spool_quota_preserves_real_stat_errors(tmp_path, monkeypatch, code):
     with pytest.raises(OSError) as error:
         spool.save({"new": True})
     assert error.value.errno == code
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_outbox_uses_enqueue_order_and_parallel_targets(db, clock, official_config, streaming):
+    service = Outbox(db, clock)
+    target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+        surface=Surface.PRIVATE, remote_conversation_id="300")
+    other = target.model_copy(update={"remote_conversation_id": "301"})
+    with db.transaction() as conn:
+        for ident, destination in (("z-first", target), ("a-second", target), ("independent", other)):
+            service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=destination, text=ident,
+                origin_kind="task", origin_id=ident, allow_proactive=True,
+                reply_context=ReplyContext(platform_message_id="trigger", expires_at=clock.now() + timedelta(minutes=5))
+                    if ident == "z-first" else None,
+                expires_at=clock.now() + timedelta(hours=1)))
+    # Read the persisted order through a fresh dispatcher after enqueueing.
+    service = Outbox(db, clock)
+    first, independent, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sent = []
+
+    async def transport(request):
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        body = json.loads(request.content)
+        native = request.url.path.endswith("/stream_messages")
+        text = body["content_raw"] if native else body["content"]
+        sent.append(text)
+        if text == "z-first":
+            assert native == streaming
+            first.set()
+            await release.wait()
+        elif text == "independent":
+            independent.set()
+        return httpx.Response(200, json={"id": text})
+
+    config = official_config.model_copy(update={"allowed_users": ("300", "301"), "proactive_verified": True,
+                                               "streaming_enabled": streaming})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = OfficialAdapter(config, "d", Inbox(db), clock, client)
+        delivery = asyncio.create_task(service.dispatch_once({"qq": adapter}))
+        try:
+            await asyncio.wait_for(first.wait(), 3)
+            await asyncio.wait_for(independent.wait(), 3)
+            assert "a-second" not in sent
+        finally:
+            release.set()
+            await delivery
+        clock.advance(3)
+        await service.dispatch_once({"qq": adapter})
+    assert sorted(sent[:2]) == ["independent", "z-first"]
+    assert sent[2:] == ["a-second"]
+    with db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.id, outbox.c.state).order_by(outbox.c.enqueue_seq)).all() == [
+            ("z-first", "SENT"), ("a-second", "SENT"), ("independent", "SENT"),
+        ]
+
+
+def test_outbox_sequence_migration_backfills_legacy_rows(db):
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db.path}")
+    command.downgrade(config, "0025")
+    with db.transaction() as conn:
+        for ident, state in (("z-first", "UNKNOWN"), ("a-second", "PENDING")):
+            conn.exec_driver_sql(
+                "INSERT INTO outbox (id, dedupe_key, conversation_id, envelope_json, state, attempts, created_at) "
+                "VALUES (?, ?, 'qq', '{}', ?, 1, '2026-11-19T00:00:00+00:00')", (ident, ident, state),
+            )
+    command.upgrade(config, "head")
+    with db.engine.connect() as conn:
+        rows = conn.execute(select(outbox.c.id, outbox.c.enqueue_seq, outbox.c.state).order_by(outbox.c.enqueue_seq)).all()
+    assert rows == [("z-first", 1, "UNKNOWN"), ("a-second", 2, "PENDING")]

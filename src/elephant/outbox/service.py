@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from random import Random
@@ -5,8 +6,10 @@ from uuid import uuid4
 
 from sqlalchemy import and_, func, insert, or_, select, update
 
-from elephant.domain import OutboundEnvelope, SendReceipt, stable_id
+from elephant.adapters.qq_official.streaming import OfficialStream
+from elephant.domain import OutboundEnvelope, SendReceipt, Surface, stable_id
 from elephant.storage.schema import outbox, reply_counters
+from elephant.storage.stream_schema import stream_messages, stream_runs
 
 from .presentation import chat_bubbles, plain_text, split_text
 
@@ -63,6 +66,7 @@ class Outbox:
                 state="PENDING",
                 attempts=0,
                 created_at=self.clock.now().isoformat(),
+                enqueue_seq=select(func.coalesce(func.max(outbox.c.enqueue_seq), 0) + 1).scalar_subquery(),
                 origin_id=envelope.origin_id,
                 origin_kind=envelope.origin_kind,
                 part_no=envelope.part_no,
@@ -200,9 +204,9 @@ class Outbox:
                     newer = c.execute(select(outbox.c.envelope_json).where(
                         outbox.c.conversation_id == envelope.target.key, outbox.c.origin_kind == "chat",
                         outbox.c.origin_id.startswith(prefix), outbox.c.origin_id != envelope.origin_id,
-                        outbox.c.created_at > row["created_at"], outbox.c.state == "SENT",
+                        outbox.c.enqueue_seq > row["enqueue_seq"], outbox.c.state == "SENT",
                         func.json_extract(outbox.c.envelope_json, "$.purpose") == "result")
-                        .order_by(outbox.c.created_at.desc()).limit(1)).scalar_one_or_none()
+                        .order_by(outbox.c.enqueue_seq.desc()).limit(1)).scalar_one_or_none()
                     if newer:
                         if OutboundEnvelope.model_validate_json(newer).text == envelope.text:
                             c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="SUPERSEDED"))
@@ -228,7 +232,7 @@ class Outbox:
                 select(outbox).where(
                     outbox.c.conversation_id == event.conversation.key,
                     outbox.c.state == "WAITING_FOR_TRIGGER",
-                ).order_by(outbox.c.created_at, outbox.c.part_no, outbox.c.id)
+                ).order_by(outbox.c.enqueue_seq)
             )
             .mappings()
             .all()
@@ -245,7 +249,7 @@ class Outbox:
                     prefix = ":".join(envelope.origin_id.split(":", 2)[:2]) + ":"
                     if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
                             outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
-                            outbox.c.created_at > row["created_at"], outbox.c.state == "SENT",
+                            outbox.c.enqueue_seq > row["enqueue_seq"], outbox.c.state == "SENT",
                             func.json_extract(outbox.c.envelope_json, "$.purpose") == "result")).first():
                         continue
             elif envelope.origin_kind != "task":
@@ -288,153 +292,202 @@ class Outbox:
             earlier.c.part_no < outbox.c.part_no,
             earlier.c.state != "SENT",
         ).correlate(outbox).exists()
+        candidates = (
+            select(outbox.c.id, func.row_number().over(
+                partition_by=outbox.c.conversation_id, order_by=outbox.c.enqueue_seq,
+            ).label("target_rank"))
+            .where(or_(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
+                       and_(outbox.c.state == "WAITING_FOR_TRIGGER",
+                            func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
+                            func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
+                   or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()),
+                   ~blocked_part)
+            .subquery()
+        )
         with self.db.engine.connect() as c:
             rows = (
                 c.execute(
-                    select(outbox)
-                    .where(or_(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
-                               and_(outbox.c.state == "WAITING_FOR_TRIGGER",
-                                    func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
-                                    func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
-                           or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()),
-                           ~blocked_part)
-                    .order_by(outbox.c.created_at, outbox.c.conversation_id, outbox.c.origin_id,
-                              outbox.c.part_no, outbox.c.id)
+                    select(outbox).join(candidates, candidates.c.id == outbox.c.id)
+                    .where(candidates.c.target_rank == 1)
+                    .order_by(outbox.c.enqueue_seq)
                     .limit(50)
                 )
                 .mappings()
                 .all()
             )
-        for row in rows:
-            with self.db.transaction() as c:
-                current = c.execute(select(outbox).where(outbox.c.id == row["id"],
-                    outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))).mappings().first()
-                if not current:
-                    continue
-                if current["state"] == "WAITING_FOR_TRIGGER":
-                    c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="PENDING"))
-                try:
-                    envelope = self._prepare_pending(c, current)
-                except ValueError:
-                    self._receipt(row["id"], SendReceipt(state="FAILED", error_code="EMPTY_TEXT"), connection=c)
-                    continue
-            now = self.clock.now()
-            if row["next_attempt_at"] and row["next_attempt_at"] > now.isoformat():
-                continue
-            if envelope.expires_at <= now and envelope.origin_kind != "task":
-                self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="EXPIRED"))
-                continue
-            adapter = adapters.get(envelope.target.adapter_instance_id)
-            if adapter is None:
-                self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED"))
-                continue
-            if pre_send and not pre_send(envelope):
-                self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="STALE_CONTEXT"))
-                continue
-            check = await adapter.validate_delivery(envelope)
-            if not check.allowed:
-                if check.wait_for_trigger:
-                    self._receipt(
-                        envelope.delivery_id,
-                        SendReceipt(state="WAITING_FOR_TRIGGER", error_code=check.reason),
-                    )
-                elif check.reason in {"TARGET_DENIED", "IDENTITY_MISMATCH", "UNSUPPORTED_SURFACE",
-                                     "RICH_MESSAGES_DISABLED", "MARKDOWN_DISABLED", "INCOMPATIBLE_CONTENT",
-                                     "UNSUPPORTED_RICH_CONTENT", "RELATIONSHIP_REMOVED", "PROACTIVE_REJECTED", "LOCAL_MEDIA_LIMIT_UNVERIFIED"}:
-                    self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code=check.reason))
-                continue
-            with self.db.transaction() as c:
-                current = c.execute(select(outbox.c.state, outbox.c.next_attempt_at).where(
-                    outbox.c.id == row["id"])).mappings().one()
-                if current["state"] not in {"PENDING", "RETRYABLE"} or (
-                    current["next_attempt_at"] and current["next_attempt_at"] > now.isoformat()
-                ):
-                    continue
-                if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
-                    outbox.c.state == "SENDING")).first():
-                    continue
-                last = c.execute(select(outbox.c.id, outbox.c.sent_at, outbox.c.attempted_at).where(
-                    outbox.c.conversation_id == envelope.target.key, outbox.c.attempted_at.is_not(None))
-                    .order_by(func.coalesce(outbox.c.sent_at, outbox.c.attempted_at).desc()).limit(1)).mappings().first()
-                if last:
-                    due = datetime.fromisoformat(last["sent_at"] or last["attempted_at"]) + self._spacing(last["id"])
-                    if due > now:
-                        self._defer(c, row["id"], due)
-                        continue
-                predecessor = c.execute(
-                    select(outbox.c.id).where(
-                        outbox.c.conversation_id == envelope.target.key,
-                        outbox.c.origin_kind == envelope.origin_kind,
-                        outbox.c.origin_id == envelope.origin_id,
-                        outbox.c.part_no < envelope.part_no,
-                        outbox.c.state != "SENT",
-                    )
-                ).first()
-                if predecessor:
-                    continue
-                if envelope.parent_task_id and c.execute(select(outbox.c.id).where(
-                    outbox.c.task_id == envelope.parent_task_id,
-                    outbox.c.notification_sequence < envelope.notification_sequence,
-                    outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
-                    continue
-                config = getattr(adapter, "config", None)
-                effective_budget = budget
-                if getattr(config, "kind", None) == "official":
-                    effective_budget = min(budget or config.official_messages_per_minute,
-                                           config.official_messages_per_minute)
-                    # Count every attempted delivery conservatively, including UNKNOWN.
-                    # Platform rate limits still remain authoritative.
-                    daily = c.execute(select(func.count()).select_from(outbox).where(
-                        outbox.c.conversation_id == envelope.target.key,
-                        outbox.c.attempted_at >= (now - timedelta(days=1)).isoformat(),
-                    )).scalar_one()
-                    global_minute = c.execute(select(func.count()).select_from(outbox).where(
-                        func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id")
-                        == envelope.target.adapter_instance_id,
-                        outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat(),
-                    )).scalar_one()
-                    if daily >= config.official_messages_per_day or global_minute >= config.official_bot_messages_per_minute:
-                        self._defer(c, envelope.delivery_id, now + timedelta(seconds=60))
-                        continue
-                if effective_budget:
-                    used = c.execute(
-                        select(func.count())
-                        .select_from(outbox)
-                        .where(
-                            outbox.c.conversation_id == envelope.target.key,
-                            or_(
-                                outbox.c.state == "SENDING",
-                                and_(outbox.c.state == "UNKNOWN",
-                                    outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat()),
-                                and_(
-                                    outbox.c.state == "SENT",
-                                    outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
-                                ),
-                            ),
-                        )
-                    ).scalar_one()
-                    if used >= effective_budget:
-                        continue
-                claimed = c.execute(
-                    update(outbox)
-                    .where(outbox.c.id == row["id"], outbox.c.state.in_(["PENDING", "RETRYABLE"]))
-                    .values(state="SENDING", attempts=outbox.c.attempts + 1, attempted_at=now.isoformat())
-                )
-                if claimed.rowcount != 1:
-                    continue
+        slots = asyncio.Semaphore(8)
+
+        async def dispatch(row):
+            async with slots:
+                await self._dispatch_row(row, adapters, budget, pre_send)
+
+        async with asyncio.TaskGroup() as group:
+            for row in rows:
+                group.create_task(dispatch(row))
+
+    async def _dispatch_row(self, row, adapters, budget, pre_send):
+        with self.db.transaction() as c:
+            current = c.execute(select(outbox).where(outbox.c.id == row["id"],
+                outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))).mappings().first()
+            if not current:
+                return
+            if current["state"] == "WAITING_FOR_TRIGGER":
+                c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="PENDING"))
             try:
-                if getattr(getattr(adapter, "config", None), "kind", None) == "official":
-                    receipt = await adapter.send(envelope, authorize=lambda envelope=envelope: not pre_send or pre_send(envelope))
-                else:
-                    receipt = await adapter.send(envelope)
-            except Exception:  # noqa: BLE001 - A send exception may follow an external side effect.
-                receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
-            self._receipt(envelope.delivery_id, receipt)
+                envelope = self._prepare_pending(c, current)
+            except ValueError:
+                self._receipt(row["id"], SendReceipt(state="FAILED", error_code="EMPTY_TEXT"), connection=c)
+                return
+        now = self.clock.now()
+        if row["next_attempt_at"] and row["next_attempt_at"] > now.isoformat():
+            return
+        if envelope.expires_at <= now and envelope.origin_kind != "task":
+            self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="EXPIRED"))
+            return
+        adapter = adapters.get(envelope.target.adapter_instance_id)
+        if adapter is None:
+            self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED"))
+            return
+        if pre_send and not pre_send(envelope):
+            self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="STALE_CONTEXT"))
+            return
+        check = await adapter.validate_delivery(envelope)
+        if not check.allowed:
+            if check.wait_for_trigger:
+                self._receipt(
+                    envelope.delivery_id,
+                    SendReceipt(state="WAITING_FOR_TRIGGER", error_code=check.reason),
+                )
+            elif check.reason in {"TARGET_DENIED", "IDENTITY_MISMATCH", "UNSUPPORTED_SURFACE",
+                                 "RICH_MESSAGES_DISABLED", "MARKDOWN_DISABLED", "INCOMPATIBLE_CONTENT",
+                                 "UNSUPPORTED_RICH_CONTENT", "RELATIONSHIP_REMOVED", "PROACTIVE_REJECTED", "LOCAL_MEDIA_LIMIT_UNVERIFIED"}:
+                self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code=check.reason))
+            return
+        with self.db.transaction() as c:
+            current = c.execute(select(outbox.c.state, outbox.c.next_attempt_at).where(
+                outbox.c.id == row["id"])).mappings().one()
+            if current["state"] not in {"PENDING", "RETRYABLE"} or (
+                current["next_attempt_at"] and current["next_attempt_at"] > now.isoformat()
+            ):
+                return
+            if c.execute(select(outbox.c.id).where(outbox.c.conversation_id == envelope.target.key,
+                outbox.c.state == "SENDING")).first():
+                return
+            last = c.execute(select(outbox.c.id, outbox.c.sent_at, outbox.c.attempted_at).where(
+                outbox.c.conversation_id == envelope.target.key, outbox.c.attempted_at.is_not(None))
+                .order_by(func.coalesce(outbox.c.sent_at, outbox.c.attempted_at).desc()).limit(1)).mappings().first()
+            if last:
+                due = datetime.fromisoformat(last["sent_at"] or last["attempted_at"]) + self._spacing(last["id"])
+                if due > now:
+                    self._defer(c, row["id"], due)
+                    return
+            predecessor = c.execute(
+                select(outbox.c.id).where(
+                    outbox.c.conversation_id == envelope.target.key,
+                    outbox.c.origin_kind == envelope.origin_kind,
+                    outbox.c.origin_id == envelope.origin_id,
+                    outbox.c.part_no < envelope.part_no,
+                    outbox.c.state != "SENT",
+                )
+            ).first()
+            if predecessor:
+                return
+            if envelope.parent_task_id and c.execute(select(outbox.c.id).where(
+                outbox.c.task_id == envelope.parent_task_id,
+                outbox.c.notification_sequence < envelope.notification_sequence,
+                outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
+                return
+            config = getattr(adapter, "config", None)
+            effective_budget = budget
+            if getattr(config, "kind", None) == "official":
+                effective_budget = min(budget or config.official_messages_per_minute,
+                                       config.official_messages_per_minute)
+                # Count every attempted delivery conservatively, including UNKNOWN.
+                # Platform rate limits still remain authoritative.
+                daily = c.execute(select(func.count()).select_from(outbox).where(
+                    outbox.c.conversation_id == envelope.target.key,
+                    outbox.c.attempted_at >= (now - timedelta(days=1)).isoformat(),
+                )).scalar_one()
+                global_minute = c.execute(select(func.count()).select_from(outbox).where(
+                    func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id")
+                    == envelope.target.adapter_instance_id,
+                    outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat(),
+                )).scalar_one()
+                if daily >= config.official_messages_per_day or global_minute >= config.official_bot_messages_per_minute:
+                    self._defer(c, envelope.delivery_id, now + timedelta(seconds=60))
+                    return
+            if effective_budget:
+                used = c.execute(
+                    select(func.count())
+                    .select_from(outbox)
+                    .where(
+                        outbox.c.conversation_id == envelope.target.key,
+                        or_(
+                            outbox.c.state == "SENDING",
+                            and_(outbox.c.state == "UNKNOWN",
+                                outbox.c.attempted_at >= (now - timedelta(seconds=60)).isoformat()),
+                            and_(
+                                outbox.c.state == "SENT",
+                                outbox.c.sent_at >= (now - timedelta(seconds=60)).isoformat(),
+                            ),
+                        ),
+                    )
+                ).scalar_one()
+                if used >= effective_budget:
+                    return
+            claimed = c.execute(
+                update(outbox)
+                .where(outbox.c.id == row["id"], outbox.c.state.in_(["PENDING", "RETRYABLE"]))
+                .values(state="SENDING", attempts=outbox.c.attempts + 1, attempted_at=now.isoformat())
+            )
+            if claimed.rowcount != 1:
+                return
+            use_final_stream = (
+                getattr(config, "kind", None) == "official"
+                and config.streaming_enabled
+                and envelope.target.surface == Surface.PRIVATE
+                and check.reason == "VALID_REPLY"
+                and envelope.official_content is None
+                and 0 < len(envelope.text) <= 10000
+                and bool(envelope.text.strip())
+                # A settled Pi stream already had its chance to publish this origin.
+                and not c.execute(select(stream_messages.c.id).join(
+                    stream_runs, stream_runs.c.run_id == stream_messages.c.run_id
+                ).where(
+                    stream_runs.c.result_origin_kind == envelope.origin_kind,
+                    stream_runs.c.result_origin_id == envelope.origin_id,
+                    stream_messages.c.kind == "answer",
+                ).limit(1)).first()
+            )
+        try:
+            if getattr(config, "kind", None) == "official":
+                def authorize(envelope=envelope, adapter=adapter):
+                    return adapters.get(envelope.target.adapter_instance_id) is adapter and (
+                        not pre_send or pre_send(envelope))
+
+                receipt = None
+                if use_final_stream:
+                    stream = OfficialStream(adapter, envelope, content_type=envelope.content_format,
+                                            authorize=authorize)
+                    stream.text = envelope.text
+                    receipt = await stream.finish()
+                if receipt is None or receipt.error_code in {
+                    "HTTP_400", "HTTP_403", "HTTP_404", "HTTP_405", "HTTP_415", "HTTP_422",
+                }:
+                    receipt = await adapter.send(envelope, authorize=authorize)
+            else:
+                receipt = await adapter.send(envelope)
+        except asyncio.CancelledError:
+            self._receipt(envelope.delivery_id, SendReceipt(state="UNKNOWN", error_code="SEND_CANCELLED"))
+            raise
+        except Exception:  # noqa: BLE001 - A send exception may follow an external side effect.
+            receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
+        self._receipt(envelope.delivery_id, receipt)
 
     def _receipt(self, delivery_id, receipt, *, connection=None):
         with self.db.transaction() if connection is None else nullcontext(connection) as c:
             previous = c.execute(select(outbox.c.state, outbox.c.conversation_id, outbox.c.envelope_json,
-                outbox.c.created_at).where(
+                outbox.c.enqueue_seq).where(
                 outbox.c.id == delivery_id)).mappings().one()
             c.execute(
                 update(outbox)
@@ -472,7 +525,7 @@ class Outbox:
                         c.execute(update(outbox).where(outbox.c.conversation_id == envelope.target.key,
                             outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith(prefix),
                             outbox.c.origin_id != envelope.origin_id,
-                            outbox.c.created_at < previous["created_at"],
+                            outbox.c.enqueue_seq < previous["enqueue_seq"],
                             func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
                             func.json_extract(outbox.c.envelope_json, "$.text") == envelope.text,
                             outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))

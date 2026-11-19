@@ -28,7 +28,7 @@
 
 - `enabled`：默认 true；自动扫码会保存并启用，手动扫码保存为 false。自动模式在服务内完成接收器安装，持久配置用于重启恢复。
 - `markdown_enabled` / `rich_messages_enabled`：默认 `true`，QQ 私聊/群及频道图片、Markdown 有对应 renderer。若关闭，显式富消息失败，不静默丢弃按钮或附件。
-- `streaming_enabled` / `typing_enabled`：默认 `false`。按应用逐项开启并验收；只在私聊且回复上下文有效时执行。
+- `streaming_enabled` / `typing_enabled` 默认均为 `false`，按应用逐项开启并验收。两者都要求有效的私聊回复上下文。`typing_enabled` 在 Agent 运行期间发送「输入中」提示。`streaming_enabled` 支持逐段发送 Pi 的公开正文，也支持 Outbox 将尚未尝试流式发送的纯文本或 Markdown 定稿作为单个终帧投递。富媒体、群聊和主动消息继续使用普通投递。回执不明的流式请求进入 `UNKNOWN` 对账。
 - `c2c_reply_window_seconds` / `group_reply_window_seconds`：未设置时保留旧窗口。官方页面时限存在冲突，默认仍保守使用 300 秒；C2C 最大4次，群最大5次。
 - `official_messages_per_minute`：每会话默认20。
 - `official_bot_messages_per_minute`：每应用默认30，可按认证权限降低/提高；官方拒收和429始终优先。
