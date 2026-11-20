@@ -15,6 +15,8 @@ from elephant.storage.stream_schema import next_delivery_sequence, stream_messag
 
 from .presentation import chat_bubbles, plain_text, split_text
 
+MEDIA_UPLOAD_MAX_ATTEMPTS = 3
+
 
 class Outbox:
     def __init__(self, db, clock, *, markdown_adapters=()):
@@ -545,6 +547,11 @@ class Outbox:
                 outbox.c.enqueue_seq, outbox.c.attempts, outbox.c.origin_kind, outbox.c.origin_id,
                 outbox.c.task_id).where(
                 outbox.c.id == delivery_id)).mappings().one()
+            error = receipt.error_code or ""
+            if (receipt.state == "RETRYABLE" and previous["attempts"] >= MEDIA_UPLOAD_MAX_ATTEMPTS
+                    and (error == "MEDIA_UPLOAD_UNAVAILABLE" or error.startswith("LOCAL_UPLOAD_"))):
+                # Upload retries occur before the QQ message POST and can otherwise hold the target indefinitely.
+                receipt = receipt.model_copy(update={"state": "FAILED"})
             c.execute(
                 update(outbox)
                 .where(outbox.c.id == delivery_id)

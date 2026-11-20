@@ -20,6 +20,7 @@ from elephant.domain import (
     ReplyContext,
     Surface,
 )
+from elephant.domain.official import OfficialContent, OfficialMedia
 from elephant.ingress.service import Inbox
 from elephant.jobs.worker import Spool, Worker
 from elephant.outbox.service import Outbox
@@ -331,6 +332,55 @@ def test_outbox_sequence_migration_backfills_legacy_rows(db):
     with db.engine.connect() as conn:
         rows = conn.execute(select(outbox.c.id, outbox.c.enqueue_seq, outbox.c.state).order_by(outbox.c.enqueue_seq)).all()
     assert rows == [("z-first", 1, "UNKNOWN"), ("a-second", 2, "PENDING")]
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_media_upload_retries_release_the_target(db, clock, official_config, recovers):
+    service = Outbox(db, clock)
+    target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+        surface=Surface.PRIVATE, remote_conversation_id="300")
+    media = OfficialContent(media=OfficialMedia(type="image", url="https://example.com/image"))
+    with db.transaction() as conn:
+        for ident, content, ttl in (("media", media, 4), ("text", None, 60)):
+            service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=target,
+                text="" if content else "后续消息", origin_kind="task" if content else "command",
+                origin_id=ident, official_content=content, allow_proactive=True,
+                expires_at=clock.now() + timedelta(seconds=ttl)))
+
+    uploads = 0
+    sent = []
+
+    def transport(request):
+        nonlocal uploads
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        if request.url.path.endswith("/files"):
+            uploads += 1
+            if recovers and uploads == 2:
+                return httpx.Response(200, json={"file_info": "fixture-media"})
+            return httpx.Response(503)
+        sent.append("media" if "media" in json.loads(request.content) else "text")
+        return httpx.Response(200, json={"id": sent[-1]})
+
+    config = official_config.model_copy(update={"proactive_verified": True, "rich_messages_enabled": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = OfficialAdapter(config, "d", Inbox(db), clock, client)
+        await service.dispatch_once({"qq": adapter})
+        clock.advance(3)
+        await Outbox(db, clock).dispatch_once({"qq": adapter})
+        assert not sent
+        for seconds in (8, 11, 11, 11):
+            clock.advance(seconds)
+            await Outbox(db, clock).dispatch_once({"qq": adapter})
+    with db.engine.connect() as conn:
+        records = {row.id: row for row in conn.execute(select(
+            outbox.c.id, outbox.c.state, outbox.c.receipt_json, outbox.c.next_attempt_at))}
+    assert sent == (["media", "text"] if recovers else ["text"])
+    assert uploads == (2 if recovers else 3)
+    assert records["media"].state == ("SENT" if recovers else "FAILED")
+    assert records["media"].next_attempt_at is None
+    if not recovers:
+        assert json.loads(records["media"].receipt_json)["error_code"] == "MEDIA_UPLOAD_UNAVAILABLE"
 
 
 async def test_quota_blocked_targets_release_candidate_slots(db, clock):
