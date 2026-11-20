@@ -343,17 +343,19 @@ def test_with_deps_installs_completely_missing_node_pair_and_rechecks_it(fake_ma
     ({"TEST_FFMPEG_VERSION": "snapshot"}, "无法确认 FFmpeg 版本"),
     ({"TEST_BROKEN_FFMPEG": "1"}, "FFmpeg 无法运行"),
 ])
-def test_unsupported_ffmpeg_has_optional_voice_warning(fake_mac, variables, expected):
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+def test_unsupported_ffmpeg_has_optional_voice_warning(fake_mac, variables, expected, platform):
     _, _, run = fake_mac
-    result = run("--apply", "--install-pi", **variables)
+    result = run("--apply", "--install-pi", TEST_PLATFORM=platform, TEST_ARCH="x86_64" if platform == "Linux" else "arm64", **variables)
     assert result.returncode == 0, result.stderr
     assert expected in result.stdout
 
 
-def test_missing_ffmpeg_has_distinct_optional_voice_warning(fake_mac):
+@pytest.mark.parametrize("platform", ["Darwin", "Linux"])
+def test_missing_ffmpeg_has_distinct_optional_voice_warning(fake_mac, platform):
     root, _, run = fake_mac
     (root / "fake-tools/ffmpeg").unlink()
-    result = run("--apply", "--install-pi")
+    result = run("--apply", "--install-pi", TEST_PLATFORM=platform, TEST_ARCH="x86_64" if platform == "Linux" else "arm64")
     assert result.returncode == 0, result.stderr
     assert "未检测到 FFmpeg" in result.stdout
 

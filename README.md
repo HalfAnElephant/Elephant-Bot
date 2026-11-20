@@ -49,7 +49,7 @@ QQ 官方 Webhook/WebSocket 和受保护的管理入口将输入写入 Inbox。C
 ./install.sh --apply --setup
 ```
 
-Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）和 FFmpeg 6 或以上。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
+Linux 个人安装不需要 sudo，先准备 [uv](https://docs.astral.sh/uv/getting-started/installation/)、Node.js 22.19.0 或以上（含 npm）。只有需要 FFmpeg 解码的语音路径才需要 FFmpeg 6 或以上；缺少它不影响个人安装或其他功能。系统服务安装仍会安装原有系统依赖。macOS 用户有 Homebrew 时，可加 `--with-deps` 让安装器补齐依赖，不会自动安装 Homebrew。只想预览时运行 `./install.sh`；安装后运行 `./elephant` 可重新打开向导。
 
 个人版升级时，先备份、排空任务并停止旧进程，再把新发布包解压到一个新目录安装。安装器不会覆盖已有运行环境；默认配置和数据不随发布目录改变。
 

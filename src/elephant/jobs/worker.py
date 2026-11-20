@@ -11,7 +11,9 @@ import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from stat import S_ISREG
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 import httpx
 import uvicorn
@@ -41,17 +43,39 @@ class CapabilityServer(uvicorn.Server):
         yield
 
 
+class _ResultLock(asyncio.Lock):
+    """Share a successful Core acknowledgment with current waiters only."""
+    settled = False
+
+
 class Spool:
     def __init__(self, directory, max_bytes=20 * 1024 * 1024):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_bytes = max_bytes
+        self._result_locks = WeakValueDictionary()
+
+    def result_lock(self, path):
+        # Replay and the active runner share ownership of each persisted record.
+        # Weak values release idle locks instead of retaining every completed run.
+        key = Path(path).absolute()
+        lock = self._result_locks.get(key)
+        if lock is None:
+            lock = self._result_locks[key] = _ResultLock()
+        return lock
 
     def save(self, payload, *, run_id=None, seq=None):
         data = json.dumps(payload, ensure_ascii=False).encode()
         # Only files replayed by the Worker belong to its event/result quota.
         pending = (*self.directory.glob("*.json"), *self.directory.glob("events/*/*.json"))
-        total = sum(path.stat().st_size for path in pending if path.is_file())
+        total = 0
+        for path in pending:
+            try:
+                entry = path.stat()
+            except FileNotFoundError:
+                continue  # A concurrent acknowledged delivery removed this entry.
+            if S_ISREG(entry.st_mode):
+                total += entry.st_size
         if total + len(data) > self.max_bytes:
             raise RuntimeError("spool full")
         if run_id is None:
@@ -133,6 +157,14 @@ class Worker:
         return True
 
     async def deliver_result(self, payload, path):
+        lock = self.spool.result_lock(path)
+        async with lock:
+            if lock.settled:
+                return True  # A concurrent owner already received the durable Core acknowledgment.
+            lock.settled = await self._deliver_result(payload, path)
+            return lock.settled
+
+    async def _deliver_result(self, payload, path):
         if not payload.get("stopped") and not payload.get("quiescent"):
             identity = {key: payload[key] for key in ("run_id", "fencing_token")}
             if await self.resolve_spooled(path, identity):
@@ -144,7 +176,10 @@ class Worker:
             await self.call("process-stopped", payload={"process_id": process["id"], "epoch": process["epoch"],
                 "generation": process["generation"], "stopped": True})
         try:
-            await self.call("result", **payload)
+            outcome = await self.call("result", **payload)
+            if isinstance(outcome, dict) and outcome.get("state") == "NEEDS_RECONCILIATION":
+                # HTTP success acknowledges receipt, not a durable final settlement.
+                return False
         except httpx.HTTPStatusError as error:
             if error.response.status_code != 409 or not payload.get("stopped"):
                 raise
@@ -290,29 +325,34 @@ class Worker:
     async def replay(self):
         await self.flush_events()
         for path in sorted(self.spool.directory.glob("*.json")):
-            payload = json.loads(path.read_text())
-            # A stale result remains recovery evidence. It never re-launches the model.
-            try:
-                await self.deliver_result(payload, path)
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code == 409:
-                    identity = {key: payload[key] for key in ("run_id", "fencing_token")}
-                    await self.resolve_spooled(path, identity)
-                    continue
-                if error.response.status_code == 422:
-                    detail = self.quarantine_result(path, error)
-                    recovery = {**payload, "stopped": False, "quiescent": False,
-                        "result": {"status": "failed", "agent_authored": False,
-                            "summary": "Core rejected persisted result: " + detail +
-                                ". Original evidence quarantined for recovery."}}
-                    recovery_path = await self.save_result(recovery)
-                    try:
-                        await self.deliver_result(recovery, recovery_path)
-                    except httpx.HTTPStatusError as recovery_error:
-                        if recovery_error.response.status_code != 409:
-                            raise
-                    continue
-                raise
+            lock = self.spool.result_lock(path)
+            async with lock:
+                try:
+                    payload = json.loads(path.read_text())
+                except FileNotFoundError:
+                    continue  # Enumeration is a snapshot; another delivery owns cleanup.
+                # A stale result remains recovery evidence. It never re-launches the model.
+                try:
+                    lock.settled = await self._deliver_result(payload, path)
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code == 409:
+                        identity = {key: payload[key] for key in ("run_id", "fencing_token")}
+                        lock.settled = await self.resolve_spooled(path, identity)
+                        continue
+                    if error.response.status_code == 422:
+                        detail = self.quarantine_result(path, error)
+                        recovery = {**payload, "stopped": False, "quiescent": False,
+                            "result": {"status": "failed", "agent_authored": False,
+                                "summary": "Core rejected persisted result: " + detail +
+                                    ". Original evidence quarantined for recovery."}}
+                        recovery_path = await self.save_result(recovery)
+                        try:
+                            await self.deliver_result(recovery, recovery_path)
+                        except httpx.HTTPStatusError as recovery_error:
+                            if recovery_error.response.status_code != 409:
+                                raise
+                        continue
+                    raise
 
     def failure_result(self, claim, error, harness=None):
         summary = f"Runner failed with {type(error).__name__}."

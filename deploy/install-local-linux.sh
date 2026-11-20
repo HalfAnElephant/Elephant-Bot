@@ -40,14 +40,25 @@ if [ -e .venv ] || [ -L .venv ]; then
 fi
 [ ! -L node_modules ] && { [ ! -e node_modules ] || [ -d node_modules ]; } ||
     fail '发现非目录的安装目标，未修改现有文件。'
-for tool in uv node ffmpeg; do
+for tool in uv node; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "缺少 ${tool}，请按部署文档补齐系统依赖后重试。"
 done
 node -e 'const [m,n] = process.versions.node.split(".").map(Number); process.exit(m > 22 || (m === 22 && n >= 19) ? 0 : 1)' ||
     fail 'Node.js 版本过低，需要 22.19 或更新版本。'
-ffmpeg -version | awk '/^ffmpeg version / { v=$3; sub(/^n/,"",v); split(v,a,"."); ok=(a[1]+0>=6) } END {exit !ok}' ||
-    fail 'FFmpeg 版本过低，需要 6 或更新版本。'
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    printf '%s\n' '  提示：未检测到 FFmpeg，语音功能需要 FFmpeg 6 或更新版本。'
+elif ffmpeg_output=$(ffmpeg -version 2>/dev/null); then
+    ffmpeg_major=$(printf '%s\n' "$ffmpeg_output" |
+        awk '/^ffmpeg version / { v=$3; sub(/^n/,"",v); split(v,a,"."); if (a[1] ~ /^[0-9]+$/) print a[1]; exit }')
+    if [ -z "$ffmpeg_major" ]; then
+        printf '%s\n' '  提示：无法确认 FFmpeg 版本；请使用 FFmpeg 6 或更新版本以支持语音。'
+    elif [ "$ffmpeg_major" -lt 6 ]; then
+        printf '%s\n' '  提示：当前 FFmpeg 版本低于 6；语音功能需要更新或调整 PATH。'
+    fi
+else
+    printf '%s\n' '  提示：FFmpeg 无法运行；请检查 PATH 和原生工具安装，语音暂不可用。'
+fi
 unset VIRTUAL_ENV CONDA_PREFIX UV_PROJECT_ENVIRONMENT UV_WORKING_DIRECTORY UV_PROJECT
 # shellcheck source=deploy/pi-install.sh
 . "$base/deploy/pi-install.sh"
