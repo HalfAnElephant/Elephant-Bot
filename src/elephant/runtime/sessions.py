@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 
 from elephant.domain import AccessContext, InboundEvent, Surface, stable_id
 from elephant.domain.execution import ExecutionPlan
@@ -66,7 +66,7 @@ class SessionService:
         return sorted(name for name in candidates if name != "personal"
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name))
 
-    def validate_workspace(self, event, workspace_id):
+    def validate_workspace(self, event, workspace_id, *, policy_snapshot=None):
         if workspace_id == "personal":
             return workspace_id
         if workspace_id not in self.configured_workspaces():
@@ -75,7 +75,8 @@ class SessionService:
             raise PermissionError("project requires an authenticated owner")
         if event.conversation.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE}:
             access = AccessContext(principal=event.principal, conversation=event.conversation)
-            decision = self.service.permissions.check(access, "workspace.use", "project:" + workspace_id)
+            decision = self.service.permissions.check(access, "workspace.use", "project:" + workspace_id,
+                snapshot=policy_snapshot)
             rule = decision.matched_rule
             if (not decision.allowed or rule is None or rule.subject.kind not in {"group", "group_member"}
                     or not any(resource.startswith("project:") for resource in rule.resources)):
@@ -263,6 +264,23 @@ class SessionService:
 
     def claim(self, worker_id):
         now = self.clock.now()
+        ready_input = select(dialogue_inputs.c.id).where(dialogue_inputs.c.dialogue_id == dialogues.c.id,
+            dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.claimed_attempt_id.is_(None))
+        ready_notice = select(leader_inbox.c.id).where(leader_inbox.c.target_session_id == dialogues.c.session_id,
+            leader_inbox.c.handled_at.is_(None), leader_inbox.c.claimed_attempt_id.is_(None))
+        busy = select(runs.c.session_id).where(runs.c.slot_reserved == 1, runs.c.session_id.is_not(None))
+        candidates = select(dialogues).where(dialogues.c.state == "ACTIVE", dialogues.c.session_id.not_in(busy),
+            or_(ready_input.exists(), ready_notice.exists()))
+        expired_inputs = select(dialogue_inputs, dialogues.c.session_id).join(
+            dialogues, dialogues.c.id == dialogue_inputs.c.dialogue_id).where(
+            dialogues.c.state == "ACTIVE", dialogue_inputs.c.handled_at.is_(None),
+            dialogue_inputs.c.claimed_attempt_id.is_(None),
+            func.json_type(dialogue_inputs.c.context_json, "$.leader_turn.wait_for_inputs") == "array",
+            func.json_extract(dialogue_inputs.c.context_json, "$.leader_turn.deadline") <= now.isoformat())
+        with self.db.engine.connect() as conn:
+            if not conn.scalar(select(or_(candidates.exists(), expired_inputs.exists()))):
+                return None
+
         with self.db.transaction() as conn:
             pending_sources = set(self.reconciling_inputs)
             for raw in conn.execute(select(runs.c.request_json).join(
@@ -271,26 +289,19 @@ class SessionService:
                 stream_claim = json.loads(raw)
                 if not stream_claim.get("typing_only"):
                     pending_sources.update(stream_claim.get("source_ids", ()))
-            deferred_expired = conn.execute(select(dialogue_inputs, dialogues.c.session_id).join(
-                dialogues, dialogues.c.id == dialogue_inputs.c.dialogue_id).where(
-                dialogues.c.state == "ACTIVE", dialogue_inputs.c.handled_at.is_(None),
-                dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.id.not_in(pending_sources),
-                func.json_type(dialogue_inputs.c.context_json, "$.leader_turn.wait_for_inputs") == "array",
-                func.json_extract(dialogue_inputs.c.context_json, "$.leader_turn.deadline") <= now.isoformat(),
-            )).mappings().all()
+            deferred_expired = conn.execute(expired_inputs.where(
+                dialogue_inputs.c.id.not_in(pending_sources))).mappings().all()
             for expired in deferred_expired:
                 self.close_input(conn, expired["session_id"], expired, InboundEvent.model_validate_json(expired["event_json"]),
                     json.loads(expired["context_json"]), now)
-            busy = select(runs.c.session_id).where(runs.c.slot_reserved == 1, runs.c.session_id.is_not(None))
-            candidates = conn.execute(select(dialogues).where(dialogues.c.state == "ACTIVE",
-                dialogues.c.session_id.not_in(busy)).order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
+            ready_dialogues = conn.execute(candidates.order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
                 dialogues.c.created_at, dialogues.c.id)).mappings().all()
             retired_mutations = set()
             for raw in conn.execute(select(runs.c.request_json).where(runs.c.role == "leader", runs.c.slot_reserved == 1)).scalars():
                 active = json.loads(raw)
                 if active.get("memory_mutation"):
                     retired_mutations.add(active["context"]["dialogue_id"])
-            for dialogue in candidates:
+            for dialogue in ready_dialogues:
                 if dialogue["id"] in retired_mutations:
                     continue
                 history = conn.execute(select(sessions.c.manifest_json).where(

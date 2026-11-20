@@ -21,7 +21,7 @@ class MailRuntime:
         self.sender = sender or MailSender(core, self.accounts)
         self.triggers = MailTriggers(core, self.accounts)
 
-    def receipts(self, conn, event, context, *, access=None):
+    def receipts(self, conn, event, context, *, access=None, policy_snapshot=None):
         if not context.get("mail_receipt_id") and not context.get("task_sources"):
             return []
         access = access or self.core.access(event)
@@ -42,7 +42,7 @@ class MailRuntime:
                 if (source is None or source["requester"] != event.principal.key
                         or source["conversation"] != event.conversation.key):
                     raise PermissionError("task source is unavailable in this mail scope")
-                self.core.permissions.require(access, "task.read", "task:" + task_id)
+                self.core.permissions.require(access, "task.read", "task:" + task_id, snapshot=policy_snapshot)
                 pending.append(json.loads(source["context_json"]))
         return list(receipts.values())
 

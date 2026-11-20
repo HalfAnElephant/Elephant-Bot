@@ -102,6 +102,13 @@ class RuntimeClient:
         method = self.leader.renew if role in {"leader", "skill_review"} else self.service.renew
         return method(*identity)
 
+    def _authorize_model(self, identity, payload):
+        with self.service.db.engine.connect() as conn:
+            role = conn.scalar(select(runs.c.role).where(runs.c.id == identity[0]))
+        if role in {"leader", "skill_review"}:
+            return self.leader.authorize_call(identity, payload)
+        return self.service.authorize(*identity, payload)
+
     async def _invoke(self, operation, body):
         if operation == "claim":
             self.core.knowledge.recover_mutations()
@@ -140,6 +147,9 @@ class RuntimeClient:
                 return await runtime.invoke(identity, body.payload)
         if operation == "renew":
             return await self._disk(self._renew, identity)
+        if (operation == "authorize" and (body.payload or {}).get("action") == "model.request"
+                and body.payload.get("effect", "read") == "read"):
+            return await self._disk(self._authorize_model, identity, body.payload)
         with self.service.db.engine.connect() as conn:
             role = conn.execute(select(runs.c.role).where(runs.c.id == body.run_id)).scalar_one_or_none()
         values = body.model_dump(exclude_none=True)

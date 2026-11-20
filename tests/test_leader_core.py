@@ -18,6 +18,23 @@ def make_core(tmp_path, official_config, clock):
     return create_app(settings, clock=clock, run_background=False).state.core
 
 
+async def test_idle_leader_claim_does_not_open_a_write_transaction(tmp_path, official_config, official_event, clock, monkeypatch):
+    from conftest import official_payload
+
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        event = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="你好"))
+        core.inbox.accept(event)
+        await core.tick(dispatch=False)
+        finish_leader(core, core.sessions.claim("fixture"), "你好。")
+        with monkeypatch.context() as patch:
+            patch.setattr(core.db, "transaction", lambda: pytest.fail("idle claim acquired a SQLite writer"))
+            assert core.sessions.claim("fixture") is None
+    finally:
+        await core.stop()
+        core.db.close()
+
+
 async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config, official_event, clock):
     from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)

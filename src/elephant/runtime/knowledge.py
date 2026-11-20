@@ -165,12 +165,12 @@ class KnowledgeRuntime:
         context["retrieved_data"] = docs
         return context
 
-    def valid(self, context):
+    def valid(self, context, *, conn=None):
         if "memory_scope" not in context:
             return True
         scope = MemoryScope.model_validate(context["memory_scope"])
-        with self.core.db.engine.connect() as conn:
-            row = conn.execute(select(memory_owners).where(memory_owners.c.id == scope.key)).mappings().first()
+        with (nullcontext(conn) if conn is not None else self.core.db.engine.connect()) as connection:
+            row = connection.execute(select(memory_owners).where(memory_owners.c.id == scope.key)).mappings().first()
         return bool(row and row["epoch"] == context.get("memory_epoch") and (row["state"] == "READY" or not context.get("retrieved_data")))
 
     async def sync(self):

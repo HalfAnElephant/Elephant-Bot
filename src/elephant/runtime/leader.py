@@ -121,6 +121,12 @@ class LeaderRuntime:
         turn = None if root_id else "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]
         return claim["task_id"], event, turn
 
+    def authorize_call(self, identity, payload):
+        with self.defer_blocked_operation(identity), self.db.engine.connect() as conn:
+            conn.exec_driver_sql("BEGIN")
+            run, claim = self.lease(conn, *identity)
+            return self.authorize(conn, run, claim, payload)
+
     @contextmanager
     def defer_blocked_operation(self, identity):
         try:
@@ -1079,16 +1085,13 @@ class LeaderRuntime:
                     conn.execute(update(runs).where(runs.c.id == run_id).values(
                         request_json=json.dumps(claim, ensure_ascii=False)))
                 return candidates
-        if operation in {"authorize", "control"}:
-            # Provider streaming checks every chunk; readers must not acquire SQLite's writer lock.
-            with self.defer_blocked_operation(identity), self.db.engine.connect() as conn:
+        if operation == "authorize":
+            return self.authorize_call(identity, payload)
+        if operation == "control":
+            with self.db.engine.connect() as conn:
                 conn.exec_driver_sql("BEGIN")
                 run, claim = self.lease(conn, *identity)
-                if operation == "authorize":
-                    return self.authorize(conn, run, claim, payload)
-                if operation == "control":
-                    return {"state": self._control_state(conn, run, claim), "delivery": "ATTACHED"}
-                return []
+                return {"state": self._control_state(conn, run, claim), "delivery": "ATTACHED"}
         if operation == "result":
             return self.complete(*identity, values["result"], stopped=values.get("stopped", False),
                 quiescent=values.get("quiescent", False), process=values.get("process"), receipt=values.get("receipt"))

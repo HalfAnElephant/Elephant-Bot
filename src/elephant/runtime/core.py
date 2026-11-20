@@ -360,22 +360,24 @@ class Core:
             "preferences": getattr(self.settings.owner, "preferences", "")}
 
     def validate_context(self, access, context):
-        try:
-            event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
-            self.sessions.validate_workspace(event, context.get("workspace_id", "personal"))
-            if context.get("owner_id") == self.settings.owner.id and self.sessions.owner(event) != self.settings.owner.id:
-                return False
-        except (PermissionError, ValueError):
-            return False
-        if not self.knowledge.valid(context):
-            return False
         if context.get("scope", access.conversation.key) != access.conversation.key:
             return False
         if context.get("principal", access.principal.key) != access.principal.key:
             return False
-        if not self.permissions.check(access, "history.read", "conversation:" + access.conversation.key).allowed:
-            return False
+        workspace_id = context.get("workspace_id", "personal")
+        event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
         with self.db.engine.connect() as conn:
+            conn.exec_driver_sql("BEGIN")
+            policy = self.permissions.snapshot(conn)
+            try:
+                self.sessions.validate_workspace(event, workspace_id, policy_snapshot=policy)
+                if context.get("owner_id") == self.settings.owner.id and self.sessions.owner(event) != self.settings.owner.id:
+                    return False
+            except (PermissionError, ValueError):
+                return False
+            if (not self.knowledge.valid(context, conn=conn) or not self.permissions.check(
+                    access, "history.read", "conversation:" + access.conversation.key, snapshot=policy).allowed):
+                return False
             if context.get("synthetic_mail_schedule_id") and not self.schedules.synthetic_fire_authorized(
                     conn, event, context):
                 return False
@@ -388,29 +390,35 @@ class Core:
                     self.tasks.graph.merge_source_dependencies(context, history.get("task_sources", ()),
                         history.get("source_manifest", ()))
             try:
-                self.mail.receipts(conn, event, context, access=access)
+                self.mail.receipts(conn, event, context, access=access, policy_snapshot=policy)
             except (PermissionError, LookupError, ValueError):
                 return False
-            for source in context.get("source_manifest", ()):
-                if source["kind"] != "inbox":
-                    return False
-                raw = conn.execute(select(inbox.c.event_json).where(inbox.c.id == source["id"],
-                    inbox.c.conversation_id == access.conversation.key)).scalar_one_or_none()
+            sources = context.get("source_manifest", ())
+            if not sources:
+                return True
+            if any(source["kind"] != "inbox" for source in sources):
+                return False
+            ids = {source["id"] for source in sources}
+            raw_events = dict(conn.execute(select(inbox.c.id, inbox.c.event_json).where(
+                inbox.c.id.in_(ids), inbox.c.conversation_id == access.conversation.key)).all())
+            by_workspace = {workspace_id: ids}
+            message_ids = set()
+            for source in sources:
+                raw = raw_events.get(source["id"])
                 if not raw or hashlib.sha256(raw.encode()).hexdigest() != source["digest"]:
                     return False
-                if not self.permissions.check(access, "history.source.read", "event:" + source["id"]).allowed:
+                if not self.permissions.check(access, "history.source.read", "event:" + source["id"], snapshot=policy).allowed:
                     return False
                 source_event = InboundEvent.model_validate_json(raw)
-                workspace_id = context.get("workspace_id", "personal")
-                if not self.knowledge.sources_valid(event, [source["id"]], workspace_id=workspace_id, conn=conn):
-                    return False
                 original_workspace = self.sessions.workspace_for(source_event, conn)
-                if original_workspace != workspace_id and not self.knowledge.sources_valid(
-                        event, [source["id"]], workspace_id=original_workspace, conn=conn):
-                    return False
-                if conn.execute(select(inbox.c.id).where(inbox.c.conversation_id == access.conversation.key,
-                    inbox.c.event_type == "message.recalled", inbox.c.message_id == source_event.platform_message_id)).first():
-                    return False
+                by_workspace.setdefault(original_workspace, set()).add(source["id"])
+                message_ids.add(source_event.platform_message_id)
+            if any(not self.knowledge.sources_valid(event, source_ids, workspace_id=workspace, conn=conn)
+                   for workspace, source_ids in by_workspace.items()):
+                return False
+            if conn.execute(select(inbox.c.id).where(inbox.c.conversation_id == access.conversation.key,
+                inbox.c.event_type == "message.recalled", inbox.c.message_id.in_(message_ids)).limit(1)).first():
+                return False
         return True
 
     def submit_turn(self, event, fragments=(), *, text=None, access=None, **_):
