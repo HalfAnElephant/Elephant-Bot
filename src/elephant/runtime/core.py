@@ -689,11 +689,12 @@ class Core:
             raise
 
     def retire_adapters(self):
-        """Retain unsupported transport inputs as explicit failures, never execute them."""
+        """Record explicit failures for work assigned to removed transports."""
         from elephant.storage.action_schema import operations
         from elephant.storage.task_schema import runs
         terminal = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
         with self.db.transaction() as conn:
+            self.outbox.retire_adapters(conn, self.adapters)
             for row in conn.execute(select(inbox).where(inbox.c.state.in_(["PENDING", "WAITING"]))).mappings():
                 event = InboundEvent.model_validate_json(row["event_json"])
                 if event.conversation.adapter_instance_id not in self.adapters:

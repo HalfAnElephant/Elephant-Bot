@@ -36,6 +36,8 @@ class TaskGraph:
         conn.execute(insert(agent_events).values(id=event_id, task_id=task["id"], attempt_id=attempt_id,
             seq=seq, generation=task["fencing"], kind=kind, source_revision=task["goal_revision"],
             payload_json=json.dumps(payload, ensure_ascii=False), created_at=now))
+        if kind == "finished" and task["kind"] == "goal":
+            self.service.outbox.retire_chat_for_finished_task(conn, InboundEvent.model_validate_json(task["event_json"]))
         if wake:
             root = self.root(conn, task)
             if (task["id"] == root["id"] or task["parent_task_id"] == root["id"]

@@ -149,7 +149,7 @@ async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_con
 
 async def test_retired_transport_inputs_and_tasks_cannot_execute(tmp_path, official_config, official_event, clock):
     from elephant.domain import AccessContext
-    from elephant.storage.schema import inbox
+    from elephant.storage.schema import inbox, outbox
     core = make_core(tmp_path, official_config, clock)
     try:
         event = core.adapters["qq"].normalize(official_event)
@@ -159,11 +159,24 @@ async def test_retired_transport_inputs_and_tasks_cannot_execute(tmp_path, offic
         access = AccessContext(conversation=retired.conversation, principal=retired.principal, role="admin")
         old = core.tasks.accept(retired, access, "old unfinished task")
         current = core.enqueue_admin_task("current host task", idempotency_key="new-task")
+        with core.db.transaction() as conn:
+            for state, target in (("WAITING_FOR_TRIGGER", retired.conversation), ("UNKNOWN", retired.conversation),
+                                  ("WAITING_FOR_TRIGGER", event.conversation)):
+                origin_id = f"{target.adapter_instance_id}:{state}"
+                delivery_id, = core.outbox.enqueue_text(conn, target=target, text="通知",
+                    origin_kind="command", origin_id=origin_id)
+                conn.execute(outbox.update().where(outbox.c.id == delivery_id).values(state=state))
         core.retire_adapters()
         with core.db.engine.connect() as conn:
             assert conn.execute(select(inbox.c.state).where(inbox.c.id == retired.event_id)).scalar_one() == "FAILED"
             assert conn.execute(select(tasks.c.state).where(tasks.c.id == old["id"])).scalar_one() == "FAILED"
             assert conn.execute(select(tasks.c.state).where(tasks.c.id == current["task_id"])).scalar_one() == "WAITING_CHILDREN"
+            state, receipt = conn.execute(select(outbox.c.state, outbox.c.receipt_json).where(
+                outbox.c.origin_id == "retired:WAITING_FOR_TRIGGER")).one()
+            assert (state, json.loads(receipt)["error_code"]) == ("FAILED", "ADAPTER_REMOVED")
+            assert dict(conn.execute(select(outbox.c.origin_id, outbox.c.state).where(
+                outbox.c.origin_id.in_(["retired:UNKNOWN", "qq:WAITING_FOR_TRIGGER"]))).all()) == {
+                    "retired:UNKNOWN": "UNKNOWN", "qq:WAITING_FOR_TRIGGER": "WAITING_FOR_TRIGGER"}
     finally:
         await core.stop()
         core.db.close()

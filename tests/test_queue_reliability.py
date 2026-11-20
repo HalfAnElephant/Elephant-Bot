@@ -267,6 +267,7 @@ async def test_outbox_uses_enqueue_order_and_parallel_targets(db, clock, officia
     service = Outbox(db, clock)
     first, independent, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     sent = []
+    attempts = []
 
     async def transport(request):
         if request.url.path.endswith("getAppAccessToken"):
@@ -274,11 +275,15 @@ async def test_outbox_uses_enqueue_order_and_parallel_targets(db, clock, officia
         body = json.loads(request.content)
         native = request.url.path.endswith("/stream_messages")
         text = body["content_raw"] if native else body["content"]
-        sent.append(text)
-        if text == "z-first":
+        attempts.append(text)
+        if text == "z-first" and attempts.count(text) == 1:
             assert native == streaming
             first.set()
             await release.wait()
+            return httpx.Response(429)
+        sent.append(text)
+        if text == "z-first":
+            assert native == streaming
         elif text == "independent":
             independent.set()
         return httpx.Response(200, json={"id": text})
@@ -291,14 +296,18 @@ async def test_outbox_uses_enqueue_order_and_parallel_targets(db, clock, officia
         try:
             await asyncio.wait_for(first.wait(), 3)
             await asyncio.wait_for(independent.wait(), 3)
-            assert "a-second" not in sent
+            assert "a-second" not in attempts
         finally:
             release.set()
             await delivery
         clock.advance(3)
         await service.dispatch_once({"qq": adapter})
-    assert sorted(sent[:2]) == ["independent", "z-first"]
-    assert sent[2:] == ["a-second"]
+        assert sent == ["independent"]
+        clock.advance(8)
+        await service.dispatch_once({"qq": adapter})
+        clock.advance(3)
+        await service.dispatch_once({"qq": adapter})
+    assert sent == ["independent", "z-first", "a-second"]
     with db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.id, outbox.c.state).order_by(outbox.c.enqueue_seq)).all() == [
             ("z-first", "SENT"), ("a-second", "SENT"), ("independent", "SENT"),

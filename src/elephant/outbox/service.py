@@ -195,6 +195,29 @@ class Outbox:
             or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at < due.isoformat()))
             .values(next_attempt_at=due.isoformat()))
 
+    def retire_adapters(self, conn, adapters):
+        adapter_id = func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id")
+        deliveries = conn.execute(select(outbox.c.id).where(
+            outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+            adapter_id.not_in(tuple(adapters)),
+        )).scalars().all()
+        receipt = SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED")
+        for delivery_id in deliveries:
+            self._receipt(delivery_id, receipt, connection=conn)
+
+    def retire_chat_for_finished_task(self, conn, event):
+        # The task result replaces queued acknowledgments for this same input.
+        deliveries = conn.execute(select(outbox.c.id).where(
+            outbox.c.conversation_id == event.conversation.key, outbox.c.origin_kind == "chat",
+            or_(outbox.c.origin_id.startswith("turn:"), outbox.c.origin_id.startswith("progress:")),
+            outbox.c.origin_id.endswith(":" + event.event_id, autoescape=True),
+            func.json_extract(outbox.c.envelope_json, "$.anchor_message_id") == event.platform_message_id,
+            outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+        )).scalars().all()
+        receipt = SendReceipt(state="FAILED", error_code="STALE_CONTEXT")
+        for delivery_id in deliveries:
+            self._receipt(delivery_id, receipt, connection=conn)
+
     def recover(self):
         with self.db.transaction() as c:
             interrupted = c.execute(select(outbox.c.id).where(outbox.c.state == "SENDING")).scalars().all()
@@ -289,7 +312,8 @@ class Outbox:
             renewed.append(row["id"])
         return renewed
 
-    def pending_rows(self, adapters, *, only_target=None, exclude_targets=(), before_seq=None, through=None):
+    def pending_rows(self, adapters, *, only_target=None, exclude_targets=(), before_seq=None, through=None,
+                     include_deferred=False):
         proactive = [name for name, adapter in adapters.items()
                      if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
         # A blocked tail must not consume the bounded batch ahead of healthy
@@ -310,7 +334,6 @@ class Outbox:
                        and_(outbox.c.state == "WAITING_FOR_TRIGGER",
                             func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
                             func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
-                   or_(outbox.c.next_attempt_at.is_(None), outbox.c.next_attempt_at <= self.clock.now().isoformat()),
                    ~blocked_part, outbox.c.conversation_id.not_in(exclude_targets))
         )
         if only_target is not None:
@@ -320,17 +343,14 @@ class Outbox:
         if through is not None:
             candidates = candidates.where(outbox.c.created_at <= through)
         candidates = candidates.subquery()
+        heads = select(outbox).join(candidates, candidates.c.id == outbox.c.id).where(candidates.c.target_rank == 1)
+        # Defer the target as a whole so a newer delivery cannot overtake its head.
+        if not include_deferred:
+            heads = heads.where(or_(outbox.c.next_attempt_at.is_(None),
+                outbox.c.next_attempt_at <= self.clock.now().isoformat()))
         with self.db.engine.connect() as c:
-            return (
-                c.execute(
-                    select(outbox).join(candidates, candidates.c.id == outbox.c.id)
-                    .where(candidates.c.target_rank == 1)
-                    .order_by(outbox.c.enqueue_seq)
-                    .limit(50)
-                )
-                .mappings()
-                .all()
-            )
+            return c.execute(heads.order_by(outbox.c.enqueue_seq).limit(50)).mappings().all()
+
     async def dispatch_once(self, adapters, budget=0, pre_send=None):
         rows = self.pending_rows(adapters)
         slots = asyncio.Semaphore(8)
@@ -344,8 +364,9 @@ class Outbox:
                 group.create_task(dispatch(row))
 
     async def dispatch_target(self, target, adapters, budget, pre_send, *, before_seq=None, through=None):
-        rows = self.pending_rows(adapters, only_target=target, before_seq=before_seq, through=through)
-        if rows:
+        rows = self.pending_rows(adapters, only_target=target, before_seq=before_seq, through=through,
+                                 include_deferred=before_seq is not None)
+        if rows and (not rows[0]["next_attempt_at"] or rows[0]["next_attempt_at"] <= self.clock.now().isoformat()):
             await self._dispatch_row(rows[0], adapters, budget, pre_send)
         return bool(rows)
 

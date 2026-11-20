@@ -1,5 +1,6 @@
 """Leader turns share the durable public-answer stream and final outbox gate."""
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -1084,16 +1085,24 @@ async def test_independent_input_defers_goal_without_consuming_original(runtime,
                 None if operation == "write_preflight" else "FAILED")
 
 
-async def test_older_outbox_row_precedes_unopened_native_stream(leader_stream):
+@pytest.mark.parametrize("deferred", [False, True])
+async def test_older_outbox_row_precedes_unopened_native_stream(leader_stream, deferred):
     s = leader_stream
     adapter = s.core.adapters["qq"]
     adapter.config = adapter.config.model_copy(update={"proactive_verified": True})
     claim = s.core.sessions.claim("fixture")
     s.core.clock.advance(.1)
     with s.core.db.transaction() as conn:
-        s.core.outbox.enqueue_text(conn, target=s.event.conversation, text="先入队",
+        delivery_id, = s.core.outbox.enqueue_text(conn, target=s.event.conversation, text="先入队",
             origin_kind="command", origin_id="older", allow_proactive=True)
+        if deferred:
+            conn.execute(outbox.update().where(outbox.c.id == delivery_id).values(
+                state="RETRYABLE", next_attempt_at=(s.core.clock.now() + timedelta(seconds=10)).isoformat()))
     await append(s.core, claim, 1, "public_answer_delta", "后来的流")
+    if deferred:
+        await s.core.deliver()
+        assert not s.calls
+        s.core.clock.advance(11)
     await s.core.deliver()
     await s.core.deliver()
     assert [req.url.path.rsplit("/", 1)[-1] for req in s.calls] == ["messages", "stream_messages"]
