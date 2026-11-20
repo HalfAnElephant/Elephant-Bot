@@ -46,7 +46,7 @@ from .sessions import SessionService
 from .task_graph import TaskGraph
 
 logger = logging.getLogger(__name__)
-CONTROL_COMMANDS = {"/项目", "/帮助", "/状态", "/任务", "/取消", "/补充", "/静默", "/恢复", "/模式", "/新对话", "/切换对话", "/对话"}
+CONTROL_COMMANDS = {"/project", "/help", "/status", "/tasks", "/cancel", "/followup", "/mute", "/resume", "/mode", "/new", "/switch", "/dialogs", "/clear"}
 
 
 class Core:
@@ -429,9 +429,9 @@ class Core:
             event = InboundEvent.model_validate_json(event.model_dump_json())
         return self.sessions.enqueue(event, access or self.access(event), self.context_for(event, access))
 
-    def reply(self, event, text):
-        with self.db.transaction() as conn:
-            self.outbox.enqueue_text(conn, target=event.conversation, text=text, origin_kind="chat",
+    def reply(self, event, text, *, conn=None):
+        with (nullcontext(conn) if conn is not None else self.db.transaction()) as connection:
+            self.outbox.enqueue_text(connection, target=event.conversation, text=text, origin_kind="chat",
                 origin_id=event.event_id, reply_context=event.reply_context, requester=event.principal,
                 ttl_seconds=300, anchor_message_id=event.platform_message_id)
 
@@ -439,11 +439,40 @@ class Core:
         self.reply(event, json.dumps(facts, ensure_ascii=False, default=str))
 
     async def command(self, event):
-        command, _, argument = event.text.strip().partition(" ")
+        command, *arguments = event.text.strip().split(maxsplit=1)
+        argument = arguments[0] if arguments else ""
         access = self.access(event)
-        if command == "/帮助":
-            return "直接告诉我需要做什么，或问“进度怎么样”、说“取消刚才那个”。补充内容时可以引用对应的进度消息。\n/状态 /新对话 <名称> /切换对话 <名称> /对话 /项目 [名称或personal] /静默 [30m] /恢复"
-        if command == "/项目":
+        if command == "/help":
+            return (
+                "/help 查看命令\n"
+                "/status 查看接收状态\n"
+                "/tasks [ID] 查看任务\n"
+                "/cancel [ID] 取消任务\n"
+                "/followup <ID> <内容> 补充任务\n"
+                "/new [名称] 开启新对话\n"
+                "/switch <名称或 ID> 切换对话\n"
+                "/dialogs 列出对话\n"
+                "/clear 清空当前对话上下文并切到新对话\n"
+                "/project [名称或 personal] 查看或切换项目\n"
+                "/mute [30m] 静默\n"
+                "/resume 恢复接收\n"
+                "/mode <silent|addressed_only> 设置接收模式"
+            )
+        if command == "/clear":
+            if not self.allowed(event):
+                raise PermissionError("conversation access required")
+            if event.conversation.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE} and not (
+                    event.mentions_bot or self.valid_bot_reply(event)):
+                return None
+            if argument:
+                return "请单独发送 /clear。"
+            with self.db.transaction() as conn:
+                if not conn.scalar(select(outbox.c.id).where(outbox.c.origin_kind == "chat",
+                        outbox.c.origin_id == event.event_id).limit(1)):
+                    self.sessions.clear_context(conn, event)
+                    self.reply(event, "已清空当前对话上下文，可以开始新的话题。", conn=conn)
+            return None
+        if command == "/project":
             if self.sessions.owner(event) is None:
                 raise PermissionError("project selection requires the owner")
             if not argument.strip():
@@ -451,30 +480,30 @@ class Core:
             with self.db.transaction() as conn:
                 selected = self.sessions.dialogue(conn, event, workspace_id=argument.strip())
             return "当前项目 " + selected["workspace_id"] + "，对话 " + selected["title"]
-        if command == "/状态":
+        if command == "/status":
             return "我在，可以正常接收消息。想了解正在处理的事情，可以问“进度怎么样”。"
-        if command in {"/静默", "/恢复", "/模式"}:
-            mode = "silent" if command == "/静默" else "addressed_only" if command == "/恢复" else argument.strip()
+        if command in {"/mute", "/resume", "/mode"}:
+            mode = "silent" if command == "/mute" else "addressed_only" if command == "/resume" else argument.strip()
             duration = None
-            if command == "/静默" and argument:
+            if command == "/mute" and argument:
                 match = re.fullmatch(r"([1-9]\d*)([smh])", argument.strip())
                 if not match:
                     return "静默时长用 s/m/h，例如 30m"
                 duration = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
             await self.set_mode(event.conversation, mode, access, duration_seconds=duration)
-            return "已静默；发送 /恢复 可恢复。" if mode == "silent" else "已恢复。"
-        if command in {"/任务", "/取消", "/补充"}:
+            return "已静默；发送 /resume 可恢复。" if mode == "silent" else "已恢复。"
+        if command in {"/tasks", "/cancel", "/followup"}:
             return self.controls.command(event, command, argument)
         from elephant.storage.agent_schema import dialogues
         with self.db.transaction() as conn:
-            if command == "/新对话":
+            if command == "/new":
                 selected = self.sessions.dialogue(conn, event, new_title=argument.strip() or "新对话")
-            elif command == "/切换对话":
+            elif command == "/switch":
                 try:
                     selected = self.sessions.dialogue(conn, event, select_ref=argument.strip())
                 except ValueError:
-                    return "请提供一个明确的对话名称，可以用 /对话 查看已有对话。"
-            elif command == "/对话":
+                    return "请提供一个明确的对话名称，可以用 /dialogs 查看已有对话。"
+            elif command == "/dialogs":
                 owner = self.sessions.owner(event) or "guest-" + event.principal.key
                 rows = conn.execute(select(dialogues).where(dialogues.c.owner_id == owner,
                     dialogues.c.conversation_id == event.conversation.key, dialogues.c.state == "ACTIVE")).mappings()
@@ -493,7 +522,7 @@ class Core:
                 text = await self.command(event)
                 if text:
                     self.reply(event, text)
-                if self.state(event.conversation.key)["mode"] != "silent":
+                if command != "/clear" and self.state(event.conversation.key)["mode"] != "silent":
                     with self.db.transaction() as conn:
                         self.outbox.retrigger(conn, event)
                 return
@@ -530,7 +559,7 @@ class Core:
         except Exception as error:
             logger.exception("Input failed")
             retry = True  # Preserve pending ingress if the receipt lookup also fails.
-            retry = self.controls.replayable(event)
+            retry = event.text.strip() == "/clear" or self.controls.replayable(event)
             error_code = type(error).__name__
             return False if retry else None
         finally:
@@ -552,6 +581,8 @@ class Core:
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
         if envelope.origin_kind == "chat" and envelope.origin_id.startswith("file:"):
+            from elephant.storage.agent_schema import dialogue_inputs
+
             origin = envelope.origin_id.split(":", 3)
             if len(origin) != 4:
                 return False
@@ -559,13 +590,16 @@ class Core:
             with self.db.engine.connect() as conn:
                 run = conn.execute(select(runs.c.request_json).where(runs.c.id == run_id,
                     runs.c.role == "leader", runs.c.state.in_(["RUNNING", "FINISHED", "RECOVERED"]))).scalar_one_or_none()
-            if not run:
-                return False
-            claim = json.loads(run)
-            if (claim["purpose"] != "user" or claim.get("target_root_task_id")
-                    or claim["task_id"] != envelope.parent_task_id
-                    or turn != "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]):
-                return False
+                if not run:
+                    return False
+                claim = json.loads(run)
+                if (claim["purpose"] != "user" or claim.get("target_root_task_id")
+                        or claim["task_id"] != envelope.parent_task_id
+                        or turn != "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]):
+                    return False
+                if conn.scalar(select(dialogue_inputs.c.id).where(dialogue_inputs.c.id == claim["source_ids"][0],
+                        dialogue_inputs.c.state == "CLEARED")):
+                    return False
             event = InboundEvent.model_validate_json(claim["event_json"])
             access = self.access(event)
             return (event.conversation == envelope.target and event.principal == envelope.requester
@@ -615,7 +649,7 @@ class Core:
             session_id, _, source_id = origin_id.removeprefix("turn:").partition(":")
             with self.db.engine.connect() as conn:
                 source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == source_id)).mappings().first()
-                if not source or envelope.purpose == "progress" and source["handled_at"]:
+                if not source or source["state"] == "CLEARED" or envelope.purpose == "progress" and source["handled_at"]:
                     return False
                 completed = conn.execute(select(runs.c.request_json, runs.c.result_json).where(
                     runs.c.id == source["claimed_attempt_id"], runs.c.session_id == session_id,

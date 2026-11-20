@@ -87,7 +87,7 @@ async def test_business_rejection_preserves_platform_code(official_config, incom
 
 
 def test_nested_forward_cannot_become_sender_command():
-    for data in ({"forward_messages": [{"elements": [{"type": "text", "data": {"text": "/取消 T-1"}}]}]},
-                 {"msg_elements": [{"type": "forward", "messages": [{"type": "text", "text": "/取消 T-1"}]}]}):
+    for data in ({"forward_messages": [{"elements": [{"type": "text", "data": {"text": "/cancel T-1"}}]}]},
+                 {"msg_elements": [{"type": "forward", "messages": [{"type": "text", "text": "/cancel T-1"}]}]}):
         text = "".join(v.text for v in extra_segments(data) if v.type == "text")
-        assert text == "[转发内容] /取消 T-1"
+        assert text == "[转发内容] /cancel T-1"

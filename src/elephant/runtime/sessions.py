@@ -19,7 +19,7 @@ from elephant.storage.agent_schema import (
 )
 from elephant.storage.learning_schema import learning_events, learning_sessions
 from elephant.storage.schedule_schema import schedules
-from elephant.storage.schema import inbox
+from elephant.storage.schema import inbox, outbox
 from elephant.storage.stream_schema import stream_runs
 from elephant.storage.task_schema import inputs, runs, sessions, tasks
 
@@ -145,6 +145,21 @@ class SessionService:
         if not changed.rowcount:
             conn.execute(insert(focus).values(key=key, dialogue_id=row["id"]))
         return row
+
+    def clear_context(self, conn, event):
+        key = stable_id(event.conversation.key, event.principal.key)
+        previous = conn.execute(select(dialogues).join(focus, focus.c.dialogue_id == dialogues.c.id)
+            .where(focus.c.key == key, dialogues.c.state == "ACTIVE")).mappings().first()
+        if previous:
+            conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == previous["id"],
+                or_(dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.state == "CONTEXT_FAILED"))
+                .values(state="CLEARED", handled_at=self.clock.now().isoformat(), claimed_attempt_id=None))
+            origin = "turn:" + previous["session_id"] + ":"
+            conn.execute(update(outbox).where(outbox.c.conversation_id == event.conversation.key,
+                outbox.c.origin_kind == "chat", outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+                or_(outbox.c.origin_id.startswith(origin), outbox.c.origin_id.contains(":" + origin)))
+                .values(state="SUPERSEDED"))
+        self.dialogue(conn, event, new_title="新对话", workspace_id=previous["workspace_id"] if previous else None)
 
     def enqueue(self, event, access, context=None, *, new_title=None, select_ref=None):
         if access.principal != event.principal or access.conversation != event.conversation or not self.allowed(event):

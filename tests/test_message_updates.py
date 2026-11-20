@@ -117,7 +117,7 @@ async def test_last_worker_result_survives_restart_before_parent_admission(contr
         assert snapshot["progress"]["delivery"] == {"required": True, "execution_complete": True,
             "delivered": False, "states": ["ACCEPTED"], "outbox_states": ["WAITING_FOR_TRIGGER"]}
 
-        incoming = r.event("/任务 " + root["public_id"])
+        incoming = r.event("/tasks " + root["public_id"])
         trigger, _ = fresh.inbox.accept(incoming.model_copy(update={"occurred_at": fresh.clock.now(),
             "reply_context": incoming.reply_context.model_copy(update={"expires_at": fresh.clock.now() + timedelta(minutes=5)})}))
         await fresh.process(trigger)

@@ -64,6 +64,10 @@ class LeaderRuntime:
         event = InboundEvent.model_validate_json(claim["event_json"])
         if not self.core.allowed(event) or run["state"] != "RUNNING":
             raise PermissionError("Leader input is no longer authorized")
+        if claim["purpose"] == "user" and not claim.get("memory_mutation") and conn.scalar(
+                select(dialogue_inputs.c.id).where(dialogue_inputs.c.id == claim["source_ids"][0],
+                    dialogue_inputs.c.state == "CLEARED")):
+            raise PermissionError("Leader input was cleared")
         if not claim.get("memory_mutation") and not reporting_failure and claim["deadline"] <= self.clock.now().isoformat():
             raise PermissionError("Leader turn deadline expired")
         root_id = claim.get("target_root_task_id")

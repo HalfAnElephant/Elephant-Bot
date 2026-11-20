@@ -223,7 +223,7 @@ async def test_control_delivery_accepts_unchanged_facts_and_ignores_budget_heart
     progress_at = runtime.core.clock.now().isoformat()
     runtime.core.tasks.observation(claim["run_id"], claim["fencing_token"], "worker", {
         "id": "status-evidence", "data": {"checked": True}, "sha256": "a" * 64, "retrieved_at": progress_at})
-    source = await runtime.receive(runtime.event("/任务 " + root["public_id"]))
+    source = await runtime.receive(runtime.event("/tasks " + root["public_id"]))
     envelopes = control_deliveries(runtime, source)
     assert progress_at in "\n".join(item.text for item in envelopes)
     assert envelopes and all(runtime.core.controls.delivery_valid(item) is True for item in envelopes)
@@ -248,7 +248,7 @@ async def test_control_delivery_rejects_goal_revision_change(control_runtime, ki
         runtime.root(goal="另一个目标")
         text = "取消刚才那个"
     else:
-        text = "/任务" if kind == "list" else "/任务 " + root["public_id"]
+        text = "/tasks" if kind == "list" else "/tasks " + root["public_id"]
     source = await runtime.receive(runtime.event(text))
     envelopes = control_deliveries(runtime, source)
     assert all(runtime.core.controls.delivery_valid(item) is True for item in envelopes)
@@ -265,7 +265,7 @@ async def test_control_delivery_matches_rendered_markdown_and_plain_bubbles(cont
     with runtime.core.db.transaction() as conn:
         conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(result_json=json.dumps({
             "status": "partial", "summary": "**第一段**|||第二段 [文档](https://example.com/docs)"})))
-    source = await runtime.receive(runtime.event("/任务 " + root["public_id"]))
+    source = await runtime.receive(runtime.event("/tasks " + root["public_id"]))
     envelopes = control_deliveries(runtime, source)
     assert len(envelopes) == 1 if markdown else len(envelopes) >= 2
     assert all(runtime.core.controls.delivery_valid(item) is True for item in envelopes)
@@ -297,7 +297,7 @@ async def test_control_status_body_and_sources_share_one_transaction(control_run
     monkeypatch.setattr(runtime.core.controls, "_status_response", render)
     monkeypatch.setattr(runtime.core.tasks.graph, "status", read)
     monkeypatch.setattr(runtime.core.controls, "_status_sources", capture)
-    source = await runtime.receive(runtime.event("/任务 " + root["public_id"]))
+    source = await runtime.receive(runtime.event("/tasks " + root["public_id"]))
     assert rendered == [0]
     assert reads == frozen and len(reads) == 1 and reads[0][1] is True
     envelope = control_deliveries(runtime, source)[0]
@@ -315,8 +315,8 @@ def test_control_old_body_stays_invalid_after_memory_replan_completes(project_co
     from elephant.storage.schema import outbox
     core = project_core
     root = core.enqueue_admin_task("旧记忆下的目标", idempotency_key="control-old-memory", workspace_id="alpha")
-    source, _ = core.inbox.accept(host_event(core, "control-memory-status", "/任务 " + root["public_id"]))
-    response = core.controls.command(source, "/任务", root["public_id"])
+    source, _ = core.inbox.accept(host_event(core, "control-memory-status", "/tasks " + root["public_id"]))
+    response = core.controls.command(source, "/tasks", root["public_id"])
     core.reply(source, response)
     with core.db.engine.connect() as conn:
         envelope = OutboundEnvelope.model_validate_json(conn.execute(select(outbox.c.envelope_json).where(

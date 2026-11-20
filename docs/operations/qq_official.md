@@ -85,6 +85,8 @@
 
 `media.type` 为 image/audio/video/file。卡片使用 `official_content.card`，含 title、description、url、pic_url；不能和媒体/模板混在一条消息。`official_content.reference.message_id` 必须是官方引用索引，不能把普通消息 ID 当成引用索引。
 
+私聊中单独发送 `/clear` 可以开始一个不带旧聊天上下文的新对话。群聊需要 @ 机器人或引用机器人的消息。旧对话中尚未完成的聊天消息会停止处理，已提交的任务、定时规则和长期记忆继续保留。需要查看旧对话时，可以用 `/dialogs` 和 `/switch`。
+
 ## 流式可靠性
 
 Pi 只透传 assistant 公开文本，不透传 thinking、工具参数、工具结果。公开文本可能包含工具调用前的简短进度说明，不只是最终答案。worker 只写已有持久化事件，不持有 QQ 密钥；Core 才能调用 QQ。

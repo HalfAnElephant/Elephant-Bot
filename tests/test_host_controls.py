@@ -12,7 +12,7 @@ from elephant.app import create_app
 from elephant.config import OwnerConfig, QQOwnerBinding, Settings
 from elephant.domain import OutboundEnvelope
 from elephant.permissions import PermissionRule
-from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
+from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
 from elephant.storage.schema import audit_events, outbox
 from elephant.storage.task_schema import inputs, model_requests, notifications, runs, tasks, waits
 
@@ -137,7 +137,7 @@ async def test_cancel_without_id_and_status_remain_host_controls_at_full_capacit
     status = await r.receive(r.event("查看 " + root["public_id"] + " 的进度"))
     assert "正在处理" in r.response(status) and "检查项目" in r.response(status)
     assert root["public_id"] not in r.response(status) and "WAITING_CHILDREN" not in r.response(status)
-    cancel = await r.receive(r.event("/取消"))
+    cancel = await r.receive(r.event("/cancel"))
     assert r.response(cancel) == "正在停止。" and task_state(r, root["task_id"]) == "CANCEL_REQUESTED"
     r.no_model_input()
 
@@ -190,7 +190,7 @@ async def test_unaddressed_group_natural_control_is_ignored_while_slash_stays_ex
     root = r.root(r.event(private=False))
     await r.receive(r.event("取消 " + root["public_id"], private=False, addressed=False))
     assert task_state(r, root["task_id"]) == "WAITING_CHILDREN"
-    await r.receive(r.event("/取消 " + root["public_id"], private=False, addressed=False))
+    await r.receive(r.event("/cancel " + root["public_id"], private=False, addressed=False))
     assert task_state(r, root["task_id"]) == "CANCELLED"
     r.no_model_input()
 
@@ -245,7 +245,7 @@ async def test_group_replies_to_host_status_use_its_original_task_and_requester(
 
 async def test_mention_upgrade_during_context_preparation_preserves_the_newer_event(control_runtime):
     r = control_runtime
-    chat = await r.receive(r.event("/状态", private=False))
+    chat = await r.receive(r.event("/status", private=False))
     with r.core.db.transaction() as conn:
         conn.execute(update(outbox).where(outbox.c.origin_id == chat.event_id).values(
             state="SENT", platform_message_id="bot-chat"))
@@ -725,7 +725,7 @@ async def test_status_uses_natural_progress_and_preserves_result(control_runtime
     with r.core.db.transaction() as conn:
         conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(state=state,
             result_json=json.dumps({"status": "partial", "summary": "已整理三条记录"})))
-    source = await r.receive(r.event("/任务 " + root["public_id"]))
+    source = await r.receive(r.event("/tasks " + root["public_id"]))
     answer = r.response(source)
     assert expected in answer and "整理本周记录" in answer and "已整理三条记录" in answer
     assert root["public_id"] not in answer and state not in answer and "子任务" not in answer
@@ -735,16 +735,71 @@ async def test_status_uses_natural_progress_and_preserves_result(control_runtime
 async def test_help_service_status_and_dialogues_hide_internal_details(control_runtime):
     r = control_runtime
     r.root(title="研究资料")
-    for text in ("/帮助", "/状态", "/对话", "/任务", "/切换对话 不存在的名称"):
+    for text in ("/help", "/status", "/dialogs", "/tasks", "/switch 不存在的名称"):
         answer = await r.core.command(r.event(text))
         assert answer
         assert all(word not in answer for word in ("Leader", "Worker", "排队", "编号", "WAITING_CHILDREN", "T-"))
-    assert await r.core.command(r.event("/对话")) == "研究资料"
-    assert await r.core.command(r.event("/切换对话 研究资料")) == "当前对话：研究资料"
+    help_text = await r.core.command(r.event("/help"))
+    assert {line.split()[0] for line in help_text.splitlines()} == {
+        "/help", "/status", "/tasks", "/cancel", "/followup", "/new", "/switch",
+        "/dialogs", "/clear", "/project", "/mute", "/resume", "/mode",
+    }
+    assert await r.core.command(r.event("/dialogs")) == "研究资料"
+    assert await r.core.command(r.event("/switch 研究资料")) == "当前对话：研究资料"
     with r.core.db.engine.connect() as conn:
         from elephant.storage.agent_schema import dialogues
         identifier = conn.execute(select(dialogues.c.id)).scalar_one()
-    assert await r.core.command(r.event("/切换对话 " + identifier)) == "当前对话：研究资料"
+    assert await r.core.command(r.event("/switch " + identifier)) == "当前对话：研究资料"
+
+
+async def test_clear_starts_a_fresh_session_even_with_a_reserved_old_turn(control_runtime):
+    r = control_runtime
+    root = r.root(title="旧话题")
+    old_input = await r.receive(r.event("旧消息"))
+    old = r.core.sessions.claim("old-leader")
+    identity = (old["run_id"], old["fencing_token"], "old-leader")
+    queued = await r.receive(r.event("尚未处理的旧消息"))
+    await r.core.leader.invoke("notify", identity, {"text": "旧进度"})
+    r.prepare.reset_mock()
+    task_state_before_clear = task_state(r, root["task_id"])
+
+    clear = await r.receive(r.event("/clear"))
+    assert "已清空当前对话上下文" in r.response(clear)
+    r.prepare.assert_not_awaited()
+    assert (await r.core.leader.invoke("control", identity))["state"] == "CANCEL_REQUESTED"
+    with pytest.raises(PermissionError, match="input was cleared"):
+        r.core.leader.authorize_call(identity, {"action": "model.request"})
+    with r.core.db.engine.connect() as conn:
+        assert dict(conn.execute(select(dialogue_inputs.c.id, dialogue_inputs.c.state)).all()) == {
+            old_input.event_id: "CLEARED", queued.event_id: "CLEARED"}
+        assert conn.scalar(select(outbox.c.state).where(outbox.c.origin_id.startswith("progress:"))) == "SUPERSEDED"
+        assert conn.scalar(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])) == 1
+    assert task_state(r, root["task_id"]) == task_state_before_clear
+
+    fresh = await r.receive(r.event("新话题"))
+    await r.core.process(clear)
+    next_turn = r.core.sessions.claim("new-leader")
+    assert next_turn["session_id"] != old["session_id"]
+    assert next_turn["source_ids"] == [fresh.event_id]
+    assert not next_turn["context"]["active_tasks"]
+    with r.core.db.engine.connect() as conn:
+        assert len(conn.execute(select(dialogues.c.id)).all()) == 2
+        assert len(conn.execute(select(outbox.c.id).where(outbox.c.origin_id == clear.event_id)).all()) == 1
+
+
+async def test_group_clear_requires_addressing_and_keeps_other_members_context(control_runtime):
+    r = control_runtime
+    original = await r.receive(r.event("第一位成员", private=False))
+    other = await r.receive(r.event("第二位成员", private=False, subject="301"))
+    ignored = await r.receive(r.event("/clear", private=False, addressed=False))
+    assert r.response(ignored) is None
+    invalid = await r.receive(r.event("/clear\t额外参数", private=False))
+    assert r.response(invalid) == "请单独发送 /clear。"
+    clear = await r.receive(r.event("/clear", private=False))
+    assert "已清空" in r.response(clear)
+    with r.core.db.engine.connect() as conn:
+        assert dict(conn.execute(select(dialogue_inputs.c.id, dialogue_inputs.c.state)).all()) == {
+            original.event_id: "CLEARED", other.event_id: "PENDING"}
 
 
 @pytest.mark.parametrize(("error", "expected"), [
@@ -766,7 +821,7 @@ async def test_rejected_private_input_hides_internal_errors(control_runtime, mon
 
 async def test_invalid_silence_duration_keeps_actionable_hint(control_runtime):
     r = control_runtime
-    source = await r.receive(r.event("/静默 明天"))
+    source = await r.receive(r.event("/mute 明天"))
     assert r.response(source) == "静默时长用 s/m/h，例如 30m"
     r.no_model_input()
 

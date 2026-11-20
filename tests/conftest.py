@@ -54,7 +54,7 @@ def official_config(monkeypatch):
 def official_event(clock):
     return {"op":0,"id":"event-1","t":"GROUP_AT_MESSAGE_CREATE","d":{
         "id":"400","group_openid":"200","author":{"member_openid":"300"},
-        "content":"/状态","timestamp":clock.now().isoformat()}}
+        "content":"/status","timestamp":clock.now().isoformat()}}
 
 
 def official_payload(payload, *, message_id=None, text=None, user_id=None, group_id=None,

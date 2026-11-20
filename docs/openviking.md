@@ -80,7 +80,7 @@ curl --fail-with-body http://127.0.0.1:1933/health \
 
 确认响应的 `version=v0.5.4.1`、`auth_mode=api_key`、`role=user`、`account_id=elephant`、`user_id=assistant`，然后重启 Elephant Bot。通过管理任务或已绑定 owner 的 QQ 私聊提供一条测试事实，在新 Dialogue 中查询，再更正和忘记该事实以确认完整链路。适配器在每次请求前核对上述身份字段，并在创建 Session 时显式关闭 working memory、自动 commit 和 peer memory，提炼类型限定为 profile、preferences、entities、events。
 
-`/项目` 列出已配置项目，`/项目 <workspace_id>` 选择对应的独立 Dialogue。项目名来自宿主 workspace 或当前 owner 的记忆绑定，`personal` 为个人范围。Dialogue、Task、原生来源和定时安排持久保存项目身份，切换当前焦点后仍按原项目同步和恢复。群项目访问同时要求显式的当前群 `workspace.use`／`project:<workspace_id>` 授权和 `group_enabled`。
+`/project` 列出已配置项目，`/project <workspace_id>` 选择对应的独立 Dialogue。项目名来自宿主 workspace 或当前 owner 的记忆绑定，`personal` 为个人范围。Dialogue、Task、原生来源和定时安排持久保存项目身份，切换当前焦点后仍按原项目同步和恢复。群项目访问同时要求显式的当前群 `workspace.use`／`project:<workspace_id>` 授权和 `group_enabled`。
 
 管理任务入口会在同一事务保存原始结构化请求、来源 hash、项目与记忆 epoch，再创建任务树。更正后返工从这个已认证来源保留独立的产物路径和验收检查；原来源撤销时停止自动重规划。
 

@@ -50,7 +50,7 @@ def rows(db):
     ("[**标题**](https://example.org/a_(b))", "标题 (https://example.org/a_(b))"),
     ("1. 标题\n2) 下一项", "1）标题\n2）下一项"),
     ("标题\n===\n下一段", "标题\n下一段"),
-    ("/研究 <目标> /任务 <编号> /人格 <JSON覆盖>", "/研究 <目标> /任务 <编号> /人格 <JSON覆盖>"),
+    ("/研究 <目标> /tasks <编号> /人格 <JSON覆盖>", "/研究 <目标> /tasks <编号> /人格 <JSON覆盖>"),
     ("`a * b + foo_bar` 和 https://example.org/_literal_/path", "a * b + foo_bar 和 https://example.org/_literal_/path"),
     (r"文件 /tmp/_data_/a.py 和 C:\_data_\file.py", r"文件 /tmp/_data_/a.py 和 C:\_data_\file.py"),
     ("![图示](https://example.org/图.png) 与 <https://example.org/x>", "图示 (https://example.org/图.png) 与 https://example.org/x"),

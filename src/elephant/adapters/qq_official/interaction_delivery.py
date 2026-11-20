@@ -43,7 +43,7 @@ async def handle_verified_interaction(adapter, core, store, payload):
             return {"op": 12}
         keyboard = None
         if decision.action == "help":
-            text = "可使用 /帮助、/状态 查看功能；发送消息开始对话。群聊不支持原生流式。"
+            text = "可使用 /help、/status 查看功能；发送消息开始对话。群聊不支持原生流式。"
         elif decision.action == "status":
             cap = await adapter.capabilities(event.conversation)
             text = ("服务运行中。当前会话：" + event.conversation.surface.value
