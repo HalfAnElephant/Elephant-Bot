@@ -132,7 +132,7 @@ class RunGateway:
         self.revoked, self.waiting = False, False
         self.outcome, self.evidence, self.artifacts = None, [], []
         # Previously accepted tasks retain their original notification policy.
-        self.notify_before_tools = claim.get("context", {}).get("notify_before_tools", False)
+        self.notify_before_tools = not claim.get("commit_publication") and claim.get("context", {}).get("notify_before_tools", False)
         self.progress_announced = False
         self.observations, self.effects, self.content = {}, {}, {}
         self.file_content = None
@@ -772,7 +772,8 @@ class RunGateway:
                             if logical_name == "tasks.take_over" and result.get("takeover"):
                                 self.claim["takeover"] = True
                             if isinstance(result, dict) and result.get("waiting"):
-                                self.waiting, self.wait_kind = True, "waiting_children"
+                                self.waiting = True
+                                self.wait_kind = "waiting_input" if result.get("deferred") else "waiting_children"
                             return result
                         await self.authorize_action("skills.write" if logical_name == "skill_manage" else "skills.read")
                         return await self.call("skills", {"operation": logical_name, "arguments": logical_args, "call_id": call_id})

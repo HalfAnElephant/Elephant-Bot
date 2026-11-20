@@ -12,7 +12,15 @@ from sqlalchemy import select, update
 from test_worker_failures import environment as worker_environment
 
 from elephant.adapters.qq_official.adapter import OfficialAdapter
-from elephant.domain import AccessContext, ConversationRef, InboundEvent, OutboundEnvelope, Surface
+from elephant.domain import (
+    AccessContext,
+    ConversationRef,
+    InboundEvent,
+    OutboundEnvelope,
+    ReplyContext,
+    Surface,
+)
+from elephant.domain.official import OfficialContent, OfficialMedia
 from elephant.ingress.service import Inbox
 from elephant.jobs.worker import Spool, Worker
 from elephant.outbox.service import Outbox
@@ -241,3 +249,157 @@ def test_spool_quota_preserves_real_stat_errors(tmp_path, monkeypatch, code):
     with pytest.raises(OSError) as error:
         spool.save({"new": True})
     assert error.value.errno == code
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_outbox_uses_enqueue_order_and_parallel_targets(db, clock, official_config, streaming):
+    service = Outbox(db, clock)
+    target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+        surface=Surface.PRIVATE, remote_conversation_id="300")
+    other = target.model_copy(update={"remote_conversation_id": "301"})
+    with db.transaction() as conn:
+        for ident, destination in (("z-first", target), ("a-second", target), ("independent", other)):
+            service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=destination, text=ident,
+                origin_kind="task", origin_id=ident, allow_proactive=True,
+                reply_context=ReplyContext(platform_message_id="trigger", expires_at=clock.now() + timedelta(minutes=5))
+                    if ident == "z-first" else None,
+                expires_at=clock.now() + timedelta(hours=1)))
+    # Read the persisted order through a fresh dispatcher after enqueueing.
+    service = Outbox(db, clock)
+    first, independent, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sent = []
+    attempts = []
+
+    async def transport(request):
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        body = json.loads(request.content)
+        native = request.url.path.endswith("/stream_messages")
+        text = body["content_raw"] if native else body["content"]
+        attempts.append(text)
+        if text == "z-first" and attempts.count(text) == 1:
+            assert native == streaming
+            first.set()
+            await release.wait()
+            return httpx.Response(429)
+        sent.append(text)
+        if text == "z-first":
+            assert native == streaming
+        elif text == "independent":
+            independent.set()
+        return httpx.Response(200, json={"id": text})
+
+    config = official_config.model_copy(update={"allowed_users": ("300", "301"), "proactive_verified": True,
+                                               "streaming_enabled": streaming})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = OfficialAdapter(config, "d", Inbox(db), clock, client)
+        delivery = asyncio.create_task(service.dispatch_once({"qq": adapter}))
+        try:
+            await asyncio.wait_for(first.wait(), 3)
+            await asyncio.wait_for(independent.wait(), 3)
+            assert "a-second" not in attempts
+        finally:
+            release.set()
+            await delivery
+        clock.advance(3)
+        await service.dispatch_once({"qq": adapter})
+        assert sent == ["independent"]
+        clock.advance(8)
+        await service.dispatch_once({"qq": adapter})
+        clock.advance(3)
+        await service.dispatch_once({"qq": adapter})
+    assert sent == ["independent", "z-first", "a-second"]
+    with db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.id, outbox.c.state).order_by(outbox.c.enqueue_seq)).all() == [
+            ("z-first", "SENT"), ("a-second", "SENT"), ("independent", "SENT"),
+        ]
+
+
+def test_outbox_sequence_migration_backfills_legacy_rows(db):
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db.path}")
+    command.downgrade(config, "0025")
+    with db.transaction() as conn:
+        for ident, state in (("z-first", "UNKNOWN"), ("a-second", "PENDING")):
+            conn.exec_driver_sql(
+                "INSERT INTO outbox (id, dedupe_key, conversation_id, envelope_json, state, attempts, created_at) "
+                "VALUES (?, ?, 'qq', '{}', ?, 1, '2026-11-19T00:00:00+00:00')", (ident, ident, state),
+            )
+    command.upgrade(config, "head")
+    with db.engine.connect() as conn:
+        rows = conn.execute(select(outbox.c.id, outbox.c.enqueue_seq, outbox.c.state).order_by(outbox.c.enqueue_seq)).all()
+    assert rows == [("z-first", 1, "UNKNOWN"), ("a-second", 2, "PENDING")]
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_media_upload_retries_release_the_target(db, clock, official_config, recovers):
+    service = Outbox(db, clock)
+    target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+        surface=Surface.PRIVATE, remote_conversation_id="300")
+    media = OfficialContent(media=OfficialMedia(type="image", url="https://example.com/image"))
+    with db.transaction() as conn:
+        for ident, content, ttl in (("media", media, 4), ("text", None, 60)):
+            service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=target,
+                text="" if content else "后续消息", origin_kind="task" if content else "command",
+                origin_id=ident, official_content=content, allow_proactive=True,
+                expires_at=clock.now() + timedelta(seconds=ttl)))
+
+    uploads = 0
+    sent = []
+
+    def transport(request):
+        nonlocal uploads
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        if request.url.path.endswith("/files"):
+            uploads += 1
+            if recovers and uploads == 2:
+                return httpx.Response(200, json={"file_info": "fixture-media"})
+            return httpx.Response(503)
+        sent.append("media" if "media" in json.loads(request.content) else "text")
+        return httpx.Response(200, json={"id": sent[-1]})
+
+    config = official_config.model_copy(update={"proactive_verified": True, "rich_messages_enabled": True})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        adapter = OfficialAdapter(config, "d", Inbox(db), clock, client)
+        await service.dispatch_once({"qq": adapter})
+        clock.advance(3)
+        await Outbox(db, clock).dispatch_once({"qq": adapter})
+        assert not sent
+        for seconds in (8, 11, 11, 11):
+            clock.advance(seconds)
+            await Outbox(db, clock).dispatch_once({"qq": adapter})
+    with db.engine.connect() as conn:
+        records = {row.id: row for row in conn.execute(select(
+            outbox.c.id, outbox.c.state, outbox.c.receipt_json, outbox.c.next_attempt_at))}
+    assert sent == (["media", "text"] if recovers else ["text"])
+    assert uploads == (2 if recovers else 3)
+    assert records["media"].state == ("SENT" if recovers else "FAILED")
+    assert records["media"].next_attempt_at is None
+    if not recovers:
+        assert json.loads(records["media"].receipt_json)["error_code"] == "MEDIA_UPLOAD_UNAVAILABLE"
+
+
+async def test_quota_blocked_targets_release_candidate_slots(db, clock):
+    from test_outbox_presentation import Adapter
+
+    service = Outbox(db, clock)
+    with db.transaction() as conn:
+        for index in range(51):
+            target = ConversationRef(deployment_id="d", adapter_instance_id="qq", bot_identity_id="bot",
+                surface=Surface.PRIVATE, remote_conversation_id=str(index))
+            for role in ("prior", "next") if index < 50 else ("next",):
+                ident = f"{index}:{role}"
+                service.enqueue(conn, OutboundEnvelope(delivery_id=ident, target=target, text=ident,
+                    origin_kind="command", origin_id=ident, expires_at=clock.now() + timedelta(minutes=5)))
+                if role == "prior":
+                    conn.execute(update(outbox).where(outbox.c.id == ident).values(
+                        state="SENT", attempted_at=clock.now().isoformat(), sent_at=clock.now().isoformat()))
+    clock.advance(5)
+    adapter = Adapter(clock)
+    await service.dispatch_once({"qq": adapter}, budget=1)
+    await service.dispatch_once({"qq": adapter}, budget=1)
+    assert [envelope.text for envelope, _at in adapter.sent] == ["50:next"]

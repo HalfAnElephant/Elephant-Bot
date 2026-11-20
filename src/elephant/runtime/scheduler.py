@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import logging
+from functools import partial
 from pathlib import Path
 from sqlite3 import SQLITE_BUSY, SQLITE_LOCKED
 from types import SimpleNamespace
@@ -38,8 +39,15 @@ class RuntimeClient:
                 metadata = __import__("json").loads(base64.urlsafe_b64decode(headers["X-QQ-Upload"]))
                 body = WorkerRequest.model_validate(metadata)
                 from elephant.jobs.rich_delivery import local_file_upload
-                result = await local_file_upload(self.service, (body.run_id, body.fencing_token, body.worker_id),
-                                                body.payload, content)
+                identity = (body.run_id, body.fencing_token, body.worker_id)
+                with self.service.db.engine.connect() as conn:
+                    role = conn.scalar(select(runs.c.role).where(runs.c.id == body.run_id))
+                if role in {"leader", "skill_review"}:
+                    with self.leader.defer_blocked_operation(identity):
+                        result = await local_file_upload(self.service, identity, body.payload, content,
+                            leader_scope=partial(self.leader.file_delivery_scope, identity))
+                else:
+                    result = await local_file_upload(self.service, identity, body.payload, content)
             else:
                 body = WorkerRequest.model_validate(json)
                 result = await self.invoke(path.rsplit("/", 1)[-1], body)
@@ -94,6 +102,13 @@ class RuntimeClient:
         method = self.leader.renew if role in {"leader", "skill_review"} else self.service.renew
         return method(*identity)
 
+    def _authorize_model(self, identity, payload):
+        with self.service.db.engine.connect() as conn:
+            role = conn.scalar(select(runs.c.role).where(runs.c.id == identity[0]))
+        if role in {"leader", "skill_review"}:
+            return self.leader.authorize_call(identity, payload)
+        return self.service.authorize(*identity, payload)
+
     async def _invoke(self, operation, body):
         if operation == "claim":
             self.core.knowledge.recover_mutations()
@@ -126,12 +141,15 @@ class RuntimeClient:
             return await self.core.knowledge.invoke(identity, body.payload)
         if operation == "schedules":
             return await self.leader.invoke(operation, identity, body.payload)
-        if operation == "mail":
-            return await self.core.mail.invoke(identity, body.payload)
-        if operation == "jobs":
-            return await self.core.job_runtime.invoke(identity, body.payload)
+        if operation in {"mail", "jobs"}:
+            runtime = self.core.mail if operation == "mail" else self.core.job_runtime
+            with self.leader.defer_blocked_operation(identity):
+                return await runtime.invoke(identity, body.payload)
         if operation == "renew":
             return await self._disk(self._renew, identity)
+        if (operation == "authorize" and (body.payload or {}).get("action") == "model.request"
+                and body.payload.get("effect", "read") == "read"):
+            return await self._disk(self._authorize_model, identity, body.payload)
         with self.service.db.engine.connect() as conn:
             role = conn.execute(select(runs.c.role).where(runs.c.id == body.run_id)).scalar_one_or_none()
         values = body.model_dump(exclude_none=True)
@@ -141,6 +159,10 @@ class RuntimeClient:
             return await self._disk(self.leader.complete, *identity, values["result"],
                 stopped=values.get("stopped", False), quiescent=values.get("quiescent", False),
                 process=values.get("process"), receipt=values.get("receipt"))
+        if role in {"leader", "skill_review"} and operation == "qq-status":
+            from elephant.jobs.rich_delivery import rich_status
+            return rich_status(self.service, identity, body.payload,
+                leader_scope=partial(self.leader.file_delivery_scope, identity))
         if role in {"leader", "skill_review"}:
             return await self.leader.invoke(operation, identity, body.payload, **values)
         if operation == "result":

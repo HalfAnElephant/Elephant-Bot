@@ -441,7 +441,15 @@ class Worker:
                     return committed
                 await self.flush_events(claim["run_id"])
                 if getattr(harness, "gateway", None) and not harness.gateway.waiting and getattr(harness, "accepting_input", True):
-                    for extra in await self.call("inputs", **identity):
+                    pending_inputs = await self.call("inputs", **identity)
+                    if pending_inputs and claim.get("steer_until") and hasattr(harness, "append_inputs"):
+                        try:
+                            await harness.append_inputs(pending_inputs)
+                        except RuntimeError:
+                            if not execution.done() and getattr(harness, "accepting_input", True):
+                                raise
+                        pending_inputs = []
+                    for extra in pending_inputs:
                         try:
                             context = harness.gateway.claim.setdefault("context", {})
                             for key in ("images", "files", "source_manifest"):

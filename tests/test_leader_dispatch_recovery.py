@@ -329,6 +329,31 @@ async def test_leader_renew_does_not_block_loop_under_real_sqlite_writer(runtime
     assert (await client.post("/internal/tasks/renew", json=stale)).status_code == 409
 
 
+async def test_model_authorization_uses_a_fresh_off_loop_check(runtime, monkeypatch):
+    from threading import get_ident
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    payload = {"worker_id": "leader", "run_id": claim["run_id"], "fencing_token": claim["fencing_token"],
+        "payload": {"action": "model.request"}}
+    loop_thread = get_ident()
+    calls = []
+    original = runtime.leader.authorize
+
+    def authorize(conn, run, binding, action):
+        assert get_ident() != loop_thread
+        calls.append(action["action"])
+        if len(calls) > 1:
+            raise PermissionError("context revoked")
+        return original(conn, run, binding, action)
+
+    monkeypatch.setattr(runtime.leader, "authorize", authorize)
+    assert (await client.post("/internal/tasks/authorize", json=payload)).json()["allowed"]
+    assert (await client.post("/internal/tasks/authorize", json=payload)).status_code == 409
+    assert calls == ["model.request", "model.request"]
+
+
 async def test_native_failure_settlement_keeps_timer_and_sqlite_writer_available(runtime, monkeypatch):
     from threading import Event
 

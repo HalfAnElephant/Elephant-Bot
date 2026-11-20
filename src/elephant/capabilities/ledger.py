@@ -40,12 +40,17 @@ class SQLiteActionLedger:
             ))
             return {"state": "PREPARED", "result": {}}
 
-    async def transition(self, operation_id, expected, state, result):
+    async def transition(self, operation_id, expected, state, result, *, authorize_dispatch=None):
         allowed = {"PREPARED": {"DISPATCHED"}, "DISPATCHED": {"VERIFIED", "PARTIAL", "FAILED", "UNKNOWN"},
                    "UNKNOWN": {"VERIFIED", "PARTIAL", "FAILED"}}
         if state not in allowed.get(expected, set()):
             raise ValueError("invalid operation transition")
         with self.database.transaction() as connection:
+            if state == "DISPATCHED" and authorize_dispatch:
+                action = connection.execute(select(operations.c.action_json).where(
+                    operations.c.id == operation_id, operations.c.state == expected)).scalar_one_or_none()
+                if action is not None:
+                    authorize_dispatch(connection, json.loads(action))
             changed = connection.execute(operations.update().where(
                 operations.c.id == operation_id, operations.c.state == expected
             ).values(state=state, result_json=json.dumps(result, ensure_ascii=False),

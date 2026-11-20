@@ -355,7 +355,7 @@ class PiRunnerAdapter:
         if self.busy:
             raise RuntimeError("session already has an active run")
         self.busy, self.quiescent_verified = True, False
-        self.accepting_input = True
+        self.accepting_input = False
         self.steered_inputs = set()
         self.protocol_recovery_attempted = False
         self.public_answers = PublicAnswerEvents(self.safe_diagnostic, public_prefix=self.public_text_prefix)
@@ -375,6 +375,7 @@ class PiRunnerAdapter:
                             raise RuntimeError(str(event.get("error", "prompt rejected")))
                         if event.get("data", {}).get("disposition") == "handled":
                             raise RuntimeError("prompt handled without an agent run")
+                        self.accepting_input = True
                     elif kind == "message_end":
                         message = event.get("message", {})
                         if message.get("role") == "assistant":
@@ -414,7 +415,6 @@ class PiRunnerAdapter:
                                 self.gateway.session_receipt = None
                                 prompt_id = await self.command("prompt", message=json.dumps({
                                     "binding_id": self.gateway.binding, "protocol_recovery": True}))
-                                self.accepting_input = True
                                 text, error = "", None
                                 continue
                             else:
@@ -470,6 +470,18 @@ class PiRunnerAdapter:
                     if not event.get("success"):
                         raise RuntimeError(str(event.get("error", "RPC command rejected")))
                     return event.get("data", {})
+
+    async def append_inputs(self, inputs):
+        async with self.input_lock:
+            if not self.busy or not self.accepting_input or not self.gateway or self.gateway.waiting:
+                raise RuntimeError("run is not accepting steering input")
+            fresh = [{"input_id": item["id"], "text": item["text"]}
+                     for item in inputs if item["id"] not in self.steered_inputs]
+            if not fresh:
+                return
+            await self.command("steer", wait=True, message=json.dumps(
+                {"binding_id": self.gateway.binding, "inputs": fresh}, ensure_ascii=False))
+            self.steered_inputs.update(item["input_id"] for item in fresh)
 
     async def append_input(self, input_id, text, *, host_notice=False):
         async with self.input_lock:

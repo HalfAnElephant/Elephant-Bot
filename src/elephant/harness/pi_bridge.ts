@@ -95,11 +95,19 @@ export default function (pi: ExtensionAPI) {
       if (envelope.protocol_recovery === true && !waiting) {
         return {action: "transform", text: "上一轮把工具调用协议写进了正文，宿主未执行其中的调用。请依据当前会话中已持久化的真实工具回执继续处理。已完成的操作应复用回执，需要核实时先读回。需要调用工具时使用原生结构化工具接口，完成后给出自然语言汇报。"};
       }
-      if (!envelope.input_id || typeof envelope.text !== "string" || waiting) return {action: "handled"};
-      if (activeInputs.has(envelope.input_id)) return {action: "handled"};
-      activeInputs.add(envelope.input_id);
-      pi.appendEntry("qqbot-input", {id: envelope.input_id});
-      return persistInput(`[[elephant-input:${envelope.input_id}]]\n` + envelope.text, [envelope.input_id]);
+      if (waiting) return {action: "handled"};
+      const incoming = Array.isArray(envelope.inputs) ? envelope.inputs : [envelope];
+      const ids: string[] = [];
+      const texts: string[] = [];
+      for (const input of incoming) {
+        if (!input || typeof input.input_id !== "string" || typeof input.text !== "string" ||
+            activeInputs.has(input.input_id)) continue;
+        activeInputs.add(input.input_id);
+        ids.push(input.input_id);
+        pi.appendEntry("qqbot-input", {id: input.input_id});
+        texts.push(`[[elephant-input:${input.input_id}]]\n` + input.text);
+      }
+      return ids.length ? persistInput(texts.join("\n\n"), ids) : {action: "handled"};
     }
     binding = {...current, binding_id: envelope.binding_id};
     waiting = false;
@@ -139,6 +147,9 @@ export default function (pi: ExtensionAPI) {
     for (const item of binding.continuation?.inputs || []) {
       activeInputs.add(item.id);
       if (!deliveredInputs.has(item.id)) parts.push(`[[elephant-input:${item.id}]]\n` + item.text);
+    }
+    if (!parts.length && binding.source_kind === "user") {
+      parts.push("依据已持久化的工具回执处理这条用户请求。已启动或已完成的外部操作先核对回执，避免重做。\n" + binding.goal);
     }
     if (parts.length && binding.audio_context) parts.push(binding.audio_context);
     const text = parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。";
@@ -235,11 +246,13 @@ export default function (pi: ExtensionAPI) {
         condition: Type.Object({capability: Type.String(), arguments: Type.Record(Type.String(), Type.Unknown()),
           path: Type.String({description: "Dot path into the observed read result. For job.inspect use state or exit_code; GitHub stdout is decoded JSON."}),
           equals: Type.Unknown(), interval_seconds: Type.Optional(Type.Integer({minimum: 15, maximum: 3600}))})})},
-    {name: "task_outcome", description: "Record the actual goal outcome when partial, blocked, failed, needing external verification, or exporting completed workspace attachments. The final assistant message is the user-facing narrative.",
+    {name: "task_outcome", description: "Record the actual goal outcome when partial, blocked, failed, needing external verification, or exporting completed workspace attachments. When you receive supplementary inputs, record every supplied supplement ID in covered_input_ids or deferred_input_ids before the final answer, including on success. Use only supplement IDs in these lists. The final assistant message is the user-facing narrative.",
       parameters: Type.Object({status: Type.Union([Type.Literal("completed"), Type.Literal("partial"), Type.Literal("blocked"), Type.Literal("failed")]),
         attachments: Type.Optional(Type.Array(Type.String({minLength: 1, maxLength: 1024}), {maxItems: 20})),
         observation_refs: Type.Optional(Type.Array(Type.String())), effect_refs: Type.Optional(Type.Array(Type.String())),
-        unresolved_items: Type.Optional(Type.Array(Type.String()))})},
+        unresolved_items: Type.Optional(Type.Array(Type.String())),
+        covered_input_ids: Type.Optional(Type.Array(Type.String(), {maxItems: 8})),
+        deferred_input_ids: Type.Optional(Type.Array(Type.String(), {maxItems: 8}))})},
   ];
   function register(definition: any) {
     const withUserMessage = binding?.role === "leader" && messageTools.has(definition.name);

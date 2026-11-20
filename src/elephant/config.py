@@ -141,6 +141,7 @@ class OrchestrationConfig(DTO):
         description="Legacy compatibility field; task tree depth is unrestricted")
     max_nodes_per_root: int = Field(default=7, ge=0, deprecated=True,
         description="Legacy compatibility field; task node count is unrestricted")
+    leader_steering_dialogues: tuple[str, ...] = ()
     leader_inbox_batch_limit: int = Field(default=16, ge=1, le=64)
     leader_inbox_coalesce_seconds: float = Field(default=2, ge=0, le=60)
     model_request_limit: int = Field(default=8, ge=1, le=32)

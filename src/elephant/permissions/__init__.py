@@ -113,12 +113,12 @@ class PermissionService:
         self.db, self.clock = db, clock
         self.initial_policy = policy or PermissionPolicy()
 
-    def _snapshot(self, conn=None):
+    def snapshot(self, conn=None):
         if self.db is None:
             return 0, self.initial_policy
         if conn is None:
             with self.db.engine.connect() as connection:
-                return self._snapshot(connection)
+                return self.snapshot(connection)
         row = conn.execute(select(permission_policy).where(permission_policy.c.id == 1)).mappings().first()
         return (
             (row["version"], PermissionPolicy.model_validate_json(row["policy_json"]))
@@ -128,14 +128,14 @@ class PermissionService:
 
     @property
     def policy_version(self):
-        return self._snapshot()[0]
+        return self.snapshot()[0]
 
     def list(self):
-        version, policy = self._snapshot()
+        version, policy = self.snapshot()
         return {"policy_version": version, **policy.model_dump(mode="json")}
 
     def get(self, rule_id):
-        return next((rule for rule in self._snapshot()[1].rules if rule.id == rule_id), None)
+        return next((rule for rule in self.snapshot()[1].rules if rule.id == rule_id), None)
 
     @staticmethod
     def _pattern_specificity(patterns, value, *, action=False):
@@ -160,12 +160,12 @@ class PermissionService:
             selector.kind
         ]
 
-    def check(self, subject, action: str, resource: str, context=None):
+    def check(self, subject, action: str, resource: str, context=None, *, snapshot=None):
         if isinstance(subject, AccessContext):
             subject = PermissionSubject.from_access(subject)
         if not isinstance(subject, PermissionSubject):
             subject = PermissionSubject.model_validate(subject)
-        version, policy = self._snapshot()
+        version, policy = self.snapshot() if snapshot is None else snapshot
         matched = []
         for rule in policy.rules:
             if not rule.enabled:
@@ -192,7 +192,7 @@ class PermissionService:
             subject = PermissionSubject.from_access(subject)
         if not isinstance(subject, PermissionSubject):
             subject = PermissionSubject.model_validate(subject)
-        policy = self._snapshot()[1]
+        policy = self.snapshot()[1]
         if policy.default_effect == "deny":
             return True
         for rule in policy.rules:
@@ -214,8 +214,8 @@ class PermissionService:
     def explain(self, subject, action, resource, context=None):
         return self.check(subject, action, resource, context)
 
-    def require(self, subject, action, resource, context=None):
-        decision = self.check(subject, action, resource, context)
+    def require(self, subject, action, resource, context=None, *, snapshot=None):
+        decision = self.check(subject, action, resource, context, snapshot=snapshot)
         if not decision.allowed:
             raise PermissionError(f"{action} denied by policy version {decision.policy_version}")
         return decision
@@ -224,7 +224,7 @@ class PermissionService:
         if self.db is None:
             raise RuntimeError("permission mutations require persistent storage")
         with self.db.transaction() as conn:
-            version, before = self._snapshot(conn)
+            version, before = self.snapshot(conn)
             if version != expected_version:
                 raise PolicyVersionConflict("permission policy version changed")
             after = transform(before)

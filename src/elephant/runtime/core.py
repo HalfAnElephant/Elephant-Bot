@@ -360,22 +360,24 @@ class Core:
             "preferences": getattr(self.settings.owner, "preferences", "")}
 
     def validate_context(self, access, context):
-        try:
-            event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
-            self.sessions.validate_workspace(event, context.get("workspace_id", "personal"))
-            if context.get("owner_id") == self.settings.owner.id and self.sessions.owner(event) != self.settings.owner.id:
-                return False
-        except (PermissionError, ValueError):
-            return False
-        if not self.knowledge.valid(context):
-            return False
         if context.get("scope", access.conversation.key) != access.conversation.key:
             return False
         if context.get("principal", access.principal.key) != access.principal.key:
             return False
-        if not self.permissions.check(access, "history.read", "conversation:" + access.conversation.key).allowed:
-            return False
+        workspace_id = context.get("workspace_id", "personal")
+        event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
         with self.db.engine.connect() as conn:
+            conn.exec_driver_sql("BEGIN")
+            policy = self.permissions.snapshot(conn)
+            try:
+                self.sessions.validate_workspace(event, workspace_id, policy_snapshot=policy)
+                if context.get("owner_id") == self.settings.owner.id and self.sessions.owner(event) != self.settings.owner.id:
+                    return False
+            except (PermissionError, ValueError):
+                return False
+            if (not self.knowledge.valid(context, conn=conn) or not self.permissions.check(
+                    access, "history.read", "conversation:" + access.conversation.key, snapshot=policy).allowed):
+                return False
             if context.get("synthetic_mail_schedule_id") and not self.schedules.synthetic_fire_authorized(
                     conn, event, context):
                 return False
@@ -383,34 +385,40 @@ class Core:
                 history = conn.execute(select(sessions.c.manifest_json).where(
                     sessions.c.id == context["session_id"])).scalar_one_or_none()
                 history = json.loads(history) if history else {}
-                if history.get("task_sources"):
+                if history.get("task_sources") or history.get("steering_sources"):
                     context = dict(context)
-                    self.tasks.graph.merge_source_dependencies(context, history["task_sources"],
+                    self.tasks.graph.merge_source_dependencies(context, history.get("task_sources", ()),
                         history.get("source_manifest", ()))
             try:
-                self.mail.receipts(conn, event, context, access=access)
+                self.mail.receipts(conn, event, context, access=access, policy_snapshot=policy)
             except (PermissionError, LookupError, ValueError):
                 return False
-            for source in context.get("source_manifest", ()):
-                if source["kind"] != "inbox":
-                    return False
-                raw = conn.execute(select(inbox.c.event_json).where(inbox.c.id == source["id"],
-                    inbox.c.conversation_id == access.conversation.key)).scalar_one_or_none()
+            sources = context.get("source_manifest", ())
+            if not sources:
+                return True
+            if any(source["kind"] != "inbox" for source in sources):
+                return False
+            ids = {source["id"] for source in sources}
+            raw_events = dict(conn.execute(select(inbox.c.id, inbox.c.event_json).where(
+                inbox.c.id.in_(ids), inbox.c.conversation_id == access.conversation.key)).all())
+            by_workspace = {workspace_id: ids}
+            message_ids = set()
+            for source in sources:
+                raw = raw_events.get(source["id"])
                 if not raw or hashlib.sha256(raw.encode()).hexdigest() != source["digest"]:
                     return False
-                if not self.permissions.check(access, "history.source.read", "event:" + source["id"]).allowed:
+                if not self.permissions.check(access, "history.source.read", "event:" + source["id"], snapshot=policy).allowed:
                     return False
                 source_event = InboundEvent.model_validate_json(raw)
-                workspace_id = context.get("workspace_id", "personal")
-                if not self.knowledge.sources_valid(event, [source["id"]], workspace_id=workspace_id, conn=conn):
-                    return False
                 original_workspace = self.sessions.workspace_for(source_event, conn)
-                if original_workspace != workspace_id and not self.knowledge.sources_valid(
-                        event, [source["id"]], workspace_id=original_workspace, conn=conn):
-                    return False
-                if conn.execute(select(inbox.c.id).where(inbox.c.conversation_id == access.conversation.key,
-                    inbox.c.event_type == "message.recalled", inbox.c.message_id == source_event.platform_message_id)).first():
-                    return False
+                by_workspace.setdefault(original_workspace, set()).add(source["id"])
+                message_ids.add(source_event.platform_message_id)
+            if any(not self.knowledge.sources_valid(event, source_ids, workspace_id=workspace, conn=conn)
+                   for workspace, source_ids in by_workspace.items()):
+                return False
+            if conn.execute(select(inbox.c.id).where(inbox.c.conversation_id == access.conversation.key,
+                inbox.c.event_type == "message.recalled", inbox.c.message_id.in_(message_ids)).limit(1)).first():
+                return False
         return True
 
     def submit_turn(self, event, fragments=(), *, text=None, access=None, **_):
@@ -543,6 +551,27 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
+        if envelope.origin_kind == "chat" and envelope.origin_id.startswith("file:"):
+            origin = envelope.origin_id.split(":", 3)
+            if len(origin) != 4:
+                return False
+            _, _, run_id, turn = origin
+            with self.db.engine.connect() as conn:
+                run = conn.execute(select(runs.c.request_json).where(runs.c.id == run_id,
+                    runs.c.role == "leader", runs.c.state.in_(["RUNNING", "FINISHED", "RECOVERED"]))).scalar_one_or_none()
+            if not run:
+                return False
+            claim = json.loads(run)
+            if (claim["purpose"] != "user" or claim.get("target_root_task_id")
+                    or claim["task_id"] != envelope.parent_task_id
+                    or turn != "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]):
+                return False
+            event = InboundEvent.model_validate_json(claim["event_json"])
+            access = self.access(event)
+            return (event.conversation == envelope.target and event.principal == envelope.requester
+                    and self.sessions.owner(event) is not None and self.allowed(event)
+                    and self.permissions.check(access, "notification.send", "task:" + claim["task_id"]).allowed
+                    and self.validate_context(access, claim["context"]))
         if envelope.origin_kind == "chat" and not envelope.origin_id.startswith(("turn:", "progress:", "qq-stream:")):
             controlled = self.controls.delivery_valid(envelope)
             if controlled is not None:
@@ -552,7 +581,7 @@ class Core:
             from elephant.storage.stream_schema import stream_messages, stream_runs
 
             with self.db.engine.connect() as conn:
-                stream = conn.execute(select(stream_messages.c.envelope_json, runs)
+                stream = conn.execute(select(stream_messages.c.envelope_json, stream_messages.c.kind, runs)
                     .join(runs, runs.c.id == stream_messages.c.run_id)
                     .join(stream_runs, stream_runs.c.run_id == runs.c.id).where(
                         stream_messages.c.id == envelope.origin_id.removeprefix("qq-stream:"),
@@ -560,7 +589,8 @@ class Core:
                 if not stream or stream["envelope_json"] != envelope.model_dump_json():
                     return False
                 claim = json.loads(stream["request_json"])
-                if claim["purpose"] != "user" or not claim.get("public_answer_events"):
+                if claim["purpose"] != "user" or not (claim.get("public_answer_events")
+                        or (stream["kind"] == "typing" and claim.get("typing_only"))):
                     return False
                 source = conn.execute(select(dialogue_inputs).where(
                     dialogue_inputs.c.id == claim["source_ids"][0],
@@ -596,13 +626,16 @@ class Core:
             event = InboundEvent.model_validate_json(source["event_json"])
             if event.conversation != envelope.target or event.principal != envelope.requester:
                 return False
-            mutation = json.loads(completed["request_json"]).get("memory_mutation", {}) if completed else {}
+            committed_claim = json.loads(completed["request_json"]) if completed else {}
+            mutation = committed_claim.get("memory_mutation", {})
             result = json.loads(completed["result_json"] or "{}") if completed else {}
             if (mutation.get("summary") == envelope.text and result.get("summary") == envelope.text
                     and result.get("agent_authored") is False):
                 return self.sessions.owner(event) is not None and self.allowed(event)
-            if settled or not self.validate_context(self.access(event), {
-                    **json.loads(source["context_json"]), "session_id": session_id}):
+            delivery_context = ({key: value for key, value in committed_claim["context"].items() if key != "session_id"}
+                if envelope.fixed_publication and committed_claim.get("commit_publication") else {
+                    **json.loads(source["context_json"]), "session_id": session_id})
+            if settled or not self.validate_context(self.access(event), delivery_context):
                 return False
         if envelope.origin_kind == "task":
             with self.db.engine.connect() as conn:
@@ -655,9 +688,8 @@ class Core:
         if dispatch:
             await self.deliver()
 
-    async def deliver(self):
-        await self.stream_delivery.dispatch_once()
-        await self.outbox.dispatch_once(self.adapters, self.settings.send_budget_per_minute, self.pre_send)
+    async def deliver(self, *, wait=True):
+        await self.stream_delivery.dispatch_once(include_outbox=True, wait=wait)
 
     async def maintenance(self):
         for recover in (self.recovery.recover_workers, self.leader.recover):
@@ -686,11 +718,12 @@ class Core:
             raise
 
     def retire_adapters(self):
-        """Retain unsupported transport inputs as explicit failures, never execute them."""
+        """Record explicit failures for work assigned to removed transports."""
         from elephant.storage.action_schema import operations
         from elephant.storage.task_schema import runs
         terminal = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
         with self.db.transaction() as conn:
+            self.outbox.retire_adapters(conn, self.adapters)
             for row in conn.execute(select(inbox).where(inbox.c.state.in_(["PENDING", "WAITING"]))).mappings():
                 event = InboundEvent.model_validate_json(row["event_json"])
                 if event.conversation.adapter_instance_id not in self.adapters:
@@ -719,7 +752,7 @@ class Core:
         self.leader.recover()
         self.knowledge.recover_mutations()
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
-        self.supervisor.start("delivery", self.deliver, interval=0.1, critical=True)
+        self.supervisor.start("delivery", lambda: self.deliver(wait=False), interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)
         self.supervisor.start("schedules", self.schedules.step, interval=1, critical=True)
@@ -732,6 +765,7 @@ class Core:
     async def stop(self):
         self.stopping = True
         await self.supervisor.stop()
+        await self.stream_delivery.stop()
         if self.scheduler:
             await self.scheduler.close()
         await self.openviking.close()

@@ -705,6 +705,14 @@
           "title": "Max Nodes Per Root",
           "type": "integer"
         },
+        "leader_steering_dialogues": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Leader Steering Dialogues",
+          "type": "array"
+        },
         "leader_inbox_batch_limit": {
           "default": 16,
           "maximum": 64,
@@ -1205,6 +1213,7 @@
         "child_parallelism": 2,
         "max_task_depth": 2,
         "max_nodes_per_root": 7,
+        "leader_steering_dialogues": [],
         "leader_inbox_batch_limit": 16,
         "leader_inbox_coalesce_seconds": 2.0,
         "model_request_limit": 8,

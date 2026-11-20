@@ -1,5 +1,6 @@
 """Task-scoped QQ delivery. Worker input cannot select identity or audience."""
 import json
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import Literal
 from uuid import uuid4
@@ -55,46 +56,72 @@ def _authorize(service, args):
     return task, event
 
 
+def _delivery_scope(service, args, leader_scope, conn=None, *, write=True):
+    if leader_scope is None:
+        task, event = _authorize(service, args)
+        return task["id"], event, None
+    with (nullcontext(conn) if conn is not None else service.db.engine.connect()) as connection:
+        return leader_scope(connection, write=write)
+
+
 def _status(row):
     return {"delivery_id": row["id"], "state": row["state"], "delivered": row["state"] == "SENT",
             "receipt": json.loads(row["receipt_json"]) if row["receipt_json"] else None}
 
 
-async def rich_send(service, args, payload):
+async def rich_send(service, args, payload, *, leader_scope=None):
     body = RichMessage.model_validate(payload)
-    task, event = _authorize(service, args)
+    scope_id, event, turn = _delivery_scope(service, args, leader_scope)
     adapter = service.qq_adapters.get(event.conversation.adapter_instance_id)
     if not isinstance(adapter, OfficialAdapter):
         raise ValueError("official QQ adapter unavailable for this conversation")  # noqa: TRY004
-    notification_id = stable_id("qq-rich", task["id"], body.request_id)
+    notification_id = stable_id("qq-rich", scope_id, body.request_id)
+    file_prefix = "file:" + notification_id + ":"
+    origin_id = file_prefix + args[0] + ":" + turn if turn else notification_id
     canonical = body.model_dump_json()
-    with service.db.engine.connect() as c:
+
+    def existing_delivery(c):
+        if turn:
+            row = c.execute(select(outbox).where(outbox.c.origin_kind == "chat",
+                outbox.c.task_id == scope_id, outbox.c.origin_id.startswith(file_prefix))).mappings().first()
+            if row:
+                old = OutboundEnvelope.model_validate_json(row["envelope_json"])
+                if (old.text, old.content_format, old.official_content) != (body.text, body.content_format, body.official_content):
+                    raise ValueError("request_id already used with different content")
+            return row
         existing = c.execute(select(notifications).where(notifications.c.id == notification_id)).mappings().first()
         if existing:
             if existing["body"] != canonical:
                 raise ValueError("request_id already used with different content")
-            row = c.execute(select(outbox).where(outbox.c.origin_id == notification_id)).mappings().one()
+            return c.execute(select(outbox).where(outbox.c.origin_id == notification_id)).mappings().one()
+        return None
+
+    with service.db.engine.connect() as c:
+        if row := existing_delivery(c):
             return _status(row)
     envelope = OutboundEnvelope(delivery_id=str(uuid4()), target=event.conversation, text=body.text,
         content_format=body.content_format, official_content=body.official_content, plain_text=True,
-        reply_context=event.reply_context, origin_kind="task", origin_id=notification_id,
-        requester=event.principal, parent_task_id=task["id"], purpose="status",
+        reply_context=event.reply_context, origin_kind="chat" if turn else "task", origin_id=origin_id,
+        requester=event.principal, parent_task_id=scope_id, purpose="status",
         expires_at=service.clock.now() + timedelta(minutes=5))
     check = await adapter.validate_delivery(envelope.model_copy(update={"reply_context":
         event.reply_context.model_copy(update={"msg_seq": 1}) if event.reply_context else None}))
     if not check.allowed:
         raise ValueError(check.reason)
     # Adapter validation may await; renew the authority check before committing the send intent.
-    _authorize(service, args)
+    if leader_scope is None:
+        _authorize(service, args)
     with service.db.transaction() as c:
-        existing = c.execute(select(notifications).where(notifications.c.id == notification_id)).mappings().first()
-        if existing:
-            if existing["body"] != canonical:
-                raise ValueError("request_id already used with different content")
-            return _status(c.execute(select(outbox).where(outbox.c.origin_id == notification_id)).mappings().one())
+        if leader_scope is not None and _delivery_scope(service, args, leader_scope, c) != (scope_id, event, turn):
+            raise PermissionError("Leader file delivery scope changed")
+        if row := existing_delivery(c):
+            return _status(row)
+        if turn:
+            delivery_id = service.outbox.enqueue(c, envelope)
+            return _status(c.execute(select(outbox).where(outbox.c.id == delivery_id)).mappings().one())
         sequence = (c.execute(select(func.max(notifications.c.sequence)).where(
-            notifications.c.task_id == task["id"])).scalar_one() or 0) + 1
-        c.execute(insert(notifications).values(id=notification_id, task_id=task["id"], run_id=args[0],
+            notifications.c.task_id == scope_id)).scalar_one() or 0) + 1
+        c.execute(insert(notifications).values(id=notification_id, task_id=scope_id, run_id=args[0],
             sequence=sequence, purpose="status", importance="important", body=canonical,
             created_at=service.clock.now().isoformat(), state="ACCEPTED"))
         delivery_id = service.outbox.enqueue(c, envelope.model_copy(update={"notification_sequence": sequence}))
@@ -102,12 +129,14 @@ async def rich_send(service, args, payload):
         return _status(row)
 
 
-def rich_status(service, args, payload):
+def rich_status(service, args, payload, *, leader_scope=None):
     body = RichStatus.model_validate(payload)
-    task, _event = _authorize(service, args)
+    scope_id, _event, turn = _delivery_scope(service, args, leader_scope, write=False)
+    delivery = select(outbox).where(outbox.c.id == body.delivery_id, outbox.c.task_id == scope_id)
+    if turn:
+        delivery = delivery.where(outbox.c.origin_kind == "chat", outbox.c.origin_id.startswith("file:"))
     with service.db.engine.connect() as c:
-        row = c.execute(select(outbox).where(outbox.c.id == body.delivery_id,
-            outbox.c.task_id == task["id"])).mappings().first()
+        row = c.execute(delivery).mappings().first()
         if row is None:
             raise ValueError("delivery does not belong to this task")
         return _status(row)
@@ -165,14 +194,19 @@ async def local_file_send(service, args, payload):
     raise ValueError("Base64 file transport removed; use authenticated qq-file-upload streaming endpoint")
 
 
-async def local_file_upload(service, args, payload, content):
+async def local_file_upload(service, args, payload, content, *, leader_scope=None):
     import asyncio
     import tempfile
 
     from elephant.adapters.qq_official.local_limits import limit_for
     from elephant.adapters.qq_official.local_media import LocalMediaStore, sniff_media_file
     body = LocalFileMessage.model_validate(payload)
-    task, event = _authorize(service, args)
+    scope_id, event, turn = _delivery_scope(service, args, leader_scope)
+
+    def authorize():
+        if _delivery_scope(service, args, leader_scope) != (scope_id, event, turn):
+            raise PermissionError("file upload scope changed")
+
     adapter = service.qq_adapters.get(event.conversation.adapter_instance_id)
     if not isinstance(adapter, OfficialAdapter):
         raise ValueError("official QQ adapter unavailable for this conversation")  # noqa: TRY004
@@ -200,7 +234,7 @@ async def local_file_upload(service, args, payload, content):
     # Unnamed private temporary file; cancellation/invalid length always closes it.
     with tempfile.TemporaryFile(mode="w+b") as staged:
         async for chunk in content:
-            _authorize(service, args)
+            authorize()
             size += len(chunk)
             if size > body.size or size > limit:
                 raise ValueError("file stream exceeds declared or official limit")
@@ -208,19 +242,19 @@ async def local_file_upload(service, args, payload, content):
                 await disk(staged.write, chunk[offset:offset + 65536])
         if size != body.size:
             raise ValueError("file stream length does not match metadata")
-        _authorize(service, args)
+        authorize()
         await disk(staged.seek, 0)
         if await disk(sniff_media_file, staged, body.filename, body.media_type) != body.mime_type:
             raise ValueError("declared MIME does not match file content")
         await disk(staged.seek, 0)
-        _authorize(service, args)
+        authorize()
         await disk(store.cleanup)
-        metadata = await disk(store.put_file, staged, task_id=task["id"],
+        metadata = await disk(store.put_file, staged, task_id=scope_id,
             conversation_id=event.conversation.key, principal_key=event.principal.key,
             request_id=body.request_id, filename=body.filename, media_type=body.media_type)
     if metadata["mime_type"] != body.mime_type:
         raise ValueError("declared MIME does not match file content")
-    _authorize(service, args)
+    authorize()
     return await rich_send(service, args, {"request_id": body.request_id, "text": body.text,
         "official_content": {"media": {"type": body.media_type, "local_ref": metadata["id"],
-                                       "filename": metadata["filename"]}}})
+                                       "filename": metadata["filename"]}}}, leader_scope=leader_scope)
