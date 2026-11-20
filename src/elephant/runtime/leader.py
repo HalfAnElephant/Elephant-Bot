@@ -102,6 +102,8 @@ class LeaderRuntime:
         for resource in payload.get("resources") or ["conversation:" + access.conversation.key]:
             self.service.permissions.require(access, action, resource)
         if effect != "read":
+            if claim.get("yielding_for_inputs"):
+                raise PermissionError("Leader turn is yielding for pending user input")
             pending = self.unreviewed_input_ids(conn, claim, claim.get("steering_seen", ()))
             if pending:
                 raise PendingOperationInput(pending)
@@ -342,14 +344,24 @@ class LeaderRuntime:
         graph = self.service.graph
         self.authorize(conn, run, claim, {"action": "task.execute"})
         if operation in {"tasks.submit", "tasks.cancel", "tasks.send_input"}:
+            deferred = {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+            if claim.get("yielding_for_inputs"):
+                return {**deferred, "waiting": True}
             pending = self.unreviewed_input_ids(conn, claim, claim.get("steering_seen", ()))
             if pending or claim.pop("deferred_goal_inputs", None):
                 if pending:
                     claim["deferred_goal_inputs"] = pending
+                    claim.setdefault("input_deferred_at", self.clock.now().isoformat())
+                    if operation == "tasks.submit":
+                        steerable = {item["id"] for item in self.steering_candidates(conn, claim)}
+                        steerable.update(self.unrouted_input_ids(conn, claim, linked_only=True))
+                        if steerable.isdisjoint(pending):
+                            claim["yielding_for_inputs"] = True
+                            deferred["waiting"] = True
                 conn.execute(update(runs).where(runs.c.id == run["id"]).values(
                     request_json=json.dumps(claim, ensure_ascii=False)))
             if pending:
-                return {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+                return deferred
         if operation == "tasks.submit":
             if purpose != "user":
                 raise PermissionError("only real user turns can create a root goal")

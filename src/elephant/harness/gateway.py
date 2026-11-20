@@ -772,7 +772,8 @@ class RunGateway:
                             if logical_name == "tasks.take_over" and result.get("takeover"):
                                 self.claim["takeover"] = True
                             if isinstance(result, dict) and result.get("waiting"):
-                                self.waiting, self.wait_kind = True, "waiting_children"
+                                self.waiting = True
+                                self.wait_kind = "waiting_input" if result.get("deferred") else "waiting_children"
                             return result
                         await self.authorize_action("skills.write" if logical_name == "skill_manage" else "skills.read")
                         return await self.call("skills", {"operation": logical_name, "arguments": logical_args, "call_id": call_id})

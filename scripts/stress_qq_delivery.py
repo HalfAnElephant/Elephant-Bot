@@ -34,6 +34,38 @@ KEY_ENV = "OPENCODE_GO_API_KEY"
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def task_attempts(conn, task_anchors, goals, children):
+    by_root = {row.id: row.anchor for row in goals}
+    by_child = {child: by_root[root] for child, root in children}
+    attempts = {anchor: [] for anchor in sorted(task_anchors)}
+    model_counts = dict(conn.execute(select(model_requests.c.run_id, func.count()).where(
+        model_requests.c.kind != "tool").group_by(model_requests.c.run_id)).all())
+    for row in conn.execute(select(runs).order_by(runs.c.started_at, runs.c.id)).mappings():
+        claim = json.loads(row["request_json"] or "{}")
+        if row["role"] == "worker":
+            anchor = by_child.get(row["task_id"])
+        elif claim.get("target_root_task_id"):
+            anchor = by_root.get(claim["target_root_task_id"])
+        else:
+            anchor = json.loads(claim.get("event_json") or "{}").get("platform_message_id")
+        if anchor in attempts:
+            attempts[anchor].append({
+                "role": row["role"], "purpose": row["purpose"], "state": row["state"], "task_id": row["task_id"],
+                "started_at": row["started_at"], "deferred_at": claim.get("input_deferred_at"),
+                "settled_at": row["quiescent_at"], "yielded_for_input": bool(claim.get("yielding_for_inputs")),
+                "model_requests": model_counts.get(row["id"], 0),
+            })
+    return attempts
+
+
+def task_latency_report(task_timelines, max_seconds):
+    samples = {anchor: timeline["received_after_ms"] for anchor, timeline in task_timelines.items()
+        if timeline["received_after_ms"] is not None}
+    over_budget = sorted(anchor for anchor, elapsed in samples.items()
+        if max_seconds is not None and elapsed > max_seconds * 1000)
+    return percentiles(list(samples.values())), over_budget
+
+
 async def trial(args, directory):
     chat_users = tuple(f"stress-{index}" for index in range(args.targets))
     quote_users = tuple(f"stress-quote-{index}" for index in range(args.quote_pairs))
@@ -41,7 +73,7 @@ async def trial(args, directory):
     users = (*chat_users, *quote_users, *task_users)
     task_cases = [(task_users[index % len(task_users)], f"stress-goal-{index}") for index in range(args.tasks)]
     task_anchors = {anchor for _, anchor in task_cases}
-    expected, submitted_at, deliveries = {}, {}, []
+    expected, submitted_at, submitted_utc, deliveries = {}, {}, {}, []
     config = AdapterConfig(instance_id="stress", kind="official", app_id="stress-app", bot_id="stress-bot",
         secret_env="ELEPHANT_STRESS_QQ_SECRET", allowed_users=users, streaming_enabled=True, typing_enabled=True,
         proactive_verified=args.proactive)
@@ -116,11 +148,12 @@ async def trial(args, directory):
         core.scheduler = scheduler = Scheduler(core, core.leader)
         fresh = []
         task_anchor = func.json_extract(tasks.c.event_json, "$.platform_message_id")
-        goals_query = select(tasks.c.id, task_anchor, tasks.c.state).where(
+        goals_query = select(tasks.c.id, task_anchor.label("anchor"), tasks.c.state, tasks.c.created_at).where(
             tasks.c.kind == "goal", task_anchor.in_(task_anchors))
 
         async def submit(event):
             submitted_at[event.platform_message_id] = time.perf_counter()
+            submitted_utc[event.platform_message_id] = datetime.now(UTC).isoformat()
             # Replay the same normalized callback while the other targets enqueue.
             for _ in range(2):
                 _, accepted = await asyncio.to_thread(core.inbox.accept, event)
@@ -181,6 +214,7 @@ async def trial(args, directory):
                     dialogue_inputs.c.claimed_attempt_id).where(dialogue_inputs.c.handled_at.is_not(None))).all())
                 children = conn.execute(select(tasks.c.id, tasks.c.root_task_id).where(
                     tasks.c.root_task_id.in_(root_ids))).all()
+                attempts_by_task = task_attempts(conn, task_anchors, goals, children)
                 usage = Counter(conn.execute(select(model_requests.c.state).where(
                     model_requests.c.kind != "tool")).scalars())
             final = [item for item in deliveries if (
@@ -191,11 +225,23 @@ async def trial(args, directory):
             receipt_rows = {row["platform_message_id"]: row for row in rows if row["platform_message_id"]}
             rank = {ident: row["enqueue_seq"] for ident, row in receipt_rows.items()}
             envelopes = {ident: json.loads(row["envelope_json"]) for ident, row in receipt_rows.items()}
-            task_final_samples = [(envelopes[ident]["anchor_message_id"], when)
+            task_final_samples = [(envelopes[ident]["anchor_message_id"], (receipt_rows[ident], when))
                 for target, _, _, ident, when in final
                 if target in task_users and ident in envelopes and envelopes[ident].get("purpose") == "result"
                 and receipt_rows[ident]["origin_kind"] == "task"]
             task_finals = dict(task_final_samples)
+            goals_by_anchor = {row.anchor: row for row in goals}
+            task_timelines = {}
+            for anchor, attempts in attempts_by_task.items():
+                goal = goals_by_anchor.get(anchor)
+                receipt, when = task_finals.get(anchor, ({}, None))
+                task_timelines[anchor] = {
+                    "submitted_at": submitted_utc.get(anchor), "goal_created_at": goal.created_at if goal else None,
+                    "attempts": attempts, "final_enqueued_at": receipt.get("created_at"),
+                    "final_sent_at": receipt.get("sent_at"),
+                    "received_after_ms": (when - submitted_at[anchor]) * 1000 if when is not None and anchor in submitted_at else None,
+                }
+            task_latency, slow_tasks = task_latency_report(task_timelines, args.max_task_final_seconds)
             extra_task_finals = len(task_final_samples) - len(task_finals)
             task_missing = sorted(task_anchors - task_finals.keys())
             outbox_latency = [(datetime.fromisoformat(row["sent_at"]) - datetime.fromisoformat(row["created_at"]))
@@ -232,8 +278,8 @@ async def trial(args, directory):
                 "fresh_inputs": sum(fresh), "duplicate_callbacks_rejected": len(fresh) - sum(fresh),
                 "chat_replies": len(chat_replies), "task_replies": len(task_contents), "latency_ms": percentiles(latency) if latency else {},
                 "outbox_latency_ms": percentiles(outbox_latency),
-                "task_final_latency_ms": percentiles([(when - submitted_at[anchor]) * 1000
-                    for anchor, when in task_finals.items() if anchor in submitted_at]),
+                "task_final_latency_ms": task_latency, "task_timelines": task_timelines,
+                "max_task_final_seconds": args.max_task_final_seconds, "slow_task_finals": slow_tasks,
                 "missing_task_finals": task_missing, "typing_signals": sum(body.get("msg_type") == 6 for _, _, body, _, _ in deliveries),
                 "native_stream_finals": sum(path == "stream_messages" for _, path, _, _, _ in final),
                 "quote_batches": len(quote_batches), "separated_quotes": separated_quotes,
@@ -243,7 +289,7 @@ async def trial(args, directory):
                 "worker_runs": len(workers), "assigned_goals": len(assigned), "goal_states": dict(Counter(row.state for row in goals)),
                 "model_requests": dict(usage), "passed": not (
                     timed_out or retry_limit_reached or driver_error or missing or duplicates or reply_errors or disordered or reply_disorder or task_duplicates
-                    or root_duplicates or task_missing or extra_task_finals or separated_quotes or sum(fresh) != input_count
+                    or root_duplicates or task_missing or extra_task_finals or separated_quotes or slow_tasks or sum(fresh) != input_count
                     or len(assigned) != args.tasks or Counter(row.state for row in goals) != {"SUCCEEDED": args.tasks})}
         finally:
             driver.cancel()
@@ -262,7 +308,13 @@ def main():
     parser.add_argument("--proactive", action="store_true", help="simulate a QQ app allowed to send proactive messages")
     parser.add_argument("--concurrency", type=int, default=4, help="maximum parallel model requests")
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--max-task-final-seconds", type=int,
+        help="fail if any task final exceeds this many seconds (default: 120 for a shared task target)")
     args = parser.parse_args()
+    if args.max_task_final_seconds is None and args.shared_task_target:
+        args.max_task_final_seconds = 120
+    if args.max_task_final_seconds is not None and args.max_task_final_seconds <= 0:
+        parser.error("--max-task-final-seconds must be positive")
     if not os.environ.get(KEY_ENV):
         parser.error(f"set {KEY_ENV} before running the live test")
     if not (1 <= args.targets <= 32 and 1 <= args.messages <= 12 and 1 <= args.tasks <= 24

@@ -682,7 +682,8 @@ async def test_core_streaming_and_regular_delivery_share_target_slots(leader_str
     ]
 
 
-async def test_real_pi_steer_merges_supplement_before_final_publication(leader_stream, tmp_path):
+@pytest.mark.parametrize("independent", [False, True], ids=["steer-supplements", "yield-for-independent-input"])
+async def test_real_pi_handles_inputs_before_final_publication(leader_stream, tmp_path, independent):
     import asyncio
     from pathlib import Path
 
@@ -718,7 +719,13 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
         async def __aiter__(self):
             entered.set()
             await asyncio.wait_for(release.wait(), 15)
-            yield frames({"content": "这份草稿还没有考虑补充。"}, "stop")
+            if independent:
+                call = {"index": 0, "id": "delegate", "type": "function", "function": {
+                    "name": "tasks_submit", "arguments": json.dumps({"goal": "测试", "success_checks": [],
+                        "children": [{"goal": "计算", "delegation_key": "worker", "success_checks": []}]})}}
+                yield frames({"tool_calls": [call]}, "tool_calls")
+            else:
+                yield frames({"content": "这份草稿还没有考虑补充。"}, "stop")
 
     def upstream(request):
         requests.append(request.content.decode())
@@ -755,19 +762,34 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
     execution = asyncio.create_task(worker.once())
     try:
         await asyncio.wait_for(starting.wait(), 15)
-        for index, text in enumerate(("重点测乱序", "也要记录耗时")):
+        for index, text in enumerate(("另一件独立的事",) if independent else ("重点测乱序", "也要记录耗时")):
             msg = f"real-quote-{index}"
-            extra = adapter.normalize({"op": 0, "id": msg, "t": "C2C_MESSAGE_CREATE", "d": {
-                "id": msg, "author": {"user_openid": "300"}, "content": text,
-                "timestamp": s.core.clock.now().isoformat(), "message_reference": {
-                    "message_id": s.event.platform_message_id}}})
-            assert [segment.type for segment in extra.segments] == ["text", "reply"]
+            data = {"id": msg, "author": {"user_openid": "300"}, "content": text,
+                "timestamp": s.core.clock.now().isoformat()}
+            if not independent:
+                data["message_reference"] = {"message_id": s.event.platform_message_id}
+            extra = adapter.normalize({"op": 0, "id": msg, "t": "C2C_MESSAGE_CREATE", "d": data})
+            assert [segment.type for segment in extra.segments] == (["text"] if independent else ["text", "reply"])
             extra, _ = s.core.inbox.accept(extra)
             extra_ids.append(extra.event_id)
             await s.core.process(extra)
         assert not runners[0].accepting_input
         boot.set()
         await asyncio.wait_for(entered.wait(), 15)
+        if independent:
+            release.set()
+            assert await asyncio.wait_for(execution, 20)
+            assert len(requests) == 1
+            with s.core.db.engine.connect() as conn:
+                run = conn.execute(select(runs)).mappings().one()
+                assert not run["slot_reserved"]
+                assert json.loads(run["receipt_json"])["kind"] == "run_yielded"
+                assert not conn.execute(select(tasks.c.id)).first()
+                assert not conn.execute(select(outbox.c.id)).first()
+                assert not any(conn.execute(select(dialogue_inputs.c.handled_at)).scalars())
+            following = s.core.sessions.claim("fixture")
+            assert following["source_ids"] == extra_ids
+            return
         async with asyncio.timeout(10):
             while not set(extra_ids) <= runners[0].steered_inputs:
                 assert not execution.done()
@@ -962,6 +984,22 @@ async def test_committed_draft_ignores_future_recalled_session_source(leader_str
     assert s.core.pre_send(envelope)
 
 
+async def test_pending_steerable_reply_does_not_yield_delegation(runtime):
+    r = runtime
+    queued = r.sessions.enqueue(r.event, r.access)
+    config = r.sessions.settings.orchestration.model_copy(update={"leader_steering_dialogues": (queued["dialogue_id"],)})
+    r.sessions.settings = r.sessions.settings.model_copy(update={"orchestration": config})
+    original = r.sessions.claim("leader")
+    extra = r.event.model_copy(update={"event_id": "supplement", "platform_message_id": "supplement-msg",
+        "reply_to": r.event.platform_message_id})
+    r.sessions.enqueue(extra, r.access)
+    identity = (original["run_id"], original["fencing_token"], "leader")
+    result = await r.leader.invoke("tasks", identity, {"operation": "tasks.submit", "call_id": "allocation",
+        "arguments": {"goal": "交给 Worker", "children": [{"goal": "计算", "delegation_key": "worker"}]}})
+    assert result == {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+    assert [item["id"] for item in await r.leader.invoke("inputs", identity)] == [extra.event_id]
+
+
 @pytest.mark.parametrize("operation", ["submit", "write_preflight", "write_dispatch", "write_recovery", "expired"])
 async def test_independent_input_defers_goal_without_consuming_original(runtime, operation):
     from datetime import datetime
@@ -997,7 +1035,8 @@ async def test_independent_input_defers_goal_without_consuming_original(runtime,
                "arguments": {"goal": "交给 Worker", "children": [{"goal": "计算", "delegation_key": "worker"}]}}
     if operation in {"submit", "expired"}:
         first = await r.leader.invoke("tasks", identity, payload)
-        assert first == {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+        assert first == {"accepted": False, "deferred": True, "reason": "pending_user_input", "waiting": True}
+        assert await r.leader.invoke("tasks", identity, {**payload, "call_id": "retry-in-same-turn"}) == first
     else:
         with pytest.raises(PermissionError, match="Review pending user input"):
             if operation == "write_preflight":

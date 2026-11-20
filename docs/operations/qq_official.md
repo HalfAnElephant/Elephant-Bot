@@ -176,4 +176,4 @@ uv run python scripts/stress_qq_delivery.py --targets 3 --messages 3 --tasks 2 -
 
 脚本使用真实 OpenCode Go DeepSeek V4.1 Flash，所有 QQ 输入和回执通过本地模拟端点。普通会话并发提交独立请求并重放回调，另有已验证的模拟用户请求 Leader 委派 Worker。标准输出为 JSON，分别记录回复和任务定稿的延迟分位数、Outbox 延迟、重复回调、重复或缺失回复、顺序异常和 Worker 分配结果。断言失败返回非零退出码。
 
-加上 `--quote-pairs 2` 会新增两个真实 QQ 引用格式的消息批次，每批包含一条原请求和两条补充。加上 `--shared-task-target` 会把委派请求集中到同一个逻辑会话。默认模拟只有被动回复权限的应用。使用 `--proactive` 可以另测已授权的主动发送路径，报告会分别记录缺失定稿和 `WAITING_FOR_TRIGGER`。
+加上 `--quote-pairs 2` 会新增两个真实 QQ 引用格式的消息批次，每批包含一条原请求和两条补充。加上 `--shared-task-target` 会把委派请求集中到同一个逻辑会话。该场景默认要求每个任务在 120 秒内收到定稿，可用 `--max-task-final-seconds` 覆盖，也可用该参数给跨目标场景设置门槛。JSON 的 `task_timelines` 按请求记录提交、建任务、Leader 和 Worker 各次领取与结算、暂缓时间以及最终入队和送达。超过门槛的请求列在 `slow_task_finals`，压测返回非零退出码。默认模拟只有被动回复权限的应用。使用 `--proactive` 可以另测已授权的主动发送路径，报告会分别记录缺失定稿和 `WAITING_FOR_TRIGGER`。
