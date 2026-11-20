@@ -389,7 +389,15 @@ class LeaderRuntime:
         if operation == "tasks.list":
             rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, tasks.c.kind == "goal",
                 tasks.c.conversation == access.conversation.key).order_by(tasks.c.created_at.desc()).limit(20)).mappings().all()
-            return self._task_snapshots(conn, run, claim, rows, access)
+            summaries = []
+            for snapshot in self._task_snapshots(conn, run, claim, rows, access):
+                action = snapshot["progress"]["current_action"] if not snapshot.get("context_revoked") else None
+                item = {"public_id": snapshot["public_id"], "title": (snapshot["goal"] or "")[:100] or None,
+                        "state": snapshot["state"], "current_action": action[:100] if action else None}
+                if len(json.dumps([*summaries, item]).encode()) > 12 * 1024:
+                    break
+                summaries.append(item)
+            return summaries
         if operation == "tasks.take_over":
             if purpose not in {"finalize", "attention"} or not root_id:
                 raise PermissionError("takeover requires a bound result or escalation")

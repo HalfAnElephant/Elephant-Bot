@@ -288,6 +288,12 @@ async def test_user_tool_snapshot_persists_new_dependencies_after_bind(handoff, 
     snapshot = await s.core.leader.invoke("tasks", identity, {"operation": operation,
         "arguments": {"task_ref": source["public_id"]}})
     assert "PRIVATE_HANDOFF" in json.dumps(snapshot)
+    if operation == "tasks.list":
+        item = next(item for item in snapshot if item["public_id"] == source["public_id"])
+        assert set(item) == {"public_id", "title", "state", "current_action"}
+        assert len(json.dumps(snapshot).encode()) <= 12 * 1024
+    else:
+        assert snapshot["children"]
     with s.core.db.engine.connect() as conn:
         stored = json.loads(conn.execute(select(runs.c.request_json).where(runs.c.id == claim["run_id"])).scalar_one())
         history = json.loads(conn.execute(select(sessions.c.manifest_json).where(
