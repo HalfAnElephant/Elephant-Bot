@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import func, insert, select, update
 
-from elephant.domain import InboundEvent, stable_id
+from elephant.domain import InboundEvent, MediaSegment, stable_id
 from elephant.domain.agents import TaskInputSpec
 from elephant.domain.tasks import TaskResult, validate_user_facing_text
 from elephant.jobs.streaming import PUBLIC_KINDS, reserve_stream_order, validate_public_event
@@ -31,6 +31,12 @@ from elephant.storage.task_schema import (
 
 from .control import task_references
 from .task_graph import TERMINAL
+
+
+class PendingOperationInput(PermissionError):
+    def __init__(self, input_ids):
+        super().__init__("Review pending user input before starting an external operation")
+        self.input_ids = input_ids
 
 
 class LeaderRuntime:
@@ -80,8 +86,6 @@ class LeaderRuntime:
         if not mutation and root_id and not self.service.graph.handoff_valid(root):
             raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
-        if effect != "read" and self.unreviewed_input_ids(conn, claim, claim.get("steering_seen", ())):
-            raise PermissionError("Review pending user input before starting an external operation")
         if effect != "read" and not personal:
             if claim["purpose"] == "user" and not root_id and run["role"] == "leader":
                 if self.sessions.owner(event) is None:
@@ -97,7 +101,33 @@ class LeaderRuntime:
                 payload.get("resources") or ["conversation:" + access.conversation.key])
         for resource in payload.get("resources") or ["conversation:" + access.conversation.key]:
             self.service.permissions.require(access, action, resource)
+        if effect != "read":
+            pending = self.unreviewed_input_ids(conn, claim, claim.get("steering_seen", ()))
+            if pending:
+                raise PendingOperationInput(pending)
         return {"allowed": True, "policy_version": self.service.permissions.policy_version}
+
+    @contextmanager
+    def defer_blocked_operation(self, identity):
+        try:
+            yield
+        except PendingOperationInput as error:
+            # The rejected authorization transaction must roll back before recording the deferral.
+            with self.db.transaction() as conn:
+                run, claim = self.lease(conn, *identity)
+                old = claim.get("deferred_goal_inputs", ())
+                pending = list(dict.fromkeys([*old, *error.input_ids]))
+                if pending != old:
+                    claim["deferred_goal_inputs"] = pending
+                    conn.execute(update(runs).where(runs.c.id == run["id"]).values(
+                        request_json=json.dumps(claim, ensure_ascii=False)))
+            raise
+
+    def _persist_input_dependencies(self, conn, source_id, pending):
+        source = dialogue_inputs.c.id == source_id
+        context = json.loads(conn.scalar(select(dialogue_inputs.c.context_json).where(source)))
+        context["leader_turn"]["wait_for_inputs"] = pending
+        conn.execute(update(dialogue_inputs).where(source).values(context_json=json.dumps(context, ensure_ascii=False)))
 
     def _persist_turn_budget(self, conn, run, claim, used):
         if claim["purpose"] == "user":
@@ -173,7 +203,8 @@ class LeaderRuntime:
             inbox.c.seq > primary_seq, inbox.c.event_type == "message.created", inbox.c.state == "PENDING",
             ~routed, (func.json_extract(inbox.c.event_json, "$.reply_to") == event.platform_message_id)
             if linked_only else True)).scalars()
-        return [new.event_id for raw in pending if (new := InboundEvent.model_validate_json(raw)).text
+        return [new.event_id for new in map(InboundEvent.model_validate_json, pending)
+            if (new.text or any(isinstance(segment, MediaSegment) for segment in new.segments))
             and self.core.allowed(new) and not new.sender_is_bot and (
                 new.conversation.surface in {"private", "guild_private"} or new.mentions_bot or new.reply_to)]
 
@@ -536,12 +567,10 @@ class LeaderRuntime:
             stale_draft, covered = False, []
             deferred_inputs = claim.get("deferred_goal_inputs")
             if deferred_inputs:
-                primary = conn.execute(select(dialogue_inputs.c.context_json).where(
-                    dialogue_inputs.c.id == claim["source_ids"][0])).scalar_one()
-                context = json.loads(primary)
-                context["leader_turn"]["wait_for_inputs"] = deferred_inputs
-                conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == claim["source_ids"][0]).values(
-                    context_json=json.dumps(context, ensure_ascii=False)))
+                conn.execute(update(operations).where(operations.c.run_id == run_id,
+                    operations.c.state == "PREPARED").values(state="FAILED",
+                        result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
+                self._persist_input_dependencies(conn, claim["source_ids"][0], deferred_inputs)
             elif result.agent_authored and claim.get("steer_until"):
                 outcome = proof.get("outcome")
                 summary = proof.get("summary")
@@ -899,6 +928,8 @@ class LeaderRuntime:
             if not reopen and current["lease"] > self.clock.now().isoformat():
                 raise PermissionError("Leader lease was renewed during recovery")
             self._account_turn(conn, current, claim, through=datetime.fromisoformat(run["lease"]))
+            if pending := claim.get("deferred_goal_inputs"):
+                self._persist_input_dependencies(conn, claim["source_ids"][0], pending)
             table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
             conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
                 table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(claimed_attempt_id=None))
@@ -1026,7 +1057,7 @@ class LeaderRuntime:
                 return candidates
         if operation in {"authorize", "control"}:
             # Provider streaming checks every chunk; readers must not acquire SQLite's writer lock.
-            with self.db.engine.connect() as conn:
+            with self.defer_blocked_operation(identity), self.db.engine.connect() as conn:
                 conn.exec_driver_sql("BEGIN")
                 run, claim = self.lease(conn, *identity)
                 if operation == "authorize":
@@ -1105,8 +1136,9 @@ class LeaderRuntime:
                         current, current_claim = self.lease(conn, *identity)
                         return self.authorize(conn, current, current_claim, {
                             "action": action["name"], "resources": action["resources"], "effect": action["effect"]})
-                    return await self.service.ledger_operation(context, payload, [claim["task_id"]],
-                        authorize, deduplicate=True, authorize_dispatch=authorize_dispatch)
+                    with self.defer_blocked_operation(identity):
+                        return await self.service.ledger_operation(context, payload, [claim["task_id"]],
+                            authorize, deduplicate=True, authorize_dispatch=authorize_dispatch)
                 return await self.service.ledger(*identity, payload)
             return self.service.ask(*identity, payload)
         if operation == "skills":

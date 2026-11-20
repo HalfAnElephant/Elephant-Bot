@@ -126,10 +126,10 @@ class RuntimeClient:
             return await self.core.knowledge.invoke(identity, body.payload)
         if operation == "schedules":
             return await self.leader.invoke(operation, identity, body.payload)
-        if operation == "mail":
-            return await self.core.mail.invoke(identity, body.payload)
-        if operation == "jobs":
-            return await self.core.job_runtime.invoke(identity, body.payload)
+        if operation in {"mail", "jobs"}:
+            runtime = self.core.mail if operation == "mail" else self.core.job_runtime
+            with self.leader.defer_blocked_operation(identity):
+                return await runtime.invoke(identity, body.payload)
         if operation == "renew":
             return await self._disk(self._renew, identity)
         with self.service.db.engine.connect() as conn:

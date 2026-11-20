@@ -797,8 +797,12 @@ async def test_real_pi_steer_merges_supplement_before_final_publication(leader_s
         await pool.close()
 
 
-@pytest.mark.parametrize(("started", "routed"), [(False, False), (False, True), (True, True)])
-async def test_user_revision_guards_operation_start_but_preserves_started_receipt(leader_stream, started, routed):
+@pytest.mark.parametrize(("started", "routed", "image_only"), [
+    (False, False, False), (False, True, False), (True, True, False), (False, False, True),
+])
+async def test_user_revision_guards_operation_start_but_preserves_started_receipt(
+    leader_stream, started, routed, image_only,
+):
     from elephant.domain import TextSegment
     from elephant.storage.action_schema import operations
     from elephant.storage.agent_schema import dialogues
@@ -821,6 +825,14 @@ async def test_user_revision_guards_operation_start_but_preserves_started_receip
     extra = s.event.model_copy(update={"event_id": "correction", "platform_message_id": "correction-message",
         "segments": (TextSegment(text="改成只读检查"),),
         "reply_context": s.event.reply_context.model_copy(update={"platform_message_id": "correction-message"})})
+    if image_only:
+        extra = s.core.adapters["qq"].normalize({"op": 0, "id": "correction", "t": "C2C_MESSAGE_CREATE", "d": {
+            "id": "correction-message", "content": "", "author": {"user_openid": "300"},
+            "timestamp": s.core.clock.now().isoformat(),
+            "message_reference": {"message_id": s.event.platform_message_id},
+            "attachments": [{"content_type": "image/png", "url": "https://example.invalid/replacement.png"}],
+        }})
+        assert not extra.text and [segment.type for segment in extra.segments] == ["text", "image", "reply"]
     extra, _ = s.core.inbox.accept(extra)
     if routed:
         await s.core.process(extra)
@@ -950,8 +962,12 @@ async def test_committed_draft_ignores_future_recalled_session_source(leader_str
     assert s.core.pre_send(envelope)
 
 
-async def test_independent_input_defers_goal_without_consuming_original(runtime):
+@pytest.mark.parametrize("operation", ["submit", "write_preflight", "write_dispatch", "write_recovery", "expired"])
+async def test_independent_input_defers_goal_without_consuming_original(runtime, operation):
+    from datetime import datetime
+
     from elephant.domain import TextSegment
+    from elephant.storage.action_schema import operations
     from elephant.storage.agent_schema import dialogue_inputs
 
     r = runtime
@@ -967,25 +983,66 @@ async def test_independent_input_defers_goal_without_consuming_original(runtime)
                      "inflight": 0, "tools_paired": True})
 
     original = r.sessions.claim("leader")
+    identity = (original["run_id"], original["fencing_token"], "leader")
+    write = {"operation": "prepare", "operation_id": "old-write", "arguments_hash": "same-write",
+             "arguments": {}, "action": {"name": "workspace.file.write", "effect": "write", "resources": []}}
+    if operation in {"write_dispatch", "write_recovery"}:
+        assert (await r.leader.invoke("ledger", identity, write))["state"] == "PREPARED"
+    if operation == "expired":
+        r.clock.advance(5)
     extra = r.event.model_copy(update={"event_id": "unrelated", "platform_message_id": "unrelated-msg",
         "segments": (TextSegment(text="另一件独立的事"),)})
     r.sessions.enqueue(extra, r.access)
     payload = {"operation": "tasks.submit", "call_id": "allocation",
                "arguments": {"goal": "交给 Worker", "children": [{"goal": "计算", "delegation_key": "worker"}]}}
-    first = await r.leader.invoke("tasks", (original["run_id"], original["fencing_token"], "leader"), payload)
-    assert first == {"accepted": False, "deferred": True, "reason": "pending_user_input"}
-    complete(original, "等待处理新消息")
+    if operation in {"submit", "expired"}:
+        first = await r.leader.invoke("tasks", identity, payload)
+        assert first == {"accepted": False, "deferred": True, "reason": "pending_user_input"}
+    else:
+        with pytest.raises(PermissionError, match="Review pending user input"):
+            if operation == "write_preflight":
+                await r.leader.invoke("authorize", identity,
+                    {"action": "workspace.file.write", "effect": "write"})
+            else:
+                await r.leader.invoke("ledger", identity, {"operation": "transition", "operation_id": "old-write",
+                    "expected": "PREPARED", "state": "DISPATCHED", "result": {}})
+    if operation == "write_recovery":
+        r.clock.advance(31)
+        assert r.leader.recover_attempt(original["run_id"])["state"] == "RECOVERED"
+    else:
+        complete(original, "等待处理新消息")
     with r.db.engine.connect() as conn:
         assert not conn.scalar(select(dialogue_inputs.c.handled_at).where(dialogue_inputs.c.id == r.event.event_id))
         assert not conn.scalar(select(outbox.c.id))
         assert not conn.scalar(select(tasks.c.id))
+    if operation == "expired":
+        r.clock.advance((datetime.fromisoformat(original["deadline"]) - r.clock.now()).total_seconds() - 1)
     other = r.sessions.claim("leader")
     assert other["source_ids"] == [extra.event_id]
+    if operation == "expired":
+        assert datetime.fromisoformat(other["deadline"]) > datetime.fromisoformat(original["deadline"])
+        r.clock.advance(1)
+        assert r.sessions.claim("another-leader") is None
+        with r.db.engine.connect() as conn:
+            assert conn.scalar(select(dialogue_inputs.c.state).where(
+                dialogue_inputs.c.id == r.event.event_id)) == "HANDLED"
+            assert conn.scalar(select(dialogue_inputs.c.state).where(dialogue_inputs.c.id == extra.event_id)) == "PENDING"
+            assert conn.execute(select(outbox.c.id)).scalar_one()
+        return
     complete(other, "独立消息已处理")
     retry = r.sessions.claim("leader")
     assert retry["source_ids"] == original["source_ids"]
-    accepted = await r.leader.invoke("tasks", (retry["run_id"], retry["fencing_token"], "leader"), payload)
-    assert accepted["task_id"]
+    identity = (retry["run_id"], retry["fencing_token"], "leader")
+    if operation == "submit":
+        assert (await r.leader.invoke("tasks", identity, payload))["task_id"]
+    else:
+        prepared = await r.leader.invoke("ledger", identity, {**write, "operation_id": "resumed-write"})
+        assert prepared["state"] == "PREPARED" and prepared.get("operation_id", "resumed-write") == "resumed-write"
+        assert (await r.leader.invoke("ledger", identity, {"operation": "transition", "operation_id": "resumed-write",
+            "expected": "PREPARED", "state": "DISPATCHED", "result": {}}))["changed"]
+        with r.db.engine.connect() as conn:
+            assert conn.scalar(select(operations.c.state).where(operations.c.id == "old-write")) == (
+                None if operation == "write_preflight" else "FAILED")
 
 
 async def test_older_outbox_row_precedes_unopened_native_stream(leader_stream):

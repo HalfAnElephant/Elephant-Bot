@@ -182,7 +182,7 @@ class SessionService:
         return (turn["deadline"] <= now.isoformat() or used.get("model_calls", 0) >= budget["model_calls"]
                 or used.get("active_seconds", 0) >= budget["active_seconds"])
 
-    def close_input(self, conn, dialogue, user, event, context, now, *, output_ref=None):
+    def close_input(self, conn, session_id, user, event, context, now, *, output_ref=None):
         values = {"state": "HANDLED", "handled_at": now.isoformat(), "claimed_attempt_id": None}
         if output_ref:
             values["context_json"] = json.dumps({**context, "output_ref": output_ref}, ensure_ascii=False)
@@ -195,7 +195,7 @@ class SessionService:
                 "conversation:" + event.conversation.key).allowed):
             self.service.outbox.enqueue_text(conn, target=event.conversation,
                 text="这次暂时没能处理完，可以重新告诉我需要做什么。", origin_kind="chat",
-                origin_id="turn:" + dialogue["session_id"] + ":" + user["id"],
+                origin_id="turn:" + session_id + ":" + user["id"],
                 reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
                 anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True)
 
@@ -271,6 +271,16 @@ class SessionService:
                 stream_claim = json.loads(raw)
                 if not stream_claim.get("typing_only"):
                     pending_sources.update(stream_claim.get("source_ids", ()))
+            deferred_expired = conn.execute(select(dialogue_inputs, dialogues.c.session_id).join(
+                dialogues, dialogues.c.id == dialogue_inputs.c.dialogue_id).where(
+                dialogues.c.state == "ACTIVE", dialogue_inputs.c.handled_at.is_(None),
+                dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.id.not_in(pending_sources),
+                func.json_type(dialogue_inputs.c.context_json, "$.leader_turn.wait_for_inputs") == "array",
+                func.json_extract(dialogue_inputs.c.context_json, "$.leader_turn.deadline") <= now.isoformat(),
+            )).mappings().all()
+            for expired in deferred_expired:
+                self.close_input(conn, expired["session_id"], expired, InboundEvent.model_validate_json(expired["event_json"]),
+                    json.loads(expired["context_json"]), now)
             busy = select(runs.c.session_id).where(runs.c.slot_reserved == 1, runs.c.session_id.is_not(None))
             candidates = conn.execute(select(dialogues).where(dialogues.c.state == "ACTIVE",
                 dialogues.c.session_id.not_in(busy)).order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
@@ -337,7 +347,7 @@ class SessionService:
                     context = json.loads(user["context_json"])
                     access = self.service._access_for({"event_json": user["event_json"], "permission_json": "{}"})
                     if self.service.context_validator and not self.service.context_validator(access, context):
-                        self.close_input(conn, dialogue, user, event, context, now, output_ref="CONTEXT_REVOKED")
+                        self.close_input(conn, dialogue["session_id"], user, event, context, now, output_ref="CONTEXT_REVOKED")
                         continue
                     turn = context.get("leader_turn")
                     if turn is None:
@@ -354,7 +364,7 @@ class SessionService:
                         conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == user["id"])
                             .values(context_json=json.dumps(context, ensure_ascii=False)))
                     if self.turn_exhausted(turn, now):
-                        self.close_input(conn, dialogue, user, event, context, now)
+                        self.close_input(conn, dialogue["session_id"], user, event, context, now)
                         continue
                     context["active_tasks"] = []
                     for task in conn.execute(
