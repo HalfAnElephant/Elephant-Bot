@@ -543,6 +543,27 @@ class Core:
         subject = PermissionSubject.from_refs(envelope.target, envelope.requester)
         if not self.permissions.check(subject, "notification.send", "conversation:" + envelope.target.key).allowed:
             return False
+        if envelope.origin_kind == "chat" and envelope.origin_id.startswith("file:"):
+            origin = envelope.origin_id.split(":", 3)
+            if len(origin) != 4:
+                return False
+            _, _, run_id, turn = origin
+            with self.db.engine.connect() as conn:
+                run = conn.execute(select(runs.c.request_json).where(runs.c.id == run_id,
+                    runs.c.role == "leader", runs.c.state.in_(["RUNNING", "FINISHED", "RECOVERED"]))).scalar_one_or_none()
+            if not run:
+                return False
+            claim = json.loads(run)
+            if (claim["purpose"] != "user" or claim.get("target_root_task_id")
+                    or claim["task_id"] != envelope.parent_task_id
+                    or turn != "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]):
+                return False
+            event = InboundEvent.model_validate_json(claim["event_json"])
+            access = self.access(event)
+            return (event.conversation == envelope.target and event.principal == envelope.requester
+                    and self.sessions.owner(event) is not None and self.allowed(event)
+                    and self.permissions.check(access, "notification.send", "task:" + claim["task_id"]).allowed
+                    and self.validate_context(access, claim["context"]))
         if envelope.origin_kind == "chat" and not envelope.origin_id.startswith(("turn:", "progress:", "qq-stream:")):
             controlled = self.controls.delivery_valid(envelope)
             if controlled is not None:

@@ -109,6 +109,18 @@ class LeaderRuntime:
                 raise PendingOperationInput(pending)
         return {"allowed": True, "policy_version": self.service.permissions.policy_version}
 
+    def file_delivery_scope(self, identity, conn, *, write=True):
+        run, claim = self.lease(conn, *identity)
+        event = InboundEvent.model_validate_json(claim["event_json"])
+        root_id = claim.get("target_root_task_id")
+        if not root_id and (claim["purpose"] != "user" or self.sessions.owner(event) is None):
+            raise PermissionError("QQ files require a verified Leader user turn or task")
+        self.authorize(conn, run, claim, {"action": "notification.send",
+            "resources": ["conversation:" + event.conversation.key, "task:" + claim["task_id"]],
+            "effect": "write" if write else "read"})
+        turn = None if root_id else "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]
+        return claim["task_id"], event, turn
+
     @contextmanager
     def defer_blocked_operation(self, identity):
         try:

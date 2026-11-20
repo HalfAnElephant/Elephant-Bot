@@ -76,6 +76,86 @@ async def test_run_gateway_local_output_to_core_durable_enqueue(rich_setup, tmp_
     assert result.data["delivered"] is False
 
 
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_direct_leader_file_uses_its_turn_scope(tmp_path, official_config, official_event, clock, monkeypatch, revoked):
+    from types import SimpleNamespace
+
+    from conftest import official_payload
+    from test_leader_core import finish_leader, make_core
+
+    from elephant.adapters.qq_official import local_upload
+    from elephant.capabilities.types import Action
+    from elephant.jobs.worker import GeneralRun
+    from elephant.runtime.scheduler import RuntimeClient
+
+    core = make_core(tmp_path, official_config, clock)
+    adapter = core.adapters["qq"]
+    calls = []
+    report = "文件发送测试".encode()
+
+    def qq(request):
+        if request.url.path.endswith("getAppAccessToken"):
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 7200})
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "qq-message"})
+
+    async def upload_file(_adapter, _envelope, content, filename, media_type, mime_type, authorize):
+        assert authorize() and content.read() == report
+        assert (filename, media_type, mime_type) == ("answer.txt", "file", "text/plain")
+        return "fixture-file-info"
+
+    monkeypatch.setattr(local_upload, "upload_local", upload_file)
+    monkeypatch.setattr(adapter.client, "_transport", httpx.MockTransport(qq))
+    workspace = tmp_path / "leader-workspace"
+    (workspace / "outputs").mkdir(parents=True)
+    (workspace / "outputs" / "answer.txt").write_bytes(report)
+    try:
+        incoming, _ = core.inbox.accept(adapter.normalize(official_payload(
+            official_event, private=True, text="发给我生成的文件", message_id="leader-file")))
+        await core.process(incoming)
+        claim = core.sessions.claim("fixture")
+        assert claim["role"] == "leader" and claim["target_root_task_id"] is None
+        runner = SimpleNamespace(worker_id="fixture", claim=claim, core_client=RuntimeClient(core, core.leader))
+        gateway = RunGateway(workspace, "offline", "fixture", "https://model.invalid/v1/chat/completions",
+            call=lambda op, body: GeneralRun.gateway_call(runner, op, body),
+            upload=lambda metadata, content: GeneralRun.gateway_upload(runner, metadata, content))
+        gateway.bind(claim)
+        args = {"request_id": "local-file", "path": "outputs/answer.txt", "media_type": "file"}
+        result = await gateway.tools.invoke("qq.file.send", args, gateway.context)
+        assert result.status == "verified"
+        assert result.data["verified_effect"] == "durable_enqueue" and not result.data["delivered"]
+        delivery_id = result.data["delivery_id"]
+        assert (await gateway.tools.invoke("qq.file.send", args, gateway.context)).status == "verified"
+        with core.db.engine.connect() as conn:
+            assert conn.execute(select(outbox.c.id)).scalars().all() == [delivery_id]
+        verification, observed = await core.recovery._verify(
+            gateway.context, Action("notification.send", (), "write"), args, {})
+        assert verification == "VERIFIED" and observed["delivery_id"] == delivery_id
+        finish_leader(core, claim, "文件已入队。")
+        other, _ = core.inbox.accept(adapter.normalize(official_payload(
+            official_event, private=True, text="另一条请求", message_id="another-leader")))
+        await core.process(other)
+        runner.claim = core.sessions.claim("fixture")
+        with pytest.raises(httpx.HTTPStatusError) as wrong_scope:
+            await GeneralRun.gateway_call(runner, "qq-status", {"delivery_id": delivery_id})
+        assert wrong_scope.value.response.status_code == 422
+        if revoked:
+            monkeypatch.setattr(core, "allowed", lambda _event: False)
+        await core.deliver()
+        with core.db.engine.connect() as conn:
+            receipt = json.loads(conn.scalar(select(outbox.c.receipt_json).where(outbox.c.id == delivery_id)))
+        if revoked:
+            assert calls == []
+            assert receipt["error_code"] == "STALE_CONTEXT"
+        else:
+            assert receipt["platform_message_id"] == "qq-message"
+            assert calls[0]["media"] == {"file_info": "fixture-file-info"}
+    finally:
+        await adapter.client.aclose()
+        await core.stop()
+        core.db.close()
+
+
 @pytest.mark.parametrize("surface", [Surface.PRIVATE, Surface.GROUP, Surface.GUILD_CHANNEL, Surface.GUILD_PRIVATE])
 async def test_local_binary_actual_adapter_transport(surface, official_config, incoming, clock, db, monkeypatch):
     from elephant.adapters.qq_official import local_upload

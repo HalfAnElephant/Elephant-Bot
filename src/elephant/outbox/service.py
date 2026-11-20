@@ -568,8 +568,9 @@ class Outbox:
 
             dialogue_id = None
             origin = previous["origin_id"] or ""
-            if previous["origin_kind"] == "chat" and origin.startswith(("turn:", "progress:")):
-                turn = origin if origin.startswith("turn:") else origin.split(":", 2)[-1]
+            if previous["origin_kind"] == "chat" and origin.startswith(("turn:", "progress:", "file:")):
+                turn = origin.split(":", 3)[-1] if origin.startswith("file:") else (
+                    origin if origin.startswith("turn:") else origin.split(":", 2)[-1])
                 _, _, source = turn.removeprefix("turn:").partition(":")
                 dialogue_id = c.execute(select(dialogue_inputs.c.dialogue_id).where(
                     dialogue_inputs.c.id == source)).scalar_one_or_none()
