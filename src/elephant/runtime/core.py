@@ -826,5 +826,6 @@ class Core:
         await self.stream_delivery.stop()
         if self.scheduler:
             await self.scheduler.close()
+        self.knowledge.export_executor.shutdown(wait=False)
         await self.openviking.close()
         await self.model_client.aclose()

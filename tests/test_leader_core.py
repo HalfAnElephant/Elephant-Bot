@@ -151,7 +151,7 @@ async def test_followup_keeps_only_same_dialogue_live_images(tmp_path, official_
 async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_config, official_event, clock):
     from unittest.mock import AsyncMock
 
-    from elephant.contracts.memory import MemoryScope, MemorySearchResult
+    from elephant.contracts.memory import MemoryScope
     from elephant.storage.memory_sync_schema import memory_owners
     core = make_core(tmp_path, official_config, clock)
     try:
@@ -163,15 +163,16 @@ async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_con
         core.openviking.search = AsyncMock(side_effect=TimeoutError("offline"))
         event = core.adapters["qq"].normalize(official_event)
         result = await core.knowledge.prepare(event, {})
-        assert result["memory_status"] == "degraded"
+        assert result["memory_status"] == "uninitialized"
+        core.openviking.search.assert_not_awaited()
         assert core.knowledge.valid(result)
-        core.openviking.search = AsyncMock(return_value=MemorySearchResult(status="blocked", memory_epoch=2))
-        result = await core.knowledge.prepare(event, {})
         # A new turn without recalled data can proceed while a mutation is pending.
         with core.db.transaction() as conn:
             conn.execute(memory_owners.insert().values(id=scope.key, scope_json=scope.model_dump_json(),
                 binding_json="{}", binding_hash="x", remote_identity="test", epoch=2, state="MUTATING", updated_at=clock.now().isoformat()))
         assert core.knowledge.valid(result)
+        result = await core.knowledge.prepare(event, {})
+        assert result["memory_status"] == "blocked" and core.knowledge.valid(result)
         assert not core.knowledge.valid({**result, "memory_epoch": 1})
         assert not core.knowledge.valid({**result, "retrieved_data": [{"content": "old"}]})
     finally:

@@ -21,6 +21,7 @@ from elephant.jobs.waiters import ExternalWaiters
 from elephant.jobs.worker import Spool, Worker, configured_github
 from elephant.pi_installation import runtime_pi_path
 from elephant.providers import ModelCapacity
+from elephant.storage.agent_schema import dialogues, focus
 from elephant.storage.task_schema import runs
 
 logger = logging.getLogger(__name__)
@@ -234,7 +235,12 @@ class Scheduler:
             runner.archive = Path(args.archive)
             return runner
 
-        self.pool = SessionPool(factory,
+        def focused(session_id):
+            with core.db.engine.connect() as conn:
+                return conn.execute(select(focus.c.key).join(dialogues, dialogues.c.id == focus.c.dialogue_id)
+                    .where(dialogues.c.session_id == session_id, dialogues.c.state == "ACTIVE").limit(1)).first() is not None
+
+        self.pool = SessionPool(factory, focused=focused,
             max_idle=self.settings.execution.warm_idle_max if self.settings.execution.warm_max else 0,
             ttl=self.settings.execution.warm_ttl_seconds)
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)

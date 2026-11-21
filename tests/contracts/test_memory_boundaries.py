@@ -49,12 +49,12 @@ async def test_memory_unavailability_still_admits_an_unenriched_user_turn(memory
     await core.process(event)
     claim = core.sessions.claim("contract-leader")
     assert claim is not None and claim["purpose"] == "user"
-    assert claim["context"]["memory_status"] == ("degraded" if state == "offline" else "blocked")
+    assert claim["context"]["memory_status"] == ("ready" if state == "offline" else "blocked")
     assert claim["context"]["retrieved_data"] == []
-    assert all(method == "GET" or path == "/api/v1/search/find" for method, path, _ in remote.calls[before:])
+    assert remote.calls[before:] == []
 
 
-async def test_forget_between_enrichment_and_claim_fences_the_queued_context(memory_core, caplog, monkeypatch):
+async def test_forget_between_admission_and_claim_fences_the_queued_context(memory_core, caplog, monkeypatch):
     core, _, scope, event, uri = memory_core
     logger = logging.getLogger("elephant.observability.timing")
     monkeypatch.setattr(logger, "handlers", [caplog.handler])
@@ -62,15 +62,12 @@ async def test_forget_between_enrichment_and_claim_fences_the_queued_context(mem
     with caplog.at_level(logging.INFO, logger="elephant.observability.timing"):
         await core.process(event)
     trace = [record for record in caplog.records if record.name == "elephant.observability.timing"]
-    assert [record.msg for record in trace] == [
-        "ingress.memory_search", "ingress.memory_read", "ingress.dialogue_admission",
-    ]
+    assert [record.msg for record in trace] == ["ingress.dialogue_admission"]
     assert all(record.data["event_id"] == event.event_id for record in trace)
-    assert trace[1].data["index"] == 1
     with core.db.engine.connect() as conn:
         saved = conn.execute(select(dialogue_inputs)).mappings().one()
     context = json.loads(saved["context_json"])
-    assert context["retrieved_data"][0]["uri"] == uri
+    assert context["retrieved_data"] == []
     receipt = await core.openviking.forget(MemoryDeletion(
         scope=scope, uris=(uri,), idempotency_key="contract-forget"))
     assert receipt.memory_epoch > context["memory_epoch"]
