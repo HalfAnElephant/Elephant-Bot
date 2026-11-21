@@ -351,7 +351,40 @@ class PiRunnerAdapter:
             observation_refs=observations, effect_refs=effects,
             limitations=("model_tool_protocol_recovery_failed",))
 
+    async def compact_idle(self, *, keep_alive):
+        self.quiescent_verified = False
+        self.last_receipt = None
+        try:
+            if not self.process:
+                await self.start()
+            async with asyncio.timeout(min(60, self.timeout or 60)):
+                bound = await self.rpc("prompt", message=json.dumps({
+                    "binding_id": self.gateway.binding, "maintenance": True}))
+                if bound.get("disposition") != "handled":
+                    raise RuntimeError("Pi did not accept the maintenance binding")
+                await self.rpc("compact", timeout=60)
+                state = await self.rpc("get_state")
+                self.actual_session_id = state.get("sessionId")
+                actual = Path(state["sessionFile"])
+                if actual not in {self.session_path, Path("/workspace/sessions") / self.session_path.name}:
+                    raise RuntimeError("pi session path changed unexpectedly")
+                self.actual_session_file = str(actual)
+                if state.get("isStreaming") or state.get("isCompacting") or not self.gateway.context_summary_saved:
+                    raise RuntimeError("Pi maintenance ended without a committed compaction record")
+                if not await self.gateway.drain():
+                    raise RuntimeError("maintenance I/O has not drained")
+            self.quiescent_verified = True
+            return TaskResult(status="completed", agent_authored=False, summary="Context maintenance completed.")
+        except Exception:
+            await self.gateway.persist_context_failure()
+            raise
+        finally:
+            if not keep_alive or not self.quiescent_verified:
+                await self.stop()
+
     async def run(self, goal, *, keep_alive=False):
+        if getattr(self.gateway, "maintenance_compaction", False):
+            return await self.compact_idle(keep_alive=keep_alive)
         if self.busy:
             raise RuntimeError("session already has an active run")
         self.busy, self.quiescent_verified = True, False
@@ -450,6 +483,10 @@ class PiRunnerAdapter:
                         return TaskResult(status="completed", summary=text[:10000] or "Waiting checkpoint persisted.")
                     elif kind in {"host_error", "host_eof"}:
                         raise RuntimeError(event.get("error", "RPC closed before agent_settled"))
+        except Exception:
+            if getattr(self.gateway, "force_tokens", None):
+                await self.gateway.persist_context_failure()
+            raise
         finally:
             self.run_timeout = None
             self.accepting_input = False
@@ -457,11 +494,11 @@ class PiRunnerAdapter:
             if not keep_alive or not settled:
                 await self.stop()
 
-    async def rpc(self, kind, **values):
+    async def rpc(self, kind, *, timeout=10, **values):
         if kind == "compact" and self.busy:
             raise RuntimeError("manual compaction requires an idle session")
         command_id = await self.command(kind, **values)
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(timeout):
             while True:
                 event = await self.queue.get()
                 if event.get("type") in {"host_error", "host_eof"}:

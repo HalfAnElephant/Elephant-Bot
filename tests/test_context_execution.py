@@ -173,3 +173,27 @@ def test_rain_followup_does_not_create_a_fictional_location(clock):
     selected, reference, reason = select_topic(index, turn, clock.now(), 1800)
     assert selected["id"] == "weather-1" and selected["entities"] == ["location:嘉定"]
     assert reference is None and reason == "matching_subject"
+
+
+@pytest.mark.parametrize(("force", "recent", "elastic"), [(2000, 128, 1800), (1000, 998, 999)])
+def test_compaction_defaults_and_legacy_alias(force, recent, elastic):
+    from elephant.config import ContextConfig
+
+    legacy = ContextConfig(max_tokens=force, keep_recent_tokens=recent).limits(32768, 4096)
+    explicit = ContextConfig(force_compaction_tokens=force, keep_recent_tokens=recent).limits(32768, 4096)
+    assert legacy == explicit
+    assert legacy["force_compaction_tokens"] == force
+    assert legacy["elastic_compaction_tokens"] == elastic
+
+
+@pytest.mark.parametrize("overrides", [
+    {"max_tokens": 2000, "force_compaction_tokens": 2001},
+    {"force_compaction_tokens": 2000, "keep_recent_tokens": 1999},
+    {"force_compaction_tokens": 2000, "elastic_compaction_tokens": 2000},
+    {"elastic_compaction_tokens": 400, "keep_recent_tokens": 400},
+])
+def test_compaction_rejects_conflicting_or_empty_intervals(overrides):
+    from elephant.config import ContextConfig
+
+    with pytest.raises(ValueError, match="force_compaction_tokens|headroom"):
+        ContextConfig(**overrides).limits(32768, 4096)

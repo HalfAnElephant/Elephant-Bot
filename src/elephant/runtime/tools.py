@@ -15,7 +15,7 @@ def task_schemas():
                          {"type": "object", "properties": {"task_ref": {"type": "string"}}, "required": ["task_ref"], "additionalProperties": False}),
         "tasks.cancel": ("Revoke this authorized task tree and stop its active work.",
                          {"type": "object", "properties": {"task_ref": {"type": "string"}}, "required": ["task_ref"], "additionalProperties": False}),
-        "tasks.list": ("List tasks in the current authorized scope.", {"type": "object", "properties": {}, "additionalProperties": False}),
+        "tasks.list": ("Find task references in the current authorized scope. Returns a short list with titles, states and current actions. Use tasks_status with the public ID for details.", {"type": "object", "properties": {}, "additionalProperties": False}),
     }
     return {name: {"name": name, "description": description, "parameters": schema}
             for name, (description, schema) in definitions.items()}

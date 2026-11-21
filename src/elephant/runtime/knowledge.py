@@ -1,13 +1,15 @@
 """Bind memory operations to verified owners and export only native Pi sources."""
+import asyncio
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import func, insert, or_, select, update
 
-from elephant.adapters.openviking.service import BACKEND_ERRORS, affected_sources, digest
+from elephant.adapters.openviking.service import affected_sources, digest
 from elephant.contracts.harness import resolve_harness
 from elephant.contracts.memory import (
     MemoryCorrection,
@@ -19,6 +21,7 @@ from elephant.contracts.memory import (
 from elephant.dialogue.planner import plan_turn
 from elephant.domain import InboundEvent, Surface, stable_id
 from elephant.domain.execution import TaskGoal, TurnInput
+from elephant.observability.timing import measure
 from elephant.storage.action_schema import operations
 from elephant.storage.agent_schema import (
     agent_events,
@@ -44,7 +47,10 @@ from .task_graph import TERMINAL
 class KnowledgeRuntime:
     def __init__(self, core):
         self.core, self.memory = core, core.openviking
-        self.memory.source_loader = self.load_source
+        self.memory.source_loader = self.load_export_source
+        self.export_lock = asyncio.Lock()
+        self.export_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory-export")
+        self.exported_files = {}
 
     def scope(self, event, *, workspace_id=None):
         owner = self.core.sessions.owner(event)
@@ -81,6 +87,20 @@ class KnowledgeRuntime:
             ids.update(row[key] for row in rows for key in ("source_id", "event_id"))
             return connection.execute(select(memory_barriers.c.id).where(memory_barriers.c.scope_id == scope.key,
                 memory_barriers.c.source_id.in_(ids)).limit(1)).first() is None
+
+    async def offload_export(self, operation, *args):
+        async with self.export_lock:
+            pending = asyncio.get_running_loop().run_in_executor(self.export_executor, operation, *args)
+            try:
+                return await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                await pending
+                raise
+
+    async def load_export_source(self, scope, session_id, after, to_seq, branch, projection_version):
+        with measure("memory.export_recovery", None, session_id=session_id):
+            return await self.offload_export(self.load_source, scope, session_id, after, to_seq, branch,
+                                             projection_version)
 
     def load_source(self, scope, session_id, after, to_seq, branch, projection_version):
         with self.core.db.engine.connect() as conn:
@@ -143,26 +163,15 @@ class KnowledgeRuntime:
         scope = self.scope(event, workspace_id=context.get("workspace_id"))
         if scope is None or not self.memory.enabled(scope):
             return context
-        query = event.text.strip()[:self.memory.config.max_query_chars]
-        if not query:
-            return context
-        try:
-            result = await self.memory.search(scope, query)
-        except BACKEND_ERRORS:
-            context["memory_status"] = "degraded"
-            return context
-        context["memory_scope"] = scope.model_dump()
-        context["memory_epoch"] = result.memory_epoch
-        context["memory_status"] = result.status
-        docs = []
-        for hit in result.hits[:4]:
-            try:
-                doc = await self.memory.read(scope, hit.uri)
-            except (PermissionError, *BACKEND_ERRORS):
-                context["memory_status"] = "degraded"
-                continue
-            docs.append(doc.model_dump(mode="json"))
-        context["retrieved_data"] = docs
+        with self.core.db.engine.connect() as conn:
+            owner = conn.execute(select(memory_owners.c.epoch, memory_owners.c.state).where(
+                memory_owners.c.id == scope.key)).one_or_none()
+        context["retrieved_data"] = []
+        if owner is None:
+            context["memory_status"] = "uninitialized"
+        else:
+            context.update(memory_scope=scope.model_dump(), memory_epoch=owner.epoch,
+                           memory_status="ready" if owner.state == "READY" else "blocked")
         return context
 
     def valid(self, context, *, conn=None):
@@ -179,29 +188,76 @@ class KnowledgeRuntime:
         with self.core.db.engine.connect() as conn:
             records = conn.execute(select(sessions).where(sessions.c.active_run_id.is_(None))).mappings().all()
         for record in records:
-            event, binding, turns = self._session_context(record["id"])
-            if (event is None or not self.core.allowed(event) or not turns
-                    or all(turn["role"] == "skill_review" for turn in turns.values())):
+            prepared = await self.offload_export(self.prepare_export, record)
+            if prepared is None:
                 continue
-            scope = self.scope(event, workspace_id=binding.get("workspace_id", "personal"))
-            if scope is None or not self.memory.enabled(scope):
-                continue
+            batch, scope, fingerprint, drained = prepared
+            if batch is not None:
+                with self.core.db.engine.connect() as conn:
+                    current = conn.execute(select(sessions).where(
+                        sessions.c.id == record["id"])).mappings().first()
+                if not current or current["active_run_id"] or self.export_fingerprint(current) != fingerprint:
+                    continue
+                await self.memory.sync(batch)
+                if self.export_cursor(scope, record["id"], batch.projection_version) < batch.to_seq:
+                    continue
+            if drained:
+                with self.core.db.engine.connect() as conn:
+                    epoch = conn.execute(select(memory_owners.c.epoch).where(
+                        memory_owners.c.id == scope.key)).scalar_one_or_none()
+                self.exported_files[record["id"]] = fingerprint, scope, epoch
+
+    @staticmethod
+    def export_fingerprint(record):
+        try:
+            stat = Path(record["session_file"]).stat()
+        except FileNotFoundError:
+            return None
+        return (record["session_file"], record["manifest_json"], stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                stat.st_ctime_ns)
+
+    def prepare_export(self, record):
+        fingerprint = self.export_fingerprint(record)
+        if fingerprint is None:
+            return None
+        previous = self.exported_files.get(record["id"])
+        if previous and previous[0] == fingerprint and self.memory.enabled(previous[1]):
             with self.core.db.engine.connect() as conn:
-                projection = getattr(resolve_harness(self.core, binding), "projection_version", "pi-original-v2")
-                after = conn.execute(select(memory_streams.c.exported_seq).where(
-                    memory_streams.c.session_id == record["id"], memory_streams.c.scope_id == scope.key,
-                    memory_streams.c.projection_version == projection)
-                    .order_by(memory_streams.c.epoch.desc()).limit(1)).scalar_one_or_none() or 0
-            exported = self._export(record, binding, turns, after=after)
-            limit = len(exported["events"])
-            while limit > 1 and sum(len(event.content.encode()) for event in exported["events"]) > 512 * 1024:
-                limit = max(1, limit // 2)
-                exported = self._export(record, binding, turns, after=after, limit=limit)
-            if exported["next_cursor"] <= after:
-                continue
-            await self.memory.sync(SourceBatch(scope=scope, session_id=record["id"], from_seq=after,
-                to_seq=exported["next_cursor"], events=exported["events"], branch=exported["branch"],
-                projection_version=exported.get("projection_version", "pi-original-v2")))
+                owner = conn.execute(select(memory_owners.c.epoch, memory_owners.c.state).where(
+                    memory_owners.c.id == previous[1].key)).one_or_none()
+            if owner is not None and owner.state == "READY" and owner.epoch == previous[2]:
+                return None
+        with measure("memory.export_scan", None, session_id=record["id"]):
+            return self.export_batch(record, fingerprint)
+
+    def export_batch(self, record, fingerprint):
+        event, binding, turns = self._session_context(record["id"])
+        if (event is None or not self.core.allowed(event) or not turns
+                or all(turn["role"] == "skill_review" for turn in turns.values())):
+            return None
+        scope = self.scope(event, workspace_id=binding.get("workspace_id", "personal"))
+        if scope is None or not self.memory.enabled(scope):
+            return None
+        projection = getattr(resolve_harness(self.core, binding), "projection_version", "pi-original-v2")
+        after = self.export_cursor(scope, record["id"], projection)
+        exported = self._export(record, binding, turns, after=after)
+        limit = len(exported["events"])
+        while limit > 1 and sum(len(event.content.encode()) for event in exported["events"]) > 512 * 1024:
+            limit = max(1, limit // 2)
+            exported = self._export(record, binding, turns, after=after, limit=limit)
+        if exported["next_cursor"] <= after:
+            return None, scope, fingerprint, True
+        batch = SourceBatch(scope=scope, session_id=record["id"], from_seq=after,
+            to_seq=exported["next_cursor"], events=exported["events"], branch=exported["branch"],
+            projection_version=exported.get("projection_version", "pi-original-v2"))
+        return batch, scope, fingerprint, not exported.get("has_more")
+
+    def export_cursor(self, scope, session_id, projection):
+        with self.core.db.engine.connect() as conn:
+            return conn.execute(select(memory_streams.c.exported_seq).where(
+                memory_streams.c.session_id == session_id, memory_streams.c.scope_id == scope.key,
+                memory_streams.c.projection_version == projection)
+                .order_by(memory_streams.c.epoch.desc()).limit(1)).scalar_one_or_none() or 0
 
     def invalidate_root(self, conn, root, scope, operation_id, source_ids, session_ids=()):
         root = conn.execute(select(tasks).where(tasks.c.id == root["id"])).mappings().one()
@@ -561,7 +617,20 @@ class KnowledgeRuntime:
         if operation == "memory_search":
             return (await self.memory.search(scope, args["query"])).model_dump(mode="json")
         if operation == "memory_read":
-            return (await self.memory.read(scope, args["uri"])).model_dump(mode="json")
+            document = await self.memory.read(scope, args["uri"])
+            with self.core.db.transaction() as conn:
+                run, claim = self.core.leader.lease(conn, *identity)
+                self.core.leader.authorize(conn, run, claim, {"action": action})
+                row = conn.execute(select(sessions).where(sessions.c.id == claim["session_id"])).mappings().one()
+                if row["active_run_id"] != run["id"]:
+                    raise PermissionError("memory read session writer changed")
+                history = json.loads(row["manifest_json"])
+                history.update(memory_history=True, memory_scope=scope.model_dump(), memory_epoch=document.memory_epoch)
+                if not self.valid(history, conn=conn):
+                    raise PermissionError("memory read was invalidated")
+                conn.execute(update(sessions).where(sessions.c.id == row["id"]).values(
+                    manifest_json=json.dumps(history, ensure_ascii=False)))
+            return document.model_dump(mode="json")
         if operation not in {"memory_correct", "memory_forget"}:
             raise ValueError("unknown memory tool")
         with self.core.db.engine.connect() as conn:

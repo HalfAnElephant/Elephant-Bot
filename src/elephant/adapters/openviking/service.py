@@ -63,6 +63,10 @@ MEMORY_TYPES = ("profile", "preferences", "entities", "events")
 _SECRET = re.compile(r"(?i)(sk-[a-z0-9_-]{12,}|-----BEGIN .*PRIVATE KEY|(?:api[_-]?key|password|密码)\s*[:=]\s*\S+)")
 
 
+class SourceBatchMismatch(ValueError):
+    """The current Harness projection cannot reproduce previously accepted evidence."""
+
+
 def digest(value):
     value = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(value.encode()).hexdigest()
@@ -282,7 +286,7 @@ class OpenVikingMemory:
         if not isinstance(batch, SourceBatch) or batch.scope != scope:
             raise PermissionError("Harness source export scope mismatch")
         if [self._source_ref(event) for event in batch.events] != refs["events"]:
-            raise ValueError("Harness source export no longer matches the accepted batch")
+            raise SourceBatchMismatch("Harness source export no longer matches the accepted batch")
         return batch
 
     async def _drive(self, scope, *, batch=None, correction=None):
@@ -336,7 +340,19 @@ class OpenVikingMemory:
         sid = quote(row["remote_session_id"], safe="")
         session_uri = f"viking://user/{self._binding(scope).user_id}/sessions/{row['remote_session_id']}"
         if row["state"] == "QUEUED":
-            batch = await self._load_batch(scope, refs, batch)
+            try:
+                batch = await self._load_batch(scope, refs, batch)
+            except SourceBatchMismatch:
+                # No remote append has been attempted. Keep the failed receipt for inspection
+                # and let the exporter register the current source range independently.
+                with self.db.transaction() as conn:
+                    conn.execute(update(operations).where(operations.c.id == row["id"]).values(
+                        state="FAILED", error_type="SourceBatchMismatch", updated_at=self._now()))
+                    conn.execute(update(sources).where(sources.c.operation_id == row["id"],
+                        sources.c.state == "QUEUED").values(state="REBUILD"))
+                    conn.execute(update(owners).where(owners.c.id == scope.key).values(
+                        last_error="SourceBatchMismatch", updated_at=self._now()))
+                return
             # Creating a deterministic empty session is idempotent; append is not.
             await self._request(scope, "POST", "/api/v1/sessions", json={
                 "session_id": row["remote_session_id"], "auto_commit_policy": None,

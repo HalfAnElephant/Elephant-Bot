@@ -1,10 +1,274 @@
 import { Type } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync } from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { compact, convertToLlm, estimateTokens, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+
+export interface CompactorInput {
+    preparation: any;
+    reason: string;
+    signal: AbortSignal;
+    model: any;
+    customInstructions?: string;
+    request: (path: string, body: unknown, signal: AbortSignal) => Promise<any>;
+    maxRequests?: number;
+}
+export type ContextCompactor = (input: CompactorInput) => Promise<any>;
+
+class SummaryBudgetExceeded extends Error {}
+
+// Keep assistant calls and their results together, including parallel tool batches.
+export function interactionGroups(messages: any[]): any[][] {
+    const groups: any[][] = [];
+    for (const message of messages) {
+        if (message.role === "toolResult" && groups.length) groups[groups.length - 1].push(message);
+        else groups.push([message]);
+    }
+    return groups;
+}
+
+export const nativeContextCompactor: ContextCompactor = async (input) => {
+    let requests = 0;
+    const run = async (preparation: any, probe = false) => compact(
+        preparation, input.model, undefined, undefined, input.customInstructions, input.signal,
+        undefined, (async (model: any, context: any) => {
+            input.signal.throwIfAborted();
+            const system = context.messages.filter((message: any) => message.role === "system")
+                .map((message: any) => typeof message.content === "string" ? message.content :
+                    message.content.filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n")).join("\n");
+            const body = {messages: context.messages.filter((message: any) => message.role !== "system"),
+                system_prompt: system || context.systemPrompt};
+            const budget = await input.request("/context/budget", body, input.signal);
+            if (!budget.fits) throw new SummaryBudgetExceeded("Compaction summary request exceeds context or byte budget");
+            if (!probe && ++requests > (input.maxRequests ?? 16)) throw new Error("Compaction request limit exceeded");
+            const result = probe ? {summary: "budget probe"} : await input.request("/context/summary", body, input.signal);
+            if (typeof result.summary !== "string" || !result.summary.trim()) throw new Error("Compactor returned an empty summary");
+            const message = {role: "assistant", content: [{type: "text", text: result.summary}],
+                api: model.api, provider: model.provider, model: model.id, stopReason: "stop", timestamp: Date.now(),
+                usage: {input: result.usage?.input ?? result.usage?.prompt_tokens ?? 0,
+                    output: result.usage?.output ?? result.usage?.completion_tokens ?? 0,
+                    cacheRead: result.usage?.cacheRead ?? 0, cacheWrite: result.usage?.cacheWrite ?? 0,
+                    totalTokens: result.usage?.totalTokens ?? result.usage?.total_tokens ??
+                        ((result.usage?.prompt_tokens ?? 0) + (result.usage?.completion_tokens ?? 0)),
+                    cost: result.usage?.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}};
+            return {result: async () => message};
+        }) as any,
+    );
+    try {
+        // Probe every native summary (history and split-turn prefix) before issuing either.
+        await run(input.preparation, true);
+        return await run(input.preparation);
+    } catch (error) {
+        if (!(error instanceof SummaryBudgetExceeded)) throw error;
+    }
+    const groups = interactionGroups([...input.preparation.messagesToSummarize, ...input.preparation.turnPrefixMessages]);
+    let summary = input.preparation.previousSummary;
+    let final: any;
+    for (let offset = 0; offset < groups.length;) {
+        input.signal.throwIfAborted();
+        let low = 1, high = groups.length - offset, count = 0;
+        const batch = (size: number) => ({...input.preparation, previousSummary: summary,
+            messagesToSummarize: groups.slice(offset, offset + size).flat(), turnPrefixMessages: [], isSplitTurn: false});
+        while (low <= high) {
+            const middle = Math.floor((low + high) / 2);
+            try {
+                await run(batch(middle), true);
+                count = middle;
+                low = middle + 1;
+            } catch (error) {
+                if (!(error instanceof SummaryBudgetExceeded)) throw error;
+                high = middle - 1;
+            }
+        }
+        if (!count) throw new Error("A complete message/tool interaction and previous summary exceed the compaction budget");
+        final = await run(batch(count));
+        summary = final.summary;
+        offset += count;
+    }
+    if (!final) throw new Error("No history available for rolling compaction");
+    return final;
+};
+
+const conversationProjection = "leader-conversation-v1";
+const historyTokens = 12_000;
+const historyBytes = 64 * 1024;
+
+function userText(message: any): string {
+    return typeof message.content === "string" ? message.content
+        : (message.content || []).filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n");
+}
+
+function messageKey(message: any): string {
+    const first = Array.isArray(message.content) ? message.content[0] : message.content;
+    const text = typeof first === "string" ? first : first?.text ?? first?.thinking ?? "";
+    return JSON.stringify([message.role, message.timestamp, message.toolCallId, message.customType,
+        first?.id, text.length, text.slice(0, 128)]);
+}
+
+// Pi clones messages before the context hook. Match that copy to native run provenance.
+export function conversationHistory(branch: any[], binding: any) {
+    const records = new Map<string, {message: any; historical?: any; current: boolean; group: any; index: number}>();
+    const published = new Set(binding.published_run_ids || []);
+    const currentInputs = new Set(binding.input_ids || []);
+    const failedInputs = new Set(binding.context_failed_input_ids || []);
+    const userSources = new Set<string>();
+    const steeredSources = new Set<string>();
+    const edits = new Map(branch.filter(entry => entry.type === "context_edit").map(entry => [entry.targetId, entry.replacement]));
+    let run: any = {};
+    let current = false;
+    let reply: ReturnType<typeof records.get>;
+    let summary: any;
+    let summaryBoundary = -1;
+    let legacyBoundary = -1;
+    for (const [index, entry] of branch.entries()) {
+        if (entry.type === "custom") {
+            if (entry.customType === "elephant-run") {
+                run = entry.data;
+                current = run.run_id === binding.run_id || (run.purpose === "user" &&
+                    (run.source_event_ids || []).some((id: string) => currentInputs.has(id)));
+                reply = undefined;
+            }
+            if (entry.customType === "elephant-source" && entry.data.kind === "user") userSources.add(entry.data.id);
+            if (entry.customType === "qqbot-input") steeredSources.add(entry.data.id);
+            if (entry.customType === "elephant-turn-boundary" && reply && entry.data.run_id === run.run_id &&
+                entry.data.kind === "turn_finished" && published.has(run.run_id) &&
+                entry.data.summary === userText(reply.message)) {
+                reply.historical = {...reply.message, content: [{type: "text", text: entry.data.summary}]};
+            }
+        }
+        if (entry.type === "compaction") {
+            summary = entry.details?.conversationProjection === conversationProjection ? entry : undefined;
+            summaryBoundary = index;
+            legacyBoundary = summary ? -1 : branch.findIndex(item => item.id === entry.firstKeptEntryId);
+        }
+        if (entry.type !== "message") continue;
+        const edit = edits.get(entry.id);
+        const message = edit ? {...entry.message, content: edit.content} : entry.message;
+        const record: NonNullable<typeof reply> = {message, group: run.run_id ?? index, current, index};
+        records.set(messageKey(message), record);
+        if (edit === null) continue;
+        if (message.role === "assistant") {
+            reply = message.stopReason === "stop" ? record : undefined;
+        }
+        if (message.role !== "user") continue;
+        const text = userText(message);
+        const parts = text.split(/(?:^|\n)\[\[elephant-input:([^\]\n]+)\]\]\n/);
+        const original = [];
+        for (let part = 1; part < parts.length; part += 2) {
+            const id = parts[part];
+            let content = parts[part + 1].trim();
+            if (failedInputs.has(id)) continue;
+            if (steeredSources.has(id) && content.startsWith("这是一条同会话的新用户消息。") && content.includes("\n")) {
+                content = content.slice(content.indexOf("\n") + 1);
+                original.push(content);
+            } else if (userSources.has(id)) {
+                original.push(content);
+            }
+        }
+        if (original.length) {
+            record.historical = {...message, content: [{type: "text", text: original.join("\n\n")}]};
+        } else if (!run.run_id && parts.length === 1) {
+            record.historical = message;
+        }
+    }
+
+    function safeSummary(message: any) {
+        return message.role === "compactionSummary" && message.summary === summary?.summary;
+    }
+
+    function budget(items: {message: any; group: any}[]) {
+        const groups: typeof items[] = [];
+        for (const item of items) {
+            if (groups.at(-1)?.[0].group === item.group) groups.at(-1)!.push(item);
+            else groups.push([item]);
+        }
+        let tokens = historyTokens;
+        let bytes = historyBytes;
+        const selected = [];
+        const checkpoint = groups[0]?.[0].message.role === "compactionSummary" ? groups.shift() : undefined;
+        for (const group of [...(checkpoint ? [checkpoint] : []), ...groups.reverse()]) {
+            const estimates = group.reduce((sum, item) => sum + estimateTokens(item.message), 0);
+            if (estimates > tokens) continue;
+            const size = group.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.message)), 0);
+            if (size > bytes) continue;
+            selected.push(group);
+            tokens -= estimates;
+            bytes -= size;
+        }
+        const ordered = checkpoint && selected[0] === checkpoint ? [selected.shift()!, ...selected.reverse()] : selected.reverse();
+        return ordered.flatMap(group => group.map(item => item.message));
+    }
+
+    function history(messages: any[], {live, includeHistory = true, restoreLegacy = true}: {
+        live: boolean; includeHistory?: boolean; restoreLegacy?: boolean;
+    }) {
+        const earlier = [];
+        const active = [];
+        if (includeHistory && restoreLegacy && legacyBoundary >= 0) {
+            const present = new Set(messages.map(messageKey));
+            for (const [key, record] of records) {
+                if (record.index < legacyBoundary && record.historical && !present.has(key)) {
+                    earlier.push({message: record.historical, group: record.group});
+                }
+            }
+        }
+        for (const message of messages) {
+            const record = records.get(messageKey(message));
+            if (live && (record?.current || !record && (message.role === "user" || message.role === "assistant" ||
+                message.role === "toolResult" || message.role === "custom" && message.customType === "elephant-runtime"))) {
+                active.push(message);
+            } else if (includeHistory && record?.historical) {
+                earlier.push({message: record.historical, group: record.group});
+            } else if (includeHistory && safeSummary(message)) {
+                earlier.push({message, group: summaryBoundary});
+            }
+        }
+        return [...budget(earlier), ...active];
+    }
+
+    function compactHistory(messages: any[]) {
+        return messages.flatMap(message => {
+            const record = records.get(messageKey(message));
+            return record?.historical ? [record.historical] : [];
+        });
+    }
+
+    const older = [];
+    for (const record of records.values()) {
+        if (record.index >= legacyBoundary) break;
+        if (record.historical) older.push(record.historical);
+    }
+    return {history, compactHistory, older, previousSummary: summary?.summary};
+}
+
+// Keep interrupted recovery receipts in the native journal, even when Pi omits their calls.
+export function omitOrphanedInterruptions(messages: any[]) {
+    let pending = new Set<string>();
+    return messages.filter(message => {
+        if (message.role === "toolResult") {
+            if (pending.delete(message.toolCallId) || !message.isError) return true;
+            const content = message.content;
+            if (content?.length !== 1 || content[0].type !== "text") return true;
+            try {
+                const receipt = JSON.parse(content[0].text);
+                return receipt?.state !== "INTERRUPTED" || receipt.stopped !== true;
+            } catch {
+                return true;
+            }
+        }
+        if (message.role === "assistant" && !["error", "aborted"].includes(message.stopReason)) {
+            pending = new Set((message.content || []).filter((part: any) => part.type === "toolCall")
+                .map((part: any) => part.id));
+        } else if (message.role !== "system") {
+            pending.clear();
+        }
+        return true;
+    });
+}
 
 // Only the trusted input envelope can rotate run credentials, before automatic compaction.
-export default function (pi: ExtensionAPI) {
+export function createBridge(options: {compactor?: ContextCompactor} = {}) {
+return function (pi: ExtensionAPI) {
   const base = process.env.ELEPHANT_GATEWAY_URL!;
   let binding: any = null;
   let waiting = false;
@@ -16,7 +280,16 @@ export default function (pi: ExtensionAPI) {
   let activeInputs = new Set<string>();
   let finalSummary = "";
   let outcome: any = null;
+  let compactionFailed = false;
+  let modelFailed = false;
+  const omittedUserMessages = new Set<string>();
   const inputHash = (text: string) => createHash("sha256").update(text).digest("hex");
+  function greetingOnly() {
+    return binding?.role === "leader" && binding.purpose === "user" && activeInputs.size === 1 &&
+      !binding.has_attachments && !binding.audio_context && !binding.input_refs?.length &&
+      !binding.continuation?.inputs?.length &&
+      /^(?:(?:hello|hi|hey|你好|您好|嗨|哈喽|在吗)[?？!！。]*|在[?？])$/iu.test(binding.goal?.trim());
+  }
   function persistInput(text: string, ids: string[]) {
     pi.appendEntry("elephant-input-persisting", {session_id: binding.session_id,
       input_ids: ids, sha256: inputHash(text)});
@@ -40,9 +313,7 @@ export default function (pi: ExtensionAPI) {
         if (entry.data.session_id === binding.session_id) pending.set(entry.data.sha256, entry.data.input_ids);
       }
       if (entry.type !== "message" || entry.message.role !== "user") continue;
-      const content = entry.message.content;
-      const text = typeof content === "string" ? content : content.filter((part: any) => part.type === "text")
-        .map((part: any) => part.text).join("\n");
+      const text = userText(entry.message);
       const hash = inputHash(text);
       const ids = pending.get(hash);
       if (ids) {
@@ -82,9 +353,52 @@ export default function (pi: ExtensionAPI) {
         if (secret) detail = detail.split(secret).join("[REDACTED]");
       }
       detail = detail.replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]").slice(0, 1000);
-      throw new Error(`Gateway rejected request (${response.status}): ${detail}`);
+      throw Object.assign(new Error(`Gateway rejected request (${response.status}): ${detail}`), {status: response.status});
     }
     return response.json();
+  }
+  function omitFailedInputs(ctx: any) {
+    omittedUserMessages.clear();
+    const failed = new Set<string>((binding.context_failed_input_ids || [])
+      .filter((id: string) => !(binding.input_ids || []).includes(id)));
+    if (!failed.size) return;
+    const manifests = new Map<string, string[]>();
+    let legacySource: string | null = null;
+    let runSources: string[] = [];
+    const branch = ctx.sessionManager.getBranch();
+    const omitted = new Set(branch.filter((entry: any) => entry.type === "context_edit" && entry.replacement === null)
+      .map((entry: any) => entry.targetId));
+    for (const entry of branch) {
+      if (entry.type === "custom" && entry.customType === "elephant-run") runSources = entry.data.source_event_ids || [];
+      if (entry.type === "custom" && entry.customType === "elephant-source") legacySource = entry.data.id;
+      if (entry.type === "custom" && entry.customType === "elephant-input-persisting") {
+        manifests.set(entry.data.sha256, entry.data.input_ids || []);
+      }
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const text = userText(entry.message);
+      const hash = inputHash(text);
+      const manifest = manifests.get(hash);
+      // Older retries stored the full goal with an empty input manifest.
+      const ids = manifest?.length === 0 && text.startsWith("依据已持久化的工具回执处理这条用户请求。")
+        ? runSources.slice(0, 1)
+        : manifest ?? (legacySource && text.startsWith(`[[elephant-input:${legacySource}]]\n`) ? [legacySource] : []);
+      legacySource = null;
+      if (ids.length && ids.every(id => failed.has(id))) {
+        omittedUserMessages.add(hash);
+        if (!omitted.has(entry.id)) ctx.sessionManager.appendContextEdit(entry.id, null);
+      }
+    }
+  }
+  function pruneRuntime(ctx: any, replacing = false) {
+    const branch = ctx.sessionManager.getBranch();
+    const omitted = new Set(branch.filter((entry: any) => entry.type === "context_edit" && entry.replacement === null)
+      .map((entry: any) => entry.targetId));
+    const snapshots = branch.filter((entry: any) => entry.type === "custom_message" &&
+      entry.customType === "elephant-runtime" && !omitted.has(entry.id));
+    for (const entry of replacing ? snapshots : snapshots.slice(0, -1)) {
+      // Pi's manager is read-only typed in extensions, but exposes its append-only edit API.
+      ctx.sessionManager.appendContextEdit(entry.id, null);
+    }
   }
   pi.on("input", async (event, ctx) => {
     let envelope: any;
@@ -105,17 +419,24 @@ export default function (pi: ExtensionAPI) {
         activeInputs.add(input.input_id);
         ids.push(input.input_id);
         pi.appendEntry("qqbot-input", {id: input.input_id});
+        if (!input.host_notice && binding.role === "leader") {
+          pi.appendEntry("elephant-source", {id: input.input_id, kind: "user"});
+        }
         texts.push(`[[elephant-input:${input.input_id}]]\n` + input.text);
       }
       return ids.length ? persistInput(texts.join("\n\n"), ids) : {action: "handled"};
     }
     binding = {...current, binding_id: envelope.binding_id};
+    pruneRuntime(ctx);
+    omitFailedInputs(ctx);
     waiting = false;
     turnStartedAt = Date.now();
     progressNoticeAccepted = false;
     replyMessagesRemaining = binding.reply_limit ?? null;
     finalSummary = "";
     outcome = null;
+    compactionFailed = false;
+    modelFailed = false;
     activeInputs = new Set(binding.input_ids || []);
     appliedInputs.clear();
     pi.registerProvider("qqbot", {
@@ -132,6 +453,7 @@ export default function (pi: ExtensionAPI) {
     }
     const nativeNames = (binding.native_tools || []).map((schema: any) => schema.name.replace("tasks.", "tasks_").replace("schedules.", "schedules_"));
     pi.setActiveTools(binding.role === "skill_review" ? nativeNames : [...definitions.map(d => d.name), ...nativeNames]);
+    if (envelope.maintenance === true || binding.maintenance_compaction) return {action: "handled"};
     const parts: string[] = [];
     const primary = (binding.input_ids || [])[0];
     pi.appendEntry("elephant-run", {run_id: binding.run_id, role: binding.role,
@@ -148,22 +470,28 @@ export default function (pi: ExtensionAPI) {
       activeInputs.add(item.id);
       if (!deliveredInputs.has(item.id)) parts.push(`[[elephant-input:${item.id}]]\n` + item.text);
     }
+    const persistedIds = [...activeInputs].filter(id => !deliveredInputs.has(id));
     if (!parts.length && binding.source_kind === "user") {
+      if (primary) persistedIds.push(primary);
       parts.push("依据已持久化的工具回执处理这条用户请求。已启动或已完成的外部操作先核对回执，避免重做。\n" + binding.goal);
     }
     if (parts.length && binding.audio_context) parts.push(binding.audio_context);
     const text = parts.join("\n\n") || "恢复已经持久化但尚未结算的轮次，从当前会话继续；不重复已完成的外部操作。";
-    return persistInput(text, [...activeInputs].filter(id => !deliveredInputs.has(id)));
+    return persistInput(text, persistedIds);
   });
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    pruneRuntime(ctx, true);
     if (!binding) throw new Error("Missing trusted run binding");
     event.systemPromptOptions.customPrompt = binding.system_prompt;
     event.systemPromptOptions.sections.elephant_tools = "先判断直接处理还是使用 tasks_submit 委派。直接处理或 Worker 执行时，用 capability_search 按需发现业务能力及参数；不要把完整目录复制进提示词。content_read 只接受实际返回的 content_ref。";
+    const greeting = greetingOnly();
     return {message: {customType: "elephant-runtime", display: false,
-      content: JSON.stringify({time: binding.current_time, timezone: binding.timezone,
+      content: "[elephant-runtime]\n" + JSON.stringify({time: binding.current_time, timezone: binding.timezone,
         repository: binding.repository, github_host: binding.github_host,
-        retrieved_data: binding.retrieved_data, memory_status: binding.memory_status,
-        active_tasks: binding.active_tasks, workspace_id: binding.workspace_id,
+        retrieved_data: greeting ? [] : binding.retrieved_data, memory_status: binding.memory_status,
+        active_tasks: (greeting ? [] : binding.active_tasks || []).map((task: any) => Object.fromEntries(
+          ["id", "task_id", "public_id", "state", "status", "title", "parent_id", "updated_at", "progress", "checkpoint_ref", "goal_revision", "goal", "context_revoked"]
+            .filter(key => task[key] != null).map(key => [key, key === "goal" ? String(task[key]).slice(0, 400) : task[key]]))), workspace_id: binding.workspace_id,
         input_refs: binding.input_refs,
         mail_input: binding.mail_input,
         goal_spec: binding.goal_spec, budget: binding.budget, checkpoint: binding.continuation?.checkpoint}),
@@ -197,8 +525,14 @@ export default function (pi: ExtensionAPI) {
       ctx.abort();
     }
   });
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role === "assistant") modelFailed = message.stopReason === "error" || !!message.errorMessage;
+  });
   pi.on("agent_settled", async (event, ctx) => {
-    if (!binding?.session_id || (event.aborted && !waiting)) return;
+    if (!binding?.session_id || (!waiting && (compactionFailed || modelFailed || event.aborted))) return;
+    const resolved = ctx.sessionManager.buildSessionProjection().messages;
+    const lastAssistant = [...resolved].reverse().find((message: any) => message.role === "assistant");
     const pending = new Set<string>();
     // Pi retries tombstone partial messages with context edits; validate the resolved conversation.
     for (const message of ctx.sessionManager.buildSessionProjection().messages) {
@@ -208,18 +542,121 @@ export default function (pi: ExtensionAPI) {
       if (message.role === "toolResult") pending.delete(message.toolCallId);
     }
     if (pending.size) throw new Error("Settled session has unpaired tools");
+    if (binding.force_compaction_tokens) {
+      await request("/context/compaction", {phase: "status",
+        tokens: resolved.reduce((total: number, message: any) => total + estimateTokens(message), 0),
+        output_tokens: lastAssistant ? estimateTokens(lastAssistant) : 0}, binding.tool_token);
+    }
     const receipt = {...durable(ctx), kind: waiting ? "run_yielded" : "turn_finished",
                      tools_paired: true, inflight: 0, outcome, summary: finalSummary};
     pi.appendEntry("elephant-turn-boundary", receipt);
     durable(ctx);
     await request("/session-receipt", receipt, binding.tool_token);
   });
-  pi.on("session_before_compact", async () => {
+  pi.on("context", (event, ctx) => {
+    let latest = -1;
+    event.messages.forEach((message: any, index: number) => {
+      if (message.role === "custom" && message.customType === "elephant-runtime") latest = index;
+    });
+    const messages = event.messages.filter((message: any, index: number) => {
+      if (message.role === "user" && omittedUserMessages.size && omittedUserMessages.has(inputHash(userText(message)))) return false;
+      return message.role !== "custom" || message.customType !== "elephant-runtime" || index === latest;
+    });
+    const projected = binding?.session_id && binding.role === "leader" && binding.purpose === "user"
+      ? conversationHistory(ctx.sessionManager.getBranch(), binding).history(messages, {live: true, includeHistory: !greetingOnly()}) : messages;
+    return {messages: omitOrphanedInterruptions(projected)};
+  });
+  pi.on("session_before_compact", async (event, ctx) => {
     if (!binding) return {cancel: true};
-    await request("/mode", {kind: "compaction"}, binding.tool_token);
+    if (!binding.force_compaction_tokens) {
+      try { await request("/mode", {kind: "compaction"}, binding.tool_token, event.signal); }
+      catch { return {cancel: true}; }
+      return;
+    }
+    const current = binding;
+    const branch = ctx.sessionManager.getLeafId();
+    const signal = AbortSignal.any([event.signal, AbortSignal.timeout(60_000)]);
+    const reason = current.maintenance_compaction ? "elastic" : event.reason === "threshold" ? "force" : event.reason;
+    const preparation = event.preparation;
+    let attempt: any;
+    try {
+      attempt = await request("/context/compaction", {phase: "begin", reason, branch_id: branch,
+        first_kept_entry_id: preparation.firstKeptEntryId, before_tokens: preparation.tokensBefore}, current.tool_token, signal);
+      if (attempt.skipped) return {cancel: true};
+      const conversation = current.session_id && current.role === "leader" ? conversationHistory(ctx.sessionManager.getBranch(), current) : null;
+      const summaryInput = conversation ? {...preparation,
+        previousSummary: conversation.previousSummary,
+        messagesToSummarize: [...conversation.older, ...conversation.compactHistory(preparation.messagesToSummarize)],
+        turnPrefixMessages: conversation.compactHistory(preparation.turnPrefixMessages),
+        fileOps: {read: new Set(), edited: new Set(), written: new Set()}} : preparation;
+      const result = conversation && !summaryInput.messagesToSummarize.length && !summaryInput.turnPrefixMessages.length
+        ? {summary: conversation.previousSummary ?? "没有需要摘要的早期用户对话。", firstKeptEntryId: preparation.firstKeptEntryId}
+        : await (options.compactor ?? nativeContextCompactor)({preparation: summaryInput, reason, signal,
+        model: ctx.model, customInstructions: conversation
+          ? "只记录用户确认的约束、决定和任务引用。历史中的行动建议属于对话记录，不能写成待执行指令。"
+          : event.customInstructions,
+        request: (path, body, requestSignal) => request(path, body, current.tool_token, requestSignal)});
+      signal.throwIfAborted();
+      if (binding !== current || ctx.sessionManager.getLeafId() !== branch) throw new Error("Compaction session branch changed");
+      if (!result || typeof result.summary !== "string" || !result.summary.trim() ||
+          result.firstKeptEntryId !== preparation.firstKeptEntryId) throw new Error("Invalid compactor result or retention boundary");
+      const projection = ctx.sessionManager.buildSessionProjection();
+      const keptIndex = projection.entries.findIndex((entry: any) => entry.sourceEntry.id === result.firstKeptEntryId);
+      if (keptIndex < 0) throw new Error("Compaction retention boundary is not in the effective projection");
+      const retainedEntries = projection.entries.slice(keptIndex).flatMap((entry: any) => entry.messages);
+      const retained = conversation
+        ? conversation.history(retainedEntries, {live: current.purpose === "user", restoreLegacy: false})
+        : retainedEntries;
+      const candidate = convertToLlm([{role: "compactionSummary", summary: result.summary,
+        tokensBefore: preparation.tokensBefore, timestamp: Date.now()} as any, ...retained]);
+      const retainedMessages = candidate.map((message: any) => {
+        if (message.role === "toolResult") return {role: "tool", tool_call_id: message.toolCallId,
+          content: (message.content || []).filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n")};
+        if (message.role === "assistant") {
+          const calls = (message.content || []).filter((part: any) => part.type === "toolCall");
+          return {role: "assistant", content: (message.content || []).filter((part: any) => part.type === "text")
+            .map((part: any) => part.text).join("\n"), ...(calls.length ? {tool_calls: calls.map((call: any) =>
+              ({id: call.id, type: "function", function: {name: call.name, arguments: JSON.stringify(call.arguments)}}))} : {})};
+        }
+        return {role: message.role, content: message.content};
+      });
+      const afterTokens = retained.reduce((sum: number, message: any) => sum + estimateTokens(message), 0) +
+        estimateTokens({role: "user", content: result.summary, timestamp: Date.now()} as any);
+      const committed = await request("/context/compaction", {phase: "commit", attempt_id: attempt.attempt_id, branch_id: branch,
+        first_kept_entry_id: result.firstKeptEntryId, before_tokens: preparation.tokensBefore,
+        after_tokens: afterTokens, summary: result.summary, retained_messages: retainedMessages}, current.tool_token, signal);
+      signal.throwIfAborted();
+      if (binding !== current || ctx.sessionManager.getLeafId() !== branch) throw new Error("Compaction session branch changed before commit");
+      return {compaction: {...result, details: {...result.details,
+        ...(conversation ? {conversationProjection} : {}),
+        elephant_compaction: {attempt_id: attempt.attempt_id, branch_id: branch,
+          session_generation: attempt.session_generation, fence: attempt.fence, run_id: attempt.run_id,
+          session_id: attempt.session_id, after_tokens: committed.after_tokens ?? afterTokens}}}};
+    } catch (error) {
+      compactionFailed = true;
+      const detail = String(error).slice(0, 1000);
+      pi.appendEntry("elephant-compaction-failed", {attempt_id: attempt?.attempt_id, reason, error: detail});
+      try {
+        const status = (error as {status?: number})?.status;
+        await request("/context/compaction", {phase: "failed", attempt_id: attempt?.attempt_id, reason, error: detail,
+          retryable: signal.reason?.name === "TimeoutError" || status === 408 || (status ?? 0) >= 500},
+          current.tool_token, AbortSignal.timeout(3000));
+      } catch { /* The gateway remains closed when its binding or attempt is revoked. */ }
+      return {cancel: true};
+    }
   });
   const normal = async () => { if (binding) await request("/mode", {kind: "business"}, binding.tool_token); };
-  pi.on("session_compact", normal);
+  pi.on("session_compact", async (_event, ctx) => {
+    if (binding?.force_compaction_tokens) {
+      const entry = [...ctx.sessionManager.getBranch()].reverse().find((entry: any) => entry.type === "compaction");
+      const detail = entry?.details?.elephant_compaction;
+      if (!detail) throw new Error("Missing compaction attempt provenance");
+      durable(ctx);
+      await request("/context/compaction", {phase: "saved", ...detail, entry_id: entry.id}, binding.tool_token);
+      compactionFailed = false;
+    }
+    await normal();
+  });
   pi.on("session_compact_failed", normal);
   const logicalName = (call: any): string => call.name === "capability_invoke" ? call.arguments?.name : call.name.replace("tasks_", "tasks.");
   pi.on("tool_call", (event, ctx) => {
@@ -315,3 +752,5 @@ export default function (pi: ExtensionAPI) {
   }
   for (const definition of definitions) register(definition);
 }
+}
+export default createBridge();

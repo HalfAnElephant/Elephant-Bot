@@ -258,9 +258,13 @@ async def test_user_active_task_snapshot_keeps_dependencies_in_fresh_session(han
     s = handoff
     claim = claim_fresh_user(s)
     assert claim["purpose"] == "user" and claim["target_root_task_id"] is None
-    assert "PRIVATE_HANDOFF" in json.dumps(claim["context"]["active_tasks"])
+    active, = claim["context"]["active_tasks"]
+    assert active["task_id"] == s.root["task_id"] and "PRIVATE_HANDOFF" not in json.dumps(active)
     assert {s.root["task_id"], s.first["task_id"]} <= set(claim["context"]["task_sources"])
     identity = await bind_user(s, claim, tmp_path)
+    details = await s.core.leader.invoke("tasks", identity, {"operation": "tasks.status",
+        "arguments": {"task_ref": active["task_id"]}})
+    assert "PRIVATE_HANDOFF" in json.dumps(details)
     with s.core.db.engine.connect() as conn:
         history = json.loads(conn.execute(select(sessions.c.manifest_json).where(
             sessions.c.id == claim["session_id"])).scalar_one())
@@ -311,7 +315,7 @@ async def test_revoked_original_task_context_is_redacted_without_poisoning_user(
     claim = claim_fresh_user(s)
     assert claim["purpose"] == "user" and not claim["context"].get("task_sources")
     snapshot = claim["context"]["active_tasks"][0]
-    assert snapshot["context_revoked"] and snapshot["goal"] is None and snapshot["result"] is None
+    assert snapshot["context_revoked"] and snapshot["goal"] is None and "result" not in snapshot
     assert "PRIVATE_HANDOFF" not in json.dumps(snapshot)
     identity = (claim["run_id"], claim["fencing_token"], "user-leader")
     snapshot = await s.core.leader.invoke("tasks", identity, {"operation": operation,

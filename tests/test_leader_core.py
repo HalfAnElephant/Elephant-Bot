@@ -1,5 +1,6 @@
 """Real ingress routes into persistent turns; controls never consume model slots."""
 import json
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -35,13 +36,26 @@ async def test_idle_leader_claim_does_not_open_a_write_transaction(tmp_path, off
         core.db.close()
 
 
-async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config, official_event, clock):
+async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config, official_event, clock, caplog, monkeypatch):
     from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)
+    logger = logging.getLogger("elephant.observability.timing")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
     try:
-        event = core.adapters["qq"].normalize(official_payload(official_event, text="帮我处理这个任务"))
-        core.inbox.accept(event)
-        await core.tick(dispatch=False)
+        adapter = core.adapters["qq"]
+        payload = official_payload(official_event, text="帮我处理这个任务")
+        event = adapter.normalize(payload)
+        with caplog.at_level(logging.INFO, logger="elephant.observability.timing"):
+            await adapter.accept_payload(payload)
+            await adapter.accept_payload(payload)
+            await core.tick(dispatch=False)
+        trace = [record for record in caplog.records if record.name == "elephant.observability.timing"]
+        assert [record.msg for record in trace] == [
+            "ingress.persisted", "ingress.processing_started", "ingress.dialogue_admission",
+        ]
+        assert all(record.data["event_id"] == event.event_id for record in trace)
+        assert trace[0].data["monotonic_ns"] <= trace[1].data["dequeued_ns"] <= trace[2].data["monotonic_ns"]
         await core.process(event)
         with core.db.engine.connect() as conn:
             items = conn.execute(select(dialogue_inputs)).mappings().all()
@@ -58,9 +72,10 @@ async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config,
 
 
 async def test_status_does_not_need_free_execution_capacity(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)
     try:
-        event = core.adapters["qq"].normalize(official_event)
+        event = core.adapters["qq"].normalize(official_payload(official_event, text="/status"))
         core.inbox.accept(event)
         await core.tick(dispatch=False)
         with core.db.engine.connect() as conn:
@@ -136,7 +151,7 @@ async def test_followup_keeps_only_same_dialogue_live_images(tmp_path, official_
 async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_config, official_event, clock):
     from unittest.mock import AsyncMock
 
-    from elephant.contracts.memory import MemoryScope, MemorySearchResult
+    from elephant.contracts.memory import MemoryScope
     from elephant.storage.memory_sync_schema import memory_owners
     core = make_core(tmp_path, official_config, clock)
     try:
@@ -148,15 +163,16 @@ async def test_memory_outage_keeps_chat_and_epoch_barrier(tmp_path, official_con
         core.openviking.search = AsyncMock(side_effect=TimeoutError("offline"))
         event = core.adapters["qq"].normalize(official_event)
         result = await core.knowledge.prepare(event, {})
-        assert result["memory_status"] == "degraded"
+        assert result["memory_status"] == "uninitialized"
+        core.openviking.search.assert_not_awaited()
         assert core.knowledge.valid(result)
-        core.openviking.search = AsyncMock(return_value=MemorySearchResult(status="blocked", memory_epoch=2))
-        result = await core.knowledge.prepare(event, {})
         # A new turn without recalled data can proceed while a mutation is pending.
         with core.db.transaction() as conn:
             conn.execute(memory_owners.insert().values(id=scope.key, scope_json=scope.model_dump_json(),
                 binding_json="{}", binding_hash="x", remote_identity="test", epoch=2, state="MUTATING", updated_at=clock.now().isoformat()))
         assert core.knowledge.valid(result)
+        result = await core.knowledge.prepare(event, {})
+        assert result["memory_status"] == "blocked" and core.knowledge.valid(result)
         assert not core.knowledge.valid({**result, "memory_epoch": 1})
         assert not core.knowledge.valid({**result, "retrieved_data": [{"content": "old"}]})
     finally:

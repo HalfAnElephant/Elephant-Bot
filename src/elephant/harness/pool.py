@@ -14,10 +14,11 @@ class PoolAcquisitionError(RuntimeError):
 
 
 class SessionPool:
-    def __init__(self, factory, *, max_resident=4, max_idle=2, ttl=300):
+    def __init__(self, factory, *, max_resident=4, max_idle=2, ttl=300, focused=None):
         if max_idle < 0 or ttl < 1:
             raise ValueError("invalid idle pool limits")
         self.factory, self.max_resident, self.max_idle, self.ttl = factory, max_resident, max_idle, ttl
+        self.focused, self.pinned = focused, None
         self.entries = {}
         self.lock = asyncio.Lock()
 
@@ -47,6 +48,8 @@ class SessionPool:
                 if limits["max_idle"] < 0 or limits["ttl"] < 1:
                     raise ValueError("invalid host pool limits")
                 self.max_idle, self.ttl = limits["max_idle"], limits["ttl"]
+            if self.focused is not None and claim.get("role") == "leader" and claim.get("purpose") == "user":
+                self.pinned = key if self.focused(key) else self.pinned
             await self._sweep()
             for entry in list(self.entries.values()):
                 if entry["key"] == key and entry["state"] == "IDLE":
@@ -90,8 +93,14 @@ class SessionPool:
 
     async def _sweep(self):
         idle = sorted((e for e in self.entries.values() if e["state"] == "IDLE"), key=lambda e: e["used"])
+        pinned = next((entry for entry in idle if entry["key"] == self.pinned), None)
+        if pinned is not None and self.focused(self.pinned) and self.max_idle:
+            idle.remove(pinned)
+            slots = self.max_idle - 1
+        else:
+            slots = self.max_idle
         for index, entry in enumerate(idle):
-            if time.monotonic() - entry["used"] >= self.ttl or len(idle) - index > self.max_idle:
+            if time.monotonic() - entry["used"] >= self.ttl or len(idle) - index > slots:
                 await self._evict(entry)
 
     async def sweep(self):

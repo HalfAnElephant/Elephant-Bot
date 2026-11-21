@@ -17,6 +17,8 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
+from elephant.observability.timing import record_timing
+
 COMPLETION_INSTRUCTION = (
     "执行预算已到收尾边界。停止调用业务工具，仅根据已有工具观察和已核实效果，"
     "沿用当前宿主人格和表达风格，用 QQ 纯文本自然说清你做了什么、哪里还没弄清。"
@@ -38,6 +40,36 @@ def estimate_tokens(value):
     return math.ceil(len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()) / 2)
 
 
+def pi_request_tokens(payload):
+    """Use Pi's text/image estimate on the final OpenAI messages and tool schema."""
+    def chars(value):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+
+    tokens = 0
+    for message in payload["messages"]:
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            length = sum(4800 if isinstance(part, dict) and part.get("type") == "image_url"
+                         else chars(part.get("text") or "") if isinstance(part, dict) and part.get("type") == "text"
+                         else chars(part) for part in content)
+        else:
+            length = chars(content)
+        length += chars(message.get("reasoning_content") or "")
+        for call in message.get("tool_calls") or ():
+            function = call.get("function")
+            length += chars(function.get("name") or "") + chars(function.get("arguments") or "") if isinstance(
+                function, dict) else chars(call)
+        tokens += (length + 3) // 4
+    tools = payload.get("tools")
+    return tokens + ((chars(json.dumps(tools, ensure_ascii=False, separators=(",", ":"))) + 3) // 4 if tools else 0)
+
+
+class ToolTransactionError(ValueError):
+    """The supplied model history has an invalid tool transaction."""
+
+
 def validate_transactions(messages):
     pending = set()
     for message in messages:
@@ -47,21 +79,21 @@ def validate_transactions(messages):
         if role == "tool":
             identity = message.get("tool_call_id")
             if not isinstance(identity, str) or identity not in pending:
-                raise ValueError("orphan or duplicate tool result")
+                raise ToolTransactionError("orphan or duplicate tool result")
             pending.remove(identity)
         else:
             if pending:
-                raise ValueError("incomplete tool transaction")
+                raise ToolTransactionError("incomplete tool transaction")
             calls = message.get("tool_calls") or []
             if not isinstance(calls, list) or any(not isinstance(call, dict) for call in calls):
-                raise ValueError("invalid tool calls")
+                raise ToolTransactionError("invalid tool calls")
             ids = [call.get("id") for call in calls]
             if calls and (role != "assistant" or any(not isinstance(i, str) or not i for i in ids)
                           or len(set(ids)) != len(ids)):
-                raise ValueError("invalid tool call identities")
+                raise ToolTransactionError("invalid tool call identities")
             pending.update(ids)
     if pending:
-        raise ValueError("tool results missing before model request")
+        raise ToolTransactionError("tool results missing before model request")
 
 
 def normalize_usage(raw):
@@ -107,6 +139,10 @@ class ModelCapacity:
         self.total = asyncio.Semaphore(total)
         self.background = asyncio.Semaphore(total - reserved)
 
+    @property
+    def maintenance_available(self):
+        return not (self.background.locked() or self.total.locked())
+
     @asynccontextmanager
     async def slot(self, background):
         if not background:
@@ -117,11 +153,27 @@ class ModelCapacity:
             yield
 
 
+class _FirstBodyByte(httpx.AsyncByteStream):
+    def __init__(self, stream, timings):
+        self.stream, self.timings = stream, timings
+
+    async def __aiter__(self):
+        async for chunk in self.stream:
+            if chunk and "first_body_byte" not in self.timings:
+                self.timings["first_body_byte"] = time.monotonic_ns()
+            yield chunk
+
+    async def aclose(self):
+        await self.stream.aclose()
+
+
 class ProviderAdapter:
     def __init__(self, model, endpoint, key, *, authorize, reserve, record, transport=None,
                  capacity=None, background=False, max_bytes=16777216,
                  output_tokens=None, model_window=32768,
-                 compaction_output=4096, stream_supported=True, on_exhausted=None):
+                 compaction_output=4096, stream_supported=True, on_exhausted=None,
+                 guard=None, upstream_failure=None, request_succeeded=None, before_compaction_request=None,
+                 maintenance=False, event_id=None, run_id=None, reasoning_effort=None):
         self.model, self.endpoint, self.key = model, endpoint, key
         self.upstream_session = str(uuid4())
         self.authorize, self.reserve, self.record = authorize, reserve, record
@@ -129,11 +181,15 @@ class ProviderAdapter:
         self.max_bytes, self.output_tokens = max_bytes, output_tokens
         self.model_window, self.compaction_output = model_window, compaction_output
         self.stream_supported, self.on_exhausted = stream_supported, on_exhausted
+        self.guard, self.upstream_failure, self.request_succeeded = guard, upstream_failure, request_succeeded
+        self.before_compaction_request, self.maintenance = before_compaction_request, maintenance
         self.request_kind = "business"
         self.request_count = self.compaction_count = self.completion_count = 0
         self.business_exhausted = False
         self.active = 0
         self.last_usage = self.ttft = None
+        self.event_id, self.run_id = event_id, run_id
+        self.reasoning_effort = reasoning_effort
 
     async def _exhausted(self):
         self.business_exhausted = True
@@ -146,11 +202,22 @@ class ProviderAdapter:
         if len(json.dumps(payload, ensure_ascii=False).encode()) > self.max_bytes:
             raise HTTPException(413, "request exceeds application byte limit")
 
-    async def complete(self, body):
+    def request_slot(self):
+        if self.maintenance and not self.capacity.maintenance_available:
+            raise HTTPException(409, "maintenance yielded model capacity")
+        return self.capacity.slot(self.background)
+
+    async def authorize_request(self, kind):
+        await self.authorize("model.request")
+        if kind == "compaction" and self.before_compaction_request:
+            await self.before_compaction_request()
+
+    async def complete(self, body, *, kind=None, document_tokens=0):
         await self.authorize("model.request")
         if not isinstance(body, dict) or body.get("model") != self.model or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "unapproved model or messages")
-        kind = "completion" if self.business_exhausted and self.request_kind == "business" else self.request_kind
+        if kind is None:
+            kind = "completion" if self.business_exhausted and self.request_kind == "business" else self.request_kind
         if kind not in {"business", "compaction", "completion", "notification"}:
             raise HTTPException(422, "invalid trusted model request kind")
         if kind == "completion" and self.completion_count >= 1:
@@ -158,10 +225,23 @@ class ProviderAdapter:
         output = self.compaction_output if kind == "compaction" else self.output_tokens
         payload = {key: body[key] for key in ("model", "messages", "tools", "tool_choice", "temperature",
                    "parallel_tool_calls", "reasoning_effort") if key in body}
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         try:
             validate_transactions(payload["messages"])
+        except ToolTransactionError as error:
+            if self.upstream_failure:
+                self.upstream_failure(payload, kind, "invalid_tool_transcript", 422)
+            raise HTTPException(422, str(error)) from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
+        payload["stream"] = bool(body.get("stream"))
+        if output is not None:
+            payload[output_limit_parameter(self.endpoint)] = output
+        if payload["stream"]:
+            payload["stream_options"] = {"include_usage": True}
+        if self.guard:
+            self.guard(payload, kind, document_tokens)
         self._check_size(payload)
         if body.get("stream") and not self.stream_supported:
             raise HTTPException(422, "configured provider does not support streaming")
@@ -192,12 +272,9 @@ class ProviderAdapter:
             else:
                 payload.pop("tool_choice", None)
             payload["messages"] = [{"role": "system", "content": COMPLETION_INSTRUCTION}, *payload["messages"]]
-        payload["stream"] = bool(body.get("stream"))
-        if output is not None:
-            payload[output_limit_parameter(self.endpoint)] = output
-        if payload["stream"]:
-            payload["stream_options"] = {"include_usage": True}
-        self._check_size(payload)
+            if self.guard:
+                self.guard(payload, kind, document_tokens)
+            self._check_size(payload)
         self.request_count += 1
         self.compaction_count += kind == "compaction"
         self.completion_count += kind == "completion"
@@ -205,21 +282,20 @@ class ProviderAdapter:
                    "x-opencode-session": self.upstream_session}
         self.active += 1
         if payload["stream"]:
-            return StreamingResponse(self._stream(payload, headers, request_id), media_type="text/event-stream")
+            return StreamingResponse(self._stream(payload, headers, request_id, kind), media_type="text/event-stream")
         started, raw = time.monotonic(), None
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
-                transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize("model.request")
-                async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
-                        error = await self._upstream_error(response)
-                        raise HTTPException(response.status_code, error["message"])
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content) > 2 * 1024 * 1024:
-                            raise HTTPException(502, "model response exceeded limit")
+            async with self._upstream(payload, headers, request_id, kind, {}) as response:
+                if response.status_code != 200:
+                    error = await self._upstream_error(response)
+                    if self.upstream_failure:
+                        self.upstream_failure(payload, kind, error["code"], response.status_code)
+                    raise HTTPException(response.status_code, error["message"])
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > 2 * 1024 * 1024:
+                        raise HTTPException(502, "model response exceeded limit")
                 try:
                     result = json.loads(content)
                 except (ValueError, UnicodeDecodeError) as error:
@@ -228,12 +304,43 @@ class ProviderAdapter:
                     raise HTTPException(502, "invalid model response")
                 raw = result.get("usage")
                 await self.authorize("model.request")
+                if self.request_succeeded:
+                    self.request_succeeded(kind)
                 return result
         finally:
             try:
                 await self._record_safely(request_id, raw, started, None, payload)
             finally:
                 self.active -= 1
+
+    @asynccontextmanager
+    async def _upstream(self, payload, headers, request_id, kind, timings, *, stream_stats=None):
+        started = timings["waiting_for_slot"] = time.monotonic_ns()
+
+        async def trace(name, _info):
+            if name.endswith(".send_request_headers.started"):
+                timings.setdefault("request_send_started", time.monotonic_ns())
+            elif name.endswith(".send_request_body.complete"):
+                timings.setdefault("request_sent", time.monotonic_ns())
+
+        try:
+            async with self.request_slot():
+                timings["slot_acquired"] = time.monotonic_ns()
+                async with httpx.AsyncClient(
+                    transport=self.transport, timeout=60, trust_env=False, follow_redirects=False
+                ) as client:
+                    await self.authorize_request(kind)
+                    timings["request_dispatched"] = time.monotonic_ns()
+                    async with client.stream("POST", self.endpoint, json=payload, headers=headers,
+                                             extensions={"trace": trace}) as response:
+                        timings["response_headers"] = time.monotonic_ns()
+                        response.stream = _FirstBodyByte(response.stream, timings)
+                        yield response
+        finally:
+            record_timing("model.timing", event_id=self.event_id, run_id=self.run_id, request_id=request_id,
+                          started_ns=started, offsets_ms={
+                              stage: (stamp - started) / 1_000_000 for stage, stamp in timings.items()
+                          }, **(stream_stats or {}))
 
     async def _upstream_error(self, response):
         content = bytearray()
@@ -272,50 +379,78 @@ class ProviderAdapter:
         usage.update(elapsed_ms=round((time.monotonic() - started) * 1000, 2),
                      ttft_ms=round(ttft * 1000, 2) if ttft is not None else None,
                      provider_model=self.model)
+        if "reasoning_effort" in payload:
+            usage["requested_reasoning_effort"] = payload["reasoning_effort"]
         self.last_usage = usage
         await self.record(request_id, usage)
 
-    async def _stream(self, payload, headers, request_id):
+    async def _stream(self, payload, headers, request_id, kind):
         started, first, raw, total, pending = time.monotonic(), None, None, 0, ""
+        failed = False
         decoder = codecs.getincrementaldecoder("utf-8")()
+        timings = {}
+        durations = {"read_wait": 0.0, "authorize": 0.0, "downstream_wait": 0.0}
+        stream_stats = {"stream_ms": durations, "chunks": 0}
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
-                transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize("model.request")
-                async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
-                        error = await self._upstream_error(response)
-                        yield ("data: " + json.dumps({"error": error}) + "\n\n").encode()
-                        return
-                    if "text/event-stream" not in response.headers.get("content-type", ""):
-                        raise RuntimeError("upstream did not provide configured streaming protocol")
-                    async for chunk in response.aiter_bytes():
-                        await self.authorize("model.request")
-                        total += len(chunk)
-                        if total > 2 * 1024 * 1024:
-                            raise RuntimeError("stream response exceeded limit")
-                        pending += decoder.decode(chunk)
-                        normalized = pending.replace("\r\n", "\n")
-                        while "\n\n" in normalized:
-                            frame, normalized = normalized.split("\n\n", 1)
-                            data = "\n".join(line[5:].lstrip(" ") for line in frame.splitlines() if line.startswith("data:"))
-                            if data and data != "[DONE]":
-                                event = json.loads(data)
-                                if isinstance(event, dict):
-                                    if event.get("usage") is not None:
-                                        raw = event["usage"]
-                                    for choice in event.get("choices", []):
-                                        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
-                                        if first is None and isinstance(delta, dict) and any(
-                                            delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
-                                        ):
-                                            first = time.monotonic() - started
-                                            self.ttft = first
-                        pending = normalized
-                        yield chunk
-                    pending += decoder.decode(b"", final=True)
-                    if pending.strip():
-                        raise RuntimeError("truncated upstream event")
+            async with self._upstream(payload, headers, request_id, kind, timings, stream_stats=stream_stats) as response:
+                if response.status_code != 200:
+                    error = await self._upstream_error(response)
+                    if self.upstream_failure:
+                        self.upstream_failure(payload, kind, error["code"], response.status_code)
+                    yield ("data: " + json.dumps({"error": error}) + "\n\n").encode()
+                    return
+                if "text/event-stream" not in response.headers.get("content-type", ""):
+                    raise RuntimeError("upstream did not provide configured streaming protocol")
+                reading = time.monotonic_ns()
+                async for chunk in response.aiter_bytes():
+                    arrived = time.monotonic_ns()
+                    durations["read_wait"] += (arrived - reading) / 1_000_000
+                    stream_stats["chunks"] += 1
+                    await self.authorize("model.request")
+                    durations["authorize"] += (time.monotonic_ns() - arrived) / 1_000_000
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        raise RuntimeError("stream response exceeded limit")
+                    pending += decoder.decode(chunk)
+                    normalized = pending.replace("\r\n", "\n")
+                    while "\n\n" in normalized:
+                        frame, normalized = normalized.split("\n\n", 1)
+                        data = "\n".join(line[5:].lstrip(" ") for line in frame.splitlines() if line.startswith("data:"))
+                        if data and data != "[DONE]":
+                            event = json.loads(data)
+                            if isinstance(event, dict):
+                                if isinstance(event.get("error"), dict):
+                                    failed = True
+                                    if self.upstream_failure:
+                                        code = event["error"].get("code", "upstream_error")
+                                        self.upstream_failure(payload, kind, code, 200)
+                                if event.get("usage") is not None:
+                                    raw = event["usage"]
+                                for choice in event.get("choices", []):
+                                    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                                    if isinstance(delta, dict) and delta.get("content"):
+                                        timings.setdefault("first_content_delta", time.monotonic_ns())
+                                    if first is None and isinstance(delta, dict) and any(
+                                        delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
+                                    ):
+                                        timings["first_effective_delta"] = time.monotonic_ns()
+                                        first = time.monotonic() - started
+                                        self.ttft = first
+                    pending = normalized
+                    forwarding = time.monotonic_ns()
+                    yield chunk
+                    reading = time.monotonic_ns()
+                    durations["downstream_wait"] += (reading - forwarding) / 1_000_000
+                durations["read_wait"] += (time.monotonic_ns() - reading) / 1_000_000
+                pending += decoder.decode(b"", final=True)
+                if pending.strip():
+                    raise RuntimeError("truncated upstream event")
+                if self.request_succeeded and not failed:
+                    self.request_succeeded(kind)
+        except (httpx.TransportError, TimeoutError):
+            if self.upstream_failure:
+                self.upstream_failure(payload, kind, "upstream_transport_error", 503)
+            raise
         finally:
             try:
                 await self._record_safely(request_id, raw, started, first, payload)

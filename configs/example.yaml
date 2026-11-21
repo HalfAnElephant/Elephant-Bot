@@ -17,7 +17,8 @@ execution:
   warm_ttl_seconds: 300
 context:
   max_request_bytes: 16777216
-  max_tokens: null # pi automatic threshold, derived from the model window
+  force_compaction_tokens: null # Derived from max_tokens (legacy alias) or the model window.
+  elastic_compaction_tokens: null # Defaults to 90% of the force threshold, above recent retention.
   keep_recent_tokens: null # pi automatic recent-context retention
   compaction_output_tokens: 4096
 model:

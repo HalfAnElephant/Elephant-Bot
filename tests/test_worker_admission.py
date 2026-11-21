@@ -89,6 +89,25 @@ async def test_pool_admits_more_than_32_busy_processes_and_keeps_only_idle_cache
         await pool.close()
 
 
+async def test_focused_user_leader_outlives_idle_ttl_and_releases_on_switch():
+    focused = {"a"}
+    pool = SessionPool(Runner, max_idle=1, ttl=1, focused=focused.__contains__)
+    claim = {"task_id": "task", "session_id": "a", "role": "leader", "purpose": "user"}
+    try:
+        first = await pool.acquire(claim)
+        await pool.release(first, committed=True)
+        pool.entries[first.pool_id]["used"] -= 2
+        await pool.sweep()
+        assert await pool.acquire(claim) is first
+        await pool.release(first, committed=True)
+        pool.entries[first.pool_id]["used"] -= 2
+        focused.clear()
+        await pool.sweep()
+        assert first.stopped_verified
+    finally:
+        await pool.close()
+
+
 async def test_unknown_process_is_retained_without_blocking_new_admission():
     pool = SessionPool(Runner, max_resident=1)
     try:

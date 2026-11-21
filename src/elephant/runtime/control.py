@@ -22,6 +22,15 @@ _CANCEL = {"取消", "取消任务", "取消刚才那个", "取消刚才那个�
            "停止刚才那个", "停止刚才那个任务", "停止上个任务", "停止这个任务"}
 _STATUS = {"任务状态", "任务进度", "进度怎么样", "任务怎么样了", "刚才那个怎么样", "刚才那个怎么样了",
            "刚才那个任务怎么样", "刚才那个任务怎么样了", "刚才那个完成了吗", "上个任务怎么样了", "现在怎么样了"}
+_COMMAND_ALIASES = {
+    "/项目": "/project", "/帮助": "/help", "/状态": "/status", "/任务": "/tasks",
+    "/取消": "/cancel", "/补充": "/followup", "/静默": "/mute", "/恢复": "/resume",
+    "/模式": "/mode", "/新对话": "/new", "/切换对话": "/switch", "/对话": "/dialogs",
+}
+
+
+def canonical_command(command: str) -> str:
+    return _COMMAND_ALIASES.get(command, command)
 
 
 @dataclass(frozen=True)
@@ -69,14 +78,15 @@ class TurnRouter:
         self.core, self.db = core, core.db
 
     def command(self, event, command, argument):
-        if command == "/任务" and not argument.strip():
+        command = canonical_command(command)
+        if command == "/tasks" and not argument.strip():
             return self._route(event, TaskIntent("list"))
-        if command == "/补充":
+        if command == "/followup":
             reference, _, text = argument.strip().partition(" ")
             if not reference or not text.strip():
                 return "请引用需要补充的进度消息，再发送补充内容。"
             return self._route(event, TaskIntent("input", reference, text))
-        return self._route(event, TaskIntent("cancel" if command == "/取消" else "status", argument.strip() or None))
+        return self._route(event, TaskIntent("cancel" if command == "/cancel" else "status", argument.strip() or None))
 
     def route(self, event):
         return self._route(event, task_intent(event.text))

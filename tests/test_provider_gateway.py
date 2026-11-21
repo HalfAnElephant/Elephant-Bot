@@ -1,6 +1,7 @@
 """Deterministic provider and host-binding checks without external service credentials."""
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -60,10 +61,14 @@ def body():
 async def test_transaction_rejection_precedes_reservation(messages, body):
     fixture = ProviderFixture()
     body["messages"] = messages
+    failures = []
+    fixture.adapter.upstream_failure = lambda _payload, kind, code, status: failures.append((kind, code, status))
     with pytest.raises(HTTPException) as error:
         await fixture.adapter.complete(body)
     assert error.value.status_code == 422
     assert not fixture.requests and not fixture.reservations
+    if isinstance(messages[0], dict) and messages[0].get("role") == "tool":
+        assert failures == [("business", "invalid_tool_transcript", 422)]
 
 
 def test_complete_parallel_transaction_is_accepted():
@@ -137,6 +142,59 @@ async def test_true_stream_first_chunk_precedes_upstream_completion(body):
     assert fixture.usage[0][1]["cached_read_tokens"] == 60
     assert fixture.usage[0][1]["ttft_ms"] is not None
     assert fixture.requests[0]["stream_options"] == {"include_usage": True}
+
+
+async def test_model_timing_marks_real_http_send_and_sse_milestones(body, caplog, monkeypatch):
+    logger = logging.getLogger("elephant.observability.timing")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    keepalive = b": ping\n\n"
+    delta = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+    release_delta = asyncio.Event()
+
+    async def upstream(reader, writer):
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(line.split(b":", 1)[1] for line in headers.lower().splitlines()
+                          if line.startswith(b"content-length:"))
+            await reader.readexactly(int(length))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
+                         + str(len(keepalive + delta)).encode() + b"\r\n\r\n" + keepalive)
+            await writer.drain()
+            await release_delta.wait()
+            writer.write(delta)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    fixture = ProviderFixture(event_id="inbox-event", run_id="leader-run")
+    async with await asyncio.start_server(upstream, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        fixture.adapter.transport = None
+        fixture.adapter.endpoint = f"http://127.0.0.1:{port}/v1/chat/completions"
+        response = await fixture.adapter.complete({**body, "stream": True})
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            async with asyncio.timeout(3):
+                try:
+                    assert await anext(response.body_iterator) == keepalive
+                finally:
+                    release_delta.set()
+                assert b"".join([chunk async for chunk in response.body_iterator]) == delta
+
+    trace = next(record.data for record in caplog.records if record.msg == "model.timing")
+    assert (trace["event_id"], trace["run_id"], trace["request_id"]) == (
+        "inbox-event", "leader-run", fixture.reservations[0][0],
+    )
+    offsets = trace["offsets_ms"]
+    assert offsets["waiting_for_slot"] == 0
+    assert offsets["slot_acquired"] <= offsets["request_dispatched"] <= offsets["request_send_started"]
+    assert offsets["request_send_started"] <= offsets["request_sent"] <= offsets["response_headers"]
+    assert offsets["response_headers"] <= offsets["first_body_byte"] < offsets["first_effective_delta"]
+    assert offsets["first_content_delta"] <= offsets["first_effective_delta"]
+    assert trace["chunks"] == 2
+    assert set(trace["stream_ms"]) == {"read_wait", "authorize", "downstream_wait"}
+    assert all(value >= 0 for value in trace["stream_ms"].values())
 
 
 async def test_stream_utf8_split_and_missing_usage_stay_unknown(body):
@@ -674,6 +732,21 @@ async def test_actual_request_metrics_keep_stable_prefix_and_host_model(body):
     assert second["input_tokens_estimated"] > 0 and second["coverage"] == "unknown"
 
 
+@pytest.mark.parametrize(("role", "effort"), [("leader", "low"), ("worker", "max")])
+async def test_host_reasoning_effort_overrides_pi_and_is_recorded(gateway, role, effort):
+    instance, core, claim = gateway
+    instance.revoke()
+    instance.bind({**claim, "role": role, "reasoning_effort": effort})
+    fixture = ProviderFixture()
+    instance.provider.transport = fixture.adapter.transport
+    await instance.provider.complete({
+        "model": "offline", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high",
+    })
+    assert fixture.requests[0]["reasoning_effort"] == effort
+    usage, = (data["usage"] for operation, data in core.calls if operation == "usage")
+    assert usage["requested_reasoning_effort"] == effort
+
+
 async def test_provider_session_header_survives_warm_rebind(gateway):
     instance, _core, claim = gateway
     seen = []
@@ -683,7 +756,8 @@ async def test_provider_session_header_survives_warm_rebind(gateway):
     instance.provider.transport = httpx.MockTransport(upstream)
     await instance.provider.complete({"model": "offline", "messages": [{"role": "user", "content": "hi"}]})
     instance.revoke()
-    instance.bind({**claim, "run_id": "second-run"})
+    instance.bind({**claim, "run_id": "second-run", "event_json": json.dumps({"event_id": "second-event"})})
+    assert (instance.provider.event_id, instance.provider.run_id) == ("second-event", "second-run")
     instance.provider.transport = httpx.MockTransport(upstream)
     await instance.provider.complete({"model": "offline", "messages": [{"role": "user", "content": "again"}]})
     assert len(seen) == 2 and seen[0] and seen[0] == seen[1]
@@ -776,3 +850,83 @@ async def test_trusted_output_limit_uses_provider_parameter(body, endpoint, fiel
     request, = fixture.requests
     assert request[field] == 512
     assert not {"max_tokens", "max_completion_tokens"}.difference({field}).intersection(request)
+
+
+@pytest.mark.parametrize(("mode", "delta", "allowed"), [
+    ("text", 1, True), ("text", 0, False), ("text", -1, False), ("documents", 0, False),
+    ("attachment", 0, False), ("tools", 0, False), ("bytes", 0, True), ("bytes", -1, False),
+])
+async def test_leader_context_gate_uses_expanded_final_request(tmp_path, mode, delta, allowed):
+    from types import SimpleNamespace
+
+    from elephant.providers import pi_request_tokens
+
+    fixture = ProviderFixture()
+    body = {"model": "offline", "messages": [{"role": "system", "content": "policy"},
+                                            {"role": "user", "content": "context" * 100}]}
+    projected = {**body}
+    if mode in {"documents", "attachment"}:
+        block = {"role": "user", "content": [{"type": "text", "text": "授权文档内容" * 300}]
+                 if mode == "documents" else [{"type": "image_url", "image_url": {"url": "data:image/png;base64,image"}}]}
+        projected["messages"] = [*body["messages"], block]
+    if mode == "tools":
+        body["tools"] = [{"type": "function", "function": {"name": "task", "description": "schema" * 300}}]
+        projected["tools"] = body["tools"]
+
+    async def core(operation, packet):
+        if operation == "authorize":
+            return {"allowed": True}
+        if operation == "reserve-budget":
+            return await fixture.reserve(packet["request_id"], packet["kind"])
+        assert operation == "usage"
+
+    gateway = RunGateway(tmp_path, "offline", "fixture-key", "https://model.invalid/v1/chat/completions",
+                         call=core, transport=fixture.adapter.transport)
+
+    async def expand(payload, *args, **kwargs):
+        return {**payload, "messages": projected["messages"]}
+
+    if mode == "documents":
+        gateway.documents = SimpleNamespace(with_documents=expand)
+    elif mode == "attachment":
+        gateway.with_attachments = expand
+    limits = {"force_compaction_tokens": pi_request_tokens(projected) + delta}
+    if mode == "bytes":
+        limits.update(force_compaction_tokens=4096,
+                      max_bytes=len(json.dumps({**projected, "stream": False}, ensure_ascii=False).encode()) + delta)
+    gateway.bind({"task_id": "leader", "run_id": "run", "fencing_token": 1, "role": "leader",
+                  "permission_snapshot": {"principal": {}}, "context": {"limits": limits}})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://local") as client:
+        response = await client.post("/v1/chat/completions", json=body,
+                                     headers={"Authorization": "Bearer " + gateway.model_token})
+    assert response.status_code == (200 if allowed else 413), response.text
+    assert len(fixture.requests) == len(fixture.reservations) == int(allowed)
+    if not allowed:
+        assert gateway.context_failure["tokens"] == pi_request_tokens(projected)
+
+
+async def test_gateway_persists_rejected_transcript_as_nonretryable(tmp_path, body):
+    fixture = ProviderFixture()
+    context_failure = []
+
+    async def core(operation, packet):
+        if operation == "authorize":
+            return {"allowed": True}
+        assert operation == "context-compaction"
+        context_failure.append(packet)
+        return {"accepted": True}
+
+    gateway = RunGateway(tmp_path, "offline", "fixture-key", "https://model.invalid/v1/chat/completions",
+                         call=core, transport=fixture.adapter.transport)
+    gateway.bind({"task_id": "leader", "run_id": "run", "fencing_token": 1, "role": "leader",
+                  "permission_snapshot": {"principal": {}}, "context": {"limits": {"force_compaction_tokens": 4096}}})
+    body["messages"] = [{"role": "tool", "tool_call_id": "orphan", "content": "receipt"}]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://local") as client:
+        response = await client.post("/v1/chat/completions", json=body,
+                                     headers={"Authorization": "Bearer " + gateway.model_token})
+    assert response.status_code == 422
+    assert not fixture.requests
+    await gateway.persist_context_failure()
+    assert len(context_failure) == 1
+    assert context_failure[0]["reason"] == "invalid_tool_transcript"
+    assert context_failure[0]["phase"] == "failure" and context_failure[0]["retryable"] is False

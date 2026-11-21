@@ -21,6 +21,7 @@ from elephant.jobs.waiters import ExternalWaiters
 from elephant.jobs.worker import Spool, Worker, configured_github
 from elephant.pi_installation import runtime_pi_path
 from elephant.providers import ModelCapacity
+from elephant.storage.agent_schema import dialogues, focus
 from elephant.storage.task_schema import runs
 
 logger = logging.getLogger(__name__)
@@ -115,11 +116,19 @@ class RuntimeClient:
             functions = ((self.leader.sessions.claim, self.service.claim) if self.last_role == "worker"
                          else (self.service.claim, self.leader.sessions.claim))
             functions = (*functions, self.leader.claim_review)
+            maintenance = getattr(self.leader, "compaction", None)
+            if maintenance is not None:
+                functions = (*functions, maintenance.claim)
             for claim in functions:
                 result = claim(body.worker_id)
                 if result:
                     self.last_role = result.get("role", "worker")
                     result["host_epoch"] = self.core.recovery.epoch
+                    model_settings = self.core.settings.model
+                    if self.last_role == "leader":
+                        result["reasoning_effort"] = model_settings.leader_reasoning_effort
+                    elif self.last_role == "worker":
+                        result["reasoning_effort"] = model_settings.worker_reasoning_effort
                     with self.service.db.transaction() as conn:
                         conn.execute(update(runs).where(runs.c.id == result["run_id"]).values(request_json=__import__("json").dumps(result)))
                     return result
@@ -198,6 +207,8 @@ class Scheduler:
         self.client = RuntimeClient(core, leader)
         model_limit = self.settings.orchestration.model_request_limit
         self.capacity = ModelCapacity(total=model_limit, reserved=int(model_limit > 1))
+        self.client.maintenance_capacity = self.capacity
+        self.leader.maintenance_capacity = self.capacity
         from elephant.adapters.execution.world import LocalExecution
         self.execution = getattr(core, "execution", None) or LocalExecution()
         core.job_runtime = self.execution.create_job_runtime(core, data)
@@ -229,7 +240,12 @@ class Scheduler:
             runner.archive = Path(args.archive)
             return runner
 
-        self.pool = SessionPool(factory,
+        def focused(session_id):
+            with core.db.engine.connect() as conn:
+                return conn.execute(select(focus.c.key).join(dialogues, dialogues.c.id == focus.c.dialogue_id)
+                    .where(dialogues.c.session_id == session_id, dialogues.c.state == "ACTIVE").limit(1)).first() is not None
+
+        self.pool = SessionPool(factory, focused=focused,
             max_idle=self.settings.execution.warm_idle_max if self.settings.execution.warm_max else 0,
             ttl=self.settings.execution.warm_ttl_seconds)
         self.worker = Worker(self.client, "daemon", Spool(self.args.spool), factory, pool=self.pool)

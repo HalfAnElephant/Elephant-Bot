@@ -130,14 +130,15 @@ async def test_full_slots_ambiguous_cancel_selects_then_exact_cancel_only_target
     r.no_model_input()
 
 
-async def test_cancel_without_id_and_status_remain_host_controls_at_full_capacity(control_runtime):
+@pytest.mark.parametrize("command", ["/cancel", "/取消"])
+async def test_cancel_without_id_and_status_remain_host_controls_at_full_capacity(control_runtime, command):
     r = control_runtime
     root = r.root()
     r.core.tasks.claim("busy-worker")
     status = await r.receive(r.event("查看 " + root["public_id"] + " 的进度"))
     assert "正在处理" in r.response(status) and "检查项目" in r.response(status)
     assert root["public_id"] not in r.response(status) and "WAITING_CHILDREN" not in r.response(status)
-    cancel = await r.receive(r.event("/取消"))
+    cancel = await r.receive(r.event(command))
     assert r.response(cancel) == "正在停止。" and task_state(r, root["task_id"]) == "CANCEL_REQUESTED"
     r.no_model_input()
 
@@ -745,6 +746,62 @@ async def test_help_service_status_and_dialogues_hide_internal_details(control_r
         from elephant.storage.agent_schema import dialogues
         identifier = conn.execute(select(dialogues.c.id)).scalar_one()
     assert await r.core.command(r.event("/切换对话 " + identifier)) == "当前对话：研究资料"
+
+
+@pytest.mark.parametrize(("english", "legacy"), [
+    ("/help", "/帮助"),
+    ("/status", "/状态"),
+    ("/tasks", "/任务"),
+    ("/project", "/项目"),
+    ("/dialogs", "/对话"),
+])
+async def test_legacy_read_commands_share_the_english_host_route(control_runtime, english, legacy):
+    r = control_runtime
+    r.root(title="研究资料")
+    english_event = await r.receive(r.event(english))
+    legacy_event = await r.receive(r.event(legacy))
+    assert r.response(english_event)
+    assert r.response(legacy_event) == r.response(english_event)
+    r.no_model_input()
+
+
+@pytest.mark.parametrize(("new", "switch", "mute", "resume", "mode"), [
+    ("/new", "/switch", "/mute", "/resume", "/mode"),
+    ("/新对话", "/切换对话", "/静默", "/恢复", "/模式"),
+])
+async def test_english_and_legacy_session_commands_remain_host_controls(
+        control_runtime, new, switch, mute, resume, mode):
+    r = control_runtime
+    r.root(title="研究资料")
+    created = await r.receive(r.event(new + " 第二个对话"))
+    assert r.response(created) == "当前对话：第二个对话"
+    switched = await r.receive(r.event(switch + " 研究资料"))
+    assert r.response(switched) == "当前对话：研究资料"
+    stopped = await r.receive(r.event(mute + " 30m"))
+    assert r.core.state(stopped.conversation.key)["mode"] == "silent"
+    resumed = await r.receive(r.event(resume))
+    assert r.core.state(resumed.conversation.key)["mode"] == "addressed_only"
+    changed = await r.receive(r.event(mode + " silent"))
+    assert r.core.state(changed.conversation.key)["mode"] == "silent"
+    r.no_model_input()
+
+
+async def test_legacy_slash_prefix_is_not_a_host_command(control_runtime):
+    r = control_runtime
+    await r.receive(r.event("/状态说明"))
+    r.core.knowledge.prepare.assert_awaited_once()
+
+
+@pytest.mark.parametrize("command", ["/followup", "/补充"])
+async def test_english_and_legacy_followup_keep_the_explicit_target(control_runtime, command):
+    r = control_runtime
+    root = r.root()
+    source = await r.receive(r.event(command + " " + root["public_id"] + " 只看最近一周"))
+    assert r.response(source) == "已收到补充内容。"
+    with r.core.db.engine.connect() as conn:
+        stored = conn.execute(select(inputs).where(inputs.c.task_id == root["task_id"])).mappings().one()
+    assert stored["source_id"] == source.event_id and stored["text"] == "只看最近一周"
+    r.no_model_input()
 
 
 @pytest.mark.parametrize(("error", "expected"), [

@@ -269,6 +269,28 @@ async def test_offline_backend_leaves_visible_pending_refs_and_recovers_from_har
     assert (await indexed(service, accepted)).indexed
 
 
+async def test_changed_source_projection_releases_memory_queue_without_remote_append(memory):
+    service, remote, scope, originals = memory
+    old = batch(scope)
+    new = batch(scope, session="leader-b", event_id="source-2")
+    originals.update({old.session_id: old, new.session_id: new})
+    remote.offline = True
+    failed = await service.sync(old)
+    queued = await service.sync(new)
+    originals[old.session_id] = old.model_copy(update={"events": ()})
+    remote.offline = False
+    remote.calls.clear()
+
+    await service.reconcile()
+    assert not remote.calls
+    failed = await service.poll(failed.operation_id)
+    assert failed.state == "FAILED" and failed.error_type == "SourceBatchMismatch"
+    assert failed.exported_seq == 0
+    assert (await service.poll(queued.operation_id)).state == "ACCEPTED"
+    remote.complete()
+    assert (await indexed(service, queued)).indexed
+
+
 @pytest.mark.parametrize("lost", ["append", "commit"])
 async def test_lost_receipt_reconciles_same_remote_operation_without_repetition(memory, lost):
     service, remote, scope, originals = memory
