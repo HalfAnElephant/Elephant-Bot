@@ -22,6 +22,15 @@ _CANCEL = {"取消", "取消任务", "取消刚才那个", "取消刚才那个�
            "停止刚才那个", "停止刚才那个任务", "停止上个任务", "停止这个任务"}
 _STATUS = {"任务状态", "任务进度", "进度怎么样", "任务怎么样了", "刚才那个怎么样", "刚才那个怎么样了",
            "刚才那个任务怎么样", "刚才那个任务怎么样了", "刚才那个完成了吗", "上个任务怎么样了", "现在怎么样了"}
+_COMMAND_ALIASES = {
+    "/项目": "/project", "/帮助": "/help", "/状态": "/status", "/任务": "/tasks",
+    "/取消": "/cancel", "/补充": "/followup", "/静默": "/mute", "/恢复": "/resume",
+    "/模式": "/mode", "/新对话": "/new", "/切换对话": "/switch", "/对话": "/dialogs",
+}
+
+
+def canonical_command(command: str) -> str:
+    return _COMMAND_ALIASES.get(command, command)
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,7 @@ class TurnRouter:
         self.core, self.db = core, core.db
 
     def command(self, event, command, argument):
+        command = canonical_command(command)
         if command == "/tasks" and not argument.strip():
             return self._route(event, TaskIntent("list"))
         if command == "/followup":

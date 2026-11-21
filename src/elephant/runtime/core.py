@@ -40,7 +40,7 @@ from elephant.storage.task_schema import (
     waits,
 )
 
-from .control import TurnRouter
+from .control import TurnRouter, canonical_command
 from .leader import LeaderRuntime
 from .sessions import SessionService
 from .task_graph import TaskGraph
@@ -443,6 +443,7 @@ class Core:
 
     async def command(self, event):
         command, *arguments = event.text.strip().split(maxsplit=1)
+        command = canonical_command(command)
         argument = arguments[0] if arguments else ""
         access = self.access(event)
         if command == "/help":
@@ -520,7 +521,7 @@ class Core:
         try:
             if not self.allowed(event) or event.sender_is_bot or event.event_type != "message.created":
                 return
-            command = (event.text.strip().split(maxsplit=1) or [""])[0]
+            command = canonical_command((event.text.strip().split(maxsplit=1) or [""])[0])
             if command in CONTROL_COMMANDS:
                 text = await self.command(event)
                 if text:
