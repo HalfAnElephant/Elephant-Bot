@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 
 from elephant.domain import InboundEvent, MediaSegment, stable_id
 from elephant.domain.agents import TaskInputSpec
@@ -295,6 +295,14 @@ class LeaderRuntime:
                         manifest_json=json.dumps(history, ensure_ascii=False)))
             conn.execute(update(runs).where(runs.c.id == run["id"]).values(
                 request_json=json.dumps(claim, ensure_ascii=False)))
+        cursor = claim["context"].get("delivery_history_cursor")
+        if kind != "input_persisted" and cursor and payload.get("delivery_history_cursor") == cursor:
+            stored = conn.scalar(select(sessions.c.manifest_json).where(sessions.c.id == claim["session_id"]))
+            if stored:
+                history = json.loads(stored)
+                history["delivery_history_cursor"] = max(cursor, history.get("delivery_history_cursor", 0))
+                conn.execute(update(sessions).where(sessions.c.id == claim["session_id"])
+                    .values(manifest_json=json.dumps(history, ensure_ascii=False)))
         now = self.clock.now().isoformat()
         table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
         values = {"persisted_at": now}
@@ -631,6 +639,8 @@ class LeaderRuntime:
                 return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
             protocol_failure = (not result.agent_authored and result.status == "failed" and run["role"] == "leader"
                 and "model_tool_protocol_recovery_failed" in result.limitations)
+            cleared = claim["purpose"] == "user" and conn.scalar(select(dialogue_inputs.c.state)
+                .where(dialogue_inputs.c.id == claim["source_ids"][0])) == "CLEARED"
             stale_draft, covered = False, []
             deferred_inputs = claim.get("deferred_goal_inputs")
             if deferred_inputs:
@@ -638,7 +648,7 @@ class LeaderRuntime:
                     operations.c.state == "PREPARED").values(state="FAILED",
                         result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
                 self._persist_input_dependencies(conn, claim["source_ids"][0], deferred_inputs)
-            elif result.agent_authored and claim.get("steer_until"):
+            elif not cleared and result.agent_authored and claim.get("steer_until"):
                 outcome = proof.get("outcome")
                 summary = proof.get("summary")
                 if (not isinstance(summary, str) or summary[:10000] != result.summary
@@ -675,14 +685,14 @@ class LeaderRuntime:
                     conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id.in_(covered),
                         dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.handled_at.is_(None)).values(
                         claimed_attempt_id=run_id, persisted_at=now, consumed_at=now, handled_at=now, state="HANDLED"))
-            if deferred_inputs or stale_draft or (not result.agent_authored and not protocol_failure):
+            if cleared or deferred_inputs or stale_draft or (not result.agent_authored and not protocol_failure):
                 if discarded_entry:
                     conn.execute(update(runs).where(runs.c.id == run_id).values(
                         receipt_json=json.dumps({"discarded_submit_entry": discarded_entry})))
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
                 source_values = {"claimed_attempt_id": None}
                 conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
-                    table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(**source_values))
+                    table.c.claimed_attempt_id == run_id, or_(table.c.handled_at.is_(None), cleared)).values(**source_values))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="FINISHED", slot_reserved=0,
                     quiescent_at=now, runner_stopped_at=now if stopped else None, result_json=submitted_result))
                 if run["process_id"]:
@@ -865,7 +875,8 @@ class LeaderRuntime:
                         stable_id(owner, source["id"], call["id"]))
                     if (not task and not proof and len(pending) == 1 and len(claim["source_ids"]) == 1
                             and not claim.get("target_root_task_id") and source["owner_id"] == owner
-                            and source["claimed_attempt_id"] == run_id and source["handled_at"] is None):
+                            and source["claimed_attempt_id"] == run_id
+                            and (source["handled_at"] is None or source["state"] == "CLEARED")):
                         discard = adapter.aborted_submit(path, call, run_id=run_id, input_ids=claim["source_ids"])
                         if discard:
                             break
@@ -1305,6 +1316,9 @@ class LeaderRuntime:
                 if known and known["active_run_id"] not in {None, run_id}:
                     raise PermissionError("session already has a writer")
                 history = json.loads(known["manifest_json"]) if known else dict(claim["binding"])
+                boundary = claim["context"].get("context_boundary", 0)
+                if boundary and boundary != history.get("context_boundary"):
+                    history = {**claim["binding"], "context_boundary": boundary, "context_sources_version": 1}
                 if known and not history.get("context_sources_version"):
                     earlier = conn.execute(select(
                         func.json_extract(runs.c.request_json, "$.context.task_sources"),
@@ -1325,6 +1339,9 @@ class LeaderRuntime:
                 if claim["context"].get("retrieved_data") and claim["context"].get("memory_scope") and not history.get("memory_history"):
                     history.update(memory_history=True, memory_scope=claim["context"]["memory_scope"],
                                    memory_epoch=claim["context"]["memory_epoch"])
+                if claim["context"].get("published_task_sources"):
+                    history["published_task_sources"] = sorted(
+                        set(history.get("published_task_sources", ())) | set(claim["context"]["published_task_sources"]))
                 if claim["context"].get("task_sources") or claim["context"].get("source_manifest"):
                     history["steering_sources"] = True
                     history["workspace_id"] = claim["context"].get("workspace_id", "personal")

@@ -51,6 +51,8 @@ class ContextMaintenance:
                 claim = json.loads(source["request_json"])
                 event = InboundEvent.model_validate_json(claim["event_json"])
                 manifest = json.loads(current["manifest_json"])
+                if claim["context"].get("context_boundary", 0) != self.leader.sessions.context_boundary(conn, dialogue["id"]):
+                    continue
                 validator = self.leader.service.context_validator
                 if not self.leader.core.allowed(event) or (validator and not validator(
                         self.leader.sessions.access_for_claim(claim), manifest)):

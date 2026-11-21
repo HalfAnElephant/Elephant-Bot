@@ -281,11 +281,13 @@ class StreamDelivery:
                 stream_messages.c.final_marker == 1, stream_messages.c.state == "FINISHED",
                 stream_messages.c.sent_text == result["summary"])).mappings().first()
             if final:
-                deliveries = c.execute(select(outbox.c.id).where(pending,
-                    outbox.c.state == "STREAM_PENDING")).scalars().all()
-                for delivery_id in deliveries:
+                deliveries = c.execute(select(outbox.c.id).where(pending, outbox.c.state == "STREAM_PENDING")
+                    .order_by(outbox.c.part_no)).scalars().all()
+                # The stream is one QQ message even if its Outbox fallback has several parts.
+                for index, delivery_id in enumerate(deliveries):
                     self.core.outbox._receipt(delivery_id, SendReceipt(state="SENT",
-                        platform_message_id=final["stream_id"]), connection=c)
+                        platform_message_id=final["stream_id"]), connection=c,
+                        record_visible=index == 0, visible_text=final["sent_text"])
                 if origin_kind == "task":
                     c.execute(update(notifications).where(notifications.c.id == origin_id).values(state="DELIVERED"))
             else:

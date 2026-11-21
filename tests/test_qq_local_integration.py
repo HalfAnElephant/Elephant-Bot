@@ -35,10 +35,13 @@ async def local_file_send(service, args, body):
     return await local_file_upload(service, args, body, chunks())
 
 
-async def test_file_core_scoped_idempotent_and_mime_rejection(rich_setup):
+@pytest.mark.parametrize("leader_managed", [False, True])
+async def test_file_core_scoped_idempotent_and_mime_rejection(rich_setup, leader_managed):
     service, args, task, _ = rich_setup
+    service.leader_publication = lambda _: leader_managed
     result = await local_file_send(service, args, payload())
-    assert not result["delivered"] and result["state"] == "PENDING"
+    assert not result["delivered"]
+    assert result["state"] == ("LEADER_PENDING" if leader_managed else "PENDING")
     assert await local_file_send(service, args, payload()) == result
     with pytest.raises(ValueError, match="different file"):
         await local_file_send(service, args, payload(content_base64=base64.b64encode(PNG + b"changed").decode()))

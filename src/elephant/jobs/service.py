@@ -54,7 +54,7 @@ class TaskService:
     def __init__(
         self, db, clock, outbox, archive_root=None, stop_verifier=None, *,
         permissions=None, max_active=4, sustained_limit=2, max_resident=None,
-        context_validator=None, budget_ceiling=None, stream_eligibility=None,
+        context_validator=None, budget_ceiling=None, stream_eligibility=None, leader_publication=None,
         qq_adapters: Mapping[str, object] | None = None,
         skills_settings: Callable[[], SkillsConfig] | SkillsConfig | None = None,
         skills_provider: Callable[..., HermesSkills | None] | None = None,
@@ -67,6 +67,7 @@ class TaskService:
         self.budget_ceiling = budget_ceiling or RunBudget()
         self.context_validator = context_validator
         self.stream_eligibility = stream_eligibility
+        self.leader_publication = leader_publication or (lambda event: False)
         self.qq_adapters = qq_adapters if qq_adapters is not None else {}
         self.skills_settings = skills_settings
         self.skills_provider = skills_provider
@@ -399,8 +400,9 @@ class TaskService:
                     if len(parts) == 3:
                         host, repository = parts[0], "/".join(parts[1:])
                         break
-            public_answer_events = bool(not row["root_task_id"] and self.stream_eligibility and self.stream_eligibility(
-                InboundEvent.model_validate_json(row["event_json"])))
+            event = InboundEvent.model_validate_json(row["event_json"])
+            public_answer_events = bool(not row["root_task_id"] and self.stream_eligibility
+                and not self.leader_publication(event) and self.stream_eligibility(event))
             if public_answer_events:
                 c.execute(insert(stream_runs).values(run_id=run_id, task_id=row["id"], state="ACTIVE", cursor_seq=0))
             return {
@@ -871,7 +873,7 @@ class TaskService:
                 notifications.c.state.not_in(["CANCELLED", "SUPERSEDED"]))
             if not internal:
                 query = query.join(outbox_table, outbox_table.c.origin_id == notifications.c.id).where(
-                    outbox_table.c.state.in_(["PENDING", "RETRYABLE", "SENDING", "SENT", "UNKNOWN",
+                    outbox_table.c.state.in_(["LEADER_PENDING", "PENDING", "RETRYABLE", "SENDING", "SENT", "UNKNOWN",
                                               "WAITING_FOR_TRIGGER", "STREAM_PENDING"]))
             duplicate = c.execute(query.limit(1)).scalar_one_or_none()
             if duplicate:
@@ -882,7 +884,7 @@ class TaskService:
             notifications.c.purpose == "progress", notifications.c.importance == "normal")
         if purpose in {"progress", "result"}:
             c.execute(update(outbox_table).where(outbox_table.c.origin_id.in_(stale),
-                outbox_table.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
+                outbox_table.c.state.in_(["LEADER_PENDING", "PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
                 .values(state="SUPERSEDED"))
         now = self.clock.now()
         c.execute(insert(notifications).values(id=notification_id, task_id=task["id"], run_id=run_id,
@@ -892,11 +894,13 @@ class TaskService:
         event = InboundEvent.model_validate_json(task["event_json"])
         streaming = bool(purpose == "result" and run_id and c.execute(select(stream_runs.c.run_id).where(
             stream_runs.c.run_id == run_id)).first())
+        worker_run = run_id and c.scalar(select(runs.c.role).where(runs.c.id == run_id)) == "worker"
         deliveries = self.outbox.enqueue_text(c, target=event.conversation, text=text,
             origin_kind="task", origin_id=notification_id, reply_context=event.reply_context,
             ttl_seconds=86400, requester=event.principal, anchor_message_id=event.platform_message_id,
             parent_task_id=task["id"], notification_sequence=seq, purpose=purpose,
             defer_reply=defer_reply or streaming,
+            defer_to_leader=bool(worker_run and not streaming and self.leader_publication(event)),
             allow_proactive=purpose in {"result", "question"} or bool(json.loads(task["context_json"]).get("schedule_fire_id")))
         if streaming:
             c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(

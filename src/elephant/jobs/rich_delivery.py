@@ -124,7 +124,8 @@ async def rich_send(service, args, payload, *, leader_scope=None):
         c.execute(insert(notifications).values(id=notification_id, task_id=scope_id, run_id=args[0],
             sequence=sequence, purpose="status", importance="important", body=canonical,
             created_at=service.clock.now().isoformat(), state="ACCEPTED"))
-        delivery_id = service.outbox.enqueue(c, envelope.model_copy(update={"notification_sequence": sequence}))
+        delivery_id = service.outbox.enqueue(c, envelope.model_copy(update={"notification_sequence": sequence}),
+            defer_to_leader=leader_scope is None and service.leader_publication(event))
         row = c.execute(select(outbox).where(outbox.c.id == delivery_id)).mappings().one()
         return _status(row)
 

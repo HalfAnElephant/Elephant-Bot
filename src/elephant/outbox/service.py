@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from random import Random
@@ -9,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from elephant.adapters.qq_official.streaming import OfficialStream
 from elephant.domain import OutboundEnvelope, SendReceipt, Surface, stable_id
-from elephant.storage.agent_schema import dialogue_inputs, leader_events
+from elephant.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_events
 from elephant.storage.schema import outbox, reply_counters
 from elephant.storage.stream_schema import next_delivery_sequence, stream_messages, stream_runs
 
@@ -23,20 +24,20 @@ class Outbox:
         self.db, self.clock = db, clock
         self.markdown_adapters = frozenset(markdown_adapters)
 
-    def enqueue(self, c, envelope: OutboundEnvelope, *, defer_reply=False) -> str:
+    def enqueue(self, c, envelope: OutboundEnvelope, *, defer_reply=False, defer_to_leader=False) -> str:
         # Rich payloads are atomic. Never duplicate a keyboard or media by text splitting.
         if envelope.content_format == "markdown" or envelope.official_content is not None:
-            return self._enqueue_one(c, envelope, defer_reply=defer_reply)
+            return self._enqueue_one(c, envelope, defer_reply=defer_reply, defer_to_leader=defer_to_leader)
         text = envelope.text if envelope.plain_text else plain_text(envelope.text)
         deliveries = []
         for offset, part in enumerate(split_text(text)):
             deliveries.append(self._enqueue_one(c, envelope.model_copy(update={
                 "text": part, "plain_text": True, "part_no": envelope.part_no + offset,
                 "delivery_id": envelope.delivery_id if offset == 0 else str(uuid4()),
-            }), defer_reply=defer_reply))
+            }), defer_reply=defer_reply, defer_to_leader=defer_to_leader))
         return deliveries[0]
 
-    def _enqueue_one(self, c, envelope, *, defer_reply=False):
+    def _enqueue_one(self, c, envelope, *, defer_reply=False, defer_to_leader=False):
         key = stable_id(
             envelope.origin_kind,
             envelope.origin_id,
@@ -58,7 +59,7 @@ class Outbox:
                 func.json_extract(outbox.c.envelope_json, "$.fixed_publication").is_(None),
                 outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))
                 .values(state="SUPERSEDED"))
-        if defer_reply and envelope.reply_context:
+        if (defer_reply or defer_to_leader) and envelope.reply_context:
             envelope = envelope.model_copy(update={
                 "reply_context": envelope.reply_context.model_copy(update={"msg_seq": None})})
         else:
@@ -69,7 +70,7 @@ class Outbox:
                 dedupe_key=key,
                 conversation_id=envelope.target.key,
                 envelope_json=envelope.model_dump_json(),
-                state="PENDING",
+                state="LEADER_PENDING" if defer_to_leader else "PENDING",
                 attempts=0,
                 created_at=self.clock.now().isoformat(),
                 enqueue_seq=next_delivery_sequence(),
@@ -125,6 +126,7 @@ class Outbox:
         purpose=None,
         defer_reply=False,
         fixed_publication=False,
+        defer_to_leader=False,
     ):
         ids = []
         if (target.adapter_instance_id in self.markdown_adapters and target.surface in {"private", "group", "guild_channel", "guild_private"}
@@ -140,7 +142,7 @@ class Outbox:
                     anchor_message_id=anchor_message_id, requester=requester,
                     parent_task_id=parent_task_id, notification_sequence=notification_sequence, purpose=purpose,
                     fixed_publication=fixed_publication,
-                ), defer_reply=defer_reply)]
+                ), defer_reply=defer_reply, defer_to_leader=defer_to_leader)]
         bubbles = [text] if defer_reply or origin_kind == "command" or purpose == "question" else chat_bubbles(text)
         parts = [part for bubble in bubbles for part in split_text(plain_text(bubble))]
         for part_no, part in enumerate(parts):
@@ -167,7 +169,7 @@ class Outbox:
                         notification_sequence=notification_sequence,
                         purpose=purpose,
                         fixed_publication=fixed_publication,
-                    ), defer_reply=defer_reply,
+                    ), defer_reply=defer_reply, defer_to_leader=defer_to_leader,
                 )
             )
         return ids
@@ -200,7 +202,7 @@ class Outbox:
     def retire_adapters(self, conn, adapters):
         adapter_id = func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id")
         deliveries = conn.execute(select(outbox.c.id).where(
-            outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+            outbox.c.state.in_(["LEADER_PENDING", "PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
             adapter_id.not_in(tuple(adapters)),
         )).scalars().all()
         receipt = SendReceipt(state="FAILED", error_code="ADAPTER_REMOVED")
@@ -265,7 +267,7 @@ class Outbox:
             c.execute(
                 select(outbox).where(
                     outbox.c.conversation_id == event.conversation.key,
-                    outbox.c.state == "WAITING_FOR_TRIGGER",
+                    outbox.c.state.in_(["LEADER_PENDING", "WAITING_FOR_TRIGGER"]),
                 ).order_by(outbox.c.enqueue_seq)
             )
             .mappings()
@@ -274,6 +276,16 @@ class Outbox:
         for row in rows:
             envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
             if envelope.requester is not None and envelope.requester != event.principal:
+                continue
+            if row["state"] == "LEADER_PENDING":
+                previous_expiry = envelope.reply_context.expires_at if envelope.reply_context else None
+                if envelope.requester is not None and (previous_expiry is None or previous_expiry < reply.expires_at):
+                    renewed_envelope = envelope.model_copy(update={
+                        "reply_context": reply.model_copy(update={"msg_seq": None}),
+                        "expires_at": max(envelope.expires_at, self.clock.now() + timedelta(seconds=300)),
+                    })
+                    c.execute(update(outbox).where(outbox.c.id == row["id"])
+                        .values(envelope_json=renewed_envelope.model_dump_json()))
                 continue
             if envelope.origin_kind == "chat":
                 if (envelope.purpose != "result" or not envelope.origin_id.startswith("turn:")
@@ -541,7 +553,43 @@ class Outbox:
             receipt = SendReceipt(state="UNKNOWN", error_code="SEND_EXCEPTION")
         self._receipt(envelope.delivery_id, receipt)
 
-    def _receipt(self, delivery_id, receipt, *, connection=None):
+    def _record_task_delivery(self, c, previous, delivery_id, receipt, *, visible_text=None):
+        from elephant.storage.task_schema import notifications, tasks
+
+        envelope = OutboundEnvelope.model_validate_json(previous["envelope_json"])
+        principal = envelope.requester
+        if (principal is None or envelope.target.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE}
+                or envelope.purpose not in {"result", "question", "progress", "status"}):
+            return
+        origin = dialogues.alias("origin_dialogue")
+        current = c.execute(select(dialogues.c.id)
+            .join(focus, focus.c.dialogue_id == dialogues.c.id)
+            .join(tasks, tasks.c.id == previous["task_id"])
+            .outerjoin(origin, tasks.c.origin_dialogue_id == origin.c.id)
+            .where(dialogues.c.workspace_id == func.coalesce(origin.c.workspace_id,
+                    func.json_extract(tasks.c.context_json, "$.workspace_id"), "personal"),
+                or_(origin.c.owner_id.is_(None), origin.c.owner_id == dialogues.c.owner_id),
+                tasks.c.requester == principal.key,
+                tasks.c.conversation == envelope.target.key, dialogues.c.conversation_id == envelope.target.key,
+                focus.c.key == stable_id(envelope.target.key, principal.key), dialogues.c.state == "ACTIVE")).scalar_one_or_none()
+        if current is None:
+            return
+        notification_exists = c.scalar(select(notifications.c.id).where(
+            notifications.c.id == previous["origin_id"], notifications.c.task_id == previous["task_id"]))
+        if not notification_exists:
+            return
+        self._record_visible_delivery(c, current, "task_delivery", delivery_id, envelope, receipt,
+            visible_text=visible_text, task_id=previous["task_id"])
+
+    @staticmethod
+    def _record_visible_delivery(c, dialogue_id, kind, delivery_id, envelope, receipt, *, visible_text=None, **source):
+        text = visible_text if visible_text is not None else envelope.text or "已发送附件。"
+        payload = {"text": text, "platform_message_id": receipt.platform_message_id, **source}
+        c.execute(sqlite_insert(leader_events).values(dialogue_id=dialogue_id, source_kind=kind,
+            source_id=delivery_id, payload_json=json.dumps(payload, ensure_ascii=False)).on_conflict_do_nothing(
+            index_elements=[leader_events.c.source_kind, leader_events.c.source_id]))
+
+    def _receipt(self, delivery_id, receipt, *, connection=None, record_visible=True, visible_text=None):
         with self.db.transaction() if connection is None else nullcontext(connection) as c:
             previous = c.execute(select(outbox.c.state, outbox.c.conversation_id, outbox.c.envelope_json,
                 outbox.c.enqueue_seq, outbox.c.attempts, outbox.c.origin_kind, outbox.c.origin_id,
@@ -572,8 +620,15 @@ class Outbox:
                 turn = origin.split(":", 3)[-1] if origin.startswith("file:") else (
                     origin if origin.startswith("turn:") else origin.split(":", 2)[-1])
                 _, _, source = turn.removeprefix("turn:").partition(":")
-                dialogue_id = c.execute(select(dialogue_inputs.c.dialogue_id).where(
-                    dialogue_inputs.c.id == source)).scalar_one_or_none()
+                input_row = c.execute(select(dialogue_inputs.c.dialogue_id, dialogue_inputs.c.claimed_attempt_id,
+                    dialogue_inputs.c.state, dialogue_inputs.c.context_json).where(dialogue_inputs.c.id == source)).first()
+                if input_row:
+                    dialogue_id = input_row.dialogue_id
+                    if (record_visible and receipt.state == "SENT" and input_row.state != "CLEARED"
+                            and json.loads(input_row.context_json).get("receipt_history")):
+                        envelope = OutboundEnvelope.model_validate_json(previous["envelope_json"])
+                        self._record_visible_delivery(c, dialogue_id, "chat_delivery", delivery_id, envelope, receipt,
+                            visible_text=visible_text, input_id=source, run_id=input_row.claimed_attempt_id)
             elif previous["origin_kind"] == "task" and previous["task_id"]:
                 from elephant.storage.task_schema import tasks
                 dialogue_id = c.execute(select(tasks.c.origin_dialogue_id).where(
@@ -593,6 +648,8 @@ class Outbox:
                     self._defer(c, pending_id, due)
 
             if receipt.state == "SENT":
+                if record_visible and previous["origin_kind"] == "task" and previous["task_id"]:
+                    self._record_task_delivery(c, previous, delivery_id, receipt, visible_text=visible_text)
                 from elephant.storage.task_schema import notification_question_ids, notifications, waits
                 origin = c.execute(select(outbox.c.origin_id).where(outbox.c.id == delivery_id)).scalar_one()
                 remaining = c.execute(select(outbox.c.id).where(outbox.c.origin_id == origin,

@@ -75,6 +75,12 @@ async def test_private_leader_claim_and_final_stream_suppress_duplicate_outbox(l
     assert json.loads(s.calls[0].content)["input_state"] == 10
     with s.core.db.engine.connect() as conn:
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
+    followup = s.event.model_copy(update={"event_id": "stream-followup", "platform_message_id": "stream-followup"})
+    s.core.sessions.enqueue(followup, s.core.access(followup))
+    next_turn = s.core.sessions.claim("fixture")
+    confirmed, = next_turn["context"]["delivery_history"]
+    assert confirmed["text"] == "你好" and confirmed["platform_message_id"] == "leader-stream"
+    assert claim["run_id"] not in next_turn["context"]["published_run_ids"]
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "rejected", "unknown"])
