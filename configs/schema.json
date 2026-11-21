@@ -582,6 +582,42 @@
           "default": null,
           "title": "Model"
         },
+        "leader_reasoning_effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "low",
+                "high",
+                "max"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Leader Reasoning Effort"
+        },
+        "worker_reasoning_effort": {
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "low",
+                "high",
+                "max"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Reasoning Effort"
+        },
         "api_key_env": {
           "default": "ELEPHANT_MODEL_KEY",
           "title": "Api Key Env",
@@ -1156,6 +1192,8 @@
       "default": {
         "endpoint": null,
         "model": null,
+        "leader_reasoning_effort": null,
+        "worker_reasoning_effort": null,
         "api_key_env": "ELEPHANT_MODEL_KEY",
         "timeout_seconds": 30,
         "context_window": 32768
