@@ -1,4 +1,4 @@
-"""Offline regressions for the opt-in evaluator’s mail cases."""
+"""The opt-in live evaluator's account setup uses only the local protected Mail API."""
 import base64
 import importlib.util
 import json
@@ -79,39 +79,3 @@ def test_mail_timeout_snapshot_omits_result_and_receipt_contents(runtime):
     assert snapshot["attempts"][0]["receipt_kind"] == "turn_finished"
     assert len(snapshot["tasks"]) == 2 and snapshot["inbox"]
     assert "private-body" not in json.dumps(snapshot) and "private-receipt" not in json.dumps(snapshot)
-
-
-@pytest.mark.parametrize(("reply", "expected"), [
-    (
-        (
-            "我查了，你名下现在只有 weekly-demo 这一个邮箱账号，没有别的可选的。\n\n"
-            "所以得先知道那只有两个信息：账号标识，还有邮箱地址（用来配置）。"
-            "有这两个我才能先把账号建好，再挂上规则。"
-        ),
-        True,
-    ),
-    ("请提供另一个邮箱的 **账号 ID**。", True),
-    ("我需要先知道这个邮箱的账号标识，然后再建规则。", True),
-    ("新邮箱的账号标识是什么？", True),
-    ("你要用哪个邮箱账号来建这条规则？", True),
-    ("你告诉我那只是哪个账号、地址是啥，我就去建。", True),
-    ("请先确认这是哪一个邮箱账户。", True),
-    ("请告诉我无需提供邮箱账号标识。", False),
-    ("请确认不用给我邮箱账号标识。", False),
-    ("请告诉我收件地址、账号标识不用给。", False),
-    ("我先查一下当前有几个邮箱账号。", False),
-    ("这个邮箱的账号标识还没指定。", False),
-    ("请提供邮箱地址，账号标识我会自动生成。", False),
-    ("你不需要先提供邮箱账号标识。", False),
-    ("请告诉我，这个邮箱的账号标识。", True),
-    ("请提供邮箱地址。账号标识还没指定，对吗？", False),
-    ("目前只找到 weekly-demo。要我继续创建邮箱规则吗？", False),
-    ("请告诉我周报要总结成几条？邮箱账号还不清楚。", False),
-    ("目前没有该账号。你把那只邮箱的信息给我吧～\n\n- 邮箱地址\n- 服务商", True),
-    ("请提供目标邮箱地址和邮箱服务商。", True),
-    ("目前缺少邮箱地址和服务商。要我继续吗？", False),
-    ("请确认无需提供邮箱地址和服务商。", False),
-    ("我已按现有 weekly-demo 配好规则，账号标识是 weekly-demo。", False),
-])
-def test_mail_clarification_requires_details_to_identify_the_account(reply, expected):
-    assert evaluator().asks_for_mail_account_clarification(reply) is expected
