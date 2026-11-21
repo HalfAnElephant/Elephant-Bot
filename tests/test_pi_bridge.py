@@ -869,6 +869,36 @@ async def test_locked_pi_replays_sent_task_report_as_history_once(compaction_ses
     assert sum(entry.get("customType") == "elephant-visible-delivery" for entry in entries) == 1
 
 
+def test_pi_budget_accepts_replayed_delivery_without_provider_usage():
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "node_modules/.bin/pi").exists():
+        pytest.skip("locked pi package is not installed")
+    script = r'''
+import assert from "node:assert/strict";
+import {createJiti} from "jiti";
+import {clampMaxTokensToContext} from "./node_modules/@earendil-works/pi-ai/dist/api/simple-options.js";
+const jiti = createJiti(import.meta.url, {alias: {
+  "@earendil-works/pi-ai": process.cwd() + "/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"}});
+const {conversationHistory} = await jiti.import("./src/elephant/harness/pi_bridge.ts");
+const report = "CONFIRMED_QQ_DELIVERY".repeat(16);
+const timestamp = "2026-11-21T00:00:00.000Z";
+const entry = {type: "custom_message", customType: "elephant-visible-delivery", id: "receipt", content: report, timestamp};
+const projected = conversationHistory([entry], {}).history([
+  {role: "custom", customType: entry.customType, content: report, timestamp: Date.parse(timestamp)}
+], {live: true});
+assert.equal(projected.length, 1);
+const budget = clampMaxTokensToContext({contextWindow: 5000}, {messages: projected}, 1000);
+assert.ok(budget > 0 && budget < 5000 - 4096, "replay text still counts against the context budget");
+assert.equal(projected[0].role, "assistant");
+assert.equal(projected[0].content[0].text, report);
+assert.equal(projected[0].usage.totalTokens, 0, "a receipt is not a provider completion");
+assert.equal(projected[0].usage.cost.total, 0);
+'''
+    subprocess.run(["node", "--input-type=module", "-e", script], cwd=root, check=True)
+
+
 def test_native_compactor_rolls_complete_interactions_and_bounds_requests():
     import subprocess
 

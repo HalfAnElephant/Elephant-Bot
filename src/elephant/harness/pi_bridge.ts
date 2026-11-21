@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync } from "node:fs";
 import { compact, convertToLlm, estimateTokens, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -143,8 +143,12 @@ export function conversationHistory(branch: any[], binding: any) {
         }
         if (entry.type === "custom_message" && entry.customType === "elephant-visible-delivery" && edits.get(entry.id) !== null) {
             const message = {role: "custom", customType: entry.customType, content: entry.content, timestamp: Date.parse(entry.timestamp)};
-            const historical = {role: "assistant", content: [{type: "text", text: entry.content}],
-                timestamp: message.timestamp, stopReason: "stop"};
+            // Pi budgets this as assistant history, but a delivery receipt has no provider usage.
+            const historical: AssistantMessage = {role: "assistant", content: [{type: "text", text: entry.content}],
+                api: "elephant-delivery", provider: "elephant", model: "delivery-replay",
+                timestamp: message.timestamp, stopReason: "stop",
+                usage: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+                    cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}};
             records.set(messageKey(message), {message, historical, current: false, group: index, index});
         }
         if (entry.type !== "message") continue;
