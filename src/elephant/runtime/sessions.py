@@ -20,7 +20,7 @@ from elephant.storage.agent_schema import (
 from elephant.storage.learning_schema import learning_events, learning_sessions
 from elephant.storage.schedule_schema import schedules
 from elephant.storage.schema import inbox, outbox
-from elephant.storage.stream_schema import stream_runs
+from elephant.storage.stream_schema import next_delivery_sequence, stream_runs
 from elephant.storage.task_schema import inputs, runs, sessions, tasks
 
 TERMINAL = {"SUCCEEDED", "PARTIAL", "BLOCKED", "FAILED", "CANCELLED", "EXPIRED"}
@@ -153,13 +153,19 @@ class SessionService:
         if previous:
             conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.dialogue_id == previous["id"],
                 or_(dialogue_inputs.c.handled_at.is_(None), dialogue_inputs.c.state == "CONTEXT_FAILED"))
-                .values(state="CLEARED", handled_at=self.clock.now().isoformat(), claimed_attempt_id=None))
+                .values(state="CLEARED", handled_at=self.clock.now().isoformat()))
             origin = "turn:" + previous["session_id"] + ":"
             conn.execute(update(outbox).where(outbox.c.conversation_id == event.conversation.key,
                 outbox.c.origin_kind == "chat", outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
                 or_(outbox.c.origin_id.startswith(origin), outbox.c.origin_id.contains(":" + origin)))
                 .values(state="SUPERSEDED"))
-        self.dialogue(conn, event, new_title="新对话", workspace_id=previous["workspace_id"] if previous else None)
+            conn.execute(insert(leader_events).values(
+                dialogue_id=previous["id"], source_kind="context_clear", source_id=event.event_id))
+
+    @staticmethod
+    def context_boundary(conn, dialogue_id):
+        return conn.scalar(select(func.max(leader_events.c.seq)).where(
+            leader_events.c.dialogue_id == dialogue_id, leader_events.c.source_kind == "context_clear")) or 0
 
     def enqueue(self, event, access, context=None, *, new_title=None, select_ref=None):
         if access.principal != event.principal or access.conversation != event.conversation or not self.allowed(event):
@@ -180,6 +186,7 @@ class SessionService:
             dialogue = self.dialogue(conn, event, new_title=new_title, select_ref=select_ref,
                 workspace_id=context.get("workspace_id"))
             context["workspace_id"] = dialogue["workspace_id"]
+            context["receipt_history"] = True
             plan = ExecutionPlan(budget=self.settings.execution.interactive_budget,
                 environment=self.settings.execution.leader_environment)
             context["leader_turn"] = {"plan": plan.model_dump(mode="json"), "used": {},
@@ -215,12 +222,13 @@ class SessionService:
                 reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
                 anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True)
 
-    def _next_inbox(self, conn, dialogue, pending_sources, now, *, settle_invalid=True):
+    def _next_inbox(self, conn, dialogue, pending_sources, now, *, settle_invalid=True, active_roots=()):
         retry_at = func.json_extract(case((func.json_valid(leader_inbox.c.output_ref),
             leader_inbox.c.output_ref), else_="{}"), "$.retry_at")
         available = (
             leader_inbox.c.target_session_id == dialogue["session_id"], leader_inbox.c.handled_at.is_(None),
             leader_inbox.c.claimed_attempt_id.is_(None), leader_inbox.c.id.not_in(pending_sources),
+            leader_inbox.c.root_task_id.not_in(active_roots),
             or_(retry_at.is_(None), retry_at <= now.isoformat()))
         roots = conn.execute(select(leader_inbox.c.root_task_id).outerjoin(leader_events,
             (leader_events.c.source_kind == "worker") & (leader_events.c.source_id == leader_inbox.c.id)).where(*available)
@@ -321,8 +329,134 @@ class SessionService:
 
     @staticmethod
     def published_runs(conn, dialogue_id):
-        return list(conn.scalars(select(leader_events.c.published_run_id).where(
-            leader_events.c.dialogue_id == dialogue_id, leader_events.c.published_run_id.is_not(None)).distinct()))
+        return list(conn.scalars(select(leader_events.c.published_run_id)
+            .outerjoin(dialogue_inputs, dialogue_inputs.c.id == leader_events.c.source_id)
+            .where(leader_events.c.dialogue_id == dialogue_id, leader_events.c.source_kind == "user",
+                leader_events.c.published_run_id.is_not(None),
+                func.json_extract(dialogue_inputs.c.context_json, "$.receipt_history").is_(None)).distinct()))
+
+    def _delivery_history(self, conn, dialogue, access, cursor, arrival_seq, context):
+        query = select(leader_events.c.seq, leader_events.c.payload_json).where(
+            leader_events.c.dialogue_id == dialogue["id"],
+            leader_events.c.source_kind.in_(("task_delivery", "chat_delivery")),
+            leader_events.c.seq > cursor)
+        if arrival_seq is not None:
+            query = query.where(leader_events.c.seq < arrival_seq)
+        rows = conn.execute(query.order_by(leader_events.c.seq.desc()).limit(32)).all()
+        if not rows:
+            return
+        graph = self.service.graph
+        delivered = []
+        # shortcut: keep the newest receipts in the active history after a long idle interval; older receipts remain in Outbox.
+        for seq, raw in reversed(rows):
+            receipt = json.loads(raw)
+            task_id = receipt.get("task_id")
+            if task_id:
+                task = conn.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one_or_none()
+                if (task is None or task["requester"] != access.principal.key or task["conversation"] != access.conversation.key
+                        or not graph.may_read(task_id, access)):
+                    continue
+                source_context = json.loads(task["context_json"])
+            else:
+                source = conn.execute(select(dialogue_inputs).where(
+                    dialogue_inputs.c.id == receipt["input_id"], dialogue_inputs.c.dialogue_id == dialogue["id"],
+                    dialogue_inputs.c.state != "CLEARED")).mappings().one_or_none()
+                if source is None:
+                    continue
+                event = InboundEvent.model_validate_json(source["event_json"])
+                if event.principal != access.principal or event.conversation != access.conversation:
+                    continue
+                raw_claim = conn.scalar(select(runs.c.request_json).where(runs.c.id == receipt.get("run_id")))
+                source_context = (json.loads(raw_claim).get("context") if raw_claim else None) or json.loads(source["context_json"])
+                source_context.pop("session_id", None)
+            if self.service.context_validator and not self.service.context_validator(access, source_context):
+                continue
+            dependencies = list(source_context.get("task_sources", ()))
+            if task_id:
+                dependencies.append(task_id)
+            graph.merge_source_dependencies(context, dependencies, source_context.get("source_manifest", ()))
+            cited = set(context.get("published_task_sources", ())) | set(source_context.get("published_task_sources", ()))
+            if task_id:
+                cited.add(task_id)
+            context["published_task_sources"] = sorted(cited)
+            delivered.append({"seq": seq, **receipt})
+        context["delivery_history"] = delivered
+        context["delivery_history_cursor"] = rows[0].seq
+
+    def _route_pending_private_tasks(self, conn, active_roots):
+        focused_sessions = select(dialogues.c.session_id).join(focus, focus.c.dialogue_id == dialogues.c.id)
+        pending = conn.execute(select(leader_inbox.c.root_task_id, leader_inbox.c.target_session_id)
+            .where(leader_inbox.c.handled_at.is_(None), leader_inbox.c.claimed_attempt_id.is_(None),
+                leader_inbox.c.target_session_id.not_in(focused_sessions),
+                leader_inbox.c.root_task_id.not_in(active_roots)).distinct()).all()
+        for root_id, previous in pending:
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+            event = InboundEvent.model_validate_json(root["event_json"])
+            if event.conversation.surface not in {Surface.PRIVATE, Surface.GUILD_PRIVATE}:
+                continue
+            workspace = json.loads(root["context_json"]).get("workspace_id", "personal")
+            current = conn.execute(select(dialogues.c.id, dialogues.c.session_id)
+                .join(focus, focus.c.dialogue_id == dialogues.c.id)
+                .where(focus.c.key == stable_id(event.conversation.key, event.principal.key),
+                    dialogues.c.owner_id == root["owner_id"], dialogues.c.conversation_id == event.conversation.key,
+                    dialogues.c.workspace_id == workspace, dialogues.c.state == "ACTIVE")).first()
+            if current is None:
+                continue
+            moved = conn.execute(update(leader_inbox).where(leader_inbox.c.root_task_id == root_id,
+                leader_inbox.c.target_session_id == previous, leader_inbox.c.handled_at.is_(None),
+                leader_inbox.c.claimed_attempt_id.is_(None)).values(target_session_id=current.session_id)
+                .returning(leader_inbox.c.id)).scalars().all()
+            conn.execute(update(leader_events).where(leader_events.c.source_kind == "worker",
+                leader_events.c.source_id.in_(moved), leader_events.c.published_run_id.is_(None))
+                .values(dialogue_id=current.id))
+
+    def publish_worker_deliveries(self):
+        """Commit prepared Worker messages at an idle Leader boundary."""
+        held = outbox.c.state == "LEADER_PENDING"
+        with self.db.engine.connect() as conn:
+            if conn.scalar(select(outbox.c.id).where(held).limit(1)) is None:
+                return
+        with self.db.transaction() as conn:
+            pending_sources = self._pending_sources(conn)
+            pending = conn.execute(select(outbox.c.task_id, outbox.c.origin_id)
+                .where(held).group_by(outbox.c.task_id, outbox.c.origin_id)
+                .order_by(func.min(outbox.c.enqueue_seq))).all()
+            for task_id, origin_id in pending:
+                deliveries = select(outbox.c.id).where(held, outbox.c.task_id == task_id,
+                    outbox.c.origin_id == origin_id).order_by(outbox.c.part_no)
+                task = conn.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one()
+                event = InboundEvent.model_validate_json(task["event_json"])
+                if (task["state"] in {"CANCELLED", "CANCEL_REQUESTED"}
+                        or not self.service.leader_publication(event) or not self.allowed(event)):
+                    conn.execute(update(outbox).where(outbox.c.id.in_(deliveries)).values(state="SUPERSEDED"))
+                    continue
+                workspace = json.loads(task["context_json"]).get("workspace_id", "personal")
+                current = conn.execute(select(dialogues).join(focus, focus.c.dialogue_id == dialogues.c.id)
+                    .where(focus.c.key == stable_id(event.conversation.key, event.principal.key),
+                        dialogues.c.owner_id == self.owner(event),
+                        dialogues.c.conversation_id == event.conversation.key,
+                        dialogues.c.state == "ACTIVE")).mappings().one_or_none()
+                if current is None:
+                    try:
+                        current = self.dialogue(conn, event, workspace_id=workspace)
+                    except (PermissionError, ValueError):
+                        conn.execute(update(outbox).where(outbox.c.id.in_(deliveries)).values(state="SUPERSEDED"))
+                        continue
+                if current["workspace_id"] != workspace or conn.scalar(select(runs.c.id).where(
+                        runs.c.session_id == current["session_id"], runs.c.slot_reserved == 1).limit(1)):
+                    continue
+                if (conn.scalar(select(inbox.c.id).where(inbox.c.conversation_id == event.conversation.key,
+                        inbox.c.principal_id == event.principal.key, inbox.c.state == "PENDING").limit(1))
+                        or self._next_user(conn, current, pending_sources, self.clock.now())):
+                    continue
+                parts = conn.scalars(deliveries).all()
+                for delivery_id in parts:
+                    conn.execute(update(outbox).where(outbox.c.id == delivery_id, held)
+                        .values(state="PENDING", enqueue_seq=next_delivery_sequence()))
+                if parts:
+                    conn.execute(insert(leader_events).values(dialogue_id=current["id"],
+                        source_kind="worker_publication", source_id=parts[0],
+                        payload_json=json.dumps({"session_id": current["session_id"], "task_id": task_id})))
 
     def claim(self, worker_id):
         maintenance = getattr(self, "context_maintenance", None)
@@ -348,19 +482,29 @@ class SessionService:
             for expired in deferred_expired:
                 self.close_input(conn, expired["session_id"], expired, InboundEvent.model_validate_json(expired["event_json"]),
                     json.loads(expired["context_json"]), now)
-            ready_dialogues = conn.execute(candidates.order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
-                dialogues.c.created_at, dialogues.c.id)).mappings().all()
             retired_mutations = set()
+            active_roots = set()
             for raw in conn.execute(select(runs.c.request_json).where(runs.c.role == "leader", runs.c.slot_reserved == 1)).scalars():
                 active = json.loads(raw)
+                if active.get("target_root_task_id"):
+                    active_roots.add(active["target_root_task_id"])
                 if active.get("memory_mutation"):
                     retired_mutations.add(active["context"]["dialogue_id"])
+            self._route_pending_private_tasks(conn, active_roots)
+            ready_dialogues = conn.execute(candidates.order_by(dialogues.c.last_admitted_at.asc().nulls_first(),
+                dialogues.c.created_at, dialogues.c.id)).mappings().all()
             for dialogue in ready_dialogues:
                 if dialogue["id"] in retired_mutations:
                     continue
                 history = conn.execute(select(sessions.c.manifest_json).where(
                     sessions.c.id == dialogue["session_id"])).scalar_one_or_none()
                 history = json.loads(history) if history else {}
+                context_boundary = self.context_boundary(conn, dialogue["id"])
+                if context_boundary != history.get("context_boundary", 0):
+                    history = {**json.loads(dialogue["binding_json"]),
+                        "context_boundary": context_boundary, "context_sources_version": 1}
+                    conn.execute(update(sessions).where(sessions.c.id == dialogue["session_id"])
+                        .values(manifest_json=json.dumps(history, ensure_ascii=False)))
                 if (history.get("task_sources") or history.get("steering_sources") or history.get("memory_history")) and self.service.context_validator:
                     source = conn.execute(select(dialogue_inputs.c.event_json).where(
                         dialogue_inputs.c.dialogue_id == dialogue["id"])
@@ -380,7 +524,8 @@ class SessionService:
                         continue
                 user = self._next_user(conn, dialogue, pending_sources, now)
                 opted_in = dialogue["id"] in self.settings.orchestration.leader_steering_dialogues
-                pending = self._next_inbox(conn, dialogue, pending_sources, now) if opted_in or not user else None
+                pending = (self._next_inbox(conn, dialogue, pending_sources, now, active_roots=active_roots)
+                    if opted_in or not user else None)
                 if user and pending:
                     seq = conn.execute(select(func.min(leader_events.c.seq)).where(
                         leader_events.c.source_kind == "worker",
@@ -478,9 +623,11 @@ class SessionService:
                         if root else self.settings.execution.leader_environment)
                 if purpose == "user":
                     context["published_run_ids"] = self.published_runs(conn, dialogue["id"])
+                    self._delivery_history(conn, dialogue, access,
+                        max(context_boundary, history.get("delivery_history_cursor", 0)), user["arrival_seq"], context)
                 context.update(key=dialogue["session_id"], session_id=dialogue["session_id"],
                     dialogue_id=dialogue["id"], owner_id=dialogue["owner_id"], source_input_ids=source_ids + [item["id"] for item in task_inputs],
-                    role="leader", environment=plan.environment, purpose=purpose, now=now.isoformat(), timezone=self.settings.timezone,
+                    context_boundary=context_boundary, role="leader", environment=plan.environment, purpose=purpose, now=now.isoformat(), timezone=self.settings.timezone,
                     model_context_window=binding["context_window"],
                     limits=self.settings.context.limits(binding["context_window"], plan.budget.output_tokens_per_call),
                     pool={"max_resident": self.service.max_resident, "max_idle": self.settings.execution.warm_idle_max,
@@ -506,7 +653,8 @@ class SessionService:
                 task_id = root["id"] if purpose in {"finalize", "attention"} else None
                 claim["public_answer_events"] = bool(self.service.stream_eligibility
                     and self.service.stream_eligibility(event))
-                if opted_in:
+                # Worker reports can be superseded or fail verification during settlement.
+                if opted_in or (root and not self.service._internal_reply(root)):
                     claim["commit_publication"] = True
                     claim["typing_only"] = bool(user and claim["public_answer_events"])
                     claim["public_answer_events"] = False

@@ -111,6 +111,32 @@ def export_artifacts(workspace, archive, paths, max_bytes=None, *, mime_types=No
     return exported
 
 
+def copy_archived_artifact(archive, artifact, destination):
+    """Copy the archived file only through its validated ID and verify the copied bytes."""
+    digest = hashlib.sha256()
+    remaining = artifact.size
+    try:
+        directory = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(artifact.id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != artifact.size:
+                raise ValueError("artifact unavailable")
+            while chunk := source.read(min(65536, remaining + 1)):
+                remaining -= len(chunk)
+                if remaining < 0:
+                    raise ValueError("artifact digest changed")
+                digest.update(chunk)
+                destination.write(chunk)
+    except OSError as error:
+        raise ValueError("artifact unavailable") from error
+    if remaining or digest.hexdigest() != artifact.sha256:
+        raise ValueError("artifact digest changed")
+
+
 def cleanup_artifacts(db, archive, now):
     """Expire old exports while preserving live task trees and pending result evidence."""
     from sqlalchemy import select

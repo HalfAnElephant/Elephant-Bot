@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync } from "node:fs";
 import { compact, convertToLlm, estimateTokens, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -140,6 +140,16 @@ export function conversationHistory(branch: any[], binding: any) {
             summary = entry.details?.conversationProjection === conversationProjection ? entry : undefined;
             summaryBoundary = index;
             legacyBoundary = summary ? -1 : branch.findIndex(item => item.id === entry.firstKeptEntryId);
+        }
+        if (entry.type === "custom_message" && entry.customType === "elephant-visible-delivery" && edits.get(entry.id) !== null) {
+            const message = {role: "custom", customType: entry.customType, content: entry.content, timestamp: Date.parse(entry.timestamp)};
+            // Pi budgets this as assistant history, but a delivery receipt has no provider usage.
+            const historical: AssistantMessage = {role: "assistant", content: [{type: "text", text: entry.content}],
+                api: "elephant-delivery", provider: "elephant", model: "delivery-replay",
+                timestamp: message.timestamp, stopReason: "stop",
+                usage: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+                    cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}}};
+            records.set(messageKey(message), {message, historical, current: false, group: index, index});
         }
         if (entry.type !== "message") continue;
         const edit = edits.get(entry.id);
@@ -427,6 +437,20 @@ return function (pi: ExtensionAPI) {
       return ids.length ? persistInput(texts.join("\n\n"), ids) : {action: "handled"};
     }
     binding = {...current, binding_id: envelope.binding_id};
+    if (binding.context_boundary && !ctx.sessionManager.getBranch().some((entry: any) =>
+        entry.type === "custom" && entry.customType === "elephant-context-clear" &&
+        entry.data.boundary === binding.context_boundary)) {
+      ctx.sessionManager.resetLeaf();
+      pi.appendEntry("elephant-context-clear", {boundary: binding.context_boundary});
+      omittedUserMessages.clear();
+    }
+    const delivered = new Set(ctx.sessionManager.getBranch().filter((entry: any) =>
+      entry.type === "custom_message" && entry.customType === "elephant-visible-delivery").map((entry: any) => entry.details.seq));
+    for (const receipt of binding.delivery_history || []) {
+      if (!delivered.has(receipt.seq)) {
+        ctx.sessionManager.appendCustomMessageEntry("elephant-visible-delivery", receipt.text, false, receipt);
+      }
+    }
     pruneRuntime(ctx);
     omitFailedInputs(ctx);
     waiting = false;
@@ -503,7 +527,7 @@ return function (pi: ExtensionAPI) {
     const fd = openSync(path, "r");
     try { fsyncSync(fd); } finally { closeSync(fd); }
     return {session_revision: ctx.sessionManager.getLeafId(), session_id: binding.session_id,
-      run_id: binding.run_id, input_ids: inputIds};
+      run_id: binding.run_id, input_ids: inputIds, delivery_history_cursor: binding.delivery_history_cursor};
   }
   pi.on("before_provider_request", async (_event, ctx) => {
     if (!binding?.session_id) return;

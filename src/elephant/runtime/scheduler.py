@@ -113,6 +113,7 @@ class RuntimeClient:
     async def _invoke(self, operation, body):
         if operation == "claim":
             self.core.knowledge.recover_mutations()
+            self.leader.sessions.publish_worker_deliveries()
             functions = ((self.leader.sessions.claim, self.service.claim) if self.last_role == "worker"
                          else (self.service.claim, self.leader.sessions.claim))
             functions = (*functions, self.leader.claim_review)

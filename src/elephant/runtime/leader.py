@@ -4,13 +4,15 @@ import fcntl
 import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 
 from elephant.domain import InboundEvent, MediaSegment, stable_id
 from elephant.domain.agents import TaskInputSpec
-from elephant.domain.tasks import TaskResult, validate_user_facing_text
+from elephant.domain.tasks import Artifact, TaskResult, validate_user_facing_text
+from elephant.harness.artifacts import copy_archived_artifact
 from elephant.jobs.streaming import PUBLIC_KINDS, reserve_stream_order, validate_public_event
 from elephant.storage.action_schema import operations
 from elephant.storage.agent_schema import dialogue_inputs, dialogues, focus, leader_events, leader_inbox
@@ -295,6 +297,14 @@ class LeaderRuntime:
                         manifest_json=json.dumps(history, ensure_ascii=False)))
             conn.execute(update(runs).where(runs.c.id == run["id"]).values(
                 request_json=json.dumps(claim, ensure_ascii=False)))
+        cursor = claim["context"].get("delivery_history_cursor")
+        if kind != "input_persisted" and cursor and payload.get("delivery_history_cursor") == cursor:
+            stored = conn.scalar(select(sessions.c.manifest_json).where(sessions.c.id == claim["session_id"]))
+            if stored:
+                history = json.loads(stored)
+                history["delivery_history_cursor"] = max(cursor, history.get("delivery_history_cursor", 0))
+                conn.execute(update(sessions).where(sessions.c.id == claim["session_id"])
+                    .values(manifest_json=json.dumps(history, ensure_ascii=False)))
         now = self.clock.now().isoformat()
         table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
         values = {"persisted_at": now}
@@ -345,14 +355,24 @@ class LeaderRuntime:
         remaining = limit - used[key]
         return {"accepted": True, "remaining": remaining}
 
-    def _task_snapshots(self, conn, run, claim, source_tasks, access):
+    def _task_snapshots(self, conn, run, claim, source_tasks, access, *, include_child_sources=False):
         graph = self.service.graph
-        snapshots, read_content = [], False
+        snapshots, cited = [], set()
         for task in source_tasks:
             snapshot = graph.status(conn, task, access=access)
             snapshots.append(snapshot)
-            read_content = graph.merge_snapshot_dependencies(claim["context"], task, snapshot) or read_content
-        if read_content:
+            if graph.merge_snapshot_dependencies(claim["context"], task, snapshot):
+                cited.add(task["id"])
+            children = {child["id"]: child for child in snapshot["children"]
+                        if include_child_sources and not child.get("rework_required")}
+            if children:
+                for child in conn.execute(select(tasks.c.id, tasks.c.context_json).where(
+                        tasks.c.id.in_(children))).mappings():
+                    if graph.merge_snapshot_dependencies(claim["context"], child, children[child["id"]]):
+                        cited.add(child["id"])
+        if cited:
+            context = claim["context"]
+            context["published_task_sources"] = sorted(set(context.get("published_task_sources", ())) | cited)
             conn.execute(update(runs).where(runs.c.id == run["id"]).values(
                 request_json=json.dumps(claim, ensure_ascii=False)))
             history = conn.execute(select(sessions.c.manifest_json).where(
@@ -361,6 +381,7 @@ class LeaderRuntime:
                 history = json.loads(history)
                 graph.merge_source_dependencies(history, claim["context"]["task_sources"],
                     claim["context"].get("source_manifest", ()))
+                history["published_task_sources"] = sorted(set(history.get("published_task_sources", ())) | cited)
                 conn.execute(update(sessions).where(sessions.c.id == claim["session_id"]).values(
                     manifest_json=json.dumps(history, ensure_ascii=False)))
         return snapshots
@@ -404,10 +425,12 @@ class LeaderRuntime:
             return graph.submit(conn, dialogue, event, access, args,
                 stable_id(owner, claim["source_ids"][0], payload["call_id"]), claim["binding"], claim["context"])
         if operation == "tasks.list":
-            rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, tasks.c.kind == "goal",
+            scope = tasks.c.id == root_id if root_id else tasks.c.kind == "goal"
+            rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, scope,
                 tasks.c.conversation == access.conversation.key).order_by(tasks.c.created_at.desc()).limit(20)).mappings().all()
+            visible = [row for row in rows if graph.may_read(row["id"], access)]
             summaries = []
-            for snapshot in self._task_snapshots(conn, run, claim, rows, access):
+            for snapshot in self._task_snapshots(conn, run, claim, visible, access):
                 action = snapshot["progress"]["current_action"] if not snapshot.get("context_revoked") else None
                 item = {"public_id": snapshot["public_id"], "title": (snapshot["goal"] or "")[:100] or None,
                         "state": snapshot["state"], "current_action": action[:100] if action else None}
@@ -456,7 +479,29 @@ class LeaderRuntime:
                 raise PermissionError("ask the user to identify one task before changing it")
         if operation == "tasks.status":
             self.service.permissions.require(access, "task.read", "task:" + task["id"])
-            return self._task_snapshots(conn, run, claim, [task], access)[0]
+            return self._task_snapshots(conn, run, claim, [task], access, include_child_sources=True)[0]
+        if operation == "tasks.read_artifact":
+            if purpose not in {"user", "finalize", "attention"} or task["kind"] not in {"work", "consult"}:
+                raise PermissionError("artifact reads require the producing Worker task")
+            self.service.permissions.require(access, "task.read", "task:" + task["id"])
+            result = self._task_snapshots(conn, run, claim, [task], access)[0]["result"] or {}
+            item = next((item for item in result.get("artifacts", []) if item["id"] == args.get("artifact_id")), None)
+            if item is None:
+                raise KeyError("artifact unavailable for this task")
+            artifact = Artifact.model_validate(item)
+            if not (artifact.mime_type.startswith("text/") or artifact.mime_type == "application/json"):
+                raise ValueError("only UTF-8 artifacts can be read as text")
+            # shortcut: cap verified model text reads at 1 MiB, add indexed paging for larger text if needed.
+            if artifact.size > 1024 * 1024:
+                raise ValueError("artifact exceeds the text read limit")
+            offset, limit = args.get("offset", 0), args.get("limit", 8000)
+            if type(offset) is not int or type(limit) is not int or offset < 0 or not 1 <= limit <= 16000:
+                raise ValueError("invalid artifact page")
+            with BytesIO() as content:
+                copy_archived_artifact(self.service.archive_root, artifact, content)
+                text = content.getvalue().decode()
+            end = offset + limit
+            return {"text": text[offset:end], "next_offset": end if end < len(text) else None}
         if operation == "tasks.cancel":
             if purpose not in {"user", "finalize", "attention"}:
                 raise PermissionError("this Leader turn cannot cancel work")
@@ -631,6 +676,8 @@ class LeaderRuntime:
                 return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
             protocol_failure = (not result.agent_authored and result.status == "failed" and run["role"] == "leader"
                 and "model_tool_protocol_recovery_failed" in result.limitations)
+            cleared = claim["purpose"] == "user" and conn.scalar(select(dialogue_inputs.c.state)
+                .where(dialogue_inputs.c.id == claim["source_ids"][0])) == "CLEARED"
             stale_draft, covered = False, []
             deferred_inputs = claim.get("deferred_goal_inputs")
             if deferred_inputs:
@@ -638,7 +685,7 @@ class LeaderRuntime:
                     operations.c.state == "PREPARED").values(state="FAILED",
                         result_json=json.dumps({"reason": "stopped_before_dispatch"}), updated_at=now))
                 self._persist_input_dependencies(conn, claim["source_ids"][0], deferred_inputs)
-            elif result.agent_authored and claim.get("steer_until"):
+            elif not cleared and result.agent_authored and claim.get("steer_until"):
                 outcome = proof.get("outcome")
                 summary = proof.get("summary")
                 if (not isinstance(summary, str) or summary[:10000] != result.summary
@@ -675,14 +722,14 @@ class LeaderRuntime:
                     conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id.in_(covered),
                         dialogue_inputs.c.claimed_attempt_id.is_(None), dialogue_inputs.c.handled_at.is_(None)).values(
                         claimed_attempt_id=run_id, persisted_at=now, consumed_at=now, handled_at=now, state="HANDLED"))
-            if deferred_inputs or stale_draft or (not result.agent_authored and not protocol_failure):
+            if cleared or deferred_inputs or stale_draft or (not result.agent_authored and not protocol_failure):
                 if discarded_entry:
                     conn.execute(update(runs).where(runs.c.id == run_id).values(
                         receipt_json=json.dumps({"discarded_submit_entry": discarded_entry})))
                 table = dialogue_inputs if claim["purpose"] == "user" else leader_inbox
                 source_values = {"claimed_attempt_id": None}
                 conn.execute(update(table).where(table.c.id.in_(claim["source_ids"]),
-                    table.c.claimed_attempt_id == run_id, table.c.handled_at.is_(None)).values(**source_values))
+                    table.c.claimed_attempt_id == run_id, or_(table.c.handled_at.is_(None), cleared)).values(**source_values))
                 conn.execute(update(runs).where(runs.c.id == run_id).values(state="FINISHED", slot_reserved=0,
                     quiescent_at=now, runner_stopped_at=now if stopped else None, result_json=submitted_result))
                 if run["process_id"]:
@@ -744,7 +791,8 @@ class LeaderRuntime:
                         self.service.graph.verify_final_result(conn, target, result, checks=("effect",))
                     artifacts = {item.id: item.model_dump(mode="json") for item in result.artifacts}
                     evidence = {item.url: item.model_dump(mode="json") for item in result.evidence}
-                    effects, observed = set(result.effect_refs), set(result.observation_refs)
+                    observed = set(result.observation_refs)
+                    child_effects = set()
                     for child in descendants:
                         if (claim["context"].get("memory_replan") and
                                 json.loads(child["context_json"]).get("memory_epoch") != claim["context"].get("memory_epoch")):
@@ -754,9 +802,14 @@ class LeaderRuntime:
                             artifacts[artifact["id"]] = artifact
                         for item in child_result.get("evidence", []):
                             evidence[item["url"]] = item
-                        effects.update(child_result.get("effect_refs", []))
+                        child_effects.update(child_result.get("effect_refs", []))
                         observed.update(child_result.get("observation_refs", []))
-                    result = result.model_copy(update={"artifacts": tuple(__import__("elephant.domain.tasks", fromlist=["Artifact"]).Artifact.model_validate(a) for a in artifacts.values()),
+                    effects = set(result.effect_refs)
+                    if child_effects:
+                        effects.update(conn.scalars(select(operations.c.id).where(
+                            operations.c.task_id.in_(select(tasks.c.id).where(tasks.c.root_task_id == target["id"])),
+                            operations.c.id.in_(child_effects), operations.c.state == "VERIFIED")))
+                    result = result.model_copy(update={"artifacts": tuple(Artifact.model_validate(a) for a in artifacts.values()),
                         "evidence": tuple(__import__("elephant.domain.tasks", fromlist=["Evidence"]).Evidence.model_validate(e) for e in evidence.values()),
                         "effect_refs": tuple(sorted(effects)), "observation_refs": tuple(sorted(observed))})
                     self.service._validate_result(result)
@@ -865,7 +918,8 @@ class LeaderRuntime:
                         stable_id(owner, source["id"], call["id"]))
                     if (not task and not proof and len(pending) == 1 and len(claim["source_ids"]) == 1
                             and not claim.get("target_root_task_id") and source["owner_id"] == owner
-                            and source["claimed_attempt_id"] == run_id and source["handled_at"] is None):
+                            and source["claimed_attempt_id"] == run_id
+                            and (source["handled_at"] is None or source["state"] == "CLEARED")):
                         discard = adapter.aborted_submit(path, call, run_id=run_id, input_ids=claim["source_ids"])
                         if discard:
                             break
@@ -1305,6 +1359,9 @@ class LeaderRuntime:
                 if known and known["active_run_id"] not in {None, run_id}:
                     raise PermissionError("session already has a writer")
                 history = json.loads(known["manifest_json"]) if known else dict(claim["binding"])
+                boundary = claim["context"].get("context_boundary", 0)
+                if boundary and boundary != history.get("context_boundary"):
+                    history = {**claim["binding"], "context_boundary": boundary, "context_sources_version": 1}
                 if known and not history.get("context_sources_version"):
                     earlier = conn.execute(select(
                         func.json_extract(runs.c.request_json, "$.context.task_sources"),
@@ -1325,6 +1382,9 @@ class LeaderRuntime:
                 if claim["context"].get("retrieved_data") and claim["context"].get("memory_scope") and not history.get("memory_history"):
                     history.update(memory_history=True, memory_scope=claim["context"]["memory_scope"],
                                    memory_epoch=claim["context"]["memory_epoch"])
+                if claim["context"].get("published_task_sources"):
+                    history["published_task_sources"] = sorted(
+                        set(history.get("published_task_sources", ())) | set(claim["context"]["published_task_sources"]))
                 if claim["context"].get("task_sources") or claim["context"].get("source_manifest"):
                     history["steering_sources"] = True
                     history["workspace_id"] = claim["context"].get("workspace_id", "personal")

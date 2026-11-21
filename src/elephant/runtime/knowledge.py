@@ -282,7 +282,7 @@ class KnowledgeRuntime:
             self.core.tasks.graph.cancel_tree(conn, child, reason="revoked")
         notice_ids = list(conn.execute(select(notifications.c.id).where(notifications.c.task_id.in_(tree_ids))).scalars())
         for row in conn.execute(select(outbox).where(outbox.c.state.in_(
-                ["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER", "STREAM_PENDING", "SENDING"]))).mappings():
+                ["LEADER_PENDING", "PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER", "STREAM_PENDING", "SENDING"]))).mappings():
             envelope = json.loads(row["envelope_json"])
             if envelope.get("origin_kind") == "task" and envelope.get("origin_id") in notice_ids:
                 state = "UNKNOWN" if row["state"] == "SENDING" else "FAILED"

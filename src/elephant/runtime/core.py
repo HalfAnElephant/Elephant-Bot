@@ -72,7 +72,8 @@ class Core:
         self.mail = MailRuntime(self)
         self.tasks = TaskService(db, clock, self.outbox, permissions=self.permissions,
             budget_ceiling=settings.execution.budget, context_validator=self.validate_context,
-            stream_eligibility=self.stream_delivery.eligible, qq_adapters=adapters,
+            stream_eligibility=self.stream_delivery.eligible, leader_publication=self._leader_publication,
+            qq_adapters=adapters,
             skills_settings=lambda: self.settings.skills, skills_provider=self.skills_for,
             action_authorizer=self.mail.authorize_context)
         self.tasks.graph = TaskGraph(self.tasks, settings)
@@ -94,6 +95,11 @@ class Core:
         self.tasks.stop_verifier = self.recovery.stopped
         self.scheduler = None
         self.active, self.active_ids, self.windows = {}, set(), {}
+
+    def _leader_publication(self, event):
+        return (event.conversation.surface in {Surface.PRIVATE, Surface.GUILD_PRIVATE}
+            and event.principal.identity_namespace.startswith("qq_app:")
+            and self.sessions.owner(event) == self.settings.owner.id)
 
     def skills_for(self, access, *, workspace_id="personal"):
         event = type("Identity", (), {"principal": access.principal, "conversation": access.conversation})()
@@ -394,6 +400,11 @@ class Core:
                     context = dict(context)
                     self.tasks.graph.merge_source_dependencies(context, history.get("task_sources", ()),
                         history.get("source_manifest", ()))
+                    context["published_task_sources"] = list(set(context.get("published_task_sources", ())) |
+                        set(history.get("published_task_sources", ())))
+            if any(not self.permissions.check(access, "task.read", "task:" + task_id, snapshot=policy).allowed
+                   for task_id in context.get("published_task_sources", ())):
+                return False
             try:
                 self.mail.receipts(conn, event, context, access=access, policy_snapshot=policy)
             except (PermissionError, LookupError, ValueError):
@@ -458,7 +469,7 @@ class Core:
                 "/new [名称] 开启新对话\n"
                 "/switch <名称或 ID> 切换对话\n"
                 "/dialogs 列出对话\n"
-                "/clear 清空当前对话上下文并切到新对话\n"
+                "/clear 清空当前对话上下文\n"
                 "/project [名称或 personal] 查看或切换项目\n"
                 "/mute [30m] 静默\n"
                 "/resume 恢复接收\n"
@@ -694,7 +705,7 @@ class Core:
             with self.db.engine.connect() as conn:
                 task = conn.execute(select(tasks, notifications.c.run_id.label("notification_run_id"),
                     notifications.c.state.label("notification_state"), notifications.c.purpose.label("notice_purpose"),
-                    runs.c.run_reason.label("notice_run_reason"),
+                    runs.c.run_reason.label("notice_run_reason"), runs.c.request_json.label("notice_request_json"),
                     runs.c.basis_goal_revision.label("notice_revision")).join(notifications, notifications.c.task_id == tasks.c.id)
                     .outerjoin(runs, runs.c.id == notifications.c.run_id)
                     .where(notifications.c.id == envelope.origin_id)).mappings().first()
@@ -726,6 +737,10 @@ class Core:
                         return False
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
+            report_context = json.loads(task["notice_request_json"] or "{}").get("context", {})
+            if report_context.get("published_task_sources") and not self.validate_context(access, {
+                    key: value for key, value in report_context.items() if key != "session_id"}):
+                return False
             return (self.permissions.check(access, "notification.send", "conversation:" + envelope.target.key).allowed
                     and self.validate_context(access, json.loads(task["context_json"])))
         return True

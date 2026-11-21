@@ -71,6 +71,48 @@ async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config,
         core.db.close()
 
 
+async def test_clear_resets_history_in_the_current_leader(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
+
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        def event(message_id, text):
+            return core.adapters["qq"].normalize(
+                official_payload(official_event, private=True, message_id=message_id, text=text))
+
+        old = event("before-clear", "先前的对话")
+        core.inbox.accept(old)
+        await core.tick(dispatch=False)
+        before = core.sessions.claim("fixture")
+
+        clear = event("clear-context", "/clear")
+        core.inbox.accept(clear)
+        await core.tick(dispatch=False)
+        await core.process(clear)
+        assert core.leader.renew(before["run_id"], before["fencing_token"], "fixture")["state"] == "CANCEL_REQUESTED"
+        finish_leader(core, before, "清空后到达的旧答复。")
+        fresh = event("after-clear", "现在开始")
+        core.inbox.accept(fresh)
+        await core.tick(dispatch=False)
+        after = core.sessions.claim("fixture")
+
+        assert after["session_id"] == before["session_id"]
+        assert after["context"]["dialogue_id"] == before["context"]["dialogue_id"]
+        assert after["context"]["context_boundary"] > 0
+        with core.db.engine.connect() as conn:
+            assert len(conn.execute(select(dialogues.c.id)).all()) == 1
+            from elephant.storage.agent_schema import leader_events
+            from elephant.storage.schema import outbox
+
+            assert conn.scalar(select(dialogue_inputs.c.state).where(dialogue_inputs.c.id == old.event_id)) == "CLEARED"
+            assert not conn.scalar(select(outbox.c.id).where(outbox.c.origin_id.endswith(old.event_id)))
+            assert len(conn.execute(select(leader_events.c.seq).where(
+                leader_events.c.source_kind == "context_clear")).all()) == 1
+    finally:
+        await core.stop()
+        core.db.close()
+
+
 async def test_status_does_not_need_free_execution_capacity(tmp_path, official_config, official_event, clock):
     from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)

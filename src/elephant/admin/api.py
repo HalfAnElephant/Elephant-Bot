@@ -1,9 +1,6 @@
 import asyncio
-import hashlib
 import json
-import os
 import re
-import stat
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -24,7 +21,8 @@ from elephant.contracts.memory import MemoryScope
 from elephant.credentials_env import credential_env
 from elephant.domain import AccessContext, ConversationRef, InboundEvent, PrincipalRef
 from elephant.domain.messages import SendReceipt
-from elephant.domain.tasks import TaskResult
+from elephant.domain.tasks import Artifact, TaskResult
+from elephant.harness.artifacts import copy_archived_artifact
 from elephant.permissions import (
     PermissionPolicy,
     PermissionRule,
@@ -627,29 +625,16 @@ def router(core, authenticate):
         item = next((a for a in result.get("artifacts", []) if a.get("sha256") == digest), None)
         if item is None:
             raise HTTPException(404)
-        root = Path(core.tasks.archive_root).resolve()
-        if not re.fullmatch(r"[a-f0-9-]{36}", item["id"]):
-            raise HTTPException(409, "invalid artifact reference")
+        try:
+            artifact = Artifact.model_validate(item)
+        except ValueError as error:
+            raise HTTPException(409, "invalid artifact reference") from error
         snapshot = tempfile.TemporaryFile()  # noqa: SIM115 - The streaming response owns the file.
         try:
             try:
-                fd = os.open(root / item["id"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as source:
-                    info = os.fstat(source.fileno())
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != item["size"]:
-                        raise HTTPException(409, "artifact unavailable")
-                    actual = hashlib.sha256()
-                    remaining = item["size"]
-                    while chunk := source.read(min(65536, remaining + 1)):
-                        remaining -= len(chunk)
-                        if remaining < 0:
-                            raise HTTPException(409, "artifact digest changed")
-                        actual.update(chunk)
-                        snapshot.write(chunk)
-                    if remaining or actual.hexdigest() != digest:
-                        raise HTTPException(409, "artifact digest changed")
-            except OSError as error:
-                raise HTTPException(409, "artifact unavailable") from error
+                copy_archived_artifact(core.tasks.archive_root, artifact, snapshot)
+            except ValueError as error:
+                raise HTTPException(409, str(error)) from error
             if core.tasks.get(row["public_id"], access).get("context_revoked"):
                 raise HTTPException(409, "artifact handoff sources are no longer authorized")
             snapshot.seek(0)

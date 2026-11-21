@@ -156,6 +156,8 @@ class RunGateway:
             self.system_prompt += ("\n文档按需要调用 document.parse，可选择文字或图文解析。返回的 document_ref 用于后续读取，"
                 "交接和压缩时保留实际使用的引用。引用正文为空或无法读取时，调用 document.ocr 核验原件文字。"
                 "OCR 返回的 length 表示该页文字不完整，结果截断时用 content_ref 读取。")
+        if claim.get("commit_publication"):
+            self.system_prompt += "\n本轮只在宿主结算后发送最终答复。业务工具的 user_message 填 null，本轮无需调用 task_notify。"
         if self.notify_before_tools:
             self.system_prompt += "\n开始业务工具前必须先单独调用 task_notify，确认宿主接受进度通知后再继续。"
         self.native_tools = native_tools(claim.get("role", "worker"), claim.get("purpose", "work"))
@@ -869,6 +871,9 @@ class RunGateway:
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],
                     "input_ids": context.get("source_input_ids", []),
                     "context_failed_input_ids": context.get("context_failed_input_ids", []),
+                    "context_boundary": context.get("context_boundary", 0),
+                    "delivery_history": context.get("delivery_history", []),
+                    "delivery_history_cursor": context.get("delivery_history_cursor"),
                     "published_run_ids": context.get("published_run_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
                     "goal": self.claim["goal"], "audio_context": audio_context,

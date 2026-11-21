@@ -123,6 +123,35 @@ def test_chat_retrigger_is_owner_bound_and_reserves_current_request_slot(
             reply_counters.c.key == stable_id(event.conversation.key, "new"))).scalar_one() == 3
 
 
+def test_new_input_refreshes_held_worker_reply_without_publishing(
+    db, clock, incoming, official_config, official_event
+):
+    from conftest import official_payload
+
+    adapter = OfficialAdapter(official_config, "d", incoming, clock)
+    event = adapter.normalize(official_payload(official_event, private=True))
+    outgoing = Outbox(db, clock)
+    envelope = OutboundEnvelope(delivery_id="held-worker", target=event.conversation,
+        text="待发布的文件说明", origin_kind="task", origin_id="worker-notice",
+        requester=event.principal, reply_context=event.reply_context, purpose="status",
+        expires_at=clock.now() + timedelta(minutes=5))
+    with db.transaction() as conn:
+        outgoing.enqueue(conn, envelope, defer_to_leader=True)
+    clock.advance(301)
+    trigger = event.model_copy(update={"reply_context": event.reply_context.model_copy(update={
+        "platform_message_id": "fresh-message", "expires_at": clock.now() + timedelta(minutes=5),
+    })})
+    with db.transaction() as conn:
+        assert outgoing.retrigger(conn, trigger) == []
+        row = conn.execute(select(outbox)).mappings().one()
+        staged = OutboundEnvelope.model_validate_json(row["envelope_json"])
+        assert row["state"] == "LEADER_PENDING"
+        assert staged.reply_context.platform_message_id == "fresh-message"
+        assert staged.reply_context.msg_seq is None
+        assert staged.expires_at > clock.now()
+        assert not conn.execute(select(reply_counters.c.key)).first()
+
+
 def test_restart_upgrades_recent_finals_and_skips_older_delivered_dialogue(
     db, clock, incoming, official_config, official_event
 ):

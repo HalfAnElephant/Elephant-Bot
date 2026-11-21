@@ -3,11 +3,13 @@ import json
 
 import pytest
 from sqlalchemy import insert, select, update
-from test_agent_runtime import root_goal, worker_complete
+from test_agent_runtime import leader_complete, root_goal, worker_complete
 from test_agent_runtime import runtime as agent_runtime
 
 from elephant.domain.tasks import TaskResult
+from elephant.harness.artifacts import export_artifacts
 from elephant.storage.action_schema import operations
+from elephant.storage.schema import outbox
 from elephant.storage.task_schema import observations, tasks
 
 runtime = agent_runtime
@@ -126,3 +128,68 @@ async def test_worker_reference_preflight_accepts_prior_attempt_and_rejects_miss
     assert stale.status_code == 409
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(tasks.c.result_json).where(tasks.c.id == worker["task_id"])).scalar_one() is None
+
+
+@pytest.mark.parametrize("worker_status", ["completed", "partial"])
+async def test_worker_status_archive_and_verified_report_share_the_current_leader(runtime, worker_status):
+    root = root_goal(runtime)
+    worker = runtime.service.claim("worker")
+    assert worker["task_id"] == root["children"][0]["id"]
+    foreign = root_goal(runtime, key="foreign-artifact")
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    user = runtime.sessions.claim("leader")
+
+    async def call(claim, operation, **arguments):
+        return await runtime.leader.invoke("tasks", (claim["run_id"], claim["fencing_token"], "leader"),
+            {"operation": operation, "arguments": arguments, "call_id": operation})
+
+    snapshot = await call(user, "tasks.status", task_ref=root["public_id"])
+    assert snapshot["children"][0]["state"] == "RUNNING"
+    complete_with_refs(runtime, user, "completed")
+
+    text = "1. 番茄牛腩\n2. 菌菇鸡汤"
+    (runtime.path / "dinner.md").write_text(text, encoding="utf-8")
+    artifact, = export_artifacts(runtime.path, runtime.service.archive_root, ["dinner.md"])
+    record_refs(runtime, worker, effect_state="VERIFIED" if worker_status == "completed" else "FAILED")
+    receipt = {"kind": "turn_finished", "session_id": worker["context"]["session_id"],
+        "run_id": worker["run_id"], "session_revision": "leaf",
+        "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True}
+    runtime.service.submit(worker["run_id"], worker["fencing_token"], "worker",
+        {"status": worker_status, "summary": "清单已生成", "artifacts": [artifact], "effect_refs": ["child-effect"]},
+        receipt=receipt)
+    with runtime.db.transaction() as conn:
+        row = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        goal = json.loads(row["goal_json"])
+        goal.update(success_checks=["artifact"], requested_outputs=["dinner.md"])
+        conn.execute(update(tasks).where(tasks.c.id == row["id"]).values(goal_json=json.dumps(goal)))
+    final = runtime.sessions.claim("leader")
+    assert final["session_id"] == user["session_id"]
+    assert final["purpose"] == ("finalize" if worker_status == "completed" else "attention")
+    listed, = await call(final, "tasks.list")
+    assert listed["public_id"] == root["public_id"]
+    status = await call(final, "tasks.status", task_ref=root["public_id"])
+    child, = status["children"]
+    assert child["state"] == ("SUCCEEDED" if worker_status == "completed" else "PARTIAL")
+    assert child["result"]["artifacts"] == [artifact]
+    with pytest.raises(PermissionError, match="another root"):
+        await call(final, "tasks.read_artifact", task_ref=foreign["children"][0]["id"], artifact_id=artifact["id"])
+    with pytest.raises(KeyError, match="artifact unavailable"):
+        await call(final, "tasks.read_artifact", task_ref=child["id"], artifact_id="unknown")
+    read = {"task_ref": child["id"], "artifact_id": artifact["id"]}
+    page = await call(final, "tasks.read_artifact", **read, limit=7)
+    tail = await call(final, "tasks.read_artifact", **read, offset=page["next_offset"])
+    assert page["text"] + tail["text"] == text and tail["next_offset"] is None
+    path = runtime.service.archive_root / artifact["id"]
+    path.write_bytes(b"X" * artifact["size"])
+    with pytest.raises(ValueError, match="digest changed"):
+        await call(final, "tasks.read_artifact", **read)
+    path.write_text(text, encoding="utf-8")
+    # The Leader need not cite a side effect to deliver a verified file.
+    leader_complete(runtime, final, text)
+    leader_complete(runtime, final, text)
+    with runtime.db.engine.connect() as conn:
+        target = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
+        assert target["state"] == "SUCCEEDED"
+        assert json.loads(target["result_json"])["effect_refs"] == (["child-effect"] if worker_status == "completed" else [])
+        deliveries = conn.execute(select(outbox.c.envelope_json).where(outbox.c.origin_kind == "task")).scalars().all()
+        assert [json.loads(delivery)["text"] for delivery in deliveries] == ["1）番茄牛腩\n2）菌菇鸡汤"]

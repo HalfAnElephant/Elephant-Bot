@@ -31,6 +31,8 @@ async def test_leader_binding_includes_persona_and_public_contract(tmp_path, pur
         assert "先委派再设计实现" in prompt and "通知时机由你" in prompt
         assert "收到用户请求本身就足以发一句自然的接收确认" in prompt
         assert "接收确认、每条进度通知和最终答复分别构成完整消息" in prompt
+        assert "面向用户的任务汇报先说结果" in prompt
+        assert "用户要的清单、正文、代码或文件是交付物，按要求完整给出" in prompt
         assert "提交成功后简短说明已接受/排队" not in prompt
         assert "禁止 Markdown" not in PERSONA
     finally:
@@ -42,7 +44,8 @@ def test_internal_roles_preserve_execution_contract(role):
     prompt = assemble_prompt(role)
     assert PERSONA not in prompt and PUBLIC_REPLY not in prompt
     if role == "worker":
-        assert "你的最终答复交给父任务核验，不直接发给 QQ" in prompt
+        assert "交给父任务核验，保留必要证据和限制" in prompt
+        assert "独立任务的最终答复会用于用户汇报" in prompt
 
 
 def test_unknown_prompt_role_is_rejected():

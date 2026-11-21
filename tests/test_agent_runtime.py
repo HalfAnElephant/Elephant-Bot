@@ -11,6 +11,7 @@ from elephant.domain.messages import (
     ConversationRef,
     InboundEvent,
     PrincipalRef,
+    SendReceipt,
     Surface,
     TextSegment,
 )
@@ -19,7 +20,7 @@ from elephant.outbox.service import Outbox
 from elephant.runtime.leader import LeaderRuntime
 from elephant.runtime.sessions import SessionService
 from elephant.runtime.task_graph import TaskGraph
-from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
+from elephant.storage.agent_schema import dialogue_inputs, leader_events, leader_inbox
 from elephant.storage.db import Database
 from elephant.storage.schema import metadata, outbox
 from elephant.storage.task_schema import inputs, runs, tasks
@@ -99,6 +100,89 @@ def test_dispatch_replay_conflict_and_worker_results_finalize_once(runtime):
         assert conn.execute(select(tasks.c.state).where(tasks.c.id == root["task_id"])).scalar_one() == "SUCCEEDED"
         assert len(conn.execute(select(outbox)).all()) == 1
         assert all(conn.execute(select(leader_inbox.c.handled_at)).scalars())
+
+
+def test_clear_keeps_pending_task_and_delivered_report_enters_same_history(runtime):
+    root = root_goal(runtime)
+    worker_complete(runtime)
+    before = runtime.sessions.claim("leader")
+    leader_complete(runtime, before, "维护汇报：服务器需要重启。")
+    with runtime.db.transaction() as conn:
+        delivery = conn.scalar(select(outbox.c.id))
+        runtime.sessions.clear_context(conn, runtime.event.model_copy(update={"event_id": "clear"}))
+
+    runtime.service.outbox._receipt(delivery, SendReceipt(state="SENT", platform_message_id="qq-visible"))
+    runtime.service.outbox._receipt(delivery, SendReceipt(state="SENT", platform_message_id="qq-visible"))
+    followup = runtime.event.model_copy(update={"event_id": "followup",
+        "segments": (TextSegment(text="今晚重启吧"),)})
+    runtime.sessions.enqueue(followup, runtime.access)
+    after = runtime.sessions.claim("leader")
+
+    assert after["session_id"] == before["session_id"]
+    assert after["context"]["context_boundary"] > 0
+    assert after["goal"] == "今晚重启吧"
+    delivered, = after["context"]["delivery_history"]
+    assert delivered["platform_message_id"] == "qq-visible"
+    assert delivered["task_id"] == root["task_id"]
+    assert "服务器需要重启" in delivered["text"]
+
+
+def test_chat_history_uses_confirmed_delivery_instead_of_the_draft(runtime):
+    first = runtime.sessions.enqueue(runtime.event, runtime.access)
+    leader = runtime.sessions.claim("leader")
+    leader_complete(runtime, leader, "用户可见内容")
+    with runtime.db.engine.connect() as conn:
+        delivery = conn.scalar(select(outbox.c.id).where(outbox.c.origin_id.endswith(first["input_id"])))
+
+    runtime.service.outbox._receipt(delivery, SendReceipt(state="UNKNOWN"))
+    runtime.sessions.enqueue(runtime.event.model_copy(update={"event_id": "second"}), runtime.access)
+    second = runtime.sessions.claim("leader")
+    assert leader["run_id"] not in second["context"]["published_run_ids"]
+    assert not second["context"].get("delivery_history")
+    leader_complete(runtime, second)
+
+    receipt = SendReceipt(state="SENT", platform_message_id="confirmed-chat")
+    runtime.service.outbox._receipt(delivery, receipt)
+    runtime.service.outbox._receipt(delivery, receipt)
+    runtime.sessions.enqueue(runtime.event.model_copy(update={"event_id": "third"}), runtime.access)
+    third = runtime.sessions.claim("leader")
+    visible, = third["context"]["delivery_history"]
+    assert visible["input_id"] == first["input_id"]
+    assert visible["platform_message_id"] == "confirmed-chat"
+    assert visible["text"] == "用户可见内容"
+
+
+def test_independent_worker_reports_through_current_private_leader(runtime):
+    runtime.service.leader_publication = lambda event: event.principal == runtime.event.principal
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    first = runtime.sessions.claim("leader")
+    task = runtime.service.accept(runtime.event, runtime.access, "独立任务")
+    runtime.service.stream_eligibility = lambda _: True
+    worker = worker_complete(runtime)
+    runtime.service.stream_eligibility = None
+    assert not worker["public_answer_events"]
+    with runtime.db.engine.connect() as conn:
+        delivery = conn.execute(select(outbox).where(outbox.c.task_id == task["id"])).mappings().one()
+        assert delivery["state"] == "LEADER_PENDING"
+    assert not runtime.service.outbox.pending_rows({})
+
+    runtime.sessions.publish_worker_deliveries()
+    assert not runtime.service.outbox.pending_rows({})
+    leader_complete(runtime, first)
+    runtime.sessions.publish_worker_deliveries()
+    runtime.sessions.publish_worker_deliveries()
+    with runtime.db.engine.connect() as conn:
+        assert conn.scalar(select(outbox.c.state).where(outbox.c.id == delivery["id"])) == "PENDING"
+        publication = conn.execute(select(leader_events).where(
+            leader_events.c.source_kind == "worker_publication")).mappings().one()
+        assert publication["dialogue_id"] == first["context"]["dialogue_id"]
+        assert json.loads(publication["payload_json"])["session_id"] == first["session_id"]
+    runtime.service.outbox._receipt(delivery["id"], SendReceipt(state="SENT", platform_message_id="worker-report"))
+    runtime.sessions.enqueue(runtime.event.model_copy(update={"event_id": "after-worker"}), runtime.access)
+    followup = runtime.sessions.claim("leader")
+    visible, = followup["context"]["delivery_history"]
+    assert visible["task_id"] == task["id"]
+    assert visible["platform_message_id"] == "worker-report"
 
 
 def test_protocol_failure_blocks_settled_goal_and_delivers_report_once(runtime):
@@ -894,28 +978,29 @@ def test_consumed_revision_can_progress_while_a_sibling_starts_independently(run
     assert runtime.service.authorize(*second_identity, write)["allowed"]
 
 
-def test_old_worker_result_keeps_its_dialogue_after_focus_switch(runtime):
+def test_old_worker_result_waits_for_current_private_leader_without_rebinding_task(runtime):
     from elephant.storage.agent_schema import dialogues
     first = runtime.sessions.enqueue(runtime.event, runtime.access)
     root = root_goal(runtime)
     user = runtime.sessions.claim("leader")
-    worker = runtime.service.claim("worker")
     other = runtime.event.model_copy(update={"event_id": "another-dialogue", "segments": (TextSegment(text="另一个问题"),)})
     second = runtime.sessions.enqueue(other, runtime.access, new_title="第二对话")
-    other_leader = runtime.sessions.claim("other-leader")
+    other_leader = runtime.sessions.claim("leader")
     assert other_leader["session_id"] == second["session_id"] != first["session_id"]
     leader_complete(runtime, user, "已接受后台核验。")
-    runtime.service.submit(worker["run_id"], worker["fencing_token"], "worker", {"status": "completed", "summary": "旧对话核验完成"},
-        receipt={"kind": "turn_finished", "session_id": worker["context"]["session_id"], "run_id": worker["run_id"],
-                 "session_revision": "leaf", "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True})
-    with runtime.db.engine.connect() as conn:
-        assert conn.execute(select(leader_inbox.c.target_session_id)).scalar_one() == first["session_id"]
+    worker_complete(runtime)
+
+    assert runtime.sessions.claim("another-worker") is None
+    leader_complete(runtime, other_leader, "当前对话继续。")
     finalizer = runtime.sessions.claim("leader")
-    assert finalizer["session_id"] == first["session_id"] and finalizer["target_root_task_id"] == root["task_id"]
+    assert finalizer["session_id"] == second["session_id"]
+    assert finalizer["target_root_task_id"] == root["task_id"]
+    leader_complete(runtime, finalizer)
     assert runtime.sessions.enqueue(runtime.event, runtime.access)["dialogue_id"] == first["dialogue_id"]
     with runtime.db.engine.connect() as conn:
         assert len(conn.execute(select(dialogues)).all()) == 2
-        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == other_leader["run_id"])).scalar_one() == 1
+        assert conn.scalar(select(tasks.c.coordinator_session_id).where(tasks.c.id == root["task_id"])) == first["session_id"]
+        assert conn.scalar(select(tasks.c.state).where(tasks.c.id == root["task_id"])) == "SUCCEEDED"
 
 
 async def test_review_without_reusable_content_finishes_without_business_or_delivery(runtime):

@@ -825,6 +825,80 @@ async def test_locked_pi_replaces_runtime_snapshots_without_erasing_log(compacti
     assert sum(entry.get("type") == "context_edit" and entry.get("replacement") is None for entry in entries) >= 2
 
 
+async def test_locked_pi_clears_context_without_replacing_session(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    path = state.runner.session_path
+
+    for index, (boundary, goal) in enumerate((
+        (0, "OLD_HISTORY_SENTINEL"),
+        (12, "FIRST_AFTER_CLEAR"),
+        (12, "SECOND_AFTER_CLEAR"),
+    )):
+        state.gateway.revoke()
+        state.gateway.bind({**state.claim, "run_id": f"clear-run-{index}", "goal": goal,
+            "context": {**state.claim["context"], "context_boundary": boundary}})
+        await state.runner.run(goal, keep_alive=True)
+
+    first, cleared, continued = (json.dumps(request["payload"]) for request in state.requests)
+    assert "OLD_HISTORY_SENTINEL" in first
+    assert "FIRST_AFTER_CLEAR" in cleared and "OLD_HISTORY_SENTINEL" not in cleared
+    assert "FIRST_AFTER_CLEAR" in continued and "OLD_HISTORY_SENTINEL" not in continued
+    assert state.runner.session_path == path
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert sum(entry.get("customType") == "elephant-context-clear" for entry in entries) == 1
+    assert "OLD_HISTORY_SENTINEL" in path.read_text()
+
+
+async def test_locked_pi_replays_sent_task_report_as_history_once(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    report = {"seq": 13, "text": "SENT_MAINTENANCE_REPORT", "task_id": "task", "platform_message_id": "qq-report"}
+    for index in range(2):
+        state.gateway.revoke()
+        state.gateway.bind({**state.claim, "run_id": f"report-run-{index}", "session_id": "test-session",
+            "role": "leader", "purpose": "user", "goal": "Continue the discussion about the report",
+            "context": {**state.claim["context"], "context_boundary": 12,
+                "source_input_ids": [f"new-input-{index}"], "delivery_history": [report], "delivery_history_cursor": 13}})
+        await state.runner.run(state.gateway.claim["goal"], keep_alive=True)
+        messages = state.requests[-1]["payload"]["messages"]
+        sent = [message for message in messages if message.get("content") == report["text"]]
+        assert len(sent) == 1
+        assert sent[0]["role"] == "assistant"
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    assert sum(entry.get("customType") == "elephant-visible-delivery" for entry in entries) == 1
+
+
+def test_pi_budget_accepts_replayed_delivery_without_provider_usage():
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "node_modules/.bin/pi").exists():
+        pytest.skip("locked pi package is not installed")
+    script = r'''
+import assert from "node:assert/strict";
+import {createJiti} from "jiti";
+import {clampMaxTokensToContext} from "./node_modules/@earendil-works/pi-ai/dist/api/simple-options.js";
+const jiti = createJiti(import.meta.url, {alias: {
+  "@earendil-works/pi-ai": process.cwd() + "/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"}});
+const {conversationHistory} = await jiti.import("./src/elephant/harness/pi_bridge.ts");
+const report = "CONFIRMED_QQ_DELIVERY".repeat(16);
+const timestamp = "2026-11-21T00:00:00.000Z";
+const entry = {type: "custom_message", customType: "elephant-visible-delivery", id: "receipt", content: report, timestamp};
+const projected = conversationHistory([entry], {}).history([
+  {role: "custom", customType: entry.customType, content: report, timestamp: Date.parse(timestamp)}
+], {live: true});
+assert.equal(projected.length, 1);
+const budget = clampMaxTokensToContext({contextWindow: 5000}, {messages: projected}, 1000);
+assert.ok(budget > 0 && budget < 5000 - 4096, "replay text still counts against the context budget");
+assert.equal(projected[0].role, "assistant");
+assert.equal(projected[0].content[0].text, report);
+assert.equal(projected[0].usage.totalTokens, 0, "a receipt is not a provider completion");
+assert.equal(projected[0].usage.cost.total, 0);
+'''
+    subprocess.run(["node", "--input-type=module", "-e", script], cwd=root, check=True)
+
+
 def test_native_compactor_rolls_complete_interactions_and_bounds_requests():
     import subprocess
 
