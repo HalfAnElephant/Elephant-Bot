@@ -705,7 +705,7 @@ class Core:
             with self.db.engine.connect() as conn:
                 task = conn.execute(select(tasks, notifications.c.run_id.label("notification_run_id"),
                     notifications.c.state.label("notification_state"), notifications.c.purpose.label("notice_purpose"),
-                    runs.c.run_reason.label("notice_run_reason"),
+                    runs.c.run_reason.label("notice_run_reason"), runs.c.request_json.label("notice_request_json"),
                     runs.c.basis_goal_revision.label("notice_revision")).join(notifications, notifications.c.task_id == tasks.c.id)
                     .outerjoin(runs, runs.c.id == notifications.c.run_id)
                     .where(notifications.c.id == envelope.origin_id)).mappings().first()
@@ -737,6 +737,10 @@ class Core:
                         return False
                 if not self.knowledge.delivery_valid(conn, task, task):
                     return False
+            report_context = json.loads(task["notice_request_json"] or "{}").get("context", {})
+            if report_context.get("published_task_sources") and not self.validate_context(access, {
+                    key: value for key, value in report_context.items() if key != "session_id"}):
+                return False
             return (self.permissions.check(access, "notification.send", "conversation:" + envelope.target.key).allowed
                     and self.validate_context(access, json.loads(task["context_json"])))
         return True

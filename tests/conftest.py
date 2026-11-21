@@ -19,7 +19,7 @@ def runtime_client_for(service):
 
     core = SimpleNamespace(tasks=service, knowledge=SimpleNamespace(recover_mutations=lambda: None),
                            recovery=SimpleNamespace(epoch=""), settings=SimpleNamespace(model=ModelConfig()))
-    leader = SimpleNamespace(sessions=SimpleNamespace(claim=lambda _worker_id: None),
+    leader = SimpleNamespace(sessions=SimpleNamespace(claim=lambda _worker_id: None, publish_worker_deliveries=lambda: None),
                              claim_review=lambda _worker_id: None, observe_operation=lambda *_args: None)
     return RuntimeClient(core, leader)
 

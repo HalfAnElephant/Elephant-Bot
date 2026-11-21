@@ -37,7 +37,7 @@ def runtime(tmp_path):
     service = TaskService(db, clock, Outbox(db, clock), stop_verifier=lambda *_: True)
     service.graph = TaskGraph(service, settings)
     sessions = SessionService(service, settings)
-    core = SimpleNamespace(tasks=service, db=db, clock=clock, outbox=service.outbox, allowed=lambda _: True)
+    core = SimpleNamespace(tasks=service, db=db, clock=clock, outbox=service.outbox, settings=settings, allowed=lambda _: True)
     leader = LeaderRuntime(core, sessions)
     event = InboundEvent(event_id="input-1", event_type="message.created",
         conversation=ConversationRef(deployment_id="d", adapter_instance_id="a", bot_identity_id="b",

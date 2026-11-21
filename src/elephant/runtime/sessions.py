@@ -653,7 +653,8 @@ class SessionService:
                 task_id = root["id"] if purpose in {"finalize", "attention"} else None
                 claim["public_answer_events"] = bool(self.service.stream_eligibility
                     and self.service.stream_eligibility(event))
-                if opted_in:
+                # Worker reports can be superseded or fail verification during settlement.
+                if opted_in or (root and not self.service._internal_reply(root)):
                     claim["commit_publication"] = True
                     claim["typing_only"] = bool(user and claim["public_answer_events"])
                     claim["public_answer_events"] = False

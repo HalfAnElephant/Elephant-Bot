@@ -12,6 +12,7 @@ from test_leader_core import finish_leader, make_core
 
 from elephant.domain import stable_id
 from elephant.jobs.streaming import StreamDelivery
+from elephant.permissions import PermissionRule
 from elephant.storage.schema import outbox, reply_counters
 from elephant.storage.stream_schema import stream_messages, stream_runs
 from elephant.storage.task_schema import events, runs, tasks
@@ -238,7 +239,7 @@ runtime = agent_runtime
 
 
 @pytest.mark.parametrize("purpose", ["progress", "finalize"])
-def test_task_leader_holds_actual_notification_for_stream_resolution(runtime, purpose):
+async def test_task_leader_publishes_only_the_committed_report(runtime, purpose):
     root = root_goal(runtime)
     if purpose == "finalize":
         worker_complete(runtime)
@@ -251,15 +252,22 @@ def test_task_leader_holds_actual_notification_for_stream_resolution(runtime, pu
     runtime.service.stream_eligibility = lambda event: True
     runtime.leader.core.stream_delivery = StreamDelivery(runtime.leader.core)
     claim = runtime.sessions.claim("leader")
-    assert claim["purpose"] == purpose and claim["public_answer_events"] is True
-    leader_complete(runtime, claim, "已经完成" if purpose == "finalize" else "正在检查")
+    assert claim["purpose"] == purpose and claim["commit_publication"] and not claim["public_answer_events"]
+    identity = (claim["run_id"], claim["fencing_token"], "leader")
+    with pytest.raises(PermissionError, match="not enabled"):
+        await runtime.leader.invoke("event", identity,
+            {"kind": "public_answer_end", "message_id": "draft", "text": "尚未验收的正文"}, seq=1, event_id="draft")
+    assert await runtime.leader.invoke("notify", identity, {"text": "草稿进度"}) == {
+        "accepted": False, "reason": "leader_draft_unpublished"}
+    text = "已经完成" if purpose == "finalize" else "正在检查"
+    leader_complete(runtime, claim, text)
+    leader_complete(runtime, claim, text)
     with runtime.db.engine.connect() as conn:
-        gate = conn.execute(select(stream_runs).where(stream_runs.c.run_id == claim["run_id"])).mappings().one()
-        assert gate["task_id"] == root["task_id"]
-        assert gate["result_origin_kind"] == "task"
-        delivery = conn.execute(select(outbox).where(outbox.c.origin_id == gate["result_origin_id"])).mappings().one()
-        assert delivery["state"] == "STREAM_PENDING"
+        assert not conn.execute(select(stream_runs)).first()
+        delivery = conn.execute(select(outbox).where(outbox.c.task_id == root["task_id"])).mappings().one()
+        assert delivery["state"] == "PENDING"
         assert delivery["origin_kind"] == "task"
+        assert json.loads(delivery["envelope_json"])["text"] == text
 
 
 async def test_locked_pi_leader_delivers_chinese_prefix_before_upstream_finishes(leader_stream, tmp_path):
@@ -396,8 +404,8 @@ async def test_recovered_leader_without_result_settles_stream_and_fences_source_
         assert s.core.sessions.claim("fixture") is not None
 
 
-@pytest.mark.parametrize("status", ["completed", "failed"])
-async def test_task_leader_delivers_final_answer_through_native_stream(leader_stream, status):
+@pytest.mark.parametrize(("status", "revoked"), [("completed", False), ("failed", False), ("completed", True)])
+async def test_task_leader_delivers_final_answer_through_native_stream(leader_stream, status, revoked):
     s = leader_stream
     user = s.core.sessions.claim("fixture")
     with s.core.db.transaction() as conn:
@@ -414,25 +422,37 @@ async def test_task_leader_delivers_final_answer_through_native_stream(leader_st
     s.calls.clear()
     finalizer = s.core.sessions.claim("fixture")
     assert finalizer["purpose"] == "finalize"
-    await append(s.core, finalizer, 1, "public_answer_delta", "检查")
-    await s.core.stream_delivery.dispatch_once()
-    await append(s.core, finalizer, 2, "public_answer_end", "检查完毕")
-    await append(s.core, finalizer, 3, "public_answer_final", "检查完毕")
+    identity = (finalizer["run_id"], finalizer["fencing_token"], "fixture")
+    snapshot = await s.core.leader.invoke("tasks", identity, {"operation": "tasks.status", "call_id": "read-workers",
+        "arguments": {"task_ref": root["public_id"]}})
+    assert snapshot["children"][0]["state"] == "SUCCEEDED"
+    await s.core.deliver()
+    assert not s.calls
     s.core.leader.complete(finalizer["run_id"], finalizer["fencing_token"], "fixture",
         {"status": status, "summary": "检查完毕"}, stopped=True, quiescent=False,
         receipt={"kind": "turn_finished", "session_id": finalizer["session_id"], "run_id": finalizer["run_id"],
                  "session_revision": "leaf", "input_ids": finalizer["source_ids"], "inflight": 0, "tools_paired": True})
+    if revoked:
+        s.core.permissions.upsert(PermissionRule(id="denied-worker", actions=("task.read",),
+            resources=("task:" + worker["task_id"],), effect="deny"),
+            expected_version=s.core.permissions.policy_version, actor="fixture")
+    s.core.clock.advance(3)
     await s.core.deliver()
     await s.core.deliver()
-    assert len(s.calls) == 2
-    assert all(call.url.path.endswith("/stream_messages") for call in s.calls)
-    final = json.loads(s.calls[-1].content)
+    if revoked:
+        assert not s.calls
+        with s.core.db.engine.connect() as conn:
+            assert conn.execute(select(outbox.c.state, outbox.c.attempts).where(
+                outbox.c.task_id == root["task_id"])).one() == ("FAILED", 0)
+        return
+    message, = s.calls
+    assert message.url.path.endswith("/stream_messages")
+    final = json.loads(message.content)
     assert final["input_state"] == 10 and final["content_raw"] == "检查完毕"
     with s.core.db.engine.connect() as conn:
-        gate = conn.execute(select(stream_runs).where(stream_runs.c.run_id == finalizer["run_id"])).mappings().one()
-        assert gate["task_id"] == root["task_id"] and gate["state"] == "DONE"
-        assert conn.execute(select(outbox.c.state).where(
-            outbox.c.origin_id == gate["result_origin_id"])).scalar_one() == "SENT"
+        assert not conn.execute(select(stream_runs).where(stream_runs.c.run_id == finalizer["run_id"])).first()
+        assert conn.execute(select(outbox.c.state, outbox.c.attempts).where(
+            outbox.c.task_id == root["task_id"])).one() == ("SENT", 1)
 
 
 @pytest.mark.parametrize("markdown", [False, True])
