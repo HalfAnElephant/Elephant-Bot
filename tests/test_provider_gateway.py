@@ -724,6 +724,21 @@ async def test_actual_request_metrics_keep_stable_prefix_and_host_model(body):
     assert second["input_tokens_estimated"] > 0 and second["coverage"] == "unknown"
 
 
+@pytest.mark.parametrize(("role", "effort"), [("leader", "low"), ("worker", "max")])
+async def test_host_reasoning_effort_overrides_pi_and_is_recorded(gateway, role, effort):
+    instance, core, claim = gateway
+    instance.revoke()
+    instance.bind({**claim, "role": role, "reasoning_effort": effort})
+    fixture = ProviderFixture()
+    instance.provider.transport = fixture.adapter.transport
+    await instance.provider.complete({
+        "model": "offline", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high",
+    })
+    assert fixture.requests[0]["reasoning_effort"] == effort
+    usage, = (data["usage"] for operation, data in core.calls if operation == "usage")
+    assert usage["requested_reasoning_effort"] == effort
+
+
 async def test_provider_session_header_survives_warm_rebind(gateway):
     instance, _core, claim = gateway
     seen = []

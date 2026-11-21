@@ -124,6 +124,11 @@ class RuntimeClient:
                 if result:
                     self.last_role = result.get("role", "worker")
                     result["host_epoch"] = self.core.recovery.epoch
+                    model_settings = self.core.settings.model
+                    if self.last_role == "leader":
+                        result["reasoning_effort"] = model_settings.leader_reasoning_effort
+                    elif self.last_role == "worker":
+                        result["reasoning_effort"] = model_settings.worker_reasoning_effort
                     with self.service.db.transaction() as conn:
                         conn.execute(update(runs).where(runs.c.id == result["run_id"]).values(request_json=__import__("json").dumps(result)))
                     return result

@@ -169,7 +169,7 @@ class ProviderAdapter:
                  output_tokens=None, model_window=32768,
                  compaction_output=4096, stream_supported=True, on_exhausted=None,
                  guard=None, upstream_failure=None, request_succeeded=None, before_compaction_request=None,
-                 maintenance=False, event_id=None, run_id=None):
+                 maintenance=False, event_id=None, run_id=None, reasoning_effort=None):
         self.model, self.endpoint, self.key = model, endpoint, key
         self.upstream_session = str(uuid4())
         self.authorize, self.reserve, self.record = authorize, reserve, record
@@ -185,6 +185,7 @@ class ProviderAdapter:
         self.active = 0
         self.last_usage = self.ttft = None
         self.event_id, self.run_id = event_id, run_id
+        self.reasoning_effort = reasoning_effort
 
     async def _exhausted(self):
         self.business_exhausted = True
@@ -220,6 +221,8 @@ class ProviderAdapter:
         output = self.compaction_output if kind == "compaction" else self.output_tokens
         payload = {key: body[key] for key in ("model", "messages", "tools", "tool_choice", "temperature",
                    "parallel_tool_calls", "reasoning_effort") if key in body}
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         try:
             validate_transactions(payload["messages"])
         except ValueError as error:
@@ -368,6 +371,8 @@ class ProviderAdapter:
         usage.update(elapsed_ms=round((time.monotonic() - started) * 1000, 2),
                      ttft_ms=round(ttft * 1000, 2) if ttft is not None else None,
                      provider_model=self.model)
+        if "reasoning_effort" in payload:
+            usage["requested_reasoning_effort"] = payload["reasoning_effort"]
         self.last_usage = usage
         await self.record(request_id, usage)
 

@@ -85,6 +85,8 @@ class AdapterConfig(DTO):
 class ModelConfig(DTO):
     endpoint: str | None = None
     model: str | None = None
+    leader_reasoning_effort: Literal["none", "low", "high", "max"] | None = None
+    worker_reasoning_effort: Literal["none", "low", "high", "max"] | None = None
     api_key_env: str = "ELEPHANT_MODEL_KEY"
     timeout_seconds: int = Field(default=30, ge=1, le=120)
     context_window: int = Field(default=32768, ge=2048, le=2000000)
