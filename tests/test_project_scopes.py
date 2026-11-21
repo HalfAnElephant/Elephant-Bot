@@ -262,7 +262,7 @@ def test_skill_write_failures_are_durable_deduplicated_and_redacted(project_core
     assert 'private body' not in rows[0]['detail']
 
 
-async def test_host_memory_replan_retries_when_followup_arrives_during_recall(project_core):
+async def test_host_memory_replan_retries_when_followup_arrives_during_context_preparation(project_core):
     core = project_core
     receipt = core.enqueue_admin_task('处理资料', idempotency_key='replan-concurrent', workspace_id='alpha',
         success_checks=('artifact',), requested_outputs=('outputs/final.txt',))
@@ -276,17 +276,21 @@ async def test_host_memory_replan_retries_when_followup_arrives_during_recall(pr
     late = late.model_copy(update={'segments': (*late.segments, MediaSegment(type='file',
         attachment_ref='late-file', source_url='https://cdn.example/late', filename='late.pptx'))})
     appended = False
-    async def append_during_recall(*_args):
+    prepare = core.knowledge.prepare
+
+    async def append_during_preparation(event, context):
         nonlocal appended
+        fresh = await prepare(event, context)
         if not appended:
             appended = True
             accepted, _ = core.inbox.accept(late)
             with core.db.transaction() as conn:
                 current = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
                 core.tasks.add_graph_input(conn, current, accepted, core.access(accepted), accepted.text)
-        return MemorySearchResult(status='ready', memory_epoch=1)
+        return fresh
+
     core.openviking.status = AsyncMock(return_value={'state': 'READY', 'memory_epoch': 1})
-    core.openviking.search = AsyncMock(side_effect=append_during_recall)
+    core.knowledge.prepare = append_during_preparation
     await core.knowledge.replan()
     with core.db.engine.connect() as conn:
         current = conn.execute(select(tasks).where(tasks.c.id == receipt['task_id'])).mappings().one()
