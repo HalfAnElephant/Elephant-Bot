@@ -76,6 +76,43 @@ async def test_private_leader_claim_and_final_stream_suppress_duplicate_outbox(l
         assert conn.execute(select(outbox.c.state)).scalar_one() == "SENT"
 
 
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "unknown"])
+async def test_delivery_streams_committed_result_without_pi_deltas(leader_stream, outcome):
+    s = leader_stream
+    adapter = s.core.adapters["qq"]
+    adapter.config = adapter.config.model_copy(update={"typing_enabled": True})
+    original = adapter.client._transport.handler
+
+    def respond(request):
+        if outcome == "rejected" and request.url.path.endswith("/stream_messages"):
+            s.calls.append(request)
+            return httpx.Response(403)
+        return original(request)
+
+    adapter.client._transport = httpx.MockTransport(respond)
+    claim = s.core.sessions.claim("fixture")
+    await s.core.deliver()
+    typing = json.loads(s.calls[0].content)
+    assert typing["msg_type"] == 6
+
+    answer = "检查完成。"
+    finish_leader(s.core, claim, answer)
+    s.fail_reads = outcome == "unknown"
+    await s.core.deliver()
+    await s.core.deliver()
+
+    assert len(s.calls) == (3 if outcome == "rejected" else 2)
+    assert s.calls[1].url.path.endswith("/stream_messages")
+    frame = json.loads(s.calls[1].content)
+    assert frame["input_state"] == 10 and frame["content_raw"] == answer
+    assert frame["msg_seq"] == typing["msg_seq"] + 1
+    if outcome == "rejected":
+        assert s.calls[2].url.path.endswith("/messages")
+        assert json.loads(s.calls[2].content)["msg_seq"] == frame["msg_seq"]
+    with s.core.db.engine.connect() as conn:
+        assert conn.execute(select(outbox.c.state)).scalar_one() == ("UNKNOWN" if outcome == "unknown" else "SENT")
+
+
 async def test_disabled_streaming_rejects_public_events(leader_stream):
     s = leader_stream
     adapter = s.core.adapters["qq"]

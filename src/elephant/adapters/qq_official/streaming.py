@@ -57,7 +57,7 @@ async def _post(adapter, envelope, path, body, *, require_id=True, authorize=Non
         return SendReceipt(state="RETRYABLE", error_code="TOKEN_REJECTED"), None
     if response.status_code == 429:
         return SendReceipt(state="RETRYABLE", error_code="RATE_LIMITED"), None
-    if response.status_code >= 500:
+    if response.status_code == 408 or response.status_code >= 500:
         return SendReceipt(state="UNKNOWN", error_code="SERVER_ERROR"), None
     if not response.is_success:
         return SendReceipt(state="FAILED", error_code=f"HTTP_{response.status_code}"), None

@@ -5,8 +5,10 @@ from uuid import uuid4
 
 from sqlalchemy import and_, func, insert, or_, select, update
 
-from elephant.domain import OutboundEnvelope, SendReceipt, stable_id
+from elephant.adapters.qq_official.streaming import OfficialStream
+from elephant.domain import OutboundEnvelope, SendReceipt, Surface, stable_id
 from elephant.storage.schema import outbox, reply_counters
+from elephant.storage.stream_schema import stream_messages, stream_runs
 
 from .presentation import chat_bubbles, plain_text, split_text
 
@@ -411,9 +413,39 @@ class Outbox:
                 )
                 if claimed.rowcount != 1:
                     continue
+                use_final_stream = (
+                    getattr(config, "kind", None) == "official"
+                    and config.streaming_enabled
+                    and envelope.target.surface == Surface.PRIVATE
+                    and check.reason == "VALID_REPLY"
+                    and envelope.official_content is None
+                    and 0 < len(envelope.text) <= 10000
+                    and bool(envelope.text.strip())
+                    # A settled Pi stream already had its chance to publish this origin.
+                    and not c.execute(select(stream_messages.c.id).join(
+                        stream_runs, stream_runs.c.run_id == stream_messages.c.run_id
+                    ).where(
+                        stream_runs.c.result_origin_kind == envelope.origin_kind,
+                        stream_runs.c.result_origin_id == envelope.origin_id,
+                        stream_messages.c.kind == "answer",
+                    ).limit(1)).first()
+                )
             try:
-                if getattr(getattr(adapter, "config", None), "kind", None) == "official":
-                    receipt = await adapter.send(envelope, authorize=lambda envelope=envelope: not pre_send or pre_send(envelope))
+                if getattr(config, "kind", None) == "official":
+                    def authorize(envelope=envelope, adapter=adapter):
+                        return adapters.get(envelope.target.adapter_instance_id) is adapter and (
+                            not pre_send or pre_send(envelope))
+
+                    receipt = None
+                    if use_final_stream:
+                        stream = OfficialStream(adapter, envelope, content_type=envelope.content_format,
+                                                authorize=authorize)
+                        stream.text = envelope.text
+                        receipt = await stream.finish()
+                    if receipt is None or receipt.error_code in {
+                        "HTTP_400", "HTTP_403", "HTTP_404", "HTTP_405", "HTTP_415", "HTTP_422",
+                    }:
+                        receipt = await adapter.send(envelope, authorize=authorize)
                 else:
                     receipt = await adapter.send(envelope)
             except Exception:  # noqa: BLE001 - A send exception may follow an external side effect.
