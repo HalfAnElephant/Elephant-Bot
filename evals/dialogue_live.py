@@ -394,8 +394,7 @@ class DialogueSuite:
                             if label == "mail_missing_account":
                                 require({row["id"] for row in accounts} == prior_accounts,
                                         "mail clarification invented a new account")
-                                require(re.search(r"邮箱|账号|标识", final_text)
-                                        and re.search(r"[？?]|提供|告诉|哪个|给我|还差|缺少|缺.*账号|账号.*未知|尚未.*指定", final_text),
+                                require(asks_for_mail_account_id(final_text),
                                         "mail request did not ask for its missing account")
                 case["passed"] = True
                 return case

@@ -1,4 +1,4 @@
-"""The opt-in live evaluator's account setup uses only the local protected Mail API."""
+"""Offline regressions for the opt-in evaluator’s mail cases."""
 import base64
 import importlib.util
 import json
