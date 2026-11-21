@@ -1,6 +1,6 @@
 import json
 
-from sqlalchemy import Column, Integer, String, Table, Text, UniqueConstraint, select
+from sqlalchemy import Column, Index, Integer, String, Table, Text, UniqueConstraint, literal_column, select
 
 from elephant.storage.schema import metadata
 
@@ -123,6 +123,11 @@ sessions = Table(
     Column("active_run_id", String),
     Column("epoch", Integer, nullable=False),
 )
+compaction_due = literal_column("json_extract(manifest_json, '$.context_compaction.elastic_due') = 1")
+compaction_retry_at = literal_column("coalesce(json_extract(manifest_json, '$.context_compaction.retry_at'), '')", Text())
+Index("ix_pi_sessions_compaction_due", compaction_retry_at, sessions.c.id,
+      sqlite_where=sessions.c.active_run_id.is_(None) & compaction_due)
+
 processes = Table(
     "session_processes", metadata,
     Column("id", String, primary_key=True),

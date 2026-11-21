@@ -486,7 +486,10 @@ class RunGateway:
             self.context_failure = None
 
     def context_upstream_failure(self, payload, kind, code, status):
-        if code == "context_length_exceeded" or status in {408, 429} or status >= 500:
+        if code == "invalid_tool_transcript":
+            # The rejected request may have malformed fields; record its disposition without parsing them again.
+            self.context_problem({"model": self.model, "messages": []}, kind, code)
+        elif code == "context_length_exceeded" or status in {408, 429} or status >= 500:
             self.context_problem(payload, kind, code, retryable=status in {408, 429} or status >= 500)
 
     async def check_compaction_request(self):

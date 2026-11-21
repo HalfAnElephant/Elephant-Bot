@@ -4,7 +4,7 @@ import pytest
 
 from elephant.cli import migrate
 from elephant.clock import FakeClock
-from elephant.config import AdapterConfig
+from elephant.config import AdapterConfig, ModelConfig
 from elephant.ingress.service import Inbox
 from elephant.storage.db import Database
 
@@ -18,7 +18,7 @@ def runtime_client_for(service):
     from elephant.runtime.scheduler import RuntimeClient
 
     core = SimpleNamespace(tasks=service, knowledge=SimpleNamespace(recover_mutations=lambda: None),
-                           recovery=SimpleNamespace(epoch=""))
+                           recovery=SimpleNamespace(epoch=""), settings=SimpleNamespace(model=ModelConfig()))
     leader = SimpleNamespace(sessions=SimpleNamespace(claim=lambda _worker_id: None),
                              claim_review=lambda _worker_id: None, observe_operation=lambda *_args: None)
     return RuntimeClient(core, leader)

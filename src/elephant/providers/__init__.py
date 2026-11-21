@@ -66,6 +66,10 @@ def pi_request_tokens(payload):
     return tokens + ((chars(json.dumps(tools, ensure_ascii=False, separators=(",", ":"))) + 3) // 4 if tools else 0)
 
 
+class ToolTransactionError(ValueError):
+    """The supplied model history has an invalid tool transaction."""
+
+
 def validate_transactions(messages):
     pending = set()
     for message in messages:
@@ -75,21 +79,21 @@ def validate_transactions(messages):
         if role == "tool":
             identity = message.get("tool_call_id")
             if not isinstance(identity, str) or identity not in pending:
-                raise ValueError("orphan or duplicate tool result")
+                raise ToolTransactionError("orphan or duplicate tool result")
             pending.remove(identity)
         else:
             if pending:
-                raise ValueError("incomplete tool transaction")
+                raise ToolTransactionError("incomplete tool transaction")
             calls = message.get("tool_calls") or []
             if not isinstance(calls, list) or any(not isinstance(call, dict) for call in calls):
-                raise ValueError("invalid tool calls")
+                raise ToolTransactionError("invalid tool calls")
             ids = [call.get("id") for call in calls]
             if calls and (role != "assistant" or any(not isinstance(i, str) or not i for i in ids)
                           or len(set(ids)) != len(ids)):
-                raise ValueError("invalid tool call identities")
+                raise ToolTransactionError("invalid tool call identities")
             pending.update(ids)
     if pending:
-        raise ValueError("tool results missing before model request")
+        raise ToolTransactionError("tool results missing before model request")
 
 
 def normalize_usage(raw):
@@ -225,6 +229,10 @@ class ProviderAdapter:
             payload["reasoning_effort"] = self.reasoning_effort
         try:
             validate_transactions(payload["messages"])
+        except ToolTransactionError as error:
+            if self.upstream_failure:
+                self.upstream_failure(payload, kind, "invalid_tool_transcript", 422)
+            raise HTTPException(422, str(error)) from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
         payload["stream"] = bool(body.get("stream"))
@@ -306,7 +314,7 @@ class ProviderAdapter:
                 self.active -= 1
 
     @asynccontextmanager
-    async def _upstream(self, payload, headers, request_id, kind, timings):
+    async def _upstream(self, payload, headers, request_id, kind, timings, *, stream_stats=None):
         started = timings["waiting_for_slot"] = time.monotonic_ns()
 
         async def trace(name, _info):
@@ -332,7 +340,7 @@ class ProviderAdapter:
             record_timing("model.timing", event_id=self.event_id, run_id=self.run_id, request_id=request_id,
                           started_ns=started, offsets_ms={
                               stage: (stamp - started) / 1_000_000 for stage, stamp in timings.items()
-                          })
+                          }, **(stream_stats or {}))
 
     async def _upstream_error(self, response):
         content = bytearray()
@@ -381,8 +389,10 @@ class ProviderAdapter:
         failed = False
         decoder = codecs.getincrementaldecoder("utf-8")()
         timings = {}
+        durations = {"read_wait": 0.0, "authorize": 0.0, "downstream_wait": 0.0}
+        stream_stats = {"stream_ms": durations, "chunks": 0}
         try:
-            async with self._upstream(payload, headers, request_id, kind, timings) as response:
+            async with self._upstream(payload, headers, request_id, kind, timings, stream_stats=stream_stats) as response:
                 if response.status_code != 200:
                     error = await self._upstream_error(response)
                     if self.upstream_failure:
@@ -391,8 +401,13 @@ class ProviderAdapter:
                     return
                 if "text/event-stream" not in response.headers.get("content-type", ""):
                     raise RuntimeError("upstream did not provide configured streaming protocol")
+                reading = time.monotonic_ns()
                 async for chunk in response.aiter_bytes():
+                    arrived = time.monotonic_ns()
+                    durations["read_wait"] += (arrived - reading) / 1_000_000
+                    stream_stats["chunks"] += 1
                     await self.authorize("model.request")
+                    durations["authorize"] += (time.monotonic_ns() - arrived) / 1_000_000
                     total += len(chunk)
                     if total > 2 * 1024 * 1024:
                         raise RuntimeError("stream response exceeded limit")
@@ -413,6 +428,8 @@ class ProviderAdapter:
                                     raw = event["usage"]
                                 for choice in event.get("choices", []):
                                     delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                                    if isinstance(delta, dict) and delta.get("content"):
+                                        timings.setdefault("first_content_delta", time.monotonic_ns())
                                     if first is None and isinstance(delta, dict) and any(
                                         delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
                                     ):
@@ -420,7 +437,11 @@ class ProviderAdapter:
                                         first = time.monotonic() - started
                                         self.ttft = first
                     pending = normalized
+                    forwarding = time.monotonic_ns()
                     yield chunk
+                    reading = time.monotonic_ns()
+                    durations["downstream_wait"] += (reading - forwarding) / 1_000_000
+                durations["read_wait"] += (time.monotonic_ns() - reading) / 1_000_000
                 pending += decoder.decode(b"", final=True)
                 if pending.strip():
                     raise RuntimeError("truncated upstream event")

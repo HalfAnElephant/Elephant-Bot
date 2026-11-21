@@ -564,3 +564,26 @@ async def test_cancelled_renew_waits_for_sqlite_transaction(environment):
         await renewing
     with service.db.transaction():
         pass
+
+
+async def test_spool_prunes_only_empty_event_dirs_and_can_append_after_ack(tmp_path):
+    events = tmp_path / "events"
+    (events / "old").mkdir(parents=True)
+    (events / "unconfirmed").mkdir()
+    (events / "unconfirmed" / "partial.tmp").write_text("unconfirmed")
+    spool = Spool(tmp_path)
+    assert not (events / "old").exists()
+    assert (events / "unconfirmed" / "partial.tmp").exists()
+    worker = Worker(None, "fixture", spool, None)
+    acknowledged = []
+
+    async def call(operation, **payload):
+        acknowledged.append((operation, payload["seq"]))
+
+    worker.call = call
+    for seq in (1, 2):
+        path = spool.save({"seq": seq}, run_id="active", seq=seq)
+        assert path.exists()
+        await worker.flush_events("active")
+        assert not path.parent.exists()
+    assert acknowledged == [("event", 1), ("event", 2)]

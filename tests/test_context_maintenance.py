@@ -8,7 +8,7 @@ from test_leader_core import finish_leader, make_core
 
 from elephant.storage.agent_schema import dialogue_inputs
 from elephant.storage.schema import outbox
-from elephant.storage.task_schema import runs, sessions
+from elephant.storage.task_schema import compaction_due, compaction_retry_at, runs, sessions
 
 
 async def prepare(core, official_event, text="hello"):
@@ -375,3 +375,12 @@ async def test_failed_coordination_event_can_resume_original_finalization(
     finally:
         await core.stop()
         core.db.close()
+
+
+def test_compaction_poll_uses_candidate_index(db, clock):
+    candidates = select(sessions).where(sessions.c.active_run_id.is_(None), compaction_due,
+                                        compaction_retry_at <= clock.now().isoformat())
+    compiled = candidates.compile(db.engine, compile_kwargs={"literal_binds": True})
+    with db.engine.connect() as conn:
+        plan = conn.exec_driver_sql("EXPLAIN QUERY PLAN " + str(compiled)).all()
+    assert any("ix_pi_sessions_compaction_due" in row[-1] for row in plan)

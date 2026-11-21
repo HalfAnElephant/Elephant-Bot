@@ -836,11 +836,19 @@ import assert from "node:assert/strict";
 import {createJiti} from "jiti";
 const jiti = createJiti(import.meta.url, {alias: {
   "@earendil-works/pi-ai": process.cwd() + "/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"}});
-const {nativeContextCompactor, interactionGroups, createBridge} = await jiti.import("./src/elephant/harness/pi_bridge.ts");
+const {nativeContextCompactor, interactionGroups, createBridge, omitOrphanedInterruptions} = await jiti.import("./src/elephant/harness/pi_bridge.ts");
 const messages = Array.from({length: 6}, (_, i) => ({role: "user", content: "history-" + i + "-" + "x".repeat(2200), timestamp: i}));
 const assistant = {role: "assistant", content: [{type: "toolCall", id: "call", name: "read", arguments: {}}]};
 const tool = {role: "toolResult", toolCallId: "call", content: [{type: "text", text: "checked"}]};
 assert.deepEqual(interactionGroups([messages[0], assistant, tool]).map(group => group.length), [1, 2]);
+const recovered = {...tool, isError: true,
+  content: [{type: "text", text: JSON.stringify({state: "INTERRUPTED", stopped: true})}]};
+const stopped = {...assistant, stopReason: "aborted"};
+const historicalMessages = [messages[0], stopped, recovered, messages[1], assistant, recovered, tool];
+assert.deepEqual(omitOrphanedInterruptions(historicalMessages),
+  [messages[0], stopped, messages[1], assistant, recovered, tool]);
+assert.equal(historicalMessages.length, 7);
+
 const preparation = {messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false,
   firstKeptEntryId: "kept", tokensBefore: 9000, fileOps: {read: new Set(), edited: new Set(), written: new Set()}, settings: {keepRecentTokens: 100}};
 let calls = 0;

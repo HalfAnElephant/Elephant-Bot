@@ -8,7 +8,7 @@ from sqlalchemy import case, func, insert, select, update
 from elephant.domain import InboundEvent
 from elephant.storage.agent_schema import dialogue_inputs, dialogues, leader_inbox
 from elephant.storage.schema import inbox
-from elephant.storage.task_schema import runs, sessions, tasks
+from elephant.storage.task_schema import compaction_due, compaction_retry_at, runs, sessions, tasks
 
 
 class ContextMaintenance:
@@ -33,11 +33,9 @@ class ContextMaintenance:
         with self.db.engine.connect() as conn:
             if self.foreground(conn):
                 return None
-            candidates = conn.execute(select(sessions).where(sessions.c.active_run_id.is_(None))).mappings().all()
+            candidates = conn.execute(select(sessions).where(sessions.c.active_run_id.is_(None),
+                compaction_due, compaction_retry_at <= now.isoformat())).mappings().all()
         for session in candidates:
-            state = json.loads(session["manifest_json"]).get("context_compaction", {})
-            if not state.get("elastic_due") or (state.get("retry_at") or "") > now.isoformat():
-                continue
             with self.db.transaction() as conn:
                 if self.foreground(conn) or conn.scalar(select(runs.c.id).where(
                         runs.c.session_id == session["id"], runs.c.slot_reserved == 1).limit(1)):
@@ -324,6 +322,8 @@ class ContextMaintenance:
             table = dialogue_inputs if is_user else leader_inbox
             field = "context_json" if is_user else "output_ref"
             failure = (json.loads(source[field]).get("context_failure") if is_user else self.inbox_failure(source)) or {}
+            if failure.get("reason") == "invalid_tool_transcript":
+                continue  # A larger token budget cannot repair a malformed tool transaction.
             try:
                 model, window, force, byte_limit = failure["limits_fingerprint"].rsplit(":", 3)
                 window, force, byte_limit = int(window), int(force), int(byte_limit)

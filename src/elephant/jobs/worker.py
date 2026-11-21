@@ -10,6 +10,7 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
+from errno import EEXIST, ENOENT, ENOTDIR, ENOTEMPTY
 from pathlib import Path
 from stat import S_ISREG
 from uuid import uuid4
@@ -55,6 +56,16 @@ class Spool:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_bytes = max_bytes
         self._result_locks = WeakValueDictionary()
+        for event_dir in (self.directory / "events").glob("*"):
+            self.prune_event_dir(event_dir)
+
+    @staticmethod
+    def prune_event_dir(directory):
+        try:
+            directory.rmdir()
+        except OSError as error:
+            if error.errno not in {ENOENT, ENOTDIR, ENOTEMPTY, EEXIST}:
+                raise
 
     def result_lock(self, path):
         # Replay and the active runner share ownership of each persisted record.
@@ -85,20 +96,34 @@ class Spool:
             if seq is None or not 1 <= seq <= 5000:
                 raise RuntimeError("event spool limit exceeded")
             directory = self.directory / "events" / run_id
-            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
             destination = directory / f"{seq:08d}.json"
         temporary = destination.with_suffix(".tmp")
-        with temporary.open("xb") as output:
-            os.chmod(temporary, 0o600)
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(destination)
-        directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        for attempt in range(3):
+            if run_id is not None:
+                destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            try:
+                directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            except FileNotFoundError:
+                if run_id is None or attempt == 2:
+                    raise
+                continue  # Acknowledgment pruned the empty directory.
+            try:
+                try:
+                    output_fd = os.open(temporary.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                                        dir_fd=directory_fd)
+                except FileNotFoundError:
+                    if run_id is None or attempt == 2:
+                        raise
+                    continue
+                with os.fdopen(output_fd, "wb") as output:
+                    output.write(data)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary.name, destination.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                break
+            finally:
+                os.close(directory_fd)
         return destination
 
     def archive(self, path):
@@ -201,21 +226,28 @@ class Worker:
         if run_id:
             root = root / run_id
         awaiting_recovery = set()
-        async with asyncio.timeout(2):
-            for path in sorted(root.rglob("*.json")):
-                if path.parent in awaiting_recovery:
-                    continue
-                payload = json.loads(path.read_text())
-                try:
-                    await self.call("event", **payload)
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code != 409:
-                        raise
-                    identity = {key: payload[key] for key in ("run_id", "fencing_token")}
-                    if not await self.resolve_spooled(path, identity):
-                        awaiting_recovery.add(path.parent)
-                    continue
-                path.unlink(missing_ok=True)
+        paths = []
+        try:
+            async with asyncio.timeout(2):
+                paths = sorted(root.rglob("*.json"))
+                for path in paths:
+                    if path.parent in awaiting_recovery:
+                        continue
+                    payload = json.loads(path.read_text())
+                    try:
+                        await self.call("event", **payload)
+                    except httpx.HTTPStatusError as error:
+                        if error.response.status_code != 409:
+                            raise
+                        identity = {key: payload[key] for key in ("run_id", "fencing_token")}
+                        if not await self.resolve_spooled(path, identity):
+                            awaiting_recovery.add(path.parent)
+                        continue
+                    path.unlink(missing_ok=True)
+        finally:
+            for directory in {path.parent for path in paths}:
+                if directory != self.spool.directory / "events":
+                    self.spool.prune_event_dir(directory)
 
     def event_sink(self, identity):
         seq = 0

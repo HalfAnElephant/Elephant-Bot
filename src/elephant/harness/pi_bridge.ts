@@ -241,6 +241,31 @@ export function conversationHistory(branch: any[], binding: any) {
     return {history, compactHistory, older, previousSummary: summary?.summary};
 }
 
+// Keep interrupted recovery receipts in the native journal, even when Pi omits their calls.
+export function omitOrphanedInterruptions(messages: any[]) {
+    let pending = new Set<string>();
+    return messages.filter(message => {
+        if (message.role === "toolResult") {
+            if (pending.delete(message.toolCallId) || !message.isError) return true;
+            const content = message.content;
+            if (content?.length !== 1 || content[0].type !== "text") return true;
+            try {
+                const receipt = JSON.parse(content[0].text);
+                return receipt?.state !== "INTERRUPTED" || receipt.stopped !== true;
+            } catch {
+                return true;
+            }
+        }
+        if (message.role === "assistant" && !["error", "aborted"].includes(message.stopReason)) {
+            pending = new Set((message.content || []).filter((part: any) => part.type === "toolCall")
+                .map((part: any) => part.id));
+        } else if (message.role !== "system") {
+            pending.clear();
+        }
+        return true;
+    });
+}
+
 // Only the trusted input envelope can rotate run credentials, before automatic compaction.
 export function createBridge(options: {compactor?: ContextCompactor} = {}) {
 return function (pi: ExtensionAPI) {
@@ -537,8 +562,9 @@ return function (pi: ExtensionAPI) {
       if (message.role === "user" && omittedUserMessages.size && omittedUserMessages.has(inputHash(userText(message)))) return false;
       return message.role !== "custom" || message.customType !== "elephant-runtime" || index === latest;
     });
-    return {messages: binding?.session_id && binding.role === "leader" && binding.purpose === "user"
-      ? conversationHistory(ctx.sessionManager.getBranch(), binding).history(messages, {live: true, includeHistory: !greetingOnly()}) : messages};
+    const projected = binding?.session_id && binding.role === "leader" && binding.purpose === "user"
+      ? conversationHistory(ctx.sessionManager.getBranch(), binding).history(messages, {live: true, includeHistory: !greetingOnly()}) : messages;
+    return {messages: omitOrphanedInterruptions(projected)};
   });
   pi.on("session_before_compact", async (event, ctx) => {
     if (!binding) return {cancel: true};

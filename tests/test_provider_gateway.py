@@ -61,10 +61,14 @@ def body():
 async def test_transaction_rejection_precedes_reservation(messages, body):
     fixture = ProviderFixture()
     body["messages"] = messages
+    failures = []
+    fixture.adapter.upstream_failure = lambda _payload, kind, code, status: failures.append((kind, code, status))
     with pytest.raises(HTTPException) as error:
         await fixture.adapter.complete(body)
     assert error.value.status_code == 422
     assert not fixture.requests and not fixture.reservations
+    if isinstance(messages[0], dict) and messages[0].get("role") == "tool":
+        assert failures == [("business", "invalid_tool_transcript", 422)]
 
 
 def test_complete_parallel_transaction_is_accepted():
@@ -187,6 +191,10 @@ async def test_model_timing_marks_real_http_send_and_sse_milestones(body, caplog
     assert offsets["slot_acquired"] <= offsets["request_dispatched"] <= offsets["request_send_started"]
     assert offsets["request_send_started"] <= offsets["request_sent"] <= offsets["response_headers"]
     assert offsets["response_headers"] <= offsets["first_body_byte"] < offsets["first_effective_delta"]
+    assert offsets["first_content_delta"] <= offsets["first_effective_delta"]
+    assert trace["chunks"] == 2
+    assert set(trace["stream_ms"]) == {"read_wait", "authorize", "downstream_wait"}
+    assert all(value >= 0 for value in trace["stream_ms"].values())
 
 
 async def test_stream_utf8_split_and_missing_usage_stay_unknown(body):
@@ -895,3 +903,30 @@ async def test_leader_context_gate_uses_expanded_final_request(tmp_path, mode, d
     assert len(fixture.requests) == len(fixture.reservations) == int(allowed)
     if not allowed:
         assert gateway.context_failure["tokens"] == pi_request_tokens(projected)
+
+
+async def test_gateway_persists_rejected_transcript_as_nonretryable(tmp_path, body):
+    fixture = ProviderFixture()
+    context_failure = []
+
+    async def core(operation, packet):
+        if operation == "authorize":
+            return {"allowed": True}
+        assert operation == "context-compaction"
+        context_failure.append(packet)
+        return {"accepted": True}
+
+    gateway = RunGateway(tmp_path, "offline", "fixture-key", "https://model.invalid/v1/chat/completions",
+                         call=core, transport=fixture.adapter.transport)
+    gateway.bind({"task_id": "leader", "run_id": "run", "fencing_token": 1, "role": "leader",
+                  "permission_snapshot": {"principal": {}}, "context": {"limits": {"force_compaction_tokens": 4096}}})
+    body["messages"] = [{"role": "tool", "tool_call_id": "orphan", "content": "receipt"}]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://local") as client:
+        response = await client.post("/v1/chat/completions", json=body,
+                                     headers={"Authorization": "Bearer " + gateway.model_token})
+    assert response.status_code == 422
+    assert not fixture.requests
+    await gateway.persist_context_failure()
+    assert len(context_failure) == 1
+    assert context_failure[0]["reason"] == "invalid_tool_transcript"
+    assert context_failure[0]["phase"] == "failure" and context_failure[0]["retryable"] is False
