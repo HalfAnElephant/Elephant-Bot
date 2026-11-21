@@ -17,6 +17,8 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
+from elephant.observability.timing import record_timing
+
 COMPLETION_INSTRUCTION = (
     "执行预算已到收尾边界。停止调用业务工具，仅根据已有工具观察和已核实效果，"
     "沿用当前宿主人格和表达风格，用 QQ 纯文本自然说清你做了什么、哪里还没弄清。"
@@ -147,13 +149,27 @@ class ModelCapacity:
             yield
 
 
+class _FirstBodyByte(httpx.AsyncByteStream):
+    def __init__(self, stream, timings):
+        self.stream, self.timings = stream, timings
+
+    async def __aiter__(self):
+        async for chunk in self.stream:
+            if chunk and "first_body_byte" not in self.timings:
+                self.timings["first_body_byte"] = time.monotonic_ns()
+            yield chunk
+
+    async def aclose(self):
+        await self.stream.aclose()
+
+
 class ProviderAdapter:
     def __init__(self, model, endpoint, key, *, authorize, reserve, record, transport=None,
                  capacity=None, background=False, max_bytes=16777216,
                  output_tokens=None, model_window=32768,
                  compaction_output=4096, stream_supported=True, on_exhausted=None,
                  guard=None, upstream_failure=None, request_succeeded=None, before_compaction_request=None,
-                 maintenance=False):
+                 maintenance=False, event_id=None, run_id=None):
         self.model, self.endpoint, self.key = model, endpoint, key
         self.upstream_session = str(uuid4())
         self.authorize, self.reserve, self.record = authorize, reserve, record
@@ -168,6 +184,7 @@ class ProviderAdapter:
         self.business_exhausted = False
         self.active = 0
         self.last_usage = self.ttft = None
+        self.event_id, self.run_id = event_id, run_id
 
     async def _exhausted(self):
         self.business_exhausted = True
@@ -257,20 +274,17 @@ class ProviderAdapter:
             return StreamingResponse(self._stream(payload, headers, request_id, kind), media_type="text/event-stream")
         started, raw = time.monotonic(), None
         try:
-            async with self.request_slot(), httpx.AsyncClient(
-                transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize_request(kind)
-                async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
-                        error = await self._upstream_error(response)
-                        if self.upstream_failure:
-                            self.upstream_failure(payload, kind, error["code"], response.status_code)
-                        raise HTTPException(response.status_code, error["message"])
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content) > 2 * 1024 * 1024:
-                            raise HTTPException(502, "model response exceeded limit")
+            async with self._upstream(payload, headers, request_id, kind, {}) as response:
+                if response.status_code != 200:
+                    error = await self._upstream_error(response)
+                    if self.upstream_failure:
+                        self.upstream_failure(payload, kind, error["code"], response.status_code)
+                    raise HTTPException(response.status_code, error["message"])
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > 2 * 1024 * 1024:
+                        raise HTTPException(502, "model response exceeded limit")
                 try:
                     result = json.loads(content)
                 except (ValueError, UnicodeDecodeError) as error:
@@ -287,6 +301,35 @@ class ProviderAdapter:
                 await self._record_safely(request_id, raw, started, None, payload)
             finally:
                 self.active -= 1
+
+    @asynccontextmanager
+    async def _upstream(self, payload, headers, request_id, kind, timings):
+        started = timings["waiting_for_slot"] = time.monotonic_ns()
+
+        async def trace(name, _info):
+            if name.endswith(".send_request_headers.started"):
+                timings.setdefault("request_send_started", time.monotonic_ns())
+            elif name.endswith(".send_request_body.complete"):
+                timings.setdefault("request_sent", time.monotonic_ns())
+
+        try:
+            async with self.request_slot():
+                timings["slot_acquired"] = time.monotonic_ns()
+                async with httpx.AsyncClient(
+                    transport=self.transport, timeout=60, trust_env=False, follow_redirects=False
+                ) as client:
+                    await self.authorize_request(kind)
+                    timings["request_dispatched"] = time.monotonic_ns()
+                    async with client.stream("POST", self.endpoint, json=payload, headers=headers,
+                                             extensions={"trace": trace}) as response:
+                        timings["response_headers"] = time.monotonic_ns()
+                        response.stream = _FirstBodyByte(response.stream, timings)
+                        yield response
+        finally:
+            record_timing("model.timing", event_id=self.event_id, run_id=self.run_id, request_id=request_id,
+                          started_ns=started, offsets_ms={
+                              stage: (stamp - started) / 1_000_000 for stage, stamp in timings.items()
+                          })
 
     async def _upstream_error(self, response):
         content = bytearray()
@@ -332,53 +375,52 @@ class ProviderAdapter:
         started, first, raw, total, pending = time.monotonic(), None, None, 0, ""
         failed = False
         decoder = codecs.getincrementaldecoder("utf-8")()
+        timings = {}
         try:
-            async with self.request_slot(), httpx.AsyncClient(
-                transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize_request(kind)
-                async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
-                    if response.status_code != 200:
-                        error = await self._upstream_error(response)
-                        if self.upstream_failure:
-                            self.upstream_failure(payload, kind, error["code"], response.status_code)
-                        yield ("data: " + json.dumps({"error": error}) + "\n\n").encode()
-                        return
-                    if "text/event-stream" not in response.headers.get("content-type", ""):
-                        raise RuntimeError("upstream did not provide configured streaming protocol")
-                    async for chunk in response.aiter_bytes():
-                        await self.authorize("model.request")
-                        total += len(chunk)
-                        if total > 2 * 1024 * 1024:
-                            raise RuntimeError("stream response exceeded limit")
-                        pending += decoder.decode(chunk)
-                        normalized = pending.replace("\r\n", "\n")
-                        while "\n\n" in normalized:
-                            frame, normalized = normalized.split("\n\n", 1)
-                            data = "\n".join(line[5:].lstrip(" ") for line in frame.splitlines() if line.startswith("data:"))
-                            if data and data != "[DONE]":
-                                event = json.loads(data)
-                                if isinstance(event, dict):
-                                    if isinstance(event.get("error"), dict):
-                                        failed = True
-                                        if self.upstream_failure:
-                                            code = event["error"].get("code", "upstream_error")
-                                            self.upstream_failure(payload, kind, code, 200)
-                                    if event.get("usage") is not None:
-                                        raw = event["usage"]
-                                    for choice in event.get("choices", []):
-                                        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
-                                        if first is None and isinstance(delta, dict) and any(
-                                            delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
-                                        ):
-                                            first = time.monotonic() - started
-                                            self.ttft = first
-                        pending = normalized
-                        yield chunk
-                    pending += decoder.decode(b"", final=True)
-                    if pending.strip():
-                        raise RuntimeError("truncated upstream event")
-                    if self.request_succeeded and not failed:
-                        self.request_succeeded(kind)
+            async with self._upstream(payload, headers, request_id, kind, timings) as response:
+                if response.status_code != 200:
+                    error = await self._upstream_error(response)
+                    if self.upstream_failure:
+                        self.upstream_failure(payload, kind, error["code"], response.status_code)
+                    yield ("data: " + json.dumps({"error": error}) + "\n\n").encode()
+                    return
+                if "text/event-stream" not in response.headers.get("content-type", ""):
+                    raise RuntimeError("upstream did not provide configured streaming protocol")
+                async for chunk in response.aiter_bytes():
+                    await self.authorize("model.request")
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        raise RuntimeError("stream response exceeded limit")
+                    pending += decoder.decode(chunk)
+                    normalized = pending.replace("\r\n", "\n")
+                    while "\n\n" in normalized:
+                        frame, normalized = normalized.split("\n\n", 1)
+                        data = "\n".join(line[5:].lstrip(" ") for line in frame.splitlines() if line.startswith("data:"))
+                        if data and data != "[DONE]":
+                            event = json.loads(data)
+                            if isinstance(event, dict):
+                                if isinstance(event.get("error"), dict):
+                                    failed = True
+                                    if self.upstream_failure:
+                                        code = event["error"].get("code", "upstream_error")
+                                        self.upstream_failure(payload, kind, code, 200)
+                                if event.get("usage") is not None:
+                                    raw = event["usage"]
+                                for choice in event.get("choices", []):
+                                    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                                    if first is None and isinstance(delta, dict) and any(
+                                        delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
+                                    ):
+                                        timings["first_effective_delta"] = time.monotonic_ns()
+                                        first = time.monotonic() - started
+                                        self.ttft = first
+                    pending = normalized
+                    yield chunk
+                pending += decoder.decode(b"", final=True)
+                if pending.strip():
+                    raise RuntimeError("truncated upstream event")
+                if self.request_succeeded and not failed:
+                    self.request_succeeded(kind)
         except (httpx.TransportError, TimeoutError):
             if self.upstream_failure:
                 self.upstream_failure(payload, kind, "upstream_transport_error", 503)

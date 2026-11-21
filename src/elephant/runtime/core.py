@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ from elephant.ingress.service import Inbox
 from elephant.jobs.service import TaskService
 from elephant.jobs.streaming import StreamDelivery
 from elephant.observability.supervision import LoopSupervisor
+from elephant.observability.timing import record_timing, sample_event_loop
 from elephant.outbox.service import Outbox
 from elephant.permissions import PermissionService, PermissionSubject
 from elephant.pi_installation import runtime_pi_path
@@ -544,7 +546,9 @@ class Core:
             if not self.settings.interactive_execution_enabled:
                 return
             context = await self.knowledge.prepare(event, self.context_for(event))
-            self.sessions.enqueue(event, access=self.access(event), context=context)
+            admission = self.sessions.enqueue(event, access=self.access(event), context=context)
+            record_timing("ingress.dialogue_admission", event_id=event.event_id, ingest_seq=event.ingest_seq,
+                          state=admission["state"])
             with self.db.transaction() as conn:
                 self.outbox.retrigger(conn, event)
         except (PermissionError, ValueError, LookupError) as error:
@@ -729,7 +733,11 @@ class Core:
     async def tick(self, *, dispatch=True):
         self.restore_silences()
         retry = False
-        for event in self.inbox.pending():
+        pending = self.inbox.pending()
+        dequeued_ns = time.monotonic_ns()
+        for event in pending:
+            record_timing("ingress.processing_started", event_id=event.event_id, ingest_seq=event.ingest_seq,
+                          dequeued_ns=dequeued_ns)
             if await self.process(event) is False:
                 retry = True
         if retry:
@@ -801,6 +809,7 @@ class Core:
         self.leader.recover()
         self.knowledge.recover_mutations()
         self.supervisor.start("ingress", lambda: self.tick(dispatch=False), interval=0.05, critical=True)
+        self.supervisor.start("event_loop_latency", sample_event_loop, interval=0)
         self.supervisor.start("delivery", lambda: self.deliver(wait=False), interval=0.1, critical=True)
         self.supervisor.start("scheduler", self.scheduler.step, interval=0.1, critical=True)
         self.supervisor.start("external_waiters", self.scheduler.waiters.once, interval=1, critical=True)

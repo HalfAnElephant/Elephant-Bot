@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from sqlalchemy import func, insert, select, update
 
 from elephant.domain import InboundEvent, stable_id
+from elephant.observability.timing import record_timing
 from elephant.storage.agent_schema import dialogue_inputs
 from elephant.storage.schema import audit_events, conversations, inbox
 
@@ -48,22 +49,25 @@ class Inbox:
                     .where(inbox.c.id == event.event_id)
                     .values(seq=seq + 1, event_json=event.model_dump_json(), state="PENDING")
                 )
-                return event, False
-            c.execute(
-                insert(inbox).values(
-                    id=event.event_id,
-                    conversation_id=key,
-                    seq=seq + 1,
-                    event_json=event.model_dump_json(),
-                    state="PENDING",
-                    priority=int(event.text.strip().startswith("/") or event.event_type != "message.created"),
-                    event_type=event.event_type,
-                    message_id=event.platform_message_id,
-                    principal_id=event.principal.key,
-                    received_at=event.received_at.isoformat(),
+            else:
+                c.execute(
+                    insert(inbox).values(
+                        id=event.event_id,
+                        conversation_id=key,
+                        seq=seq + 1,
+                        event_json=event.model_dump_json(),
+                        state="PENDING",
+                        priority=int(event.text.strip().startswith("/") or event.event_type != "message.created"),
+                        event_type=event.event_type,
+                        message_id=event.platform_message_id,
+                        principal_id=event.principal.key,
+                        received_at=event.received_at.isoformat(),
+                    )
                 )
-            )
-            return event, True
+        if conn is None:
+            record_timing("ingress.persisted", event_id=event.event_id, ingest_seq=event.ingest_seq,
+                          received_at=event.received_at.isoformat())
+        return event, old_event is None
 
     def pending(self, limit: int = 100, exclude=()) -> list[InboundEvent]:
         with self.db.engine.connect() as c:

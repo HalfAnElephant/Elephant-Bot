@@ -1,8 +1,31 @@
 import asyncio
+import logging
+from types import SimpleNamespace
 
 import pytest
 
+from elephant.observability import timing
 from elephant.observability.supervision import LoopSupervisor
+
+
+@pytest.mark.parametrize("delay_ns, reported", [(50_000_000, False), (250_000_000, True)])
+async def test_event_loop_sample_records_scheduling_gap(monkeypatch, caplog, delay_ns, reported):
+    now = 3_000_000_000
+
+    async def late_sleep(seconds):
+        nonlocal now
+        now += round(seconds * 1_000_000_000) + delay_ns
+
+    monkeypatch.setattr(timing, "time", SimpleNamespace(monotonic_ns=lambda: now))
+    monkeypatch.setattr(timing, "asyncio", SimpleNamespace(sleep=late_sleep))
+    monkeypatch.setattr(timing.logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(timing.logger, "propagate", False)
+    with caplog.at_level(logging.INFO, logger=timing.logger.name):
+        await timing.sample_event_loop()
+    samples = [record.data for record in caplog.records if record.msg == "event_loop.lag"]
+    assert bool(samples) is reported
+    if reported:
+        assert samples[0]["monotonic_ns"] - samples[0]["due_ns"] == delay_ns
 
 
 async def until(condition):

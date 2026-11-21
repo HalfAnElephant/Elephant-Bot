@@ -1,6 +1,7 @@
 """Deterministic provider and host-binding checks without external service credentials."""
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -137,6 +138,55 @@ async def test_true_stream_first_chunk_precedes_upstream_completion(body):
     assert fixture.usage[0][1]["cached_read_tokens"] == 60
     assert fixture.usage[0][1]["ttft_ms"] is not None
     assert fixture.requests[0]["stream_options"] == {"include_usage": True}
+
+
+async def test_model_timing_marks_real_http_send_and_sse_milestones(body, caplog, monkeypatch):
+    logger = logging.getLogger("elephant.observability.timing")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    keepalive = b": ping\n\n"
+    delta = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+    release_delta = asyncio.Event()
+
+    async def upstream(reader, writer):
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(line.split(b":", 1)[1] for line in headers.lower().splitlines()
+                          if line.startswith(b"content-length:"))
+            await reader.readexactly(int(length))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
+                         + str(len(keepalive + delta)).encode() + b"\r\n\r\n" + keepalive)
+            await writer.drain()
+            await release_delta.wait()
+            writer.write(delta)
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    fixture = ProviderFixture(event_id="inbox-event", run_id="leader-run")
+    async with await asyncio.start_server(upstream, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        fixture.adapter.transport = None
+        fixture.adapter.endpoint = f"http://127.0.0.1:{port}/v1/chat/completions"
+        response = await fixture.adapter.complete({**body, "stream": True})
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            async with asyncio.timeout(3):
+                try:
+                    assert await anext(response.body_iterator) == keepalive
+                finally:
+                    release_delta.set()
+                assert b"".join([chunk async for chunk in response.body_iterator]) == delta
+
+    trace = next(record.data for record in caplog.records if record.msg == "model.timing")
+    assert (trace["event_id"], trace["run_id"], trace["request_id"]) == (
+        "inbox-event", "leader-run", fixture.reservations[0][0],
+    )
+    offsets = trace["offsets_ms"]
+    assert offsets["waiting_for_slot"] == 0
+    assert offsets["slot_acquired"] <= offsets["request_dispatched"] <= offsets["request_send_started"]
+    assert offsets["request_send_started"] <= offsets["request_sent"] <= offsets["response_headers"]
+    assert offsets["response_headers"] <= offsets["first_body_byte"] < offsets["first_effective_delta"]
 
 
 async def test_stream_utf8_split_and_missing_usage_stay_unknown(body):
@@ -683,7 +733,8 @@ async def test_provider_session_header_survives_warm_rebind(gateway):
     instance.provider.transport = httpx.MockTransport(upstream)
     await instance.provider.complete({"model": "offline", "messages": [{"role": "user", "content": "hi"}]})
     instance.revoke()
-    instance.bind({**claim, "run_id": "second-run"})
+    instance.bind({**claim, "run_id": "second-run", "event_json": json.dumps({"event_id": "second-event"})})
+    assert (instance.provider.event_id, instance.provider.run_id) == ("second-event", "second-run")
     instance.provider.transport = httpx.MockTransport(upstream)
     await instance.provider.complete({"model": "offline", "messages": [{"role": "user", "content": "again"}]})
     assert len(seen) == 2 and seen[0] and seen[0] == seen[1]

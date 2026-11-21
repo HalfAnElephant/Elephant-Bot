@@ -197,7 +197,8 @@ class RunGateway:
             upstream_failure=self.context_upstream_failure if self.force_tokens else None,
             request_succeeded=self.context_request_succeeded if self.force_tokens else None,
             before_compaction_request=self.check_compaction_request if self.force_tokens else None,
-            maintenance=self.maintenance_compaction)
+            maintenance=self.maintenance_compaction,
+            event_id=json.loads(claim.get("event_json") or "{}").get("event_id"), run_id=claim["run_id"])
         self.provider.upstream_session = self.upstream_session
         self.provider.max_bytes = limits.get("max_bytes", self.provider.max_bytes)
         self.provider.on_exhausted = self.budget_exhausted

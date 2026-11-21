@@ -1,5 +1,6 @@
 """Real ingress routes into persistent turns; controls never consume model slots."""
 import json
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -35,13 +36,26 @@ async def test_idle_leader_claim_does_not_open_a_write_transaction(tmp_path, off
         core.db.close()
 
 
-async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config, official_event, clock):
+async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config, official_event, clock, caplog, monkeypatch):
     from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)
+    logger = logging.getLogger("elephant.observability.timing")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
     try:
-        event = core.adapters["qq"].normalize(official_payload(official_event, text="帮我处理这个任务"))
-        core.inbox.accept(event)
-        await core.tick(dispatch=False)
+        adapter = core.adapters["qq"]
+        payload = official_payload(official_event, text="帮我处理这个任务")
+        event = adapter.normalize(payload)
+        with caplog.at_level(logging.INFO, logger="elephant.observability.timing"):
+            await adapter.accept_payload(payload)
+            await adapter.accept_payload(payload)
+            await core.tick(dispatch=False)
+        trace = [record for record in caplog.records if record.name == "elephant.observability.timing"]
+        assert [record.msg for record in trace] == [
+            "ingress.persisted", "ingress.processing_started", "ingress.dialogue_admission",
+        ]
+        assert all(record.data["event_id"] == event.event_id for record in trace)
+        assert trace[0].data["monotonic_ns"] <= trace[1].data["dequeued_ns"] <= trace[2].data["monotonic_ns"]
         await core.process(event)
         with core.db.engine.connect() as conn:
             items = conn.execute(select(dialogue_inputs)).mappings().all()
@@ -58,9 +72,10 @@ async def test_ingress_persists_turn_and_deduplicates(tmp_path, official_config,
 
 
 async def test_status_does_not_need_free_execution_capacity(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
     core = make_core(tmp_path, official_config, clock)
     try:
-        event = core.adapters["qq"].normalize(official_event)
+        event = core.adapters["qq"].normalize(official_payload(official_event, text="/status"))
         core.inbox.accept(event)
         await core.tick(dispatch=False)
         with core.db.engine.connect() as conn:

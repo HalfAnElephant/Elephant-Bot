@@ -1,5 +1,6 @@
 """Memory failures and mutations preserve the real Core/Leader admission boundary."""
 import json
+import logging
 
 import pytest
 from conftest import official_payload
@@ -53,9 +54,19 @@ async def test_memory_unavailability_still_admits_an_unenriched_user_turn(memory
     assert all(method == "GET" or path == "/api/v1/search/find" for method, path, _ in remote.calls[before:])
 
 
-async def test_forget_between_enrichment_and_claim_fences_the_queued_context(memory_core):
+async def test_forget_between_enrichment_and_claim_fences_the_queued_context(memory_core, caplog, monkeypatch):
     core, _, scope, event, uri = memory_core
-    await core.process(event)
+    logger = logging.getLogger("elephant.observability.timing")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    with caplog.at_level(logging.INFO, logger="elephant.observability.timing"):
+        await core.process(event)
+    trace = [record for record in caplog.records if record.name == "elephant.observability.timing"]
+    assert [record.msg for record in trace] == [
+        "ingress.memory_search", "ingress.memory_read", "ingress.dialogue_admission",
+    ]
+    assert all(record.data["event_id"] == event.event_id for record in trace)
+    assert trace[1].data["index"] == 1
     with core.db.engine.connect() as conn:
         saved = conn.execute(select(dialogue_inputs)).mappings().one()
     context = json.loads(saved["context_json"])

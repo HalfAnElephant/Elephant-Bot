@@ -31,6 +31,7 @@ from elephant.harness.launcher import (
 )
 from elephant.harness.pi import MAX_EVENT, PiHarness, compaction_settings
 from elephant.harness.pool import PoolAcquisitionError, SessionPool
+from elephant.observability.timing import record_timing
 
 logger = logging.getLogger(__name__)
 LEASE_HEARTBEAT_SECONDS = 5
@@ -294,6 +295,10 @@ class Worker:
         last_success = next_debug = next_warning = None
         while True:
             started = time.monotonic()
+            if started - due >= 0.1:
+                record_timing("lease.heartbeat_lag", run_id=identity["run_id"],
+                              due_ns=round(due * 1_000_000_000), started_ns=round(started * 1_000_000_000),
+                              lag_ms=(started - due) * 1000)
             failure = None
             try:
                 await self.call("renew", **identity)

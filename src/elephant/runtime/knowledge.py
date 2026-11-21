@@ -19,6 +19,7 @@ from elephant.contracts.memory import (
 from elephant.dialogue.planner import plan_turn
 from elephant.domain import InboundEvent, Surface, stable_id
 from elephant.domain.execution import TaskGoal, TurnInput
+from elephant.observability.timing import measure
 from elephant.storage.action_schema import operations
 from elephant.storage.agent_schema import (
     agent_events,
@@ -147,7 +148,8 @@ class KnowledgeRuntime:
         if not query:
             return context
         try:
-            result = await self.memory.search(scope, query)
+            with measure("ingress.memory_search", event.event_id, ingest_seq=event.ingest_seq):
+                result = await self.memory.search(scope, query)
         except BACKEND_ERRORS:
             context["memory_status"] = "degraded"
             return context
@@ -155,9 +157,10 @@ class KnowledgeRuntime:
         context["memory_epoch"] = result.memory_epoch
         context["memory_status"] = result.status
         docs = []
-        for hit in result.hits[:4]:
+        for index, hit in enumerate(result.hits[:4], 1):
             try:
-                doc = await self.memory.read(scope, hit.uri)
+                with measure("ingress.memory_read", event.event_id, ingest_seq=event.ingest_seq, index=index):
+                    doc = await self.memory.read(scope, hit.uri)
             except (PermissionError, *BACKEND_ERRORS):
                 context["memory_status"] = "degraded"
                 continue
