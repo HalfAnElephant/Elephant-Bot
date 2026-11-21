@@ -187,6 +187,7 @@ class OutboundEnvelope(DTO):
     part_no: int = 0
     content_version: int = 1
     plain_text: bool = False
+    fixed_publication: bool = Field(default=False, exclude_if=lambda value: not value)
     expires_at: datetime
     allow_proactive: bool = False
     context_version: int | None = None

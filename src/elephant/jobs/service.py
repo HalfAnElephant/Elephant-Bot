@@ -19,7 +19,7 @@ from elephant.domain.execution import ExecutionPlan, RunBudget, TaskGoal, WaitCo
 from elephant.domain.messages import AccessContext, InboundEvent, Surface
 from elephant.domain.tasks import TaskResult, validate_user_facing_text
 from elephant.harness.launcher import verify_stop_marker
-from elephant.jobs.streaming import PUBLIC_KINDS, validate_public_event
+from elephant.jobs.streaming import PUBLIC_KINDS, reserve_stream_order, validate_public_event
 from elephant.permissions import PermissionService
 from elephant.storage.schema import outbox as outbox_table
 from elephant.storage.stream_schema import stream_runs
@@ -654,6 +654,7 @@ class TaskService:
                 return {"acknowledged": seq}
             if seq != run["last_seq"] + 1:
                 raise ValueError("event sequence gap")
+            reserve_stream_order(c, run_id, payload)
             c.execute(insert(events).values(event_id=event_id, run_id=run_id, seq=seq, payload=encoded))
             c.execute(update(runs).where(runs.c.id == run_id).values(last_seq=seq))
             return {"acknowledged": seq}
@@ -1295,10 +1296,14 @@ class TaskService:
                 tasks.c.root_task_id == task["id"])).scalars()) if decision else [operation_task_id]
             context = ToolContext(task_id=operation_task_id, run_id=run_id, fence=fencing_token,
                 principal=self._access_for(task), workspace="")
+        def authorize_dispatch(_conn, action):
+            return self.authorize(run_id, fencing_token, worker_id, {
+                "action": action["name"], "resources": action["resources"], "effect": action["effect"]})
         return await self.ledger_operation(context, payload, scope_task_ids,
-            lambda action: self.authorize(run_id, fencing_token, worker_id, action))
+            lambda action: self.authorize(run_id, fencing_token, worker_id, action),
+            authorize_dispatch=authorize_dispatch)
 
-    async def ledger_operation(self, context, payload, scope_task_ids, authorize, *, deduplicate=False):
+    async def ledger_operation(self, context, payload, scope_task_ids, authorize, *, deduplicate=False, authorize_dispatch=None):
         from elephant.capabilities.ledger import SQLiteActionLedger
         from elephant.capabilities.types import Action
         from elephant.storage.action_schema import operations
@@ -1324,7 +1329,8 @@ class TaskService:
             return await ledger.prepare(payload["operation_id"], context, action,
                 payload["arguments_hash"], payload["arguments"], scope_task_ids=scope_task_ids, deduplicate=deduplicate)
         if payload["operation"] == "transition":
-            return {"changed": await ledger.transition(payload["operation_id"], payload["expected"], payload["state"], payload["result"])}
+            return {"changed": await ledger.transition(payload["operation_id"], payload["expected"], payload["state"],
+                payload["result"], authorize_dispatch=authorize_dispatch)}
         raise ValueError("unknown ledger operation")
 
     def control(self, run_id, fencing_token, worker_id):
@@ -1480,7 +1486,6 @@ class TaskService:
             return {"accepted": bool(changed.rowcount)}
 
     def add_graph_input(self, conn, task, event, access, text, *, kind="followup", question_id=None, source_id=None, selected_by=None):
-        from elephant.storage.agent_schema import leader_inbox
         if kind not in {"followup", "answer", "notify"} or bool(question_id) != (kind == "answer"):
             raise ValueError("invalid task input kind")
         text = self._input_text(event, text)
@@ -1526,9 +1531,8 @@ class TaskService:
                     text=text, state="READY" if child["state"] == "QUEUED" else "PENDING",
                     created_at=now, kind=kind, actor=event.principal.key, goal_revision=revision))
             if not children:
-                event_id = self.graph.event(conn, root, "followup", {"input_id": input_id, "text": text})
-                conn.execute(insert(leader_inbox).values(id=str(uuid4()), target_session_id=root["coordinator_session_id"],
-                    root_task_id=root["id"], event_id=event_id, resume_reason="followup", source_revision=revision, created_at=now))
+                self.graph.event(conn, {**root, "goal_revision": revision}, "followup",
+                    {"input_id": input_id, "text": text}, wake=True)
         self._merge_input_sources(conn, affected, sources)
         if sources and task["id"] != root["id"]:
             self._merge_input_sources(conn, {root["id"]}, {"source_manifest": sources["source_manifest"]})

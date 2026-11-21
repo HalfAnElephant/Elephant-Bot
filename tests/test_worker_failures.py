@@ -2,10 +2,12 @@
 import asyncio
 import json
 import logging
+from datetime import timedelta
 from itertools import pairwise
 from pathlib import Path
 from sqlite3 import SQLITE_BUSY
 from sqlite3 import OperationalError as SQLiteError
+from threading import Event
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -334,7 +336,7 @@ async def test_active_heartbeat_renews_while_event_flush_is_waiting(environment,
     claim = service.claim("worker")
     blocked = asyncio.Event()
     renewals = asyncio.Queue()
-    busy = asyncio.Event()
+    busy = Event()
     renew = service.renew
 
     def renew_with_busy(*args):
@@ -373,8 +375,12 @@ async def test_active_heartbeat_renews_while_event_flush_is_waiting(environment,
     run = asyncio.create_task(worker.once(claim))
     try:
         await asyncio.wait_for(blocked.wait(), 2)
+        old_expiry = (clock.now() + timedelta(seconds=30)).isoformat()
         clock.advance(25)
-        assert await asyncio.wait_for(renewals.get(), 2) > clock.now().isoformat()
+        # Thread dispatch can complete the initial renewal after blocked is set.
+        # Wait for a transaction that actually observed the advanced fake clock.
+        while await asyncio.wait_for(renewals.get(), 2) <= old_expiry:
+            pass
         clock.advance(10)
         assert await asyncio.wait_for(renewals.get(), 2) > clock.now().isoformat()
         assert busy.is_set() == busy_once
@@ -517,3 +523,44 @@ async def test_finalizer_does_not_reexport_child_paths_from_its_workspace(enviro
         assert service.get(task["public_id"], service._access_for(task))["state"] == "SUCCEEDED"
     finally:
         await pool.close()
+
+
+async def test_real_sqlite_writer_does_not_starve_renew_timer_and_recovers(environment, clock):
+    service, _, client = environment
+    claim = service.claim("worker")
+    request = {"worker_id": "worker", **{key: claim[key] for key in ("run_id", "fencing_token")}}
+    clock.advance(1)
+    loop = asyncio.get_running_loop()
+    with service.db.transaction():
+        started = loop.time()
+        renewing = asyncio.create_task(client.post("/internal/tasks/renew", json=request))
+        await asyncio.sleep(0.025)
+        assert loop.time() - started < 0.5
+        assert not renewing.done()
+        # Keep a real competing writer through SQLite's production busy timeout.
+        response = await renewing
+        assert response.status_code == 503
+    assert (await client.post("/internal/tasks/renew", json=request)).status_code == 200
+    with service.db.engine.connect() as conn:
+        lease = conn.execute(select(runs.c.lease).where(runs.c.id == claim["run_id"])).scalar_one()
+    assert lease > clock.now().isoformat()
+    clock.advance(31)
+    assert (await client.post("/internal/tasks/renew", json=request)).status_code == 409
+
+
+async def test_cancelled_renew_waits_for_sqlite_transaction(environment):
+    service, _, client = environment
+    claim = service.claim("worker")
+    request = {"worker_id": "worker", **{key: claim[key] for key in ("run_id", "fencing_token")}}
+    with service.db.transaction():
+        renewing = asyncio.create_task(client.post("/internal/tasks/renew", json=request))
+        await asyncio.sleep(0.05)
+        renewing.cancel()
+        await asyncio.sleep(0.025)
+        renewing.cancel()
+        await asyncio.sleep(0.025)
+        assert not renewing.done()
+    with pytest.raises(asyncio.CancelledError):
+        await renewing
+    with service.db.transaction():
+        pass

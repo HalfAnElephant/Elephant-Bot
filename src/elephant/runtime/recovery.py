@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from elephant.adapters.execution.world import LocalExecution
 from elephant.capabilities.types import Action, ToolContext
@@ -460,7 +460,8 @@ class RuntimeRecovery:
             notification_id = stable_id("qq-rich", context.task_id, arguments.get("request_id", ""))
             with self.core.db.engine.connect() as conn:
                 delivery = conn.execute(select(outbox).where(outbox.c.task_id == context.task_id,
-                    outbox.c.origin_id == notification_id)).mappings().first()
+                    or_(outbox.c.origin_id == notification_id, and_(outbox.c.origin_kind == "chat",
+                        outbox.c.origin_id.startswith("file:" + notification_id + ":"))))).mappings().first()
             if delivery:
                 return "VERIFIED", {"delivery_id": delivery["id"], "state": delivery["state"],
                     "delivered": delivery["state"] == "SENT", "verified_effect": "durable_enqueue"}

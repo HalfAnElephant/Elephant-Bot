@@ -1,4 +1,5 @@
 """Committed tasks.submit receipts survive a lost response at the native tool boundary."""
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -7,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, select, update
 from test_agent_runtime import runtime as agent_runtime
 from test_pi_bridge import completion_sse
 
@@ -16,7 +17,7 @@ from elephant.jobs.worker import GeneralRun
 from elephant.providers import ModelCapacity
 from elephant.runtime.scheduler import RuntimeClient
 from elephant.storage.agent_schema import dialogue_inputs
-from elephant.storage.task_schema import runs, tasks
+from elephant.storage.task_schema import processes, runs, tasks
 
 runtime = agent_runtime
 
@@ -241,3 +242,263 @@ def test_interrupted_direct_tool_releases_writer_with_recovery_receipt(runtime):
     with runtime.db.engine.connect() as conn:
         assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 0
         assert conn.execute(select(func.count()).select_from(tasks)).scalar_one() == 0
+
+
+def failed_stop(runtime, claim):
+    return runtime.leader.complete(claim["run_id"], claim["fencing_token"], "leader",
+        {"status": "failed", "summary": "进程已停止", "agent_authored": False}, stopped=True, quiescent=False)
+
+
+@pytest.mark.parametrize("crash_after_edit", [False, True])
+def test_active_failed_stop_cleans_partial_submit_before_retry_without_new_pi_records(runtime, monkeypatch, crash_after_edit):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, old, {}, stop_reason="aborted")
+    original = path.read_bytes()
+    if crash_after_edit:
+        with monkeypatch.context() as patch:
+            def interrupted(*args, **kwargs):
+                raise RuntimeError("interrupted before database commit")
+            patch.setattr(runtime.leader, "_account_turn", interrupted)
+            with pytest.raises(RuntimeError, match="before database commit"):
+                failed_stop(runtime, old)
+        assert runtime.sessions.claim("replacement") is None
+    assert failed_stop(runtime, old)["state"] == "FINISHED"
+    entries = load_entries(path)
+    assert path.read_bytes().startswith(original)
+    assert len([entry for entry in entries if entry["type"] == "context_edit"]) == 1
+    assert not any(entry.get("message", {}).get("role") == "toolResult" for entry in entries)
+    retry = runtime.sessions.claim("leader")
+    assert retry["session_id"] == old["session_id"] and retry["source_ids"] == old["source_ids"]
+    with runtime.db.transaction() as conn:
+        conn.execute(update(runs).where(runs.c.id == retry["run_id"]).values(session=str(path)))
+    runtime.clock.advance(31)
+    assert runtime.leader.recover_attempt(retry["run_id"])["state"] == "RECOVERED"
+    assert load_entries(path) == entries
+
+
+@pytest.mark.parametrize("blocker", ["tool_use", "committed_partial", "changed_committed", "wrong_sources"])
+async def test_active_failed_stop_keeps_uncertain_submit_and_writer(runtime, blocker):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    arguments = {}
+    if blocker in {"committed_partial", "changed_committed"}:
+        assert (await submit_tool(runtime, old, {"goal": "检查项目", "children": [
+            {"goal": "独立检查", "delegation_key": "primary"}]})).status_code == 200
+        if blocker == "changed_committed":
+            arguments = {"goal": "另一个目标", "children": [{"goal": "独立检查", "delegation_key": "primary"}]}
+    path = native_pending_submit(runtime, old, arguments,
+        stop_reason="toolUse" if blocker == "tool_use" else "aborted",
+        run_sources=["wrong"] if blocker == "wrong_sources" else None)
+    before = path.read_bytes()
+    assert failed_stop(runtime, old)["state"] == "NEEDS_RECONCILIATION"
+    assert path.read_bytes() == before
+    assert runtime.sessions.claim("replacement") is None
+    with runtime.db.engine.connect() as conn:
+        assert conn.execute(select(runs.c.slot_reserved).where(runs.c.id == old["run_id"])).scalar_one() == 1
+
+
+async def test_active_failed_stop_restores_only_matching_committed_submit_receipt(runtime):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    old = runtime.sessions.claim("leader")
+    arguments = {"goal": "检查项目", "children": [{"goal": "独立检查", "delegation_key": "primary"}]}
+    response = await submit_tool(runtime, old, arguments)
+    path = native_pending_submit(runtime, old, arguments)
+    assert failed_stop(runtime, old)["state"] == "FINISHED"
+    entries = load_entries(path)
+    assert not any(entry["type"] == "context_edit" for entry in entries)
+    results = [entry["message"] for entry in entries if entry.get("message", {}).get("role") == "toolResult"]
+    assert len(results) == 1 and not results[0]["isError"]
+    assert json.loads(results[0]["content"][0]["text"])["task_id"] == response.json()["task_id"]
+
+
+async def test_leader_renew_does_not_block_loop_under_real_sqlite_writer(runtime):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    request = {"worker_id": "leader", **{key: claim[key] for key in ("run_id", "fencing_token")}}
+    loop = asyncio.get_running_loop()
+    with runtime.db.transaction():
+        started = loop.time()
+        renewing = asyncio.create_task(client.post("/internal/tasks/renew", json=request))
+        await asyncio.sleep(0.025)
+        assert loop.time() - started < 0.5
+        assert not renewing.done()
+    assert (await renewing).status_code == 200
+    stale = {**request, "fencing_token": claim["fencing_token"] + 1}
+    assert (await client.post("/internal/tasks/renew", json=stale)).status_code == 409
+
+
+async def test_model_authorization_uses_a_fresh_off_loop_check(runtime, monkeypatch):
+    from threading import get_ident
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    payload = {"worker_id": "leader", "run_id": claim["run_id"], "fencing_token": claim["fencing_token"],
+        "payload": {"action": "model.request"}}
+    loop_thread = get_ident()
+    calls = []
+    original = runtime.leader.authorize
+
+    def authorize(conn, run, binding, action):
+        assert get_ident() != loop_thread
+        calls.append(action["action"])
+        if len(calls) > 1:
+            raise PermissionError("context revoked")
+        return original(conn, run, binding, action)
+
+    monkeypatch.setattr(runtime.leader, "authorize", authorize)
+    assert (await client.post("/internal/tasks/authorize", json=payload)).json()["allowed"]
+    assert (await client.post("/internal/tasks/authorize", json=payload)).status_code == 409
+    assert calls == ["model.request", "model.request"]
+
+
+async def test_native_failure_settlement_keeps_timer_and_sqlite_writer_available(runtime, monkeypatch):
+    from threading import Event
+
+    from elephant.adapters.pi.adapter import PiAdapter
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, claim, {}, stop_reason="aborted")
+    entered, release = Event(), Event()
+    discard = PiAdapter.discard_aborted_submit
+
+    def slow_discard(adapter, *args):
+        entered.set()
+        assert release.wait(3)
+        return discard(adapter, *args)
+
+    monkeypatch.setattr(PiAdapter, "discard_aborted_submit", slow_discard)
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    payload = {"worker_id": "leader", **{key: claim[key] for key in ("run_id", "fencing_token")},
+        "result": {"status": "failed", "summary": "进程已停止", "agent_authored": False},
+        "stopped": True, "quiescent": False}
+    start = asyncio.get_running_loop().time()
+    settling = asyncio.create_task(client.post("/internal/tasks/result", json=payload))
+    try:
+        await asyncio.sleep(0.025)
+        assert asyncio.get_running_loop().time() - start < 0.5
+        assert await asyncio.to_thread(entered.wait, 2)
+
+        def unrelated_writer():
+            with runtime.db.transaction() as conn:
+                assert conn.execute(select(runs.c.state).where(runs.c.id == claim["run_id"])).scalar_one() == "SETTLING"
+        await asyncio.wait_for(asyncio.to_thread(unrelated_writer), 1)
+        # Freeze also fences old tool requests and process rebinding during I/O.
+        assert (await submit_tool(runtime, claim, {"goal": "检查项目", "children": [
+            {"goal": "独立检查", "delegation_key": "primary"}]})).status_code == 409
+        runtime.leader.core.recovery = SimpleNamespace(epoch="fixture")
+        rebound = await client.post("/internal/tasks/bind-process", json={
+            "worker_id": "leader", "run_id": claim["run_id"], "fencing_token": claim["fencing_token"],
+            "payload": {"identity": {}}})
+        assert rebound.status_code == 409
+        assert runtime.sessions.claim("replacement") is None
+        settling.cancel()
+        await asyncio.sleep(0.025)
+        assert not settling.done()
+    finally:
+        release.set()
+        await asyncio.gather(settling, return_exceptions=True)
+    assert settling.cancelled()
+    assert len([entry for entry in load_entries(path) if entry["type"] == "context_edit"]) == 1
+    # Cancellation drains native work; the durable result is idempotently replayable.
+    assert (await client.post("/internal/tasks/result", json=payload)).json()["state"] == "FINISHED"
+
+
+@pytest.mark.parametrize("rival", ["result", "recovery"])
+async def test_native_settlement_serializes_other_runtime_after_lease_expiry(runtime, monkeypatch, rival):
+    from threading import Event
+
+    from elephant.runtime.leader import LeaderRuntime
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, claim, {}, stop_reason="aborted")
+    entered, release = Event(), Event()
+    reconcile = runtime.leader._reconcile_stopped_tools
+
+    def slow_reconcile(*args):
+        entered.set()
+        assert release.wait(3)
+        return reconcile(*args)
+
+    monkeypatch.setattr(runtime.leader, "_reconcile_stopped_tools", slow_reconcile)
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    payload = {"worker_id": "leader", **{key: claim[key] for key in ("run_id", "fencing_token")},
+        "result": {"status": "failed", "summary": "进程已停止", "agent_authored": False},
+        "stopped": True, "quiescent": False}
+    settling = asyncio.create_task(client.post("/internal/tasks/result", json=payload))
+    other = LeaderRuntime(runtime.leader.core, runtime.sessions)
+    waiting = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        if rival == "recovery":
+            runtime.clock.advance(31)
+            waiting = asyncio.create_task(asyncio.to_thread(other.recover_attempt, claim["run_id"]))
+        else:
+            waiting = asyncio.create_task(RuntimeClient(other.core, other).post("/internal/tasks/result", json=payload))
+        await asyncio.sleep(0.05)
+        assert not waiting.done()
+        assert runtime.sessions.claim("replacement") is None
+    finally:
+        release.set()
+        results = await asyncio.gather(settling, *([waiting] if waiting else []), return_exceptions=True)
+    assert len([entry for entry in load_entries(path) if entry["type"] == "context_edit"]) == 1
+    if rival == "recovery":
+        assert results[0].status_code == 409
+        assert results[1]["state"] == "RECOVERED"
+    else:
+        assert all(result.status_code == 200 and result.json()["state"] == "FINISHED" for result in results)
+    assert runtime.sessions.claim("replacement") is not None
+
+
+async def test_worker_preserves_spooled_failure_on_http_success_needing_reconciliation(runtime):
+    from elephant.jobs.worker import Spool, Worker
+
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, claim, {}, stop_reason="toolUse")
+    native = path.read_bytes()
+    client = RuntimeClient(runtime.leader.core, runtime.leader)
+    worker = Worker(client, "leader", Spool(runtime.path / "spool"), lambda _: None)
+    payload = {"worker_id": "leader", **{key: claim[key] for key in ("run_id", "fencing_token")},
+        "result": {"status": "failed", "summary": "进程已停止", "agent_authored": False},
+        "stopped": True, "quiescent": False}
+    evidence = await worker.save_result(payload)
+    original = evidence.read_bytes()
+    assert await worker.deliver_result(payload, evidence) is False
+    assert evidence.read_bytes() == original
+    await worker.replay()
+    assert evidence.read_bytes() == original and path.read_bytes() == native
+    assert runtime.sessions.claim("replacement") is None
+    with runtime.db.engine.connect() as conn:
+        row = conn.execute(select(runs).where(runs.c.id == claim["run_id"])).mappings().one()
+        assert row["slot_reserved"] == 1 and row["state"] == "NEEDS_RECONCILIATION"
+
+
+@pytest.mark.parametrize("blocker", ["fence", "running_process", "epoch", "generation"])
+async def test_native_settlement_rechecks_fencing_and_stop_before_edit(runtime, blocker):
+    runtime.sessions.enqueue(runtime.event, runtime.access)
+    claim = runtime.sessions.claim("leader")
+    path = native_pending_submit(runtime, claim, {}, stop_reason="aborted")
+    before = path.read_bytes()
+    if blocker != "fence":
+        with runtime.db.transaction() as conn:
+            conn.execute(insert(processes).values(id="native-process", session_id=claim["session_id"],
+                worker="leader", epoch=2 if blocker == "epoch" else 1,
+                generation=2 if blocker == "generation" else 1,
+                state="BUSY" if blocker == "running_process" else "STOPPED", identity_json="{}",
+                last_used=runtime.clock.now().isoformat()))
+            conn.execute(update(runs).where(runs.c.id == claim["run_id"]).values(
+                process_id="native-process", process_epoch=1, binding_generation=1))
+    payload = {"worker_id": "leader", "run_id": claim["run_id"],
+        "fencing_token": claim["fencing_token"] + int(blocker == "fence"),
+        "result": {"status": "failed", "summary": "进程已停止", "agent_authored": False},
+        "stopped": True, "quiescent": False}
+    response = await RuntimeClient(runtime.leader.core, runtime.leader).post("/internal/tasks/result", json=payload)
+    assert response.status_code == 409 and path.read_bytes() == before
+    with runtime.db.engine.connect() as conn:
+        row = conn.execute(select(runs).where(runs.c.id == claim["run_id"])).mappings().one()
+        assert row["slot_reserved"] == 1 and row["state"] == "RUNNING"

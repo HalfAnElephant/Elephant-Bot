@@ -77,7 +77,7 @@ def test_cleanup_preserves_uncertain_or_pending_delivery(db, clock, state):
     store = LocalMediaStore(db, clock, ttl_seconds=1)
     record = put(store)
     with db.transaction() as c:
-        c.execute(insert(outbox).values(id="delivery", dedupe_key="delivery", conversation_id="conversation",
+        c.execute(insert(outbox).values(id="delivery", enqueue_seq=1, dedupe_key="delivery", conversation_id="conversation",
             envelope_json=json.dumps({"official_content": {"media": {"local_ref": record["id"]}}}),
             state=state, created_at=clock.now().isoformat()))
     clock.advance(2)

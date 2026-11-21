@@ -1,7 +1,7 @@
 """Durable QQ stream intent and outcome; never replay an uncertain network write."""
-from sqlalchemy import Column, Integer, String, Table, Text, UniqueConstraint
+from sqlalchemy import Column, Index, Integer, String, Table, Text, UniqueConstraint, func, select
 
-from elephant.storage.schema import metadata
+from elephant.storage.schema import metadata, outbox
 
 stream_runs = Table(
     "qq_stream_runs", metadata,
@@ -12,7 +12,18 @@ stream_runs = Table(
     Column("error", String),
     Column("result_origin_kind", String),
     Column("result_origin_id", String),
+    Column("enqueue_seq", Integer),
 )
+Index("ix_qq_stream_runs_enqueue_seq", stream_runs.c.enqueue_seq)
+
+
+def next_delivery_sequence():
+    return select(func.max(
+        select(func.coalesce(func.max(outbox.c.enqueue_seq), 0)).scalar_subquery(),
+        select(func.coalesce(func.max(stream_runs.c.enqueue_seq), 0)).scalar_subquery(),
+    ) + 1).scalar_subquery()
+
+
 stream_messages = Table(
     "qq_stream_messages", metadata,
     Column("id", String, primary_key=True),

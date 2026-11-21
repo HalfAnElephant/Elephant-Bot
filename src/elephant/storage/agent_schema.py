@@ -1,5 +1,5 @@
 """Durable dialogue routing and source receipts; Pi alone owns model history."""
-from sqlalchemy import Column, Integer, String, Table, Text, UniqueConstraint
+from sqlalchemy import Column, Index, Integer, String, Table, Text, UniqueConstraint
 
 from elephant.storage.schema import metadata
 
@@ -64,3 +64,17 @@ agent_events = Table(
     UniqueConstraint("task_id", "seq"),
 )
 AGENT_TABLES = (dialogues, focus, dialogue_inputs, leader_inbox, agent_events)
+
+
+leader_events = Table(
+    "leader_events", metadata,
+    Column("seq", Integer, primary_key=True),
+    Column("dialogue_id", String, nullable=False),
+    Column("source_kind", String, nullable=False),
+    Column("source_id", String, nullable=False),
+    Column("published_run_id", String),
+    Column("payload_json", Text),
+    UniqueConstraint("source_kind", "source_id"),
+    sqlite_autoincrement=True,
+)
+Index("ix_leader_events_dialogue_seq", leader_events.c.dialogue_id, leader_events.c.seq)
