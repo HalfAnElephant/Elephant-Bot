@@ -107,7 +107,11 @@ def test_mail_timeout_snapshot_omits_result_and_receipt_contents(runtime):
     ("请提供邮箱地址。账号标识还没指定，对吗？", False),
     ("目前只找到 weekly-demo。要我继续创建邮箱规则吗？", False),
     ("请告诉我周报要总结成几条？邮箱账号还不清楚。", False),
+    ("目前没有该账号。你把那只邮箱的信息给我吧～\n\n- 邮箱地址\n- 服务商", True),
+    ("请提供目标邮箱地址和邮箱服务商。", True),
+    ("目前缺少邮箱地址和服务商。要我继续吗？", False),
+    ("请确认无需提供邮箱地址和服务商。", False),
     ("我已按现有 weekly-demo 配好规则，账号标识是 weekly-demo。", False),
 ])
-def test_mail_clarification_requires_a_request_for_the_account_id(reply, expected):
-    assert evaluator().asks_for_mail_account_id(reply) is expected
+def test_mail_clarification_requires_details_to_identify_the_account(reply, expected):
+    assert evaluator().asks_for_mail_account_clarification(reply) is expected
