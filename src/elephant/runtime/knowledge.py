@@ -561,7 +561,20 @@ class KnowledgeRuntime:
         if operation == "memory_search":
             return (await self.memory.search(scope, args["query"])).model_dump(mode="json")
         if operation == "memory_read":
-            return (await self.memory.read(scope, args["uri"])).model_dump(mode="json")
+            document = await self.memory.read(scope, args["uri"])
+            with self.core.db.transaction() as conn:
+                run, claim = self.core.leader.lease(conn, *identity)
+                self.core.leader.authorize(conn, run, claim, {"action": action})
+                row = conn.execute(select(sessions).where(sessions.c.id == claim["session_id"])).mappings().one()
+                if row["active_run_id"] != run["id"]:
+                    raise PermissionError("memory read session writer changed")
+                history = json.loads(row["manifest_json"])
+                history.update(memory_history=True, memory_scope=scope.model_dump(), memory_epoch=document.memory_epoch)
+                if not self.valid(history, conn=conn):
+                    raise PermissionError("memory read was invalidated")
+                conn.execute(update(sessions).where(sessions.c.id == row["id"]).values(
+                    manifest_json=json.dumps(history, ensure_ascii=False)))
+            return document.model_dump(mode="json")
         if operation not in {"memory_correct", "memory_forget"}:
             raise ValueError("unknown memory tool")
         with self.core.db.engine.connect() as conn:

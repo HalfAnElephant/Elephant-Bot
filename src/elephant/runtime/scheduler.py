@@ -115,6 +115,9 @@ class RuntimeClient:
             functions = ((self.leader.sessions.claim, self.service.claim) if self.last_role == "worker"
                          else (self.service.claim, self.leader.sessions.claim))
             functions = (*functions, self.leader.claim_review)
+            maintenance = getattr(self.leader, "compaction", None)
+            if maintenance is not None:
+                functions = (*functions, maintenance.claim)
             for claim in functions:
                 result = claim(body.worker_id)
                 if result:
@@ -198,6 +201,8 @@ class Scheduler:
         self.client = RuntimeClient(core, leader)
         model_limit = self.settings.orchestration.model_request_limit
         self.capacity = ModelCapacity(total=model_limit, reserved=int(model_limit > 1))
+        self.client.maintenance_capacity = self.capacity
+        self.leader.maintenance_capacity = self.capacity
         from elephant.adapters.execution.world import LocalExecution
         self.execution = getattr(core, "execution", None) or LocalExecution()
         core.job_runtime = self.execution.create_job_runtime(core, data)

@@ -69,14 +69,14 @@ class TurnRouter:
         self.core, self.db = core, core.db
 
     def command(self, event, command, argument):
-        if command == "/任务" and not argument.strip():
+        if command == "/tasks" and not argument.strip():
             return self._route(event, TaskIntent("list"))
-        if command == "/补充":
+        if command == "/followup":
             reference, _, text = argument.strip().partition(" ")
             if not reference or not text.strip():
                 return "请引用需要补充的进度消息，再发送补充内容。"
             return self._route(event, TaskIntent("input", reference, text))
-        return self._route(event, TaskIntent("cancel" if command == "/取消" else "status", argument.strip() or None))
+        return self._route(event, TaskIntent("cancel" if command == "/cancel" else "status", argument.strip() or None))
 
     def route(self, event):
         return self._route(event, task_intent(event.text))

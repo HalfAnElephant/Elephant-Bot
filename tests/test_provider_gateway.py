@@ -776,3 +776,56 @@ async def test_trusted_output_limit_uses_provider_parameter(body, endpoint, fiel
     request, = fixture.requests
     assert request[field] == 512
     assert not {"max_tokens", "max_completion_tokens"}.difference({field}).intersection(request)
+
+
+@pytest.mark.parametrize(("mode", "delta", "allowed"), [
+    ("text", 1, True), ("text", 0, False), ("text", -1, False), ("documents", 0, False),
+    ("attachment", 0, False), ("tools", 0, False), ("bytes", 0, True), ("bytes", -1, False),
+])
+async def test_leader_context_gate_uses_expanded_final_request(tmp_path, mode, delta, allowed):
+    from types import SimpleNamespace
+
+    from elephant.providers import pi_request_tokens
+
+    fixture = ProviderFixture()
+    body = {"model": "offline", "messages": [{"role": "system", "content": "policy"},
+                                            {"role": "user", "content": "context" * 100}]}
+    projected = {**body}
+    if mode in {"documents", "attachment"}:
+        block = {"role": "user", "content": [{"type": "text", "text": "授权文档内容" * 300}]
+                 if mode == "documents" else [{"type": "image_url", "image_url": {"url": "data:image/png;base64,image"}}]}
+        projected["messages"] = [*body["messages"], block]
+    if mode == "tools":
+        body["tools"] = [{"type": "function", "function": {"name": "task", "description": "schema" * 300}}]
+        projected["tools"] = body["tools"]
+
+    async def core(operation, packet):
+        if operation == "authorize":
+            return {"allowed": True}
+        if operation == "reserve-budget":
+            return await fixture.reserve(packet["request_id"], packet["kind"])
+        assert operation == "usage"
+
+    gateway = RunGateway(tmp_path, "offline", "fixture-key", "https://model.invalid/v1/chat/completions",
+                         call=core, transport=fixture.adapter.transport)
+
+    async def expand(payload, *args, **kwargs):
+        return {**payload, "messages": projected["messages"]}
+
+    if mode == "documents":
+        gateway.documents = SimpleNamespace(with_documents=expand)
+    elif mode == "attachment":
+        gateway.with_attachments = expand
+    limits = {"force_compaction_tokens": pi_request_tokens(projected) + delta}
+    if mode == "bytes":
+        limits.update(force_compaction_tokens=4096,
+                      max_bytes=len(json.dumps({**projected, "stream": False}, ensure_ascii=False).encode()) + delta)
+    gateway.bind({"task_id": "leader", "run_id": "run", "fencing_token": 1, "role": "leader",
+                  "permission_snapshot": {"principal": {}}, "context": {"limits": limits}})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway.app), base_url="http://local") as client:
+        response = await client.post("/v1/chat/completions", json=body,
+                                     headers={"Authorization": "Bearer " + gateway.model_token})
+    assert response.status_code == (200 if allowed else 413), response.text
+    assert len(fixture.requests) == len(fixture.reservations) == int(allowed)
+    if not allowed:
+        assert gateway.context_failure["tokens"] == pi_request_tokens(projected)

@@ -419,7 +419,8 @@ class Worker:
                 if execution.done():
                     break
                 if getattr(harness, "gateway", None):
-                    harness.gateway.provider.background = claim.get("role", "worker") != "leader"
+                    harness.gateway.provider.background = (claim.get("role", "worker") != "leader"
+                                                           or claim.get("purpose") == "compaction")
                     if "budget" in lease:
                         harness.gateway.tools.max_calls = lease["budget"].get("tool_calls", 60)
                     deadline = getattr(harness, "run_timeout", None)

@@ -268,8 +268,38 @@
             }
           ],
           "default": null,
-          "description": "pi soft compaction threshold; null reserves 10% of the model window or output headroom, whichever is larger",
+          "description": "Compatibility alias for force_compaction_tokens",
           "title": "Max Tokens"
+        },
+        "force_compaction_tokens": {
+          "anyOf": [
+            {
+              "maximum": 2000000,
+              "minimum": 256,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inclusive Leader context limit. Null derives from max_tokens or the model window with output headroom",
+          "title": "Force Compaction Tokens"
+        },
+        "elastic_compaction_tokens": {
+          "anyOf": [
+            {
+              "maximum": 2000000,
+              "minimum": 129,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inclusive idle Leader compaction threshold. Null uses 90% of the force threshold, above recent retention",
+          "title": "Elastic Compaction Tokens"
         },
         "keep_recent_tokens": {
           "anyOf": [
@@ -1227,6 +1257,8 @@
       "default": {
         "max_request_bytes": 16777216,
         "max_tokens": null,
+        "force_compaction_tokens": null,
+        "elastic_compaction_tokens": null,
         "keep_recent_tokens": null,
         "compaction_output_tokens": 4096,
         "recent_messages": 64,

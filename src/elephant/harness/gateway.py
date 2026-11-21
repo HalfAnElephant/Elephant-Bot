@@ -36,7 +36,12 @@ from elephant.harness.attachments import (
 )
 from elephant.harness.images import ImageExceedsRequestBudget, download_public_file, fetch_image
 from elephant.harness.public_web import bounded_json
-from elephant.providers import ProviderAdapter, validate_transactions
+from elephant.providers import (
+    ProviderAdapter,
+    output_limit_parameter,
+    pi_request_tokens,
+    validate_transactions,
+)
 from elephant.runtime.prompting import assemble_prompt
 from elephant.runtime.tools import native_tools
 
@@ -159,6 +164,16 @@ class RunGateway:
         budget = claim.get("plan", {}).get("budget", {})
         limits = claim.get("context", {}).get("limits", {})
         self.model_window = claim.get("context", {}).get("model_context_window", self.model_window)
+        self.force_tokens = limits.get("force_compaction_tokens") if claim.get("role") == "leader" else None
+        self.maintenance_compaction = bool(claim.get("purpose") == "compaction" and self.force_tokens)
+        self.context_attempt = None
+        self.context_calls = 0
+        self.context_committing = False
+        self.context_failure = None
+        self.context_failure_recorded = False
+        self.context_before = None
+        self.context_tokens = 0
+        self.context_summary_saved = False
         self.task_content = self.content_root / claim["task_id"]
         self.task_content.mkdir(parents=True, exist_ok=True, mode=0o700)
         if claim.get("host") and claim["host"] != self.github_host:
@@ -174,9 +189,15 @@ class RunGateway:
             content_store=self.store_content, content_read=self.read_content, max_calls=budget.get("tool_calls", 60))
         self.provider = ProviderAdapter(self.model, self.endpoint, self.key,
             authorize=self.authorize_action, reserve=self.reserve, record=self.record,
-            transport=self.transport, capacity=self.capacity, background=claim.get("role", "worker") != "leader",
+            transport=self.transport, capacity=self.capacity,
+            background=self.maintenance_compaction or claim.get("role", "worker") != "leader",
             output_tokens=budget.get("output_tokens_per_call"), model_window=self.model_window,
-            compaction_output=limits.get("compaction_output_tokens", 4096))
+            compaction_output=limits.get("compaction_output_tokens", 4096),
+            guard=self.guard_context if self.force_tokens else None,
+            upstream_failure=self.context_upstream_failure if self.force_tokens else None,
+            request_succeeded=self.context_request_succeeded if self.force_tokens else None,
+            before_compaction_request=self.check_compaction_request if self.force_tokens else None,
+            maintenance=self.maintenance_compaction)
         self.provider.upstream_session = self.upstream_session
         self.provider.max_bytes = limits.get("max_bytes", self.provider.max_bytes)
         self.provider.on_exhausted = self.budget_exhausted
@@ -412,6 +433,179 @@ class RunGateway:
             message["content"] = message["content"][:len(message["content"]) // 2] + "\n附件内容因本轮请求大小限制被截断，未显示部分不能视为已读取。"
         return result
 
+    def context_metrics(self, payload, document_tokens=0):
+        return {"tokens": pi_request_tokens(payload) + document_tokens,
+                "request_bytes": len(json.dumps(payload, ensure_ascii=False).encode())}
+
+    def context_limit(self, kind):
+        return (self.model_window - self.provider.compaction_output - 1024
+                if kind == "compaction" else self.force_tokens)
+
+    def context_problem(self, payload, kind, reason, *, retryable=False, document_tokens=0):
+        if kind == "compaction" and self.context_failure:
+            self.context_failure.update(compaction_error=reason, retryable=retryable)
+            return
+        stable = {key: payload.get(key) for key in ("model", "messages", "tools")}
+        stable["messages"] = [
+            item for item in stable["messages"] or ()
+            if not (isinstance(item.get("content"), str) and item["content"].startswith("[elephant-runtime]"))
+        ]
+        self.context_failure = {
+            **self.context_metrics(payload, document_tokens), "reason": reason, "retryable": retryable,
+            "fingerprint": hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest(),
+            "limits_fingerprint": f"{self.model}:{self.model_window}:{self.force_tokens}:{self.provider.max_bytes}",
+            "force_compaction_tokens": self.force_tokens, "max_request_bytes": self.provider.max_bytes,
+            "summary_saved": self.context_summary_saved,
+        }
+
+    def guard_context(self, payload, kind, document_tokens):
+        if self.maintenance_compaction and kind != "compaction":
+            raise HTTPException(403, "maintenance binding only authorizes compaction")
+        if kind != "compaction":
+            self.context_before = {
+                "prefix": [message for message in payload["messages"] if message["role"] in {"system", "developer"}],
+                "tools": payload.get("tools", []),
+            }
+            if self.context_attempt and not self.context_summary_saved:
+                raise HTTPException(413, "context_length_exceeded: compaction did not commit")
+        metrics = self.context_metrics(payload, document_tokens)
+        if metrics["tokens"] >= self.context_limit(kind) or metrics["request_bytes"] > self.provider.max_bytes:
+            previous = self.context_failure
+            self.context_problem(payload, kind, "context_budget_exceeded", document_tokens=document_tokens)
+            if previous and self.context_attempt:
+                self.context_failure["compaction_error"] = previous.get("compaction_error", "post_compaction_overflow")
+            raise HTTPException(413, "context_length_exceeded: finalized request exceeds its context budget")
+        if kind != "compaction":
+            self.context_tokens = metrics["tokens"]
+
+    def context_request_succeeded(self, kind):
+        if kind != "compaction":
+            self.context_attempt = None
+            self.context_summary_saved = False
+            self.context_failure = None
+
+    def context_upstream_failure(self, payload, kind, code, status):
+        if code == "context_length_exceeded" or status in {408, 429} or status >= 500:
+            self.context_problem(payload, kind, code, retryable=status in {408, 429} or status >= 500)
+
+    async def check_compaction_request(self):
+        if not self.context_attempt:
+            raise HTTPException(403, "compaction attempt is not bound")
+        await self.call("context-compaction", {**self.context_attempt, "phase": "request"})
+
+    async def persist_context_failure(self):
+        if self.context_failure and not self.context_failure_recorded:
+            await self.call("context-compaction", {**self.context_failure, "phase": "failure"})
+            self.context_failure_recorded = True
+
+    def summary_body(self, packet):
+        prompt = packet.get("prompt")
+        messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else packet.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise HTTPException(422, "summary requires prepared Pi messages")
+        normalized = []
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                raise HTTPException(422, "summary supports Pi's serialized conversation prompt")
+            content = message.get("content")
+            if isinstance(content, list) and all(isinstance(part, dict) and part.get("type") == "text"
+                    and isinstance(part.get("text"), str) for part in content):
+                content = "".join(part["text"] for part in content)
+            if not isinstance(content, str):
+                raise HTTPException(422, "invalid summary prompt")
+            normalized.append({"role": "user", "content": content})
+        if packet.get("system_prompt"):
+            if not isinstance(packet["system_prompt"], str):
+                raise HTTPException(422, "invalid summary system prompt")
+            normalized.insert(0, {"role": "system", "content": packet["system_prompt"]})
+        return {"model": self.model, "messages": normalized}
+
+    async def compaction_phase(self, body):
+        phase = body.get("phase")
+        if phase == "failed":
+            retryable = body.get("retryable") is True or bool(self.context_failure and self.context_failure.get("retryable"))
+            error = "compaction_timeout_or_upstream_error" if retryable else "compaction_failed"
+            detail = body.get("error")
+            if isinstance(detail, str) and "retention" in detail.lower():
+                error = "invalid_retention_boundary"
+            elif isinstance(detail, str) and "candidate compaction leaves" in detail:
+                error = "post_compaction_overflow"
+            if not self.context_failure:
+                self.context_problem({"model": self.model, "messages": []}, "compaction", error, retryable=retryable)
+            self.context_failure.update(compaction_error=error, retryable=retryable)
+            return {"accepted": True}
+        if phase == "status":
+            tokens = body.get("tokens")
+            if type(tokens) is not int or tokens < 0:
+                raise HTTPException(422, "invalid projected token estimate")
+            output = body.get("output_tokens", 0)
+            if type(output) is not int or output < 0:
+                raise HTTPException(422, "invalid output token estimate")
+            return await self.call("context-compaction", {"phase": phase,
+                "tokens": max(tokens, self.context_tokens + output if self.context_tokens else 0)})
+        common = ("phase", "reason", "branch_id", "first_kept_entry_id", "before_tokens", "after_tokens",
+                  "attempt_id", "entry_id", "record_id")
+        packet = {key: body[key] for key in common if key in body}
+        if phase == "begin":
+            if self.context_attempt is not None:
+                raise HTTPException(409, "compaction already attempted for this model continuation")
+            if not self.maintenance_compaction and not self.context_failure and body.get("reason") == "force":
+                return {"skipped": True}
+            if body.get("reason") == "overflow" and self.context_failure and self.context_failure.get("reason") in {
+                    "context_budget_exceeded", "raw_byte_limit_exceeded"}:
+                packet["reason"] = "force"
+            if self.context_failure and self.context_failure.get("reason") in {
+                    "context_budget_exceeded", "context_length_exceeded", "raw_byte_limit_exceeded"}:
+                packet["before_tokens"] = max(packet.get("before_tokens", 0), self.context_failure["tokens"])
+                packet["request_bytes"] = self.context_failure["request_bytes"]
+            result = await self.call("context-compaction", packet)
+            self.context_attempt = {"attempt_id": result["attempt_id"], "branch_id": body.get("branch_id")}
+            self.context_calls = 0
+            self.context_committing = False
+            self.context_summary_saved = False
+            return result
+        if (phase not in {"commit", "saved"} or not self.context_attempt
+                or any(body.get(key) != value for key, value in self.context_attempt.items())):
+            raise HTTPException(409, "compaction attempt is not active")
+        if phase == "commit":
+            tokens = body.get("after_tokens")
+            summary = body.get("summary")
+            if type(tokens) is not int or tokens < 0 or not isinstance(summary, str) or not summary.strip():
+                raise HTTPException(422, "invalid candidate compaction")
+            kept = body.get("retained_messages")
+            if isinstance(kept, list):
+                retained = [message for message in kept if message["role"] not in {"system", "developer"}]
+                prefix = (self.context_before or {}).get("prefix", [{"role": "system", "content": self.system_prompt}])
+                tools = (self.context_before or {}).get("tools", list(self.native_tools.values()))
+                candidate = {"model": self.model, "messages": [*prefix, *retained], "tools": tools, "stream": True}
+                try:
+                    validate_transactions(candidate["messages"])
+                except ValueError as error:
+                    raise HTTPException(422, str(error)) from error
+                if not self.maintenance_compaction:
+                    candidate = await self.with_attachments(candidate, include_audio=False)
+                token_costs = []
+                if self.documents:
+                    candidate = await self.documents.with_documents(candidate, self.context, token_costs=token_costs)
+                if self.provider.output_tokens:
+                    candidate[output_limit_parameter(self.endpoint)] = self.provider.output_tokens
+                candidate["stream_options"] = {"include_usage": True}
+                metrics = self.context_metrics(candidate, sum(token_costs))
+                tokens = max(tokens, metrics["tokens"])
+                packet.update(after_tokens=tokens, request_bytes=metrics["request_bytes"])
+            if tokens >= self.force_tokens or packet.get("request_bytes", len(summary.encode())) > self.provider.max_bytes:
+                raise HTTPException(413, "candidate compaction leaves context above the force threshold")
+        result = await self.call("context-compaction", packet)
+        if phase == "commit":
+            self.context_committing = True
+            return {**result, "after_tokens": packet["after_tokens"]}
+        if phase == "saved":
+            self.context_summary_saved = True
+            if self.context_failure:
+                self.context_failure["summary_saved"] = True
+            self.context_tokens = 0
+        return result
+
     def budget_exhausted(self):
         self.business_exhausted = True
         if self.protocol_recovery_attempted and (self.outcome or {}).get("status", "completed") == "completed":
@@ -609,7 +803,7 @@ class RunGateway:
         self.revoked = True
 
     @asynccontextmanager
-    async def request_scope(self, authorization, kind):
+    async def request_scope(self, authorization, kind, *, verify_authority=True):
         task, generation = asyncio.current_task(), self.generation
         token = self.process_token if kind == "binding" else self.model_token if kind == "model" else self.tool_token
         finished = asyncio.Event() if kind == "model" else None
@@ -618,7 +812,10 @@ class RunGateway:
         self.inflight += 1
         self.request_tasks.add(task)
         try:
-            await self.authenticate(authorization, token)
+            if verify_authority:
+                await self.authenticate(authorization, token)
+            elif self.revoked or not hmac.compare_digest(authorization, "Bearer " + token):
+                raise HTTPException(403, "run capability expired or revoked")
             if generation != self.generation:
                 raise HTTPException(403, "binding changed while authenticating")
             yield generation
@@ -649,25 +846,39 @@ class RunGateway:
                     raise HTTPException(403, "binding no longer active")
                 context = self.claim.get("context", {})
                 event = json.loads(self.claim.get("event_json") or "{}")
-                audio_context = await self.voice_input_text("")
+                audio_context = None if self.maintenance_compaction else await self.voice_input_text("")
                 if generation != self.generation or self.revoked:
                     raise HTTPException(403, "binding no longer active")
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
                     "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
                     "purpose": self.claim.get("purpose", "work"),
+                    "force_compaction_tokens": self.force_tokens,
+                    "elastic_compaction_tokens": context.get("limits", {}).get("elastic_compaction_tokens"),
+                    "keep_recent_tokens": context.get("limits", {}).get("keep_recent_tokens"),
+                    "compaction_input_tokens": self.context_limit("compaction"),
+                    "compaction_output_tokens": self.provider.compaction_output,
+                    "max_request_bytes": self.provider.max_bytes,
+                    "maintenance_compaction": self.maintenance_compaction,
                     "repository": self.context.repository, "github_host": self.context.host,
                     "model_window": self.model_window, "output_tokens": max(self.provider.output_tokens or self.model_window, self.provider.compaction_output),
                     "session_id": self.claim.get("session_id"), "run_id": self.claim["run_id"],
                     "input_ids": context.get("source_input_ids", []),
+                    "context_failed_input_ids": context.get("context_failed_input_ids", []),
+                    "published_run_ids": context.get("published_run_ids", []),
                     "source_kind": "user" if self.claim.get("role") == "leader" and self.claim.get("purpose") == "user" else "relay",
-                    "goal": self.claim["goal"], "audio_context": audio_context, "goal_spec": self.claim.get("goal_spec", {}),
+                    "goal": self.claim["goal"], "audio_context": audio_context,
+                    "has_attachments": bool(context.get("images") or context.get("files")),
+                    "goal_spec": {key: value for key, value in self.claim.get("goal_spec", {}).items()
+                                  if not self.force_tokens or key not in {"text", "goal"}},
                     "input_refs": context.get("input_refs", []),
                     "mail_input": {"receipt_id": context["mail_receipt_id"], "untrusted": True} if context.get("mail_receipt_id") else None,
                     "active_tasks": context.get("active_tasks", []),
                     "budget": self.claim.get("plan", {}).get("budget", {}),
                     "reply_limit": (event.get("reply_context") or {}).get("max_replies"),
-                    "retrieved_data": context.get("retrieved_data", []),
+                    "retrieved_data": [{key: document[key] for key in ("uri", "revision") if key in document}
+                                       for document in context.get("retrieved_data", []) if document.get("uri")]
+                                      if self.force_tokens else context.get("retrieved_data", []),
                     "memory_status": context.get("memory_status", "disabled"),
                     "workspace_id": context.get("workspace_id", "personal"),
                     "current_time": context.get("now"), "timezone": context.get("timezone", "Asia/Shanghai"), "continuation": self.claim.get("continuation", {})}
@@ -709,21 +920,92 @@ class RunGateway:
                 self.provider.request_kind = body["kind"]
                 return {"accepted": True}
 
+        @self.app.post("/context/compaction")
+        async def compaction(request: Request, authorization: str = Header(default="")):
+            # Core checks the fence for every phase, including a write saved just after preemption.
+            async with self.request_scope(authorization, "tool", verify_authority=False):
+                if not self.force_tokens:
+                    raise HTTPException(403, "Leader compaction binding required")
+                body = await bounded_json(request, self.provider.max_bytes)
+                try:
+                    return await self.compaction_phase(body)
+                except httpx.HTTPStatusError as error:
+                    raise HTTPException(error.response.status_code, self.safe_error(
+                        error.response.json().get("detail", str(error)))) from error
+
+        @self.app.post("/context/{operation}")
+        async def context_summary(operation: str, request: Request, authorization: str = Header(default="")):
+            async with self.request_scope(authorization, "tool"):
+                if (not self.force_tokens or not self.context_attempt or self.context_committing
+                        or operation not in {"budget", "summary"}):
+                    raise HTTPException(403, "active Leader compaction attempt required")
+                try:
+                    packet = await bounded_json(request, self.provider.max_bytes + 65536)
+                except HTTPException as error:
+                    if operation == "budget" and error.status_code == 413:
+                        return {"fits": False, "tokens": None, "request_bytes": None}
+                    raise
+                body = self.summary_body(packet)
+                payload = {**body, "stream": False,
+                           output_limit_parameter(self.endpoint): self.provider.compaction_output}
+                metrics = self.context_metrics(payload)
+                fits = (metrics["tokens"] < self.context_limit("compaction")
+                        and metrics["request_bytes"] <= self.provider.max_bytes)
+                if operation == "budget":
+                    return {**metrics, "fits": fits}
+                if not fits:
+                    self.context_problem(payload, "compaction", "summary_budget_exceeded")
+                    raise HTTPException(413, "prepared summary request exceeds its context budget")
+                if self.context_calls >= 16:
+                    raise HTTPException(429, "compaction request limit exhausted")
+                self.context_calls += 1
+                try:
+                    response = await self.provider.complete(body, kind="compaction")
+                except (httpx.TransportError, TimeoutError) as error:
+                    self.context_problem(payload, "compaction", "summary_transport_error", retryable=True)
+                    raise HTTPException(503, "summary transport temporarily failed") from error
+                except httpx.HTTPStatusError as error:
+                    raise HTTPException(error.response.status_code, self.safe_error(
+                        error.response.json().get("detail", str(error)))) from error
+                try:
+                    choice = response["choices"][0]
+                    if choice.get("finish_reason") not in {None, "stop"}:
+                        raise HTTPException(422, "summary provider did not finish the candidate")
+                    summary = choice["message"]["content"]
+                except (KeyError, IndexError, TypeError, AttributeError) as error:
+                    raise HTTPException(502, "summary provider returned no assistant content") from error
+                if not isinstance(summary, str) or not summary.strip():
+                    raise HTTPException(502, "summary provider returned empty assistant content")
+                return {"summary": summary, "usage": response.get("usage")}
+
         @self.app.post("/v1/chat/completions")
         async def model(request: Request, authorization: str = Header(default="")):
+            if self.maintenance_compaction:
+                raise HTTPException(403, "maintenance binding only supports summary requests")
             scope = self.request_scope(authorization, "model")
             generation = await scope.__aenter__()
             streaming = False
             try:
                 provider = self.provider
-                body = await bounded_json(request, provider.max_bytes)
+                try:
+                    body = await bounded_json(request, provider.max_bytes if not self.force_tokens else
+                                              max(provider.max_bytes, 32 * 1024 * 1024))
+                except HTTPException as error:
+                    if self.force_tokens and error.status_code == 413:
+                        self.context_problem({"model": self.model, "messages": []}, "business", "raw_byte_limit_exceeded")
+                        size = request.headers.get("content-length", "")
+                        self.context_failure["request_bytes"] = int(size) if len(size) < 20 and size.isascii() and size.isdecimal() else 32 * 1024 * 1024 + 1
+                        raise HTTPException(413, "context_length_exceeded: model request exceeds byte limit") from error
+                    raise
                 await self.authenticate(authorization, self.model_token)
                 body = await self.with_attachments(body, include_audio=False)
+                token_costs = []
                 if self.documents:
-                    body = await self.documents.with_documents(body, self.context)
+                    body = await self.documents.with_documents(body, self.context,
+                        token_costs=token_costs if self.force_tokens else None)
                 if generation != self.generation or self.revoked:
                     raise HTTPException(403, "binding changed while loading attachments")
-                response = await provider.complete(body)
+                response = await provider.complete(body, document_tokens=sum(token_costs))
                 if isinstance(response, StreamingResponse):
                     source = response.body_iterator
                     async def stream():

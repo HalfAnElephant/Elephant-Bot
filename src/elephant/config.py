@@ -153,7 +153,11 @@ class OrchestrationConfig(DTO):
 class ContextConfig(DTO):
     max_request_bytes: int = Field(default=16777216, ge=4096, le=16777216)
     max_tokens: int | None = Field(default=None, ge=256, le=2000000,
-        description="pi soft compaction threshold; null reserves 10% of the model window or output headroom, whichever is larger")
+        description="Compatibility alias for force_compaction_tokens")
+    force_compaction_tokens: int | None = Field(default=None, ge=256, le=2000000,
+        description="Inclusive Leader context limit. Null derives from max_tokens or the model window with output headroom")
+    elastic_compaction_tokens: int | None = Field(default=None, ge=129, le=2000000,
+        description="Inclusive idle Leader compaction threshold. Null uses 90% of the force threshold, above recent retention")
     keep_recent_tokens: int | None = Field(default=None, ge=128, le=2000000,
         description="pi recent context retained during compaction; null uses 20% of the model window")
     compaction_output_tokens: int = Field(default=4096, ge=128, le=32768)
@@ -164,16 +168,20 @@ class ContextConfig(DTO):
     def limits(self, model_window: int, output_tokens: int | None) -> dict:
         output = max(output_tokens or 0, self.compaction_output_tokens)
         headroom = output + 1024
-        soft = self.max_tokens if self.max_tokens is not None else model_window - max(
-            (model_window + 9) // 10, headroom
-        )
-        recent = self.keep_recent_tokens if self.keep_recent_tokens is not None else min(
-            model_window // 5, soft // 2
-        )
-        if not 0 < recent < soft <= model_window - headroom:
-            raise ValueError("context requires recent < soft threshold with output headroom inside model window")
-        return {"max_bytes": self.max_request_bytes, "soft_compaction_input_tokens": soft,
+        if self.force_compaction_tokens is not None and self.max_tokens not in (None, self.force_compaction_tokens):
+            raise ValueError("context.max_tokens and force_compaction_tokens must agree")
+        force = self.force_compaction_tokens or self.max_tokens or model_window - max((model_window + 9) // 10, headroom)
+        recent = self.keep_recent_tokens if self.keep_recent_tokens is not None else min(model_window // 5, force // 2)
+        elastic = self.elastic_compaction_tokens or max(force * 9 // 10, recent + 1)
+        if force > model_window - headroom:
+            raise ValueError("context force threshold must reserve model output headroom")
+        if not 0 < recent < elastic < force:
+            raise ValueError("context requires keep_recent_tokens < elastic_compaction_tokens < force_compaction_tokens; "
+                             "lower keep_recent_tokens to leave room for the elastic threshold")
+        return {"max_bytes": self.max_request_bytes, "soft_compaction_input_tokens": force,
+                "force_compaction_tokens": force, "elastic_compaction_tokens": elastic,
                 "keep_recent_tokens": recent, "compaction_output_tokens": self.compaction_output_tokens}
+
 
 
 class Settings(DTO):

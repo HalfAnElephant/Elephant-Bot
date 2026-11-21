@@ -241,6 +241,33 @@ def router(core, authenticate):
             raise HTTPException(404, "task unavailable")
         return row, core.access(event)
 
+    @router.post("/api/v1/context-inputs/{input_id}/recover")
+    def recover_context_input(input_id: str):
+        from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
+        with core.db.transaction() as conn:
+            source = conn.execute(select(dialogue_inputs).where(dialogue_inputs.c.id == input_id,
+                dialogue_inputs.c.owner_id == core.settings.owner.id)).mappings().first()
+            is_user = source is not None
+            if not is_user:
+                source = conn.execute(select(leader_inbox, tasks.c.event_json)
+                    .join(tasks, tasks.c.id == leader_inbox.c.root_task_id)
+                    .where(leader_inbox.c.id == input_id, tasks.c.owner_id == core.settings.owner.id)).mappings().first()
+            if not source:
+                raise HTTPException(404, "context input unavailable")
+            event = InboundEvent.model_validate_json(source["event_json"])
+            require_permission("conversation.manage", "conversation:" + event.conversation.key)
+            if core.sessions.owner(event) != core.settings.owner.id:
+                raise HTTPException(404, "context input unavailable")
+            if is_user and source["state"] != "CONTEXT_FAILED":
+                raise HTTPException(409, "context input is not awaiting recovery")
+            try:
+                reset = core.leader.compaction.reset_input if is_user else core.leader.compaction.reset_inbox
+                reset(conn, source)
+            except PermissionError as error:
+                raise HTTPException(409, str(error)) from error
+        core.tasks.wakeup.set()
+        return {"input_id": input_id, "state": "PENDING"}
+
     @router.get("/api/v1/adapters")
     async def adapters():
         result = []

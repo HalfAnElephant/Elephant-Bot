@@ -44,6 +44,9 @@ class LeaderRuntime:
         self.core, self.sessions = core, session_service
         self.service, self.db, self.clock = core.tasks, core.db, core.clock
         self._review_marks = {}
+        from .compaction import ContextMaintenance
+        self.compaction = ContextMaintenance(self)
+        self.sessions.context_maintenance = self.compaction
 
     def observe_operation(self, identity, operation, payload, result=None):
         self.sessions.learning.observe(identity, operation, payload or {}, result)
@@ -60,10 +63,14 @@ class LeaderRuntime:
             raise PermissionError("stale Leader attempt")
         return run, json.loads(run["request_json"])
 
-    def authorize(self, conn, run, claim, payload, *, ending_wait=False, reporting_failure=False):
+    def authorize(self, conn, run, claim, payload, *, ending_wait=False, reporting_failure=False, compaction_saved=False):
         event = InboundEvent.model_validate_json(claim["event_json"])
         if not self.core.allowed(event) or run["state"] != "RUNNING":
             raise PermissionError("Leader input is no longer authorized")
+        if claim["purpose"] == "user" and not claim.get("memory_mutation") and conn.scalar(
+                select(dialogue_inputs.c.id).where(dialogue_inputs.c.id == claim["source_ids"][0],
+                    dialogue_inputs.c.state == "CLEARED")):
+            raise PermissionError("Leader input was cleared")
         if not claim.get("memory_mutation") and not reporting_failure and claim["deadline"] <= self.clock.now().isoformat():
             raise PermissionError("Leader turn deadline expired")
         root_id = claim.get("target_root_task_id")
@@ -73,6 +80,11 @@ class LeaderRuntime:
                     root["goal_revision"] != claim["basis_goal_revision"] and not ending_wait):
                 raise PermissionError("Leader target version is no longer current")
         action = payload.get("action", "task.execute")
+        if claim["purpose"] == "compaction":
+            if payload.get("effect", "read") != "read" or action not in {"task.execute", "model.request"}:
+                raise PermissionError("maintenance cannot execute business tools")
+            if not compaction_saved and self.compaction.foreground(conn):
+                raise PermissionError("maintenance yielded to foreground input")
         effect = payload.get("effect", "read")
         if run["role"] == "skill_review" and action not in {"model.request", "task.execute", "skills.read", "skills.write"}:
             raise PermissionError("skill review cannot execute business tools")
@@ -83,6 +95,9 @@ class LeaderRuntime:
         validator = getattr(self.core, "validate_context", None)
         if not mutation and validator and not validator(access, claim["context"]):
             raise PermissionError("Leader context sources are no longer authorized")
+        history = conn.scalar(select(sessions.c.manifest_json).where(sessions.c.id == claim["session_id"]))
+        if not mutation and validator and history and not validator(access, json.loads(history)):
+            raise PermissionError("Leader session sources are no longer authorized")
         if not mutation and root_id and not self.service.graph.handoff_valid(root):
             raise PermissionError("Leader target handoff sources are no longer authorized")
         personal = action.startswith(("skills.", "memory."))
@@ -301,6 +316,8 @@ class LeaderRuntime:
         if claim.get("memory_mutation"):
             raise PermissionError("memory mutation ended this Leader turn")
         request_id, kind = payload["request_id"], payload["kind"]
+        if claim["purpose"] == "compaction" and kind != "compaction":
+            raise PermissionError("maintenance only permits compaction requests")
         if kind not in {"business", "completion", "compaction", "notification", "tool"}:
             raise ValueError("unknown budget kind")
         previous = conn.execute(select(model_requests).where(model_requests.c.id == request_id)).mappings().first()
@@ -389,7 +406,15 @@ class LeaderRuntime:
         if operation == "tasks.list":
             rows = conn.execute(select(tasks).where(tasks.c.owner_id == owner, tasks.c.kind == "goal",
                 tasks.c.conversation == access.conversation.key).order_by(tasks.c.created_at.desc()).limit(20)).mappings().all()
-            return self._task_snapshots(conn, run, claim, rows, access)
+            summaries = []
+            for snapshot in self._task_snapshots(conn, run, claim, rows, access):
+                action = snapshot["progress"]["current_action"] if not snapshot.get("context_revoked") else None
+                item = {"public_id": snapshot["public_id"], "title": (snapshot["goal"] or "")[:100] or None,
+                        "state": snapshot["state"], "current_action": action[:100] if action else None}
+                if len(json.dumps([*summaries, item]).encode()) > 12 * 1024:
+                    break
+                summaries.append(item)
+            return summaries
         if operation == "tasks.take_over":
             if purpose not in {"finalize", "attention"} or not root_id:
                 raise PermissionError("takeover requires a bound result or escalation")
@@ -542,8 +567,10 @@ class LeaderRuntime:
                 if run is not None:
                     proof = json.loads(run["receipt_json"]) if run["receipt_json"] else receipt
                     try:
-                        _, _, discarded_entry = self._reconcile_stopped_tools(run, claim, process_row, proof)
-                    except (OSError, ValueError, KeyError):
+                        adapter, path, discarded_entry = self._reconcile_stopped_tools(run, claim, process_row, proof)
+                        with self.db.transaction() as conn:
+                            self.compaction.recover(conn, run, claim, adapter, path, verify_saved=False)
+                    except (OSError, ValueError, KeyError, PermissionError):
                         with self.db.transaction() as conn:
                             current, _ = self.lease(conn, run_id, fencing, worker_id, settling=True)
                             conn.execute(update(runs).where(runs.c.id == current["id"]).values(
@@ -589,6 +616,16 @@ class LeaderRuntime:
                         or process.get("epoch") != run["process_epoch"]):
                     raise PermissionError("quiescence proof does not match process")
             self._account_turn(conn, run, claim)
+            if claim["purpose"] == "compaction":
+                self.compaction.settle(conn, run, claim)
+                self.service.wakeup.set()
+                conn.execute(update(runs).where(runs.c.id == run_id).values(state="FINISHED", slot_reserved=0,
+                    quiescent_at=now, runner_stopped_at=now if stopped else None, result_json=submitted_result))
+                conn.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
+                if run["process_id"]:
+                    conn.execute(update(processes).where(processes.c.id == run["process_id"],
+                        processes.c.generation == run["binding_generation"]).values(state="STOPPED" if stopped else "IDLE", last_used=now))
+                return {"state": "FINISHED"}
             if mutation:
                 self.authorize(conn, run, claim, {"action": "task.execute"})
                 return self.finalize_committed_mutation(conn, run, claim, stopped=stopped)
@@ -888,7 +925,9 @@ class LeaderRuntime:
         mutation = claim.get("memory_mutation")
         try:
             adapter, path, discarded_entry = self._reconcile_stopped_tools(run, claim, process, proof)
-        except (OSError, ValueError, KeyError):
+            with self.db.transaction() as conn:
+                self.compaction.recover(conn, run, claim, adapter, path)
+        except (OSError, ValueError, KeyError, PermissionError):
             with self.db.transaction() as conn:
                 conn.execute(update(runs).where(runs.c.id == run_id, runs.c.slot_reserved == 1)
                     .values(state="NEEDS_RECONCILIATION"))
@@ -1196,6 +1235,8 @@ class LeaderRuntime:
             return result
         with self.db.transaction() as conn:
             run, claim = self.lease(conn, *identity)
+            if operation == "context-compaction":
+                return self.compaction.operation(conn, run, claim, payload)
             if operation == "validate-result-refs":
                 self.authorize(conn, run, claim, {"action": "task.execute"})
                 result = TaskResult.model_validate({"summary": "Outcome reference validation", **payload})
@@ -1264,9 +1305,30 @@ class LeaderRuntime:
                 if known and known["active_run_id"] not in {None, run_id}:
                     raise PermissionError("session already has a writer")
                 history = json.loads(known["manifest_json"]) if known else dict(claim["binding"])
-                if claim["context"].get("task_sources"):
+                if known and not history.get("context_sources_version"):
+                    earlier = conn.execute(select(
+                        func.json_extract(runs.c.request_json, "$.context.task_sources"),
+                        func.json_extract(runs.c.request_json, "$.context.source_manifest"),
+                        func.json_extract(runs.c.request_json, "$.context.memory_scope"),
+                        func.json_extract(runs.c.request_json, "$.context.memory_epoch"),
+                    ).where(runs.c.session_id == known["id"], runs.c.id != run_id,
+                            runs.c.purpose != "compaction").order_by(runs.c.session_generation)).all()
+                    for task_sources, sources, memory_scope, memory_epoch in earlier:
+                        if task_sources or sources:
+                            self.service.graph.merge_source_dependencies(
+                                history, json.loads(task_sources or "[]"), json.loads(sources or "[]"))
+                        if memory_scope and type(memory_epoch) is int and not history.get("memory_history"):
+                            history.update(memory_history=True, memory_scope=json.loads(memory_scope), memory_epoch=memory_epoch)
+                    if history.get("source_manifest"):
+                        history["steering_sources"] = True
+                history["context_sources_version"] = 1
+                if claim["context"].get("retrieved_data") and claim["context"].get("memory_scope") and not history.get("memory_history"):
+                    history.update(memory_history=True, memory_scope=claim["context"]["memory_scope"],
+                                   memory_epoch=claim["context"]["memory_epoch"])
+                if claim["context"].get("task_sources") or claim["context"].get("source_manifest"):
+                    history["steering_sources"] = True
                     history["workspace_id"] = claim["context"].get("workspace_id", "personal")
-                    self.service.graph.merge_source_dependencies(history, claim["context"]["task_sources"],
+                    self.service.graph.merge_source_dependencies(history, claim["context"].get("task_sources", ()),
                         claim["context"].get("source_manifest", ()))
                 if known:
                     conn.execute(update(sessions).where(sessions.c.id == known["id"]).values(active_run_id=run_id,

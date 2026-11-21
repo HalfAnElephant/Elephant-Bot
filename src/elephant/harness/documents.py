@@ -276,7 +276,7 @@ class DeepSeekDocuments:
             await self._authorize("document.parse", scope, resources=resources)
             return self._result(identity, receipt)
 
-    async def with_documents(self, body, context):
+    async def with_documents(self, body, context, *, token_costs=None):
         messages = body.get("messages")
         if not isinstance(messages, list):
             return body
@@ -308,6 +308,10 @@ class DeepSeekDocuments:
                         " 本次省略该较早文档（每次最多加载20个有效文档），需要时重新调用 document.parse 或在新消息中再次提及该引用。"})
                 else:
                     attached += 1
+                    if token_costs is not None:
+                        # The provider expands opaque file IDs. Use the authorized receipt's
+                        # size as the estimate until the provider reports actual model usage.
+                        token_costs.append((receipt["size"] + 3) // 4)
                     parts.extend(({"type": "text", "text": REFERENCE + identity},
                                   {"type": "file", "file_id": receipt["file_id"]}))
         await self._authorize("model.request", scope)

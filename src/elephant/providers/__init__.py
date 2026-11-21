@@ -38,6 +38,32 @@ def estimate_tokens(value):
     return math.ceil(len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()) / 2)
 
 
+def pi_request_tokens(payload):
+    """Use Pi's text/image estimate on the final OpenAI messages and tool schema."""
+    def chars(value):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+
+    tokens = 0
+    for message in payload["messages"]:
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            length = sum(4800 if isinstance(part, dict) and part.get("type") == "image_url"
+                         else chars(part.get("text") or "") if isinstance(part, dict) and part.get("type") == "text"
+                         else chars(part) for part in content)
+        else:
+            length = chars(content)
+        length += chars(message.get("reasoning_content") or "")
+        for call in message.get("tool_calls") or ():
+            function = call.get("function")
+            length += chars(function.get("name") or "") + chars(function.get("arguments") or "") if isinstance(
+                function, dict) else chars(call)
+        tokens += (length + 3) // 4
+    tools = payload.get("tools")
+    return tokens + ((chars(json.dumps(tools, ensure_ascii=False, separators=(",", ":"))) + 3) // 4 if tools else 0)
+
+
 def validate_transactions(messages):
     pending = set()
     for message in messages:
@@ -107,6 +133,10 @@ class ModelCapacity:
         self.total = asyncio.Semaphore(total)
         self.background = asyncio.Semaphore(total - reserved)
 
+    @property
+    def maintenance_available(self):
+        return not (self.background.locked() or self.total.locked())
+
     @asynccontextmanager
     async def slot(self, background):
         if not background:
@@ -121,7 +151,9 @@ class ProviderAdapter:
     def __init__(self, model, endpoint, key, *, authorize, reserve, record, transport=None,
                  capacity=None, background=False, max_bytes=16777216,
                  output_tokens=None, model_window=32768,
-                 compaction_output=4096, stream_supported=True, on_exhausted=None):
+                 compaction_output=4096, stream_supported=True, on_exhausted=None,
+                 guard=None, upstream_failure=None, request_succeeded=None, before_compaction_request=None,
+                 maintenance=False):
         self.model, self.endpoint, self.key = model, endpoint, key
         self.upstream_session = str(uuid4())
         self.authorize, self.reserve, self.record = authorize, reserve, record
@@ -129,6 +161,8 @@ class ProviderAdapter:
         self.max_bytes, self.output_tokens = max_bytes, output_tokens
         self.model_window, self.compaction_output = model_window, compaction_output
         self.stream_supported, self.on_exhausted = stream_supported, on_exhausted
+        self.guard, self.upstream_failure, self.request_succeeded = guard, upstream_failure, request_succeeded
+        self.before_compaction_request, self.maintenance = before_compaction_request, maintenance
         self.request_kind = "business"
         self.request_count = self.compaction_count = self.completion_count = 0
         self.business_exhausted = False
@@ -146,11 +180,22 @@ class ProviderAdapter:
         if len(json.dumps(payload, ensure_ascii=False).encode()) > self.max_bytes:
             raise HTTPException(413, "request exceeds application byte limit")
 
-    async def complete(self, body):
+    def request_slot(self):
+        if self.maintenance and not self.capacity.maintenance_available:
+            raise HTTPException(409, "maintenance yielded model capacity")
+        return self.capacity.slot(self.background)
+
+    async def authorize_request(self, kind):
+        await self.authorize("model.request")
+        if kind == "compaction" and self.before_compaction_request:
+            await self.before_compaction_request()
+
+    async def complete(self, body, *, kind=None, document_tokens=0):
         await self.authorize("model.request")
         if not isinstance(body, dict) or body.get("model") != self.model or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "unapproved model or messages")
-        kind = "completion" if self.business_exhausted and self.request_kind == "business" else self.request_kind
+        if kind is None:
+            kind = "completion" if self.business_exhausted and self.request_kind == "business" else self.request_kind
         if kind not in {"business", "compaction", "completion", "notification"}:
             raise HTTPException(422, "invalid trusted model request kind")
         if kind == "completion" and self.completion_count >= 1:
@@ -162,6 +207,13 @@ class ProviderAdapter:
             validate_transactions(payload["messages"])
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
+        payload["stream"] = bool(body.get("stream"))
+        if output is not None:
+            payload[output_limit_parameter(self.endpoint)] = output
+        if payload["stream"]:
+            payload["stream_options"] = {"include_usage": True}
+        if self.guard:
+            self.guard(payload, kind, document_tokens)
         self._check_size(payload)
         if body.get("stream") and not self.stream_supported:
             raise HTTPException(422, "configured provider does not support streaming")
@@ -192,12 +244,9 @@ class ProviderAdapter:
             else:
                 payload.pop("tool_choice", None)
             payload["messages"] = [{"role": "system", "content": COMPLETION_INSTRUCTION}, *payload["messages"]]
-        payload["stream"] = bool(body.get("stream"))
-        if output is not None:
-            payload[output_limit_parameter(self.endpoint)] = output
-        if payload["stream"]:
-            payload["stream_options"] = {"include_usage": True}
-        self._check_size(payload)
+            if self.guard:
+                self.guard(payload, kind, document_tokens)
+            self._check_size(payload)
         self.request_count += 1
         self.compaction_count += kind == "compaction"
         self.completion_count += kind == "completion"
@@ -205,15 +254,17 @@ class ProviderAdapter:
                    "x-opencode-session": self.upstream_session}
         self.active += 1
         if payload["stream"]:
-            return StreamingResponse(self._stream(payload, headers, request_id), media_type="text/event-stream")
+            return StreamingResponse(self._stream(payload, headers, request_id, kind), media_type="text/event-stream")
         started, raw = time.monotonic(), None
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
+            async with self.request_slot(), httpx.AsyncClient(
                 transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize("model.request")
+                await self.authorize_request(kind)
                 async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
                     if response.status_code != 200:
                         error = await self._upstream_error(response)
+                        if self.upstream_failure:
+                            self.upstream_failure(payload, kind, error["code"], response.status_code)
                         raise HTTPException(response.status_code, error["message"])
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -228,6 +279,8 @@ class ProviderAdapter:
                     raise HTTPException(502, "invalid model response")
                 raw = result.get("usage")
                 await self.authorize("model.request")
+                if self.request_succeeded:
+                    self.request_succeeded(kind)
                 return result
         finally:
             try:
@@ -275,16 +328,19 @@ class ProviderAdapter:
         self.last_usage = usage
         await self.record(request_id, usage)
 
-    async def _stream(self, payload, headers, request_id):
+    async def _stream(self, payload, headers, request_id, kind):
         started, first, raw, total, pending = time.monotonic(), None, None, 0, ""
+        failed = False
         decoder = codecs.getincrementaldecoder("utf-8")()
         try:
-            async with self.capacity.slot(self.background), httpx.AsyncClient(
+            async with self.request_slot(), httpx.AsyncClient(
                 transport=self.transport, timeout=60, trust_env=False, follow_redirects=False) as client:
-                await self.authorize("model.request")
+                await self.authorize_request(kind)
                 async with client.stream("POST", self.endpoint, json=payload, headers=headers) as response:
                     if response.status_code != 200:
                         error = await self._upstream_error(response)
+                        if self.upstream_failure:
+                            self.upstream_failure(payload, kind, error["code"], response.status_code)
                         yield ("data: " + json.dumps({"error": error}) + "\n\n").encode()
                         return
                     if "text/event-stream" not in response.headers.get("content-type", ""):
@@ -302,6 +358,11 @@ class ProviderAdapter:
                             if data and data != "[DONE]":
                                 event = json.loads(data)
                                 if isinstance(event, dict):
+                                    if isinstance(event.get("error"), dict):
+                                        failed = True
+                                        if self.upstream_failure:
+                                            code = event["error"].get("code", "upstream_error")
+                                            self.upstream_failure(payload, kind, code, 200)
                                     if event.get("usage") is not None:
                                         raw = event["usage"]
                                     for choice in event.get("choices", []):
@@ -316,6 +377,12 @@ class ProviderAdapter:
                     pending += decoder.decode(b"", final=True)
                     if pending.strip():
                         raise RuntimeError("truncated upstream event")
+                    if self.request_succeeded and not failed:
+                        self.request_succeeded(kind)
+        except (httpx.TransportError, TimeoutError):
+            if self.upstream_failure:
+                self.upstream_failure(payload, kind, "upstream_transport_error", 503)
+            raise
         finally:
             try:
                 await self._record_safely(request_id, raw, started, first, payload)

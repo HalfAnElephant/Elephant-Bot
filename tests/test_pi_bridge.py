@@ -806,3 +806,363 @@ async def test_locked_leader_requires_new_communication_choice_with_legacy_histo
     rejected = next(message for message in messages if message.get("toolCallId") == "history-3")
     assert rejected["isError"] is True
     assert order == ["read", "notice", "read"]
+
+
+async def test_locked_pi_replaces_runtime_snapshots_without_erasing_log(compaction_session):
+    state = compaction_session
+    await state.runner.rpc("set_auto_compaction", enabled=False)
+    for index in range(3):
+        state.gateway.revoke()
+        state.gateway.bind({**state.claim, "run_id": f"snapshot-run-{index}",
+            "context": {**state.claim["context"], "active_tasks": [
+                {"id": "task", "status": "running", "goal": "LARGE_RETIRED_GOAL_" + "x" * 5000}]}})
+        await state.runner.run("Continue the verified history", keep_alive=True)
+        payload = json.dumps(state.requests[-1]["payload"], ensure_ascii=False)
+        assert payload.count('\\"active_tasks\\"') == 1
+        assert "x" * 1000 not in payload
+    entries = [json.loads(line) for line in state.runner.session_path.read_text().splitlines()]
+    assert sum(entry.get("customType") == "elephant-runtime" for entry in entries) == 3
+    assert sum(entry.get("type") == "context_edit" and entry.get("replacement") is None for entry in entries) >= 2
+
+
+def test_native_compactor_rolls_complete_interactions_and_bounds_requests():
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / "node_modules/.bin/pi").exists():
+        pytest.skip("locked pi package is not installed")
+    script = r'''
+import assert from "node:assert/strict";
+import {createJiti} from "jiti";
+const jiti = createJiti(import.meta.url, {alias: {
+  "@earendil-works/pi-ai": process.cwd() + "/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/pi-ai-extension-view.js"}});
+const {nativeContextCompactor, interactionGroups, createBridge} = await jiti.import("./src/elephant/harness/pi_bridge.ts");
+const messages = Array.from({length: 6}, (_, i) => ({role: "user", content: "history-" + i + "-" + "x".repeat(2200), timestamp: i}));
+const assistant = {role: "assistant", content: [{type: "toolCall", id: "call", name: "read", arguments: {}}]};
+const tool = {role: "toolResult", toolCallId: "call", content: [{type: "text", text: "checked"}]};
+assert.deepEqual(interactionGroups([messages[0], assistant, tool]).map(group => group.length), [1, 2]);
+const preparation = {messagesToSummarize: messages, turnPrefixMessages: [], isSplitTurn: false,
+  firstKeptEntryId: "kept", tokensBefore: 9000, fileOps: {read: new Set(), edited: new Set(), written: new Set()}, settings: {keepRecentTokens: 100}};
+let calls = 0;
+const input = {preparation, reason: "force", signal: new AbortController().signal,
+  model: {id: "fixture", provider: "qqbot", api: "openai-completions"},
+  request: async (path, body) => {
+    const text = JSON.stringify(body);
+    if (path === "/context/budget") return {fits: text.length < 9500};
+    assert(text.length < 9500);
+    calls++;
+    return {summary: "Verified rolling checkpoint " + calls};
+  }};
+const result = await nativeContextCompactor(input);
+assert(calls >= 2 && calls <= 6);
+assert.equal(result.firstKeptEntryId, "kept");
+assert(result.summary.includes("Verified rolling checkpoint"));
+await assert.rejects(nativeContextCompactor({...input, maxRequests: 1}), /request limit/);
+await assert.rejects(nativeContextCompactor({...input, request: async () => ({fits: false})}), /complete message\/tool interaction/);
+const abort = new AbortController(); abort.abort();
+await assert.rejects(nativeContextCompactor({...input, signal: abort.signal}), /abort/i);
+const hooks = new Map(), observed = [], packets = [];
+let rejectCompactor = false;
+const pi = {on: (event, handler) => hooks.set(event, handler), appendEntry: () => {},
+  registerProvider: () => {}, registerTool: () => {}, setActiveTools: () => {}};
+createBridge({compactor: async args => {
+  observed.push(args.reason);
+  assert.equal(args.preparation.firstKeptEntryId, "kept");
+  if (rejectCompactor) throw new Error("injected failure");
+  return {summary: "injected checkpoint", firstKeptEntryId: "kept", tokensBefore: 9000};
+}})(pi);
+globalThis.fetch = async (url, options) => {
+  packets.push(JSON.parse(options.body));
+  return new Response(JSON.stringify(String(url).endsWith("/binding") ? {generation: 1, goal: "continue",
+    force_compaction_tokens: 10000, model_window: 32768, native_tools: [], model: "fixture"} :
+    String(url).endsWith("/context/compaction") && packets.at(-1).phase === "begin" ? {attempt_id: "attempt"} : {}));
+};
+const ctx = {model: input.model, sessionManager: {getBranch: () => [], getLeafId: () => "branch",
+  buildSessionProjection: () => ({entries: [{sourceEntry: {id: "kept"}, messages: [messages[0]]}]})}};
+await hooks.get("input")({text: JSON.stringify({binding_id: "binding"})}, ctx);
+for (const reason of ["manual", "threshold", "overflow"]) {
+  const result = await hooks.get("session_before_compact")({preparation, reason, signal: input.signal}, ctx);
+  assert.equal(result.compaction.summary, "injected checkpoint");
+}
+assert.deepEqual(observed, ["manual", "force", "overflow"]);
+rejectCompactor = true;
+const failure = await hooks.get("session_before_compact")({preparation, reason: "overflow", signal: input.signal}, ctx);
+assert.equal(failure.cancel, true);
+assert.equal(packets.at(-1).phase, "failed");
+const {createHash} = await import("node:crypto");
+const failedText = "[[elephant-input:failed]]\noriginal oversized input";
+const entries = [{type: "custom", customType: "elephant-input-persisting", data: {
+  sha256: createHash("sha256").update(failedText).digest("hex"), input_ids: ["failed"]}},
+  {type: "message", id: "failed-user", message: {role: "user", content: failedText}}];
+const edits = [], failedHooks = new Map();
+createBridge()({...pi, on: (event, handler) => failedHooks.set(event, handler)});
+globalThis.fetch = async () => new Response(JSON.stringify({generation: 2, goal: "independent",
+  context_failed_input_ids: ["failed"], input_ids: ["fresh"], model_window: 32768, native_tools: [], model: "fixture"}));
+await failedHooks.get("input")({text: JSON.stringify({binding_id: "new-binding"})}, {
+  ...ctx, sessionManager: {...ctx.sessionManager, getBranch: () => entries,
+    appendContextEdit: (id, replacement) => edits.push({id, replacement})}});
+assert.deepEqual(edits, [{id: "failed-user", replacement: null}]);
+const retryHooks = new Map(), branch = [], retryEdits = [];
+let nextBinding;
+createBridge()({...pi, on: (event, handler) => retryHooks.set(event, handler),
+  appendEntry: (customType, data) => branch.push({type: "custom", customType, data})});
+globalThis.fetch = async () => new Response(JSON.stringify(nextBinding));
+const retryCtx = {...ctx, sessionManager: {...ctx.sessionManager, getBranch: () => branch,
+  appendContextEdit: (id, replacement) => retryEdits.push({id, replacement})}};
+async function bindUser(generation, inputId, failed = []) {
+  nextBinding = {generation, session_id: "session", source_kind: "user", input_ids: [inputId],
+    context_failed_input_ids: failed, goal: inputId === "failed" ? "OVERSIZED_SOURCE" : "independent",
+    model_window: 32768, native_tools: [], model: "fixture"};
+  return retryHooks.get("input")({text: JSON.stringify({binding_id: "binding-" + generation})}, retryCtx);
+}
+for (const generation of [1, 2]) {
+  const {text} = await bindUser(generation, "failed");
+  assert.deepEqual(branch.at(-1).data.input_ids, ["failed"]);
+  // Include a retry written by the earlier bridge with an empty source manifest.
+  if (generation === 2) branch.at(-1).data.input_ids = [];
+  branch.push({type: "message", id: "attempt-" + generation, message: {role: "user", content: text}});
+}
+await bindUser(3, "new-user", ["failed"]);
+assert.deepEqual(retryEdits.map(edit => edit.id), ["attempt-1", "attempt-2"]);
+assert.deepEqual(retryHooks.get("context")({messages: branch.filter(entry => entry.message)
+  .map(entry => entry.message)}).messages, []);
+
+'''
+    result = subprocess.run(["node", "--input-type=module", "-"], check=False, input=script, text=True,
+                            cwd=root, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("scenario", [
+    "force", "overflow", "summary_failure", "overflow_failure", "summary_timeout", "maintenance", "tool_force", "rolling",
+])
+async def test_locked_leader_uses_native_compaction_commit_and_final_gate(compaction_session, scenario):
+    state = compaction_session
+    runner, gateway = state.runner, state.gateway
+    await runner.rpc("set_auto_compaction", enabled=False)
+    # Seed real native history while the previous Worker binding has no Leader ceiling.
+    async def seed(request):
+        repetitions = {"force": 3500, "summary_failure": 3500, "summary_timeout": 3500, "rolling": 3200, "tool_force": 800}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text=completion_sse({"role": "assistant", "content": "Earlier verified work. " * repetitions.get(scenario, 60)}))
+    for index in range(3 if scenario == "rolling" else 1):
+        if index:
+            gateway.bind({**state.claim, "run_id": "seed-" + str(index)})
+        gateway.provider.transport = httpx.MockTransport(seed)
+        await runner.run("Preserve these original messages", keep_alive=True)
+    await runner.rpc("set_auto_compaction", enabled=True)
+    original_call = gateway.call
+    phases, upstream, attempts = [], [], []
+    async def core(operation, payload):
+        if operation == "notify" and scenario == "tool_force":
+            return {"accepted": True, "verified_tool_result": "result " * 3000}
+        if operation == "context-compaction":
+            phases.append(payload)
+            if payload["phase"] == "begin":
+                attempts.append("attempt-" + str(len(attempts)))
+                return {"attempt_id": attempts[-1]}
+            return {"accepted": True}
+        return await original_call(operation, payload)
+    gateway.call = core
+    gateway.bind({**state.claim, "run_id": "enhanced-run", "role": "leader",
+        "purpose": "compaction" if scenario == "maintenance" else "user",
+        "context": {**state.claim["context"], "limits": {**state.claim["context"]["limits"],
+            "force_compaction_tokens": 15000 if scenario == "tool_force" else 10000,
+            "elastic_compaction_tokens": 14000 if scenario == "tool_force" else 9000}}})
+    async def model(request):
+        payload = json.loads(request.content)
+        upstream.append(payload)
+        if payload.get("stream") is False:
+            if scenario in {"summary_failure", "overflow_failure"}:
+                return httpx.Response(500, json={"error": {"message": "fixture summary unavailable"}})
+            if scenario == "summary_timeout":
+                raise httpx.ReadTimeout("fixture summary timeout", request=request)
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant",
+                "content": "Verified native checkpoint. Original source history remains on disk."}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+        if scenario == "tool_force" and sum(bool(item.get("stream")) for item in upstream) == 1:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                text=completion_sse({"role": "assistant", "content": None, "tool_calls": [{"id": "large-result",
+                    "type": "function", "function": {"name": "task_notify", "arguments": json.dumps({"text": "Checking."})}}]}))
+        if scenario in {"overflow", "overflow_failure"} and sum(bool(item.get("stream")) for item in upstream) == 1:
+            return httpx.Response(400, json={"error": {"code": "context_length_exceeded",
+                "message": "maximum context length exceeded"}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text=completion_sse({"role": "assistant", "content": "Continued with the committed checkpoint."}))
+    gateway.provider.transport = httpx.MockTransport(model)
+    failed = scenario in {"summary_failure", "overflow_failure", "summary_timeout"}
+    if failed:
+        with pytest.raises(RuntimeError):
+            await runner.run("Continue with the authorized history", keep_alive=True)
+    else:
+        result = await runner.run("Continue with the authorized history", keep_alive=True)
+        assert result.status == "completed"
+    summaries = [payload for payload in upstream if payload.get("stream") is False]
+    business = [payload for payload in upstream if payload.get("stream") is not False]
+    assert summaries and len(attempts) == 1
+    if failed:
+        assert len(business) == int(scenario == "overflow_failure")
+        assert not any(packet["phase"] == "saved" for packet in phases)
+        assert next(packet for packet in phases if packet["phase"] == "failure")["retryable"]
+    else:
+        assert [packet["phase"] for packet in phases if packet["phase"] in {"begin", "commit", "saved"}] == ["begin", "commit", "saved"]
+        assert len(business) == (0 if scenario == "maintenance" else 2 if scenario in {"overflow", "tool_force"} else 1)
+        entries = [json.loads(line) for line in runner.session_path.read_text().splitlines()]
+        saved = next(packet for packet in phases if packet["phase"] == "saved")
+        native = next(entry for entry in entries if entry.get("id") == saved["entry_id"])
+        assert native["type"] == "compaction"
+        assert native["details"]["elephant_compaction"]["attempt_id"] == attempts[0]
+        assert any("verified history" in json.dumps(entry) or "Earlier verified work" in json.dumps(entry) for entry in entries)
+        if scenario == "rolling":
+            assert len(summaries) >= 2
+            assert sum(entry["type"] == "compaction" for entry in entries) == 1
+        if scenario in {"maintenance", "rolling"}:
+            await runner.stop()
+            gateway.revoke()
+            gateway.bind({**state.claim, "run_id": "restart-after-compaction", "role": "leader", "purpose": "user",
+                "context": {**state.claim["context"], "limits": {**state.claim["context"]["limits"],
+                    "force_compaction_tokens": 10000, "elastic_compaction_tokens": 9000}}})
+            gateway.provider.transport = httpx.MockTransport(model)
+            restarted = PiRunnerAdapter(runner.executable, runner.workspace, provider="qqbot", model="offline",
+                timeout=25, session_id=runner.session_path.stem, gateway=gateway, gateway_url=runner.gateway_url)
+            try:
+                result = await restarted.run("Resume the native checkpoint after restart")
+            finally:
+                await restarted.stop()
+            assert result.summary == "Continued with the committed checkpoint."
+            assert len(attempts) == 1
+            assert "Verified native checkpoint" in json.dumps(upstream[-1]["messages"])
+
+
+@pytest.mark.parametrize("stage", ["model_capacity", "in_flight", "before_commit"])
+async def test_locked_pi_maintenance_yields_without_a_second_writer(compaction_session, stage, record_property):
+    from contextlib import AsyncExitStack
+
+    from elephant.providers import ModelCapacity
+
+    state = compaction_session
+    runner, gateway = state.runner, state.gateway
+    await runner.run("Preserve a previous authorized turn", keep_alive=True)
+    phases = []
+    previous = gateway.call
+    started = asyncio.Event()
+    pending = asyncio.Event()
+    body_arrived = asyncio.Event()
+    timing = {}
+
+    async def core(operation, payload):
+        if operation != "context-compaction":
+            return await previous(operation, payload)
+        phases.append(payload["phase"])
+        if payload["phase"] == "commit" and stage == "before_commit":
+            timing["arrival"] = asyncio.get_running_loop().time()
+            response = httpx.Response(409, json={"detail": "maintenance yielded to foreground"},
+                request=httpx.Request("POST", "http://core/context-compaction"))
+            response.raise_for_status()
+        return {"accepted": True, "attempt_id": "preemptible"}
+
+    async def upstream(request):
+        body = json.loads(request.content)
+        if body["stream"]:
+            timing["model"] = asyncio.get_running_loop().time()
+            body_arrived.set()
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                text=completion_sse({"role": "assistant", "content": "The foreground turn completed."}))
+        started.set()
+        if stage == "in_flight":
+            await pending.wait()
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Summary only."}, "finish_reason": "stop"}]})
+
+    gateway.call = core
+    gateway.capacity = ModelCapacity(total=1)
+    limits = {**state.claim["context"]["limits"], "force_compaction_tokens": 10000, "elastic_compaction_tokens": 9000}
+    claim = {**state.claim, "role": "leader", "purpose": "compaction",
+             "context": {**state.claim["context"], "limits": limits}}
+    gateway.bind({**claim, "run_id": "maintenance-preempted"})
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    loop = asyncio.get_running_loop()
+    async with AsyncExitStack() as stack:
+        if stage == "model_capacity":
+            await stack.enter_async_context(gateway.capacity.slot(False))
+            timing["arrival"] = loop.time()
+        task = asyncio.create_task(runner.run("", keep_alive=True))
+        if stage == "in_flight":
+            await asyncio.wait_for(started.wait(), 5)
+            timing["arrival"] = loop.time()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        else:
+            with pytest.raises(RuntimeError, match="Compaction cancelled"):
+                await asyncio.wait_for(task, 5)
+    writer_released = loop.time()
+    assert runner.stopped_verified and gateway.provider.active == 0
+    assert "saved" not in phases
+    assert started.is_set() == (stage != "model_capacity")
+    assert not any(json.loads(line)["type"] == "compaction" for line in runner.session_path.read_text().splitlines())
+
+    gateway.bind({**claim, "purpose": "user", "run_id": "independent-foreground"})
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    resumed = PiRunnerAdapter(runner.executable, runner.workspace, provider="qqbot", model="offline",
+        timeout=10, session_id=runner.session_path.stem, gateway=gateway, gateway_url=runner.gateway_url)
+    try:
+        result = await resumed.run("Process the newly arrived input")
+    finally:
+        await resumed.stop()
+    assert result.summary == "The foreground turn completed."
+    assert body_arrived.is_set()
+    record_property("session_yield_ms", round((writer_released - timing["arrival"]) * 1000, 1))
+    record_property("foreground_model_start_after_yield_ms", round((timing["model"] - writer_released) * 1000, 1))
+    assert timing["model"] >= writer_released
+
+
+async def test_locked_pi_rejects_unsummarizable_first_input_and_admits_independent_input(compaction_session):
+    state = compaction_session
+    runner, gateway = state.runner, state.gateway
+    previous = gateway.call
+    phases, upstream = [], []
+
+    async def core(operation, payload):
+        if operation == "context-compaction":
+            phases.append(payload)
+            return {"accepted": True, "attempt_id": "first-input-attempt"}
+        return await previous(operation, payload)
+
+    async def model(request):
+        payload = json.loads(request.content)
+        upstream.append(payload)
+        if not payload["stream"]:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Only a partial checkpoint."}}]})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            text=completion_sse({"role": "assistant", "content": "Independent input processed."}))
+
+    gateway.call = core
+    gateway.revoke()
+    large = "oversized-first-input " * 4000
+    claim = {**state.claim, "role": "leader", "purpose": "user", "session_id": runner.session_path.stem,
+        "context": {**state.claim["context"], "source_input_ids": ["oversized"],
+            "limits": {**state.claim["context"]["limits"],
+                       "force_compaction_tokens": 12000, "elastic_compaction_tokens": 10800}}}
+    gateway.bind({**claim, "run_id": "unrecoverable-first-turn", "goal": large})
+    gateway.provider.transport = httpx.MockTransport(model)
+    with pytest.raises(RuntimeError):
+        await runner.run(large)
+    assert not [payload for payload in upstream if payload["stream"]]
+    assert not [packet for packet in phases if packet["phase"] == "saved"]
+    failure = next(packet for packet in phases if packet["phase"] == "failure")
+    assert failure["retryable"] is False and failure["tokens"] >= 12000
+    assert large in runner.session_path.read_text()
+
+    claim["context"].update(source_input_ids=["independent"], context_failed_input_ids=["oversized"])
+    gateway.bind({**claim, "run_id": "independent-next-turn", "goal": "Independent next turn."})
+    gateway.provider.transport = httpx.MockTransport(model)
+    resumed = PiRunnerAdapter(runner.executable, runner.workspace, provider="qqbot", model="offline",
+        timeout=10, session_id=runner.session_path.stem, gateway=gateway, gateway_url=runner.gateway_url)
+    try:
+        result = await resumed.run("Independent next turn.")
+    finally:
+        await resumed.stop()
+    assert result.summary == "Independent input processed."
+    body, = [payload for payload in upstream if payload["stream"]]
+    assert "oversized-first-input" not in json.dumps(body)
+    assert large in runner.session_path.read_text()

@@ -30,6 +30,14 @@ class PiAdapter:
     def discard_aborted_submit(self, path, discard):
         return sessions.discard_aborted_submit(path, discard, pi_executable=self.executable)
 
+    def compaction_records(self, path):
+        path = Path(path)
+        if not path.exists():
+            return []
+        with path.open(encoding="utf-8") as stream:
+            records = [json.loads(line) for line in stream if line.strip()]
+        return [entry for entry in records if entry.get("type") == "compaction"]
+
     def create(self, args, claim, client, process_id, session_id, capacity):
         from elephant.jobs.worker import GeneralRun
 
