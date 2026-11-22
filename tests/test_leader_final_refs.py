@@ -195,8 +195,9 @@ async def test_worker_status_archive_and_verified_report_share_the_current_leade
         assert [json.loads(delivery)["text"] for delivery in deliveries] == ["1）番茄牛腩\n2）菌菇鸡汤"]
 
 
+@pytest.mark.parametrize("worker_status", ["blocked", "partial"])
 @pytest.mark.parametrize("takeover", ["none", "without_evidence", "verified"])
-async def test_blocked_worker_artifacts_cannot_complete_scheduled_root(runtime, takeover):
+async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtime, worker_status, takeover):
     root = root_goal(runtime)
     with runtime.db.transaction() as conn:
         task = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
@@ -205,21 +206,21 @@ async def test_blocked_worker_artifacts_cannot_complete_scheduled_root(runtime, 
         conn.execute(update(tasks).where(tasks.c.id == task["id"]).values(
             context_json=json.dumps(context), goal_json=json.dumps(goal)))
     worker = runtime.service.claim("worker")
-    (runtime.path / "report.md").write_text("blocked in sandbox", encoding="utf-8")
+    (runtime.path / "report.md").write_text("diagnostics only, host inspection incomplete", encoding="utf-8")
     artifact, = export_artifacts(runtime.path, runtime.service.archive_root, ["report.md"])
     record_refs(runtime, worker)
     receipt = {"kind": "turn_finished", "session_id": worker["context"]["session_id"],
         "run_id": worker["run_id"], "session_revision": "leaf",
         "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True}
     runtime.service.submit(worker["run_id"], worker["fencing_token"], "worker",
-        {"status": "blocked", "summary": "沙箱无法检查主机", "artifacts": [artifact], "effect_refs": ["child-effect"]},
+        {"status": worker_status, "summary": "主机检查未完成", "artifacts": [artifact], "effect_refs": ["child-effect"]},
         receipt=receipt)
     final = runtime.sessions.claim("leader")
     assert final["purpose"] == "attention"
     if takeover != "none":
         await runtime.leader.invoke("tasks", (final["run_id"], final["fencing_token"], "leader"), {
             "operation": "tasks.take_over", "arguments": {}, "call_id": "take-over"})
-    refs = {"artifacts": [artifact], "effect_refs": ["child-effect"]}
+    refs = {"artifacts": [artifact], "effect_refs": ["child-effect"]} if takeover != "none" else {}
     if takeover == "verified":
         (runtime.path / "report.md").write_text("verified on host", encoding="utf-8")
         verified, = export_artifacts(runtime.path, runtime.service.archive_root, ["report.md"])
@@ -232,5 +233,7 @@ async def test_blocked_worker_artifacts_cannot_complete_scheduled_root(runtime, 
         assert row["state"] == ("SUCCEEDED" if takeover == "verified" else "BLOCKED")
         assert result["artifacts"] == ([verified] if takeover == "verified" else [])
         assert result["effect_refs"] == []
+        worker_result = conn.scalar(select(tasks.c.result_json).where(tasks.c.id == worker["task_id"]))
+        assert json.loads(worker_result)["artifacts"] == [artifact]
         delivery = conn.scalar(select(outbox.c.envelope_json))
         assert json.loads(delivery)["text"] == result["summary"]

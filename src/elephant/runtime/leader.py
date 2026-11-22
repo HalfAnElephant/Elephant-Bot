@@ -805,7 +805,7 @@ class LeaderRuntime:
                     observed = set(result.observation_refs)
                     child_effects = set()
                     for child in descendants:
-                        if scheduled_success and child["state"] not in {"SUCCEEDED", "PARTIAL"}:
+                        if scheduled_success and child["state"] != "SUCCEEDED":
                             continue
                         child_result = child_results[child["id"]]
                         for artifact in child_result.get("artifacts", []):
@@ -896,16 +896,16 @@ class LeaderRuntime:
                     reworked.add(previous)
                     previous = work[previous]["rework_of_task_id"]
         incomplete = [child for task_id, child in work.items()
-                      if task_id not in reworked and child["state"] not in {"SUCCEEDED", "PARTIAL"}]
+                      if task_id not in reworked and child["state"] != "SUCCEEDED"]
         unsuccessful = [child_results[child["id"]] for child in descendants
-                        if child["state"] not in {"SUCCEEDED", "PARTIAL"}]
-        failed_artifacts = {item["id"] for child in unsuccessful for item in child.get("artifacts", [])}
-        failed_observations = {ref for child in unsuccessful for ref in child.get("observation_refs", [])}
-        failed_effects = {ref for child in unsuccessful for ref in child.get("effect_refs", [])}
+                        if child["state"] != "SUCCEEDED"]
+        incomplete_artifacts = {item["id"] for child in unsuccessful for item in child.get("artifacts", [])}
+        incomplete_observations = {ref for child in unsuccessful for ref in child.get("observation_refs", [])}
+        incomplete_effects = {ref for child in unsuccessful for ref in child.get("effect_refs", [])}
         result = result.model_copy(update={
-            "artifacts": tuple(item for item in result.artifacts if item.id not in failed_artifacts),
-            "observation_refs": tuple(ref for ref in result.observation_refs if ref not in failed_observations),
-            "effect_refs": tuple(ref for ref in result.effect_refs if ref not in failed_effects),
+            "artifacts": tuple(item for item in result.artifacts if item.id not in incomplete_artifacts),
+            "observation_refs": tuple(ref for ref in result.observation_refs if ref not in incomplete_observations),
+            "effect_refs": tuple(ref for ref in result.effect_refs if ref not in incomplete_effects),
         })
         if not incomplete:
             return result
