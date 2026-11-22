@@ -51,6 +51,8 @@ def _authorize(service, args):
     service.authorize(*args, {"action": "notification.send"})
     with service.db.engine.connect() as c:
         _run, task = service._lease(c, *args)
+    if service._silent_schedule(task):
+        raise PermissionError("silent schedules cannot send QQ messages")
     event = InboundEvent.model_validate_json(task["event_json"])
     service.permissions.require(service._access_for(task), "notification.send", "conversation:" + task["conversation"])
     return task, event

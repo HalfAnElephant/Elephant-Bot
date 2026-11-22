@@ -848,7 +848,13 @@ class TaskService:
             return {"state": state}
 
     @staticmethod
+    def _silent_schedule(task):
+        return json.loads(task["context_json"]).get("schedule_silent") is True
+
+    @staticmethod
     def _internal_reply(task):
+        if TaskService._silent_schedule(task):
+            return True
         event = InboundEvent.model_validate_json(task["event_json"])
         return (event.conversation.adapter_instance_id == "admin_api"
             and event.conversation.bot_identity_id == "host" and event.conversation.surface == Surface.PRIVATE

@@ -162,6 +162,8 @@ Leader 的聊天、进度、提问和最终汇报统一加载 `src/elephant/runt
 
 定时请求可直接描述执行目标、时间或周期和时区，Leader 使用 `schedules.create/list/get/update/cancel` 管理。管理接口位于 `/api/v1/schedules`，创建要求 `Idempotency-Key`，修改和删除要求当前 `expected_revision`。取消安排停止未来触发，已经派发的工作使用任务控制入口管理。
 
+定时任务可用 `environment` 指定 Worker 运行在 `host` 或 `sandbox`，省略时使用 Worker 默认环境。设置 `silent: true` 后，后续触发的任务仅在 Leader 内部记录进度、问题和结果，用户可主动查询。默认发送任务通知。
+
 技能管理接口提供 `/api/v1/skills`、`/read`、`/history`、`/export` 和 `/rollback`，均使用管理员令牌与当前权限。回退需要目标 entry ID 和该技能的最新 ledger ID，历史变化时拒绝覆盖。`workspace_id` 指定已配置的项目或 `personal`。导出 ZIP 包含标准技能文件与附件。
 
 已有事项的补充进入原 Worker；相同原文、附件和上下文的活动请求复用已有工作。不同原文的需求由 Leader 结合当前目标判断。长工作委派后，Leader 简短确认并继续处理聊天，进度和结果统一经 Leader 表达，相同进度合并，新修订使待发旧进度失效。

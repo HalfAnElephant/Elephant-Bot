@@ -137,7 +137,7 @@ class TaskGraph:
         task_context = {key: value for key, value in context.items()
                         if key in {"images", "limits", "timezone", "model_context_window", "source_manifest", "task_sources",
                             "scope", "principal", "preferences", "memory_scope", "memory_epoch",
-                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "mail_receipt_id", "structured_request"}}
+                            "memory_status", "retrieved_data", "files", "workspace_id", "schedule_fire_id", "synthetic_mail_schedule_id", "mail_receipt_id", "structured_request", "schedule_silent"}}
         task_context.update(dispatch_spec=intent, owner_id=dialogue["owner_id"], role="worker")
         root = self.service.new_task(root_id, event, access,
             TaskGoal(text=spec.goal, requested_actions=spec.requested_actions,

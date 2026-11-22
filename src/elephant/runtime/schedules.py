@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -38,6 +39,9 @@ class ScheduleSpec(BaseModel):
     mail_replay_from_uid: int | None = Field(default=None, ge=1,
         description="Explicit historical replay start UID. Omit to process only new mail after activation.")
     timezone: str = Field(default="Asia/Shanghai", max_length=128)
+    environment: Literal["sandbox", "host"] | None = Field(default=None,
+        description="Execution environment for the scheduled Worker. Omit to use the configured Worker default.")
+    silent: bool = Field(default=False, description="Keep progress, questions and results in the Leader; send no task notifications to the user.")
     success_checks: tuple[str, ...] = ()
     requested_outputs: tuple[str, ...] = ()
     requested_actions: tuple[str, ...] = Field(default=(), max_length=32,
@@ -67,7 +71,7 @@ class ScheduleSpec(BaseModel):
         return self
 
     def goal_spec(self):
-        child = {"mode": "work", "goal": self.goal, "delegation_key": "primary",
+        child = {"mode": "work", "goal": self.goal, "delegation_key": "primary", "environment": self.environment,
                  "success_checks": self.success_checks, "requested_outputs": self.requested_outputs}
         return {"goal": self.goal, "requested_actions": self.requested_actions, "success_checks": self.success_checks,
                 "requested_outputs": self.requested_outputs, "children": [child]}
@@ -490,6 +494,8 @@ class ScheduleService:
             context[kind] = list({json.dumps(item, sort_keys=True, ensure_ascii=False): item for item in attachments}.values())
         context["task_sources"] = sorted(set(context.get("task_sources", ())) | set(source_context.get("task_sources", ())))
         context["schedule_fire_id"] = fire_id
+        if spec.silent:
+            context["schedule_silent"] = True
         if mail_receipt_id is not None:
             context["mail_receipt_id"] = mail_receipt_id
         elif spec.mail is not None:
