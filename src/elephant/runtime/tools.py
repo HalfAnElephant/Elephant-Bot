@@ -69,7 +69,8 @@ def native_tools(role, purpose):
                 ("list", "List this authenticated user's schedules.", {}, []),
                 ("get", "Read a schedule and its current revision before changing it.",
                     {"schedule_id": {"type": "string"}}, ["schedule_id"]),
-                ("update", "Update or pause a schedule using its latest revision.",
+                ("update", ("Update or pause a schedule using its latest revision. Set environment to host or sandbox "
+                    "and set silent=true for Leader-only reporting when requested by the user."),
                     {"schedule_id": {"type": "string"}, "expected_revision": {"type": "integer", "minimum": 1},
                      "changes": {"type": "object"}}, ["schedule_id", "expected_revision", "changes"]),
                 ("cancel", "Cancel future triggers of this user's schedule. Existing tasks keep their own lifecycle.",

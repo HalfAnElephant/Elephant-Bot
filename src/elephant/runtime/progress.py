@@ -108,12 +108,17 @@ def task_progress(graph, conn, task, root, *, access, may_read, stale, delivery_
     for artifact_id, artifact in registered_artifacts(conn, ids).items():
         completed.append({"kind": "artifact", "reference": artifact_id,
                           "label": artifact["relative_path"], "sha256": artifact["sha256"]})
+    event_kinds = {"milestone", "child_result", "finished", "children_ready"}
+    if graph.service._silent_schedule(root):
+        event_kinds.add("worker_update")
     milestones = conn.execute(select(agent_events).where(agent_events.c.task_id.in_(ids),
-        current_evidence(agent_events.c.task_id, agent_events.c.source_revision), agent_events.c.kind.in_({
-            "milestone", "child_result", "finished", "children_ready"}))
+        current_evidence(agent_events.c.task_id, agent_events.c.source_revision), agent_events.c.kind.in_(event_kinds))
         .order_by(agent_events.c.created_at.desc(), agent_events.c.seq.desc())).mappings().all()
     latest = None
     for row in milestones:
+        if row["kind"] == "worker_update":
+            progress.setdefault("latest_worker_update", json.loads(row["payload_json"])["public_text"][:2000])
+            continue
         if row["kind"] == "milestone":
             spec = milestone_spec(row["payload_json"])
             if spec is None:

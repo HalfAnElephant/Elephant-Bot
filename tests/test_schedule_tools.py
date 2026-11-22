@@ -60,8 +60,9 @@ async def test_live_leader_schedule_controls_persist_and_worker_role_is_rejected
         claim = core.sessions.claim('schedule-leader')
         identity = (claim['run_id'], claim['fencing_token'], 'schedule-leader')
         payload = {'operation': 'create', 'call_id': 'schedule-call', 'arguments': {'goal': '检查一次仓库',
-            'run_at': (clock.now() + timedelta(days=1)).isoformat()}}
+            'run_at': (clock.now() + timedelta(days=1)).isoformat(), 'environment': 'host', 'silent': True}}
         first = await core.leader.invoke('schedules', identity, payload)
+        assert first['spec']['environment'] == 'host' and first['spec']['silent'] is True
         assert await core.leader.invoke('schedules', identity, payload) == first
         assert len(core.schedules.list(event)) == 1
         with core.db.transaction() as conn:

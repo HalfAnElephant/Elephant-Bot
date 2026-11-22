@@ -651,7 +651,10 @@ class SessionService:
                     "deadline": turn["deadline"] if turn else (now + timedelta(seconds=plan.budget.total_wall_seconds)).isoformat(),
                     "active_seconds_remaining": max(0, plan.budget.active_seconds - (turn.get("used", {}).get("active_seconds", 0) if turn else 0))}
                 task_id = root["id"] if purpose in {"finalize", "attention"} else None
-                claim["public_answer_events"] = bool(self.service.stream_eligibility
+                silent = root is not None and self.service._silent_schedule(root)
+                if silent:
+                    claim["goal"] += "\n本次定时任务为静默执行。请在本轮结算中记录进度、问题或结果，供 Leader 内部保留。"
+                claim["public_answer_events"] = bool(not silent and self.service.stream_eligibility
                     and self.service.stream_eligibility(event))
                 # Worker reports can be superseded or fail verification during settlement.
                 if opted_in or (root and not self.service._internal_reply(root)):

@@ -391,3 +391,51 @@ async def test_mail_filter_update_still_requires_stored_qq_source(control_runtim
     with core.db.engine.connect() as conn:
         assert not conn.execute(select(inbox.c.id).where(inbox.c.id == unstored.event_id)).first()
     assert core.schedules.get(source, item['id']) == item
+
+
+@pytest.mark.parametrize("silent", [False, True])
+async def test_schedule_worker_environment_and_leader_only_delivery(timers, silent):
+    from test_agent_runtime import leader_complete
+
+    from elephant.jobs.rich_delivery import rich_send
+    from elephant.storage.agent_schema import leader_inbox
+    from elephant.storage.schema import outbox
+    from elephant.storage.task_schema import notifications
+
+    service, runtime = timers
+    row = service.create(runtime.event, {"goal": "检查主机", "cron": "* * * * *"}, idempotency_key="host")
+    assert row["spec"]["environment"] is None and row["spec"]["silent"] is False
+    service.update(runtime.event, row["id"], {"environment": "host", "silent": silent}, expected_revision=1)
+    runtime.clock.advance(60)
+    service.once()
+    worker = runtime.service.claim("worker")
+    assert worker["plan"]["environment"] == "host"
+    identity = (worker["run_id"], worker["fencing_token"], "worker")
+    assert runtime.service.notify(*identity, {"notification_id": "progress", "text": "检查进行中"})["accepted"]
+    if silent:
+        with pytest.raises(PermissionError, match="silent schedules"):
+            await rich_send(runtime.service, identity, {"request_id": "silent", "text": "检查进行中"})
+    receipt = {"kind": "turn_finished", "session_id": worker["context"]["session_id"],
+        "run_id": worker["run_id"], "session_revision": "leaf",
+        "input_ids": worker["context"]["source_input_ids"], "inflight": 0, "tools_paired": True}
+    runtime.service.submit(*identity, {"status": "completed", "summary": "检查完成"}, receipt=receipt)
+    runtime.service.stream_eligibility = lambda event: True
+    leader = runtime.sessions.claim("leader")
+    assert leader["purpose"] == "finalize"
+    assert not leader["public_answer_events"]
+    if silent:
+        leader_id = (leader["run_id"], leader["fencing_token"], "leader")
+        snapshot = await runtime.leader.invoke("tasks", leader_id, {"operation": "tasks.status",
+            "arguments": {"task_ref": leader["task_id"]}, "call_id": "status"})
+        assert snapshot["progress"]["latest_worker_update"] == "检查进行中"
+        result = await runtime.leader.invoke("notify", leader_id, {"text": "检查已核对"})
+        assert result["accepted"]
+        with runtime.db.engine.connect() as conn, pytest.raises(PermissionError, match="silent schedules"):
+            runtime.leader.file_delivery_scope(leader_id, conn)
+    leader_complete(runtime, leader, "主机检查完成")
+    with runtime.db.engine.connect() as conn:
+        assert conn.scalar(select(func.count()).select_from(outbox)) == int(not silent)
+        notices = conn.execute(select(notifications.c.body).order_by(notifications.c.sequence)).scalars().all()
+        assert notices == (["检查已核对", "主机检查完成"] if silent else ["主机检查完成"])
+        assert conn.scalar(select(leader_inbox.c.output_ref)) == leader["run_id"]
+    assert roots(runtime)[0]["state"] == "SUCCEEDED"

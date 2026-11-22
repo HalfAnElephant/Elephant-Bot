@@ -132,6 +132,10 @@ class LeaderRuntime:
         root_id = claim.get("target_root_task_id")
         if not root_id and (claim["purpose"] != "user" or self.sessions.owner(event) is None):
             raise PermissionError("QQ files require a verified Leader user turn or task")
+        if write and root_id:
+            task = conn.execute(select(tasks).where(tasks.c.id == root_id)).mappings().one()
+            if self.service._silent_schedule(task):
+                raise PermissionError("silent schedules cannot send QQ messages")
         self.authorize(conn, run, claim, {"action": "notification.send",
             "resources": ["conversation:" + event.conversation.key, "task:" + claim["task_id"]],
             "effect": "write" if write else "read"})
@@ -785,19 +789,25 @@ class LeaderRuntime:
                         raise PermissionError("required children, inputs or operations are not settled")
                     descendants = conn.execute(select(tasks).where(tasks.c.root_task_id == target["id"],
                         tasks.c.id != target["id"])).mappings().all()
+                    if claim["context"].get("memory_replan"):
+                        descendants = [child for child in descendants if
+                            json.loads(child["context_json"]).get("memory_epoch") == claim["context"].get("memory_epoch")]
                     if result.observation_refs:
                         self.service.graph.verify_final_result(conn, target, result, checks=("observation",))
                     if result.effect_refs:
                         self.service.graph.verify_final_result(conn, target, result, checks=("effect",))
+                    child_results = {child["id"]: json.loads(child["result_json"] or "{}") for child in descendants}
+                    scheduled_success = result.status == "completed" and json.loads(target["context_json"]).get("schedule_fire_id")
+                    if scheduled_success:
+                        result = self._verify_scheduled_completion(conn, claim, descendants, child_results, result)
                     artifacts = {item.id: item.model_dump(mode="json") for item in result.artifacts}
                     evidence = {item.url: item.model_dump(mode="json") for item in result.evidence}
                     observed = set(result.observation_refs)
                     child_effects = set()
                     for child in descendants:
-                        if (claim["context"].get("memory_replan") and
-                                json.loads(child["context_json"]).get("memory_epoch") != claim["context"].get("memory_epoch")):
+                        if scheduled_success and child["state"] != "SUCCEEDED":
                             continue
-                        child_result = json.loads(child["result_json"]) if child["result_json"] else {}
+                        child_result = child_results[child["id"]]
                         for artifact in child_result.get("artifacts", []):
                             artifacts[artifact["id"]] = artifact
                         for item in child_result.get("evidence", []):
@@ -843,7 +853,7 @@ class LeaderRuntime:
                     conn.execute(update(waits).where(waits.c.id.in_(question_ids)).values(notification_id=notice_id))
                 if claim.get("public_answer_events"):
                     self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
-            elif run["role"] != "skill_review":
+            elif run["role"] != "skill_review" and not (target and self.service._silent_schedule(target)):
                 event = InboundEvent.model_validate_json(claim["event_json"])
                 published_chat = True
                 self.core.outbox.enqueue_text(conn, target=event.conversation, text=result.summary,
@@ -875,6 +885,43 @@ class LeaderRuntime:
             conn.execute(update(sessions).where(sessions.c.active_run_id == run_id).values(active_run_id=None))
         self.service.wakeup.set()
         return {"state": "FINISHED"}
+
+    def _verify_scheduled_completion(self, conn, claim, descendants, child_results, result):
+        work = {child["id"]: child for child in descendants if child["kind"] == "work"}
+        reworked = set()
+        for child in work.values():
+            if child["state"] == "SUCCEEDED":
+                previous = child["rework_of_task_id"]
+                while previous in work and previous not in reworked:
+                    reworked.add(previous)
+                    previous = work[previous]["rework_of_task_id"]
+        incomplete = [child for task_id, child in work.items()
+                      if task_id not in reworked and child["state"] != "SUCCEEDED"]
+        unsuccessful = [child_results[child["id"]] for child in descendants
+                        if child["state"] != "SUCCEEDED"]
+        incomplete_artifacts = {item["id"] for child in unsuccessful for item in child.get("artifacts", [])}
+        incomplete_observations = {ref for child in unsuccessful for ref in child.get("observation_refs", [])}
+        incomplete_effects = {ref for child in unsuccessful for ref in child.get("effect_refs", [])}
+        result = result.model_copy(update={
+            "artifacts": tuple(item for item in result.artifacts if item.id not in incomplete_artifacts),
+            "observation_refs": tuple(ref for ref in result.observation_refs if ref not in incomplete_observations),
+            "effect_refs": tuple(ref for ref in result.effect_refs if ref not in incomplete_effects),
+        })
+        if not incomplete:
+            return result
+        if claim.get("takeover"):
+            root_id, run_id = claim["target_root_task_id"], claim["run_id"]
+            child_artifacts = {item["id"] for child in child_results.values() for item in child.get("artifacts", [])}
+            if any(item.id not in child_artifacts for item in result.artifacts) or conn.scalar(
+                    select(observations.c.id).where(observations.c.task_id == root_id, observations.c.run_id == run_id,
+                        observations.c.id.in_(result.observation_refs)).limit(1)) or conn.scalar(
+                    select(operations.c.id).where(operations.c.task_id == root_id, operations.c.run_id == run_id,
+                        operations.c.state == "VERIFIED", operations.c.id.in_(result.effect_refs)).limit(1)):
+                return result
+        return result.model_copy(update={
+            "status": "blocked",
+            "summary": "任务未能确认完成。仍有子任务未完成，且缺少可核验的接管或返工结果。",
+        })
 
     def _reconcile_stopped_tools(self, run, claim, process, proof):
         """Reconcile native calls only after the caller has verified exclusive stop."""
