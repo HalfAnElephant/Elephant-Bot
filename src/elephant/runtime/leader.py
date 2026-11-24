@@ -832,10 +832,15 @@ class LeaderRuntime:
                     self.service._validate_result(result)
                     root_goal = json.loads(target["goal_json"])
                     if result.status == "completed":
-                        self.service.graph.verify_final_result(conn, target, result)
-                        missing = set(root_goal.get("requested_outputs", [])) - {a.relative_path for a in result.artifacts}
+                        missing = sorted(set(root_goal.get("requested_outputs", [])) - {a.relative_path for a in result.artifacts})
                         if missing:
-                            raise ValueError("requested root outputs missing")
+                            reason = f"任务未完成：有{len(missing)}个要求的输出文件未生成或未能核验。"
+                            result = result.model_copy(update={"status": "blocked", "summary": reason,
+                                "agent_authored": False, "limitations": (*result.limitations,
+                                    *("missing requested output: " + path for path in missing))})
+                            submitted_result = result.model_dump_json()
+                        else:
+                            self.service.graph.verify_final_result(conn, target, result)
                     state = {"completed": "SUCCEEDED", "partial": "PARTIAL", "blocked": "BLOCKED", "failed": "FAILED"}.get(result.status)
                     if not state:
                         raise ValueError("finalize must settle or persist a child wait")

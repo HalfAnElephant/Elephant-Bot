@@ -410,6 +410,45 @@ async def test_fast_final_prevents_delayed_dispatch_ack_and_unknown_result_resen
         core.db.close()
 
 
+async def test_missing_root_output_settles_blocked_instead_of_retrying(tmp_path, official_config, official_event, clock):
+    from conftest import official_payload
+
+    core = make_core(tmp_path, official_config, clock)
+    try:
+        event = core.adapters["qq"].normalize(official_payload(official_event, private=True, text="生成报告"))
+        core.inbox.accept(event)
+        await core.process(event)
+        user = core.sessions.claim("fixture")
+        with core.db.transaction() as conn:
+            run, claim = core.leader.lease(conn, user["run_id"], user["fencing_token"], "fixture")
+            root = core.leader.task_tool(conn, run, claim, {"operation": "tasks.submit", "call_id": "dispatch",
+                "arguments": {"goal": "生成报告", "requested_outputs": ["outputs/report.md"],
+                    "children": [{"goal": "整理数据", "delegation_key": "only"}]}})
+        worker = core.tasks.claim("worker")
+        core.tasks.submit(worker["run_id"], worker["fencing_token"], "worker",
+            {"status": "completed", "summary": "数据整理完成"}, receipt={"kind": "turn_finished",
+             "session_id": worker["context"]["session_id"], "run_id": worker["run_id"],
+             "session_revision": "leaf", "input_ids": worker["context"]["source_input_ids"],
+             "inflight": 0, "tools_paired": True})
+        finish_leader(core, user, "已接受，等待执行。")
+        finalizer = core.sessions.claim("fixture")
+        assert finalizer["purpose"] == "finalize"
+        assert finish_leader(core, finalizer, "报告已生成。") == {"state": "FINISHED"}
+        with core.db.engine.connect() as conn:
+            row = conn.execute(select(tasks.c.state, tasks.c.result_json).where(
+                tasks.c.id == root["task_id"])).one()
+            result = json.loads(row.result_json)
+            assert row.state == "BLOCKED"
+            assert result["status"] == "blocked" and result["agent_authored"] is False
+            assert result["summary"] == "任务未完成：有1个要求的输出文件未生成或未能核验。"
+            assert "missing requested output: outputs/report.md" in result["limitations"]
+            assert json.loads(conn.execute(select(runs.c.result_json).where(
+                runs.c.id == finalizer["run_id"])).scalar_one()) == result
+    finally:
+        await core.stop()
+        core.db.close()
+
+
 @pytest.mark.parametrize("mutation", [False, True])
 async def test_delayed_chat_revalidates_original_memory_epoch(tmp_path, official_config, official_event, clock, mutation):
     from conftest import official_payload

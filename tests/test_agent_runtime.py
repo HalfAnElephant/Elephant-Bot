@@ -760,7 +760,12 @@ async def test_memory_replan_rebuilds_explicit_contract_from_retained_user_sourc
         goal = json.loads(raw)
     assert goal["requested_outputs"] == outputs and goal["success_checks"] == checks
     assert "FORGOTTEN_SECRET" not in raw and "forgotten-secret.txt" not in raw
-    if checks:
+    if outputs:
+        claim = runtime.sessions.claim("leader")
+        assert leader_complete(runtime, claim) == {"state": "FINISHED"}
+        with runtime.db.engine.connect() as conn:
+            assert conn.scalar(select(tasks.c.state).where(tasks.c.id == root_id)) == "BLOCKED"
+    elif checks:
         claim = runtime.sessions.claim("leader")
         with pytest.raises(ValueError, match="root success check not verified"):
             leader_complete(runtime, claim)
