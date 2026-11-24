@@ -217,6 +217,12 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
         receipt=receipt)
     final = runtime.sessions.claim("leader")
     assert final["purpose"] == "attention"
+    if takeover == "none":
+        for status in ("completed", "partial", "failed"):
+            preflight = await runtime.leader.invoke("validate-result-refs",
+                (final["run_id"], final["fencing_token"], "leader"), {"status": status})
+            assert preflight["accepted"] is False and preflight["verified_status"] == "blocked"
+            assert ("受阻" if worker_status == "blocked" else "仅部分完成") in preflight["facts"]
     if takeover != "none":
         await runtime.leader.invoke("tasks", (final["run_id"], final["fencing_token"], "leader"), {
             "operation": "tasks.take_over", "arguments": {}, "call_id": "take-over"})
@@ -225,13 +231,20 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
         (runtime.path / "report.md").write_text("verified on host", encoding="utf-8")
         verified, = export_artifacts(runtime.path, runtime.service.archive_root, ["report.md"])
         refs["artifacts"].append(verified)
-    complete_with_refs(runtime, final, "completed", **refs)
-    complete_with_refs(runtime, final, "completed", **refs)
+        preflight = await runtime.leader.invoke("validate-result-refs",
+            (final["run_id"], final["fencing_token"], "leader"),
+            {"status": "completed", "has_direct_artifacts": True})
+        assert preflight == {"accepted": True}
+    reported_status = "blocked" if worker_status == "blocked" and takeover == "none" else "completed"
+    complete_with_refs(runtime, final, reported_status, **refs)
+    complete_with_refs(runtime, final, reported_status, **refs)
     with runtime.db.engine.connect() as conn:
         row = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
         result = json.loads(row["result_json"])
         assert row["state"] == ("SUCCEEDED" if takeover == "verified" else "BLOCKED")
-        if takeover != "verified":
+        if reported_status == "blocked":
+            assert result["summary"] == "已核验执行结果"
+        elif takeover != "verified":
             assert ("1 项受阻" if worker_status == "blocked" else "1 项仅部分完成") in result["summary"]
             assert "尚无可核验的接管或返工结果" in result["summary"]
         assert result["artifacts"] == ([verified] if takeover == "verified" else [])

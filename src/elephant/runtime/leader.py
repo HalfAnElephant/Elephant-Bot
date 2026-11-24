@@ -797,15 +797,15 @@ class LeaderRuntime:
                     if result.effect_refs:
                         self.service.graph.verify_final_result(conn, target, result, checks=("effect",))
                     child_results = {child["id"]: json.loads(child["result_json"] or "{}") for child in descendants}
-                    scheduled_success = result.status == "completed" and json.loads(target["context_json"]).get("schedule_fire_id")
-                    if scheduled_success:
+                    scheduled_report = json.loads(target["context_json"]).get("schedule_fire_id")
+                    if scheduled_report:
                         result = self._verify_scheduled_completion(conn, claim, descendants, child_results, result)
                     artifacts = {item.id: item.model_dump(mode="json") for item in result.artifacts}
                     evidence = {item.url: item.model_dump(mode="json") for item in result.evidence}
                     observed = set(result.observation_refs)
                     child_effects = set()
                     for child in descendants:
-                        if scheduled_success and child["state"] != "SUCCEEDED":
+                        if scheduled_report and child["state"] != "SUCCEEDED":
                             continue
                         child_result = child_results[child["id"]]
                         for artifact in child_result.get("artifacts", []):
@@ -908,6 +908,8 @@ class LeaderRuntime:
             "effect_refs": tuple(ref for ref in result.effect_refs if ref not in incomplete_effects),
         })
         if not incomplete:
+            return result
+        if result.status == "blocked":
             return result
         if claim.get("takeover"):
             root_id, run_id = claim["target_root_task_id"], claim["run_id"]
@@ -1345,11 +1347,25 @@ class LeaderRuntime:
                 return self.compaction.operation(conn, run, claim, payload)
             if operation == "validate-result-refs":
                 self.authorize(conn, run, claim, {"action": "task.execute"})
-                result = TaskResult.model_validate({"summary": "Outcome reference validation", **payload})
+                result = TaskResult.model_validate({"summary": "Outcome reference validation",
+                    **{key: value for key, value in payload.items() if key != "has_direct_artifacts"}})
                 if claim.get("target_root_task_id"):
                     root = conn.execute(select(tasks).where(tasks.c.id == claim["target_root_task_id"])).mappings().one()
                     checks = tuple(name for name in ("observation", "effect") if getattr(result, name + "_refs"))
                     self.service.graph.verify_final_result(conn, root, result, checks=checks)
+                    if (result.status != "blocked" and claim["purpose"] in {"finalize", "attention"}
+                            and json.loads(root["context_json"]).get("schedule_fire_id")
+                            and self.service.graph.finalize_ready(conn, root)
+                            and not (claim.get("takeover") and payload.get("has_direct_artifacts"))):
+                        descendants = conn.execute(select(tasks).where(tasks.c.root_task_id == root["id"],
+                            tasks.c.id != root["id"])).mappings().all()
+                        if claim["context"].get("memory_replan"):
+                            descendants = [child for child in descendants if
+                                json.loads(child["context_json"]).get("memory_epoch") == claim["context"].get("memory_epoch")]
+                        child_results = {child["id"]: json.loads(child["result_json"] or "{}") for child in descendants}
+                        checked = self._verify_scheduled_completion(conn, claim, descendants, child_results, result)
+                        if checked.status != result.status:
+                            return {"accepted": False, "verified_status": "blocked", "facts": checked.summary}
                 else:
                     self.service._verify_result_refs(conn, result, {"id": claim["task_id"],
                         "retry_of_task_id": None, "rework_of_task_id": None})
