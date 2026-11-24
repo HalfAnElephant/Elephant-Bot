@@ -44,6 +44,9 @@ async def render_expression(core, *, event, request_id: str, task_id: str,
     try:
         async with asyncio.timeout(2):
             async with capacity.slot(background=True):
+                if not core.permissions.check(core.access(event), "model.request",
+                        "conversation:" + event.conversation.key).allowed:
+                    return fallback
                 response = await core.model_client.post(config.endpoint, json=payload,
                     headers={"Authorization": "Bearer " + key})
             response.raise_for_status()

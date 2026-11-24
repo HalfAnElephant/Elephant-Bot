@@ -105,3 +105,23 @@ async def test_host_expression_respects_shared_model_capacity(db, clock, monkeyp
                 facts=[["已取消。", "任务已取消。"]], fallback="已取消。") == "已取消。"
     with db.engine.connect() as conn:
         assert conn.scalar(select(model_requests.c.state)) == "FAILED"
+
+
+async def test_host_expression_rechecks_permission_after_waiting_for_capacity(db, clock, monkeypatch):
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+
+    def forbidden(_request):
+        raise AssertionError("revoked facts reached model provider")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+        core = host_core(db, clock, client)
+        core.scheduler.capacity = ModelCapacity(total=1)
+        async with core.scheduler.capacity.slot(background=True):
+            pending = asyncio.create_task(render_expression(core, event=EVENT,
+                request_id="revoked-while-waiting", task_id="task-1",
+                facts=[["已取消。", "任务已取消。"]], fallback="已取消。"))
+            await asyncio.sleep(0)
+            core.permissions.check = lambda *_args: SimpleNamespace(allowed=False)
+        assert await pending == "已取消。"
+    with db.engine.connect() as conn:
+        assert conn.scalar(select(model_requests.c.state)) == "FAILED"

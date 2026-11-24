@@ -312,7 +312,7 @@ class Scheduler:
 
     async def close(self):
         self.worker.begin_shutdown()
-        expressions = tuple(self.client.expression_tasks.values())
+        expressions = tuple(getattr(getattr(self, "client", None), "expression_tasks", {}).values())
         for task in expressions:
             task.cancel()
         await asyncio.gather(*expressions, return_exceptions=True)
