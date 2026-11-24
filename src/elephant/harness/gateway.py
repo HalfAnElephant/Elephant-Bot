@@ -863,6 +863,7 @@ class RunGateway:
                 return {"generation": self.generation, "model": self.model, "model_token": self.model_token,
                     "tool_token": self.tool_token, "system_prompt": self.system_prompt,
                     "native_tools": list(self.native_tools.values()), "role": self.claim.get("role", "worker"),
+                    "public_answer_events": self.claim.get("public_answer_events") is True,
                     "purpose": self.claim.get("purpose", "work"),
                     "force_compaction_tokens": self.force_tokens,
                     "elastic_compaction_tokens": context.get("limits", {}).get("elastic_compaction_tokens"),
