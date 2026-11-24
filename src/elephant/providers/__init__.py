@@ -20,7 +20,8 @@ from fastapi.responses import StreamingResponse
 from elephant.observability.timing import record_timing
 
 COMPLETION_INSTRUCTION = (
-    "执行预算已到收尾边界。停止调用业务工具，仅根据已有工具观察和已核实效果，"
+    "执行预算已到收尾边界。本次不提供工具，不要输出 DSML 或任何工具调用协议。"
+    "仅根据已有工具观察和已核实效果，"
     "沿用当前宿主人格和表达风格，用 QQ 纯文本自然说清你做了什么、哪里还没弄清。"
     "不要宣称未验证的操作成功，也不要编造结果。"
 )
@@ -265,13 +266,11 @@ class ProviderAdapter:
         if kind == "business" and isinstance(reservation, dict) and reservation.get("remaining") == 0:
             await self._exhausted()
         if kind == "completion" or (kind == "business" and self.business_exhausted):
-            # Keep the protocol schema for tool history while explicitly disabling further calls.
+            # Historical tool messages remain valid without advertising callable tools.
+            payload.pop("tools", None)
+            payload.pop("tool_choice", None)
             payload.pop("parallel_tool_calls", None)
-            if payload.get("tools"):
-                payload["tool_choice"] = "none"
-            else:
-                payload.pop("tool_choice", None)
-            payload["messages"] = [{"role": "system", "content": COMPLETION_INSTRUCTION}, *payload["messages"]]
+            payload["messages"] = [*payload["messages"], {"role": "user", "content": COMPLETION_INSTRUCTION}]
             if self.guard:
                 self.guard(payload, kind, document_tokens)
             self._check_size(payload)

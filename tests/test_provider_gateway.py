@@ -248,7 +248,7 @@ async def test_upstream_error_is_once_and_unknown_usage_is_recorded(body):
     assert fixture.usage[0][1]["coverage"] == "unknown"
 
 
-async def test_business_budget_disables_calls_without_removing_protocol_schema(body):
+async def test_business_budget_removes_callable_tools_and_requests_plain_final(body):
     fixture = ProviderFixture()
     exhausted = []
     async def reserve(request_id, kind):
@@ -265,9 +265,10 @@ async def test_business_budget_disables_calls_without_removing_protocol_schema(b
     assert [kind for _, kind in fixture.reservations] == ["business", "completion"]
     assert len(fixture.requests) == 1
     payload = fixture.requests[0]
-    assert payload["tools"] == body["tools"] and payload["tool_choice"] == "none"
-    assert payload["messages"][0]["role"] == "system"
-    assert "未验证" in payload["messages"][0]["content"]
+    assert "tools" not in payload and "tool_choice" not in payload
+    assert payload["messages"][-1]["role"] == "user"
+    assert "DSML" in payload["messages"][-1]["content"]
+    assert "未验证" in payload["messages"][-1]["content"]
     with pytest.raises(HTTPException) as error:
         await fixture.adapter.complete(body)
     assert error.value.status_code == 429 and len(fixture.requests) == 1
@@ -282,8 +283,9 @@ async def test_last_business_reservation_revokes_future_business_tools(body):
     fixture.adapter.reserve = reserve
     fixture.adapter.on_exhausted = lambda: exhausted.append(True)
     await fixture.adapter.complete({**body, "tools": [{"function": {"name": "write"}}]})
-    assert exhausted == [True] and fixture.requests[0]["tool_choice"] == "none"
-    assert fixture.requests[0]["tools"] == [{"function": {"name": "write"}}]
+    assert exhausted == [True] and "tool_choice" not in fixture.requests[0]
+    assert "tools" not in fixture.requests[0]
+    assert "不提供工具" in fixture.requests[0]["messages"][-1]["content"]
     await fixture.adapter.complete(body)
     assert [kind for _, kind in fixture.reservations] == ["business", "completion"]
 

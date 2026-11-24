@@ -524,7 +524,8 @@ async def test_locked_pi_protocol_correction_budget_exhaustion_is_durable_partia
     if prior_status:
         assert "previous-limitation" in result.limitations
     assert len(requests) == 2 and business_calls == 2
-    assert requests[1]["tool_choice"] == "none"
+    assert "tools" not in requests[1] and "tool_choice" not in requests[1]
+    assert "不提供工具" in requests[1]["messages"][-1]["content"]
     assert state.runner.quiescent_verified and gateway.revoked
 
 

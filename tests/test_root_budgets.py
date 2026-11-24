@@ -77,7 +77,7 @@ async def test_worker_attempts_and_leader_decisions_have_independent_completion_
         authorize=authorize, reserve=reserve, record=usage, transport=httpx.MockTransport(transport))
     await provider.complete({"model": "model", "messages": [{"role": "user", "content": "核验结果"}],
         "tools": [{"type": "function", "function": {"name": "tasks_status", "parameters": {"type": "object"}}}]})
-    assert sent[0]["tool_choice"] == "none"
+    assert "tools" not in sent[0] and "tool_choice" not in sent[0]
     assert provider.business_exhausted
     with runtime.db.engine.connect() as conn:
         assert json.loads(conn.execute(select(tasks.c.budget_json).where(tasks.c.id == root["task_id"])).scalar_one())["model_calls"] == 7
