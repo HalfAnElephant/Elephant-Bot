@@ -385,6 +385,35 @@ async def test_outcome_references_are_validated_before_acceptance(gateway):
     assert instance.outcome["observation_refs"] == ["prior-attempt-observation"]
 
 
+async def test_scheduled_outcome_preflight_allows_agent_to_correct_final_prose(gateway):
+    instance, core, _claim = gateway
+    instance.claim.update(role="leader", purpose="attention")
+    instance.claim["context"]["schedule_fire_id"] = "fire"
+    instance.artifacts.append("outputs/report.md")
+    validations = []
+
+    async def host(operation, payload):
+        if operation == "validate-result-refs":
+            validations.append(payload)
+            return ({"accepted": False, "verified_status": "blocked", "facts": "一项子任务受阻。"}
+                    if payload["status"] == "completed" else {"accepted": True})
+        return await core(operation, payload)
+
+    instance.call = host
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=instance.app), base_url="http://gateway") as client:
+        rejected = await client.post("/tools/task_outcome", headers=auth(instance.tool_token),
+            json={"call_id": "scheduled-unverified", "arguments": {"status": "completed"}})
+        assert rejected.status_code == 200
+        assert rejected.json()["accepted"] is False
+        assert "一项子任务受阻" in rejected.json()["facts"]
+        assert instance.outcome is None
+        revised = await client.post("/tools/task_outcome", headers=auth(instance.tool_token),
+            json={"call_id": "scheduled-blocked", "arguments": {"status": "blocked"}})
+        assert revised.status_code == 200 and revised.json()["accepted"] is True
+    assert instance.outcome["status"] == "blocked"
+    assert validations[0]["has_direct_artifacts"] is True
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 @pytest.mark.parametrize("effect_state", ["verified", "unknown", "failed"])
 async def test_receipt_and_result_share_reference_and_status_rules(gateway, explicit, effect_state):
@@ -438,6 +467,20 @@ def test_explicit_empty_outcome_references_stay_empty(gateway):
     instance.outcome = {"status": "completed", "observation_refs": [], "effect_refs": []}
     result = instance.result("Report")
     assert result.observation_refs == result.effect_refs == ()
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    ("waiting_input", "等待用户补充"),
+    ("waiting_children", "等待子任务"),
+    ("waiting_external", "等待外部结果"),
+])
+def test_empty_wait_checkpoint_has_user_facing_fallback(gateway, status, expected):
+    instance, _core, _claim = gateway
+    instance.waiting, instance.wait_kind = True, status
+    result = instance.result("")
+    assert result.status == status
+    assert expected in result.summary
+    assert "Waiting checkpoint persisted" not in result.summary
 
 
 @pytest.mark.parametrize("enabled", [True, False])

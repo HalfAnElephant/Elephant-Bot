@@ -752,7 +752,12 @@ class RunGateway:
         elif status == "completed" and any(
                 value in {"unknown", "partial", "dispatched", "prepared"} for value in self.effects.values()):
             status = "partial"
-        return TaskResult(status=status, summary=summary[:10000] or "Waiting checkpoint persisted.",
+        fallback = {
+            "waiting_input": "已保存等待用户补充的状态。",
+            "waiting_children": "已保存等待子任务的状态。",
+            "waiting_external": "已保存等待外部结果的状态。",
+        }.get(status, "本轮没有可确认的回复。")
+        return TaskResult(status=status, summary=summary[:10000] or fallback,
             observation_refs=tuple(outcome.get("observation_refs", self.observations)),
             effect_refs=tuple(outcome.get("effect_refs", [identity for identity, state in self.effects.items()
                 if state == "verified"])),
@@ -1109,9 +1114,16 @@ class RunGateway:
                                 and self.claim.get("purpose") == "finalize" and not self.claim.get("takeover")):
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         result = self.result("Outcome reference validation", outcome=args)
-                        if args.get("observation_refs") or args.get("effect_refs"):
-                            await self.call("validate-result-refs", {"status": result.status,
-                                "observation_refs": list(result.observation_refs), "effect_refs": list(result.effect_refs)})
+                        if (args.get("observation_refs") or args.get("effect_refs") or
+                                self.claim.get("role") == "leader" and self.claim.get("purpose") in {"finalize", "attention"}
+                                and self.claim.get("context", {}).get("schedule_fire_id")):
+                            check_payload = {"status": result.status,
+                                "observation_refs": list(result.observation_refs), "effect_refs": list(result.effect_refs)}
+                            if self.claim.get("role") == "leader":
+                                check_payload["has_direct_artifacts"] = bool(attachments or self.artifacts)
+                            check = await self.call("validate-result-refs", check_payload)
+                            if check.get("accepted") is False:
+                                return {**check, "next_action": "请依据这些已核实的缺口重新调用 task_outcome，并在最终回复中准确说明阻塞情况。"}
                         self.outcome = args
                         self.artifacts.extend(path for path in attachments if path not in self.artifacts)
                         return {"accepted": True, "committed": False,

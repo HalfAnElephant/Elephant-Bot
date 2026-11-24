@@ -15,6 +15,7 @@ from sqlalchemy import insert, select, update
 
 from elephant.adapters.hermes_skills import HermesSkills
 from elephant.adapters.openviking import OpenVikingMemory
+from elephant.credentials_env import credential_env
 from elephant.domain import (
     AccessContext,
     ConversationRef,
@@ -95,6 +96,7 @@ class Core:
         self.tasks.stop_verifier = self.recovery.stopped
         self.scheduler = None
         self.active, self.active_ids, self.windows = {}, set(), {}
+        self._control_expressions = {}
 
     def _leader_publication(self, event):
         return (event.conversation.surface in {Surface.PRIVATE, Surface.GUILD_PRIVATE}
@@ -550,6 +552,15 @@ class Core:
                 return
             controlled = self.controls.route(event)
             if controlled is not None:
+                if (event.event_id not in self._control_expressions and self.settings.model.endpoint
+                        and self.settings.model.model and credential_env(self.settings.model.api_key_env)):
+                    expression = self.controls.claim_expression(event)
+                    if expression:
+                        facts, fallback, task_id = expression
+                        self._control_expressions[event.event_id] = asyncio.create_task(
+                            self._express_control(event, facts, fallback, task_id))
+                        retry = True  # The background task finishes this persisted input.
+                        return
                 self.reply(event, controlled)
                 with self.db.transaction() as conn:
                     self.outbox.retrigger(conn, event)
@@ -584,6 +595,32 @@ class Core:
         finally:
             if not retry:
                 self.inbox.finish(event.event_id, error=error_code, expected_seq=event.ingest_seq)
+
+    async def _express_control(self, event, facts, fallback, task_id):
+        from .host_expression import render_expression
+        finished = True
+        try:
+            try:
+                body = await render_expression(self, event=event, request_id="host-control:" + event.event_id,
+                    task_id=task_id, facts=facts, fallback=fallback)
+            except Exception:
+                logger.exception("Control expression failed")
+                body = fallback
+            self.controls.publish_expression(event, body)
+            with self.db.transaction() as conn:
+                self.outbox.retrigger(conn, event)
+        except asyncio.CancelledError:
+            finished = False
+            raise
+        except (PermissionError, LookupError, ValueError):
+            logger.warning("Control expression no longer authorized")
+        except Exception:
+            finished = False
+            logger.exception("Control expression publication failed")
+        finally:
+            self._control_expressions.pop(event.event_id, None)
+            if finished:
+                self.inbox.finish(event.event_id, expected_seq=event.ingest_seq)
 
     def pre_send(self, envelope, *, stream_cleanup=False):
         if stream_cleanup:
@@ -695,7 +732,9 @@ class Core:
             result = json.loads(completed["result_json"] or "{}") if completed else {}
             if (mutation.get("summary") == envelope.text and result.get("summary") == envelope.text
                     and result.get("agent_authored") is False):
-                return self.sessions.owner(event) is not None and self.allowed(event)
+                return (self.sessions.owner(event) is not None and self.allowed(event)
+                    and self.permissions.check(self.access(event), "task.execute",
+                        "conversation:" + event.conversation.key).allowed)
             delivery_context = ({key: value for key, value in committed_claim["context"].items() if key != "session_id"}
                 if envelope.fixed_publication and committed_claim.get("commit_publication") else {
                     **json.loads(source["context_json"]), "session_id": session_id})
@@ -751,6 +790,8 @@ class Core:
         pending = self.inbox.pending()
         dequeued_ns = time.monotonic_ns()
         for event in pending:
+            if event.event_id in self._control_expressions:
+                continue
             record_timing("ingress.processing_started", event_id=event.event_id, ingest_seq=event.ingest_seq,
                           dequeued_ns=dequeued_ns)
             if await self.process(event) is False:
@@ -838,6 +879,11 @@ class Core:
     async def stop(self):
         self.stopping = True
         await self.supervisor.stop()
+        pending = tuple(self._control_expressions.values())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await self.stream_delivery.stop()
         if self.scheduler:
             await self.scheduler.close()

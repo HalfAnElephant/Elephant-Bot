@@ -32,6 +32,17 @@ class RuntimeClient:
     def __init__(self, core, leader):
         self.core, self.service, self.leader = core, core.tasks, leader
         self.last_role = "worker"
+        self.expression_tasks = {}
+
+    async def _express_result(self, run_id):
+        for render in (self.core.knowledge.express_committed_mutation,
+                       getattr(self.leader, "express_scheduled_blocked", None)):
+            if render is None:
+                continue
+            try:
+                await render(run_id)
+            except Exception:
+                logger.exception("Host expression failed for run %s", run_id)
 
     async def post(self, path, *, json=None, content=None, headers=None, timeout=None):
         request = httpx.Request("POST", "http://runtime.local" + path)
@@ -166,9 +177,14 @@ class RuntimeClient:
         for key in ("worker_id", "run_id", "fencing_token", "payload"):
             values.pop(key, None)
         if role in {"leader", "skill_review"} and operation == "result":
-            return await self._disk(self.leader.complete, *identity, values["result"],
+            result = await self._disk(self.leader.complete, *identity, values["result"],
                 stopped=values.get("stopped", False), quiescent=values.get("quiescent", False),
                 process=values.get("process"), receipt=values.get("receipt"))
+            if role == "leader" and result.get("state") == "FINISHED" and body.run_id not in self.expression_tasks:
+                task = asyncio.create_task(self._express_result(body.run_id))
+                self.expression_tasks[body.run_id] = task
+                task.add_done_callback(lambda done, key=body.run_id: self.expression_tasks.pop(key, None))
+            return result
         if role in {"leader", "skill_review"} and operation == "qq-status":
             from elephant.jobs.rich_delivery import rich_status
             return rich_status(self.service, identity, body.payload,
@@ -296,6 +312,10 @@ class Scheduler:
 
     async def close(self):
         self.worker.begin_shutdown()
+        expressions = tuple(getattr(getattr(self, "client", None), "expression_tasks", {}).values())
+        for task in expressions:
+            task.cancel()
+        await asyncio.gather(*expressions, return_exceptions=True)
         if self.job_maintenance is not None:
             self.job_maintenance.cancel()
             await asyncio.gather(self.job_maintenance, return_exceptions=True)

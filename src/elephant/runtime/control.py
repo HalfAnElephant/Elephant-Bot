@@ -89,12 +89,50 @@ class TurnRouter:
         return self._route(event, TaskIntent("cancel" if command == "/cancel" else "status", argument.strip() or None))
 
     def route(self, event):
-        return self._route(event, task_intent(event.text))
+        return self._route(event, task_intent(event.text), natural=True)
 
     def replayable(self, event):
         with self.db.engine.connect() as conn:
             return conn.execute(select(audit_events.c.id).where(
                 audit_events.c.id == stable_id("host-task-control", event.event_id))).scalar_one_or_none() is not None
+
+    def claim_expression(self, event):
+        identifier = stable_id("host-task-control", event.event_id)
+        with self.db.transaction() as conn:
+            raw = conn.scalar(select(audit_events.c.detail).where(audit_events.c.id == identifier))
+            if raw is None:
+                return None
+            receipt = json.loads(raw)
+            if (not receipt.get("expression_facts") or receipt.get("expression_started")
+                    or receipt.get("selection") or conn.scalar(select(outbox.c.id).where(
+                        outbox.c.origin_kind == "chat", outbox.c.origin_id == event.event_id).limit(1))):
+                return None
+            receipt["expression_started"] = True
+            conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(
+                detail=json.dumps(receipt, ensure_ascii=False)))
+            return receipt["expression_facts"], receipt["response"], receipt.get("task_id") or event.event_id
+
+    def publish_expression(self, event, body):
+        identifier = stable_id("host-task-control", event.event_id)
+        with self.db.transaction() as conn:
+            raw = conn.scalar(select(audit_events.c.detail).where(audit_events.c.id == identifier))
+            if raw is None:
+                raise LookupError("task control receipt disappeared")
+            receipt = json.loads(raw)
+            if conn.scalar(select(outbox.c.id).where(outbox.c.origin_kind == "chat",
+                    outbox.c.origin_id == event.event_id).limit(1)):
+                return
+            self._authorize(conn, event, receipt)
+            if not self.core.allowed(event) or self.core.state(event.conversation.key)["mode"] == "silent":
+                return
+            if receipt.get("expression_state"):
+                current = conn.scalar(select(tasks.c.state).where(tasks.c.id == receipt["task_id"]))
+                if current != receipt["expression_state"]:
+                    return
+            receipt["response"] = body
+            conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(
+                detail=json.dumps(receipt, ensure_ascii=False)))
+            self.core.reply(event, body, conn=conn)
 
     def _visible(self, conn, reference, event):
         row = self.core.tasks._visible(conn, reference, self.core.access(event))
@@ -408,6 +446,10 @@ class TurnRouter:
                     return False
             try:
                 self._authorize(conn, event, receipt)
+                if receipt.get("expression_state") and receipt.get("task_id"):
+                    current = conn.scalar(select(tasks.c.state).where(tasks.c.id == receipt["task_id"]))
+                    if current != receipt["expression_state"]:
+                        return False
                 access = self.core.access(event)
                 source_context = {"scope": event.conversation.key, "principal": event.principal.key,
                     "workspace_id": receipt.get("source_workspace_id", "personal"),
@@ -422,6 +464,7 @@ class TurnRouter:
                             task = conn.execute(select(tasks).where(tasks.c.id == task_id)).mappings().one_or_none()
                             if (task is None or not graph.may_read(task_id, access)
                                     or "goal" in snapshot and task["goal"] != snapshot["goal"]
+                                    or "state" in snapshot and task["state"] != snapshot["state"]
                                     or not self.core.validate_context(access, snapshot["context"])
                                     or graph.event_scope_revision(conn, task, access) is None):
                                 return False
@@ -450,7 +493,7 @@ class TurnRouter:
             raise PermissionError("task control source was recalled")
         return source
 
-    def _route(self, event, intent):
+    def _route(self, event, intent, *, natural=False):
         identifier = stable_id("host-task-control", event.event_id)
         identity = {"actor": event.principal.key, "conversation": event.conversation.key,
                     "event_sha256": hashlib.sha256(event.model_dump_json().encode()).hexdigest()}
@@ -476,8 +519,36 @@ class TurnRouter:
                 source_tasks = {}
                 view = self.core.tasks.graph.status(conn, target, access=self.core.access(event), source_tasks=source_tasks)
                 receipt["response"] = self._status_response(view)
+                if natural:
+                    state = self._progress(view["state"])
+                    facts = [[state + "。", "目前" + state + "。"]]
+                    progress = view["progress"]
+                    action = progress["current_action"]
+                    if action and action != state:
+                        facts.append([action + "。", "当前步骤：" + action + "。"])
+                    counts = []
+                    for kind, unit in (("task", "项执行工作"), ("observation", "份资料核对记录"),
+                                       ("operation", "条已核实操作回执"), ("artifact", "份已登记文件")):
+                        count = progress.get("verified_counts", {}).get(kind)
+                        if count:
+                            counts.append(f"{count}{unit}")
+                    if counts:
+                        facts.append(["已有" + "、".join(counts) + "。", "目前已核实" + "、".join(counts) + "。"])
+                    if progress["last_effective_progress_at"]:
+                        facts.append(["最近有效进展时间 " + progress["last_effective_progress_at"] + "。",
+                            "最近一次有效进展在 " + progress["last_effective_progress_at"] + "。"])
+                    if view.get("goal"):
+                        facts.append(["目标：" + view["goal"][:300], "这项任务的目标是：" + view["goal"][:300]])
+                    summary = (view.get("result") or {}).get("summary")
+                    if summary:
+                        facts.append(["处理结果：" + summary[:600], "目前的处理结果是：" + summary[:600]])
+                    if all(len(variant) <= 500 for group in facts for variant in group):
+                        receipt["expression_facts"] = facts
                 if view["goal"] is not None or view["result"] is not None:
                     self._status_sources(conn, target, source_tasks)
+                if natural:
+                    source_tasks.setdefault(target["id"], {"context": json.loads(target["context_json"])})["state"] = target["state"]
+                    receipt["expression_state"] = target["state"]
                 receipt["delivery_basis"] = {"source_tasks": source_tasks}
                 conn.execute(update(audit_events).where(audit_events.c.id == identifier).values(
                     detail=json.dumps(receipt, ensure_ascii=False)))
@@ -496,11 +567,19 @@ class TurnRouter:
                     if action == "cancel":
                         result = self.core.tasks.cancel(receipt["reference"], access, conn=conn)
                         response = self._progress(result["state"]) + "。"
+                        if natural and result["state"] == "CANCEL_REQUESTED":
+                            receipt["expression_facts"] = [["正在停止。", "已发出停止请求，任务仍在停止中。"]]
+                            receipt["expression_state"] = result["state"]
+                        elif natural and result["state"] == "CANCELLED":
+                            receipt["expression_facts"] = [["已取消。", "任务已取消。"]]
+                            receipt["expression_state"] = result["state"]
                     else:
                         self.core.tasks.add_input(receipt["reference"], source, access, receipt["text"],
                             question_id=receipt["question_id"], selected_by=event if source is not event else None,
                             conn=conn)
                         response = "已收到补充内容。"
+                        if natural:
+                            receipt["expression_facts"] = [["已收到补充内容。", "补充内容已加入任务。"]]
             except (PermissionError, LookupError, ValueError):
                 response = ("未执行这次取消。请重新发送明确的取消指令。" if action == "cancel"
                             else "未接收这次补充。请重新发送内容，或引用当前需要回答的问题。")

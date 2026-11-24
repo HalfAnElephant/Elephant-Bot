@@ -1,17 +1,20 @@
-"""Host controls resolve exact task identity without model capacity or guessed answers."""
+"""Host controls resolve exact task identity before optional wording selection."""
+import asyncio
 import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from sqlalchemy import insert, select, update
 
 from elephant.app import create_app
-from elephant.config import OwnerConfig, QQOwnerBinding, Settings
-from elephant.domain import OutboundEnvelope
+from elephant.config import ModelConfig, OwnerConfig, QQOwnerBinding, Settings
+from elephant.domain import OutboundEnvelope, stable_id
 from elephant.permissions import PermissionRule
+from elephant.providers import ModelCapacity
 from elephant.storage.agent_schema import dialogue_inputs, leader_inbox
 from elephant.storage.schema import audit_events, outbox
 from elephant.storage.task_schema import inputs, model_requests, notifications, runs, tasks, waits
@@ -108,6 +111,127 @@ def task_state(runtime, identifier):
 def child_rows(runtime, root_id):
     with runtime.core.db.engine.connect() as conn:
         return [dict(row) for row in conn.execute(select(tasks).where(tasks.c.parent_task_id == root_id)).mappings()]
+
+
+async def test_host_control_expression_does_not_block_ingress_and_selects_one_body(control_runtime, monkeypatch):
+    r = control_runtime
+    r.root()
+    r.core.settings = r.core.settings.model_copy(update={"model": ModelConfig(
+        endpoint="https://api.deepseek.com/chat/completions", model="deepseek-chat")})
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+    r.core.scheduler = SimpleNamespace(capacity=ModelCapacity(total=2), close=AsyncMock())
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_post(url, **kwargs):
+        calls.append(kwargs["json"])
+        await release.wait()
+        count = len(json.loads(kwargs["json"]["messages"][1]["content"]))
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": json.dumps({"choices": [1] * count})}}]},
+            request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(r.core.model_client, "post", slow_post)
+    status, same_dialogue, other = (r.event("任务状态"), r.event("任务状态"),
+        r.event("/help", adapter="qq-other"))
+    for source in (status, same_dialogue, other):
+        r.core.inbox.accept(source)
+    await r.core.tick(dispatch=False)
+    assert status.event_id in r.core._control_expressions
+    assert r.response(status) is None
+    assert "/tasks" in r.response(other)
+    assert r.response(same_dialogue) is None
+    release.set()
+    await asyncio.gather(*r.core._control_expressions.values())
+    await r.core.tick(dispatch=False)
+    await asyncio.gather(*r.core._control_expressions.values())
+    assert "检查项目" in r.response(same_dialogue)
+    assert r.response(status).startswith("目前正在处理。")
+    assert "检查项目" in r.response(status)
+    with r.core.db.engine.connect() as conn:
+        rows = conn.execute(select(outbox).where(outbox.c.origin_id == status.event_id)).mappings().all()
+        receipt = json.loads(conn.execute(select(audit_events.c.detail).where(
+            audit_events.c.id == stable_id("host-task-control", status.event_id))).scalar_one())
+    assert len(rows) == 1 and len(calls) == 2
+    assert receipt["response"] == r.response(status)
+    assert r.core.pre_send(OutboundEnvelope.model_validate_json(rows[0]["envelope_json"]))
+
+
+async def test_interrupted_host_expression_replays_fallback_once(control_runtime, monkeypatch):
+    r = control_runtime
+    r.root()
+    r.core.settings = r.core.settings.model_copy(update={"model": ModelConfig(
+        endpoint="https://api.deepseek.com/chat/completions", model="deepseek-chat")})
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+    r.core.scheduler = SimpleNamespace(capacity=ModelCapacity(total=2), close=AsyncMock())
+    started = asyncio.Event()
+
+    async def hanging_post(_url, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(r.core.model_client, "post", hanging_post)
+    status = await r.receive(r.event("任务状态"))
+    task = r.core._control_expressions[status.event_id]
+    await started.wait()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert r.response(status) is None
+    await r.core.process(status)
+    assert r.response(status).startswith("正在处理。")
+    with r.core.db.engine.connect() as conn:
+        assert len(conn.execute(select(outbox).where(outbox.c.origin_id == status.event_id)).all()) == 1
+
+
+@pytest.mark.parametrize("change", ["silent", "revoked"])
+async def test_invalidated_host_expression_prevents_delivery(control_runtime, monkeypatch, change):
+    r = control_runtime
+    r.root()
+    r.core.settings = r.core.settings.model_copy(update={"model": ModelConfig(
+        endpoint="https://api.deepseek.com/chat/completions", model="deepseek-chat")})
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+    r.core.scheduler = SimpleNamespace(capacity=ModelCapacity(total=2), close=AsyncMock())
+    release = asyncio.Event()
+
+    async def slow_post(url, **_kwargs):
+        await release.wait()
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"choices":[0,0,0]}'}}]},
+            request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(r.core.model_client, "post", slow_post)
+    status = await r.receive(r.event("任务状态"))
+    if change == "silent":
+        r.core.save_state(status.conversation.key, mode="silent")
+    else:
+        monkeypatch.setattr(r.core, "allowed", lambda _event: False)
+    release.set()
+    await asyncio.gather(*r.core._control_expressions.values())
+    assert r.response(status) is None
+
+
+async def test_cancel_expression_drops_stale_stop_request(control_runtime, monkeypatch):
+    r = control_runtime
+    root = r.root()
+    assert r.core.tasks.claim("worker") is not None
+    r.core.settings = r.core.settings.model_copy(update={"model": ModelConfig(
+        endpoint="https://api.deepseek.com/chat/completions", model="deepseek-chat")})
+    monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+    r.core.scheduler = SimpleNamespace(capacity=ModelCapacity(total=2), close=AsyncMock())
+    release = asyncio.Event()
+
+    async def slow_post(url, **_kwargs):
+        await release.wait()
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"choices":[1]}'}}]},
+            request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(r.core.model_client, "post", slow_post)
+    cancel = await r.receive(r.event("取消这个任务"))
+    assert task_state(r, root["task_id"]) == "CANCEL_REQUESTED"
+    with r.core.db.transaction() as conn:
+        conn.execute(update(tasks).where(tasks.c.id == root["task_id"]).values(state="CANCELLED"))
+    release.set()
+    await asyncio.gather(*r.core._control_expressions.values())
+    assert r.response(cancel) is None
 
 
 async def test_full_slots_ambiguous_cancel_selects_then_exact_cancel_only_targets_one(control_runtime):
