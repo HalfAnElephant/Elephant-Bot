@@ -197,7 +197,7 @@ async def test_worker_status_archive_and_verified_report_share_the_current_leade
 
 @pytest.mark.parametrize("worker_status", ["blocked", "partial"])
 @pytest.mark.parametrize("takeover", ["none", "without_evidence", "verified"])
-async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtime, worker_status, takeover):
+async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtime, worker_status, takeover, monkeypatch):
     root = root_goal(runtime)
     with runtime.db.transaction() as conn:
         task = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
@@ -235,6 +235,11 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
             (final["run_id"], final["fencing_token"], "leader"),
             {"status": "completed", "has_direct_artifacts": True})
         assert preflight == {"accepted": True}
+    if worker_status == "blocked" and takeover == "without_evidence":
+        settings = runtime.leader.core.settings
+        runtime.leader.core.settings = settings.model_copy(update={"model": settings.model.model_copy(update={
+            "endpoint": "https://example.test/chat/completions", "model": "offline"})})
+        monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
     reported_status = "blocked" if worker_status == "blocked" and takeover == "none" else "completed"
     complete_with_refs(runtime, final, reported_status, **refs)
     complete_with_refs(runtime, final, reported_status, **refs)
@@ -242,9 +247,7 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
         row = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
         result = json.loads(row["result_json"])
         assert row["state"] == ("SUCCEEDED" if takeover == "verified" else "BLOCKED")
-        if reported_status == "blocked":
-            assert result["summary"] == "已核验执行结果"
-        elif takeover != "verified":
+        if takeover != "verified":
             assert ("1 项受阻" if worker_status == "blocked" else "1 项仅部分完成") in result["summary"]
             assert "尚无可核验的接管或返工结果" in result["summary"]
         assert result["artifacts"] == ([verified] if takeover == "verified" else [])
@@ -253,3 +256,17 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
         assert json.loads(worker_result)["artifacts"] == [artifact]
         delivery = conn.scalar(select(outbox.c.envelope_json))
         assert json.loads(delivery)["text"] == result["summary"]
+    if worker_status == "blocked" and takeover == "without_evidence":
+        calls = []
+        async def render(_core, **_kwargs):
+            calls.append(_kwargs)
+            return "目前有1 项受阻，任务还不能确认完成。\n目前仍缺少可核验的接管或返工结果。"
+        monkeypatch.setattr("elephant.runtime.host_expression.render_expression", render)
+        await runtime.leader.express_scheduled_blocked(final["run_id"])
+        await runtime.leader.express_scheduled_blocked(final["run_id"])
+        with runtime.db.engine.connect() as conn:
+            selected = json.loads(conn.scalar(select(tasks.c.result_json).where(tasks.c.id == root["task_id"])))
+            delivery = conn.execute(select(outbox)).mappings().one()
+        assert selected["summary"] == json.loads(delivery["envelope_json"])["text"]
+        assert delivery["next_attempt_at"] is None
+        assert len(calls) == 1 and selected["summary"].startswith("目前有1 项受阻")

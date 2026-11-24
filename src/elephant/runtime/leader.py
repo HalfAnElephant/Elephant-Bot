@@ -9,7 +9,8 @@ from pathlib import Path
 
 from sqlalchemy import func, insert, or_, select, update
 
-from elephant.domain import InboundEvent, MediaSegment, stable_id
+from elephant.credentials_env import credential_env
+from elephant.domain import InboundEvent, MediaSegment, OutboundEnvelope, stable_id
 from elephant.domain.agents import TaskInputSpec
 from elephant.domain.tasks import Artifact, TaskResult, validate_user_facing_text
 from elephant.harness.artifacts import copy_archived_artifact
@@ -23,6 +24,7 @@ from elephant.storage.task_schema import (
     inputs,
     model_requests,
     notification_question_ids,
+    notifications,
     observations,
     processes,
     runs,
@@ -563,6 +565,10 @@ class LeaderRuntime:
             reply_context=event.reply_context, requester=event.principal, ttl_seconds=86400,
             anchor_message_id=event.platform_message_id, purpose="result", allow_proactive=True,
             defer_reply=claim.get("public_answer_events", False))
+        model = self.core.settings.model
+        if model.endpoint and model.model and credential_env(model.api_key_env):
+            conn.execute(update(outbox).where(outbox.c.origin_kind == "chat", outbox.c.origin_id == origin_id,
+                outbox.c.state == "PENDING").values(next_attempt_at=(self.clock.now() + timedelta(seconds=3)).isoformat()))
         if claim.get("public_answer_events"):
             self.core.stream_delivery.hold_result(conn, run["id"], "chat", origin_id)
         conn.execute(update(dialogue_inputs).where(dialogue_inputs.c.id == source["id"]).values(
@@ -798,6 +804,7 @@ class LeaderRuntime:
                         self.service.graph.verify_final_result(conn, target, result, checks=("effect",))
                     child_results = {child["id"]: json.loads(child["result_json"] or "{}") for child in descendants}
                     scheduled_report = json.loads(target["context_json"]).get("schedule_fire_id")
+                    original_summary = result.summary
                     if scheduled_report:
                         result = self._verify_scheduled_completion(conn, claim, descendants, child_results, result)
                     artifacts = {item.id: item.model_dump(mode="json") for item in result.artifacts}
@@ -840,6 +847,13 @@ class LeaderRuntime:
                         defer_reply=claim.get("public_answer_events", False))
                     if claim.get("public_answer_events"):
                         self.core.stream_delivery.hold_result(conn, run_id, "task", notice["notification_id"])
+                    model = self.core.settings.model
+                    if (scheduled_report and result.status == "blocked" and result.summary != original_summary
+                            and model.endpoint and model.model and credential_env(model.api_key_env)):
+                        conn.execute(update(outbox).where(outbox.c.origin_kind == "task",
+                            outbox.c.origin_id == notice["notification_id"],
+                            outbox.c.state.in_(["PENDING", "STREAM_PENDING"])).values(
+                                next_attempt_at=(self.clock.now() + timedelta(seconds=3)).isoformat()))
             elif newer_result:
                 pass  # The queued Worker event wakes a new turn with the current snapshot.
             elif claim["purpose"] in {"progress", "question", "attention"} and result.agent_authored:
@@ -909,8 +923,6 @@ class LeaderRuntime:
         })
         if not incomplete:
             return result
-        if result.status == "blocked":
-            return result
         if claim.get("takeover"):
             root_id, run_id = claim["target_root_task_id"], claim["run_id"]
             child_artifacts = {item["id"] for child in child_results.values() for item in child.get("artifacts", [])}
@@ -929,6 +941,67 @@ class LeaderRuntime:
             "status": "blocked",
             "summary": f"任务未能确认完成：{gaps or '子任务尚未成功'}；尚无可核验的接管或返工结果。",
         })
+
+    async def express_scheduled_blocked(self, run_id):
+        """Choose wording only after the host has settled a scheduled result."""
+        with self.db.engine.connect() as conn:
+            run = conn.execute(select(runs).where(runs.c.id == run_id, runs.c.state == "FINISHED")).mappings().first()
+            if not run:
+                return
+            claim = json.loads(run["request_json"])
+            root_id = claim.get("target_root_task_id")
+            if not root_id:
+                return
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id, tasks.c.state == "BLOCKED")).mappings().first()
+            if (not root or root["goal_revision"] != run["basis_goal_revision"]
+                    or not json.loads(root["context_json"]).get("schedule_fire_id")):
+                return
+            notice = conn.execute(select(notifications).where(notifications.c.run_id == run_id,
+                notifications.c.task_id == root_id, notifications.c.purpose == "result")).mappings().first()
+            if not notice:
+                return
+            rows = conn.execute(select(outbox).where(outbox.c.origin_kind == "task",
+                outbox.c.origin_id == notice["id"], outbox.c.state.in_(["PENDING", "STREAM_PENDING"]),
+                outbox.c.next_attempt_at.is_not(None))).mappings().all()
+            if len(rows) != 1:
+                return
+            fallback = notice["body"]
+            prefix, separator, rest = fallback.partition("：")
+            gaps, divider, tail = rest.partition("；")
+            if not separator or not divider or prefix != "任务未能确认完成" or not gaps or not tail:
+                return
+            event = InboundEvent.model_validate_json(root["event_json"])
+            if not self.core.allowed(event):
+                return
+        from .host_expression import render_expression
+        candidate = await render_expression(self.core, event=event, request_id="scheduled-expression:" + run_id,
+            task_id=root_id, facts=[
+                [f"任务未能确认完成：{gaps}。", f"目前有{gaps}，任务还不能确认完成。"],
+                [tail, "目前仍缺少可核验的接管或返工结果。"],
+            ], fallback=fallback)
+        with self.db.transaction() as conn:
+            root = conn.execute(select(tasks).where(tasks.c.id == root_id, tasks.c.state == "BLOCKED")).mappings().first()
+            notice = conn.execute(select(notifications).where(notifications.c.id == notice["id"],
+                notifications.c.body == fallback)).mappings().first()
+            rows = conn.execute(select(outbox).where(outbox.c.origin_kind == "task",
+                outbox.c.origin_id == notice["id"], outbox.c.state.in_(["PENDING", "STREAM_PENDING"]),
+                outbox.c.next_attempt_at > self.clock.now().isoformat())).mappings().all() if notice else []
+            if (not root or root["goal_revision"] != run["basis_goal_revision"]
+                    or not notice or len(rows) != 1 or not self.core.allowed(event)):
+                return
+            self.service.permissions.require(self.service._access_for(root), "notification.send",
+                "conversation:" + root["conversation"])
+            result = json.loads(root["result_json"])
+            if result.get("summary") != fallback:
+                return
+            envelope = OutboundEnvelope.model_validate_json(rows[0]["envelope_json"])
+            if envelope.text != fallback:
+                return
+            result["summary"] = candidate
+            conn.execute(update(tasks).where(tasks.c.id == root_id).values(result_json=json.dumps(result, ensure_ascii=False)))
+            conn.execute(update(notifications).where(notifications.c.id == notice["id"]).values(body=candidate))
+            conn.execute(update(outbox).where(outbox.c.id == rows[0]["id"]).values(
+                envelope_json=envelope.model_copy(update={"text": candidate}).model_dump_json(), next_attempt_at=None))
 
     def _reconcile_stopped_tools(self, run, claim, process, proof):
         """Reconcile native calls only after the caller has verified exclusive stop."""

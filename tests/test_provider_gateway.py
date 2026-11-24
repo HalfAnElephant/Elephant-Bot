@@ -388,6 +388,7 @@ async def test_outcome_references_are_validated_before_acceptance(gateway):
 async def test_scheduled_outcome_preflight_allows_agent_to_correct_final_prose(gateway):
     instance, core, _claim = gateway
     instance.claim.update(role="leader", purpose="attention")
+    instance.claim["context"]["schedule_fire_id"] = "fire"
     instance.artifacts.append("outputs/report.md")
     validations = []
 

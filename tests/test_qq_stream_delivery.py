@@ -15,6 +15,7 @@ from elephant.jobs.streaming import StreamDelivery
 from elephant.outbox.service import Outbox
 from elephant.storage.schema import outbox, reply_counters
 from elephant.storage.stream_schema import stream_messages, stream_runs
+from elephant.storage.task_schema import runs
 
 
 @pytest.fixture
@@ -81,6 +82,30 @@ async def test_live_prefix_then_final_is_delivered_once(stream_setup):
     assert s.calls[-1]["stream_msg_id"] == "stream-1"
     await s.bridge.dispatch_once()
     assert len(s.calls) == 2
+    await s.client.aclose()
+
+
+async def test_expression_hold_keeps_fallback_for_outbox_selection(stream_setup):
+    s = stream_setup
+    append(s, 1, "public_answer_end", "Agent draft")
+    append(s, 2, "public_answer_final", "Agent draft")
+    submit(s, "Agent draft")
+    with s.core.db.transaction() as conn:
+        conn.execute(update(outbox).values(next_attempt_at=(s.core.clock.now() + timedelta(seconds=3)).isoformat()))
+    await s.bridge.dispatch_once()
+    assert states(s) == ["PENDING"]
+    await s.client.aclose()
+
+
+async def test_public_answer_after_memory_rotation_is_not_streamed(stream_setup):
+    s = stream_setup
+    append(s, 1, "public_answer_delta", "retired context text")
+    with s.core.db.transaction() as conn:
+        conn.execute(update(runs).where(runs.c.id == s.claim["run_id"]).values(
+            role="leader", request_json=json.dumps({"memory_mutation": {"completed": True},
+                "event_json": s.event.model_dump_json()})))
+    await s.bridge.dispatch_once()
+    assert not s.calls
     await s.client.aclose()
 
 

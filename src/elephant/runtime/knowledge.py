@@ -19,7 +19,7 @@ from elephant.contracts.memory import (
     SourceBatch,
 )
 from elephant.dialogue.planner import plan_turn
-from elephant.domain import InboundEvent, Surface, stable_id
+from elephant.domain import InboundEvent, OutboundEnvelope, Surface, stable_id
 from elephant.domain.execution import TaskGoal, TurnInput
 from elephant.observability.timing import measure
 from elephant.storage.action_schema import operations
@@ -490,6 +490,61 @@ class KnowledgeRuntime:
                     tasks.c.kind == "goal", tasks.c.state.not_in(TERMINAL | {"CANCEL_REQUESTED"}))).mappings():
                 if json.loads(root["context_json"]).get("memory_scope") == scope.model_dump():
                     self.invalidate_root(conn, root, scope, receipt.operation_id, receipt.affected_source_ids, old_session_ids)
+
+    async def express_committed_mutation(self, run_id):
+        """Choose wording after settlement; the persisted fallback survives a crash."""
+        with self.core.db.engine.connect() as conn:
+            run = conn.execute(select(runs).where(runs.c.id == run_id, runs.c.state == "FINISHED")).mappings().first()
+            if not run:
+                return
+            claim = json.loads(run["request_json"])
+            mutation = claim.get("memory_mutation")
+            if not mutation:
+                return
+            origin_id = "turn:" + claim["session_id"] + ":" + claim["source_ids"][0]
+            rows = conn.execute(select(outbox).where(outbox.c.origin_kind == "chat",
+                outbox.c.origin_id == origin_id, outbox.c.state.in_(["PENDING", "STREAM_PENDING"]),
+                outbox.c.next_attempt_at > self.core.clock.now().isoformat())).mappings().all()
+            if len(rows) != 1:
+                return
+            fallback = mutation["summary"]
+            event = InboundEvent.model_validate_json(claim["event_json"])
+            if not self.core.allowed(event) or self.core.sessions.owner(event) is None:
+                return
+        facts = ([
+            ["记忆更改已完成。", "这次记忆更改已经完成。"],
+        ] if mutation["completed"] else [
+            ["旧内容已停止召回。", "已停止召回旧内容。"],
+            ["后台清理尚未完成。", "后台仍在清理。"],
+        ])
+        from .host_expression import render_expression
+        candidate = await render_expression(self.core, event=event, request_id="memory-expression:" + run_id,
+            task_id=run["task_id"], facts=facts, fallback=fallback)
+        with self.core.db.transaction() as conn:
+            run = conn.execute(select(runs).where(runs.c.id == run_id, runs.c.state == "FINISHED")).mappings().first()
+            if not run:
+                return
+            claim = json.loads(run["request_json"])
+            mutation = claim.get("memory_mutation")
+            if not mutation or mutation["summary"] != fallback or not self.core.allowed(event) or self.core.sessions.owner(event) is None:
+                return
+            rows = conn.execute(select(outbox).where(outbox.c.origin_kind == "chat",
+                outbox.c.origin_id == origin_id, outbox.c.state.in_(["PENDING", "STREAM_PENDING"]),
+                outbox.c.next_attempt_at > self.core.clock.now().isoformat())).mappings().all()
+            if len(rows) != 1:
+                return
+            row = rows[0]
+            envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
+            if envelope.text != fallback:
+                return
+            mutation["summary"] = candidate
+            claim["memory_mutation"] = mutation
+            result = json.loads(run["result_json"])
+            result["summary"] = candidate
+            conn.execute(update(runs).where(runs.c.id == run_id).values(
+                request_json=json.dumps(claim, ensure_ascii=False), result_json=json.dumps(result, ensure_ascii=False)))
+            conn.execute(update(outbox).where(outbox.c.id == row["id"]).values(
+                envelope_json=envelope.model_copy(update={"text": candidate}).model_dump_json(), next_attempt_at=None))
 
     def mutation_request(self, scope, claim, call_id, operation, args, session_file, *, projection_version=None):
         event = InboundEvent.model_validate_json(claim["event_json"])

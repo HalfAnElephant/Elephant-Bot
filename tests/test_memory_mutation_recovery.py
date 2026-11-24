@@ -10,6 +10,7 @@ from test_agent_runtime import runtime as agent_runtime
 from test_leader_dispatch_recovery import native_pending_submit
 
 from elephant.adapters.pi.sessions import unfinished_tools
+from elephant.config import ModelConfig
 from elephant.contracts.memory import MutationReceipt
 from elephant.domain import TextSegment
 from elephant.storage.agent_schema import dialogue_inputs, dialogues
@@ -20,7 +21,8 @@ runtime = agent_runtime
 
 
 @pytest.mark.parametrize("completed", [False, True])
-async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(runtime, monkeypatch, completed):
+@pytest.mark.parametrize("expression", ["none", "selected", "fallback"])
+async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(runtime, monkeypatch, completed, expression):
     knowledge, scope = memory_runtime(runtime)
     runtime.service.max_active = 1
     runtime.sessions.enqueue(runtime.event, runtime.access, context={"memory_scope": scope.model_dump(),
@@ -36,6 +38,10 @@ async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(r
     receipt = MutationReceipt(operation_id="forget-original", state="APPLIED" if completed else "PENDING",
         completed=completed, memory_epoch=1, affected_source_ids=("forgotten-source",))
     knowledge.rotate(scope, (old["run_id"], old["fencing_token"], "leader"), receipt)
+    if expression != "none":
+        monkeypatch.setenv("ELEPHANT_MODEL_KEY", "test-key")
+        knowledge.core.settings = knowledge.core.settings.model_copy(update={"model": ModelConfig(
+            endpoint="https://api.deepseek.com/chat/completions", model="test")})
     with runtime.db.engine.connect() as conn:
         persisted = json.loads(conn.execute(select(runs.c.request_json).where(runs.c.id == old["run_id"])).scalar_one())
         replacement = conn.execute(select(dialogues.c.session_id)).scalar_one()
@@ -62,6 +68,17 @@ async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(r
     runtime.service.stop_verifier = lambda *_: True
     assert runtime.leader.recover_attempt(old["run_id"])["state"] == "FINISHED"
     assert runtime.leader.recover_attempt(old["run_id"])["state"] == "FINISHED"
+    if expression != "none":
+        selected = ("这次记忆更改已经完成。" if completed
+                    else "已停止召回旧内容。\n后台仍在清理。")
+        if expression == "fallback":
+            selected = persisted["memory_mutation"]["summary"]
+        from unittest.mock import AsyncMock
+        render = AsyncMock(return_value=selected)
+        monkeypatch.setattr("elephant.runtime.host_expression.render_expression", render)
+        await knowledge.express_committed_mutation(old["run_id"])
+        await knowledge.express_committed_mutation(old["run_id"])
+        render.assert_awaited_once()
     assert path.read_bytes() == native_before and len(unfinished_tools(path)) == 1
     with runtime.db.engine.connect() as conn:
         original = conn.execute(select(runs).where(runs.c.id == old["run_id"])).mappings().one()
@@ -72,7 +89,7 @@ async def test_committed_memory_marker_recovery_finishes_once_after_stop_proof(r
         assert len(confirmations) == 1
         result = json.loads(original["result_json"])
         assert result["agent_authored"] is False
-        assert result["summary"] == persisted["memory_mutation"]["summary"]
+        assert result["summary"] == (selected if expression != "none" else persisted["memory_mutation"]["summary"])
         assert json.loads(confirmations[0]["envelope_json"])["text"] == result["summary"]
         assert "OLD_PRIVATE_MEMORY" not in confirmations[0]["envelope_json"]
         assert conn.execute(select(dialogues.c.session_id)).scalar_one() == replacement

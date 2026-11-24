@@ -207,6 +207,8 @@ class StreamDelivery:
             return  # Do not allocate scarce reply budget for an empty/tool-only message.
         with self.db.engine.connect() as c:
             run = c.execute(select(runs).where(runs.c.id == gate["run_id"])).mappings().one()
+            if run["role"] == "leader" and json.loads(run["request_json"]).get("memory_mutation"):
+                return
             event, _task = self._source(c, run)
         config = self.core.adapters[event.conversation.adapter_instance_id].config
         if not config.streaming_enabled:
@@ -277,7 +279,10 @@ class StreamDelivery:
                 c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(state="RECONCILIATION"))
                 self._drop_live(run_id)
                 return
-            final = c.execute(select(stream_messages).where(stream_messages.c.run_id == run_id,
+            held_expression = c.scalar(select(outbox.c.id).where(pending,
+                outbox.c.state == "STREAM_PENDING", outbox.c.next_attempt_at.is_not(None)).limit(1))
+            memory_mutation = run["role"] == "leader" and json.loads(run["request_json"]).get("memory_mutation")
+            final = None if memory_mutation or held_expression else c.execute(select(stream_messages).where(stream_messages.c.run_id == run_id,
                 stream_messages.c.final_marker == 1, stream_messages.c.state == "FINISHED",
                 stream_messages.c.sent_text == result["summary"])).mappings().first()
             if final:

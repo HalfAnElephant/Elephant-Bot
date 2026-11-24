@@ -1115,7 +1115,8 @@ class RunGateway:
                             raise ValueError("Final reports reuse verified child artifacts automatically; do not export child paths from the Leader workspace.")
                         result = self.result("Outcome reference validation", outcome=args)
                         if (args.get("observation_refs") or args.get("effect_refs") or
-                                self.claim.get("role") == "leader" and self.claim.get("purpose") in {"finalize", "attention"}):
+                                self.claim.get("role") == "leader" and self.claim.get("purpose") in {"finalize", "attention"}
+                                and self.claim.get("context", {}).get("schedule_fire_id")):
                             check_payload = {"status": result.status,
                                 "observation_refs": list(result.observation_refs), "effect_refs": list(result.effect_refs)}
                             if self.claim.get("role") == "leader":
