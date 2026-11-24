@@ -701,7 +701,7 @@ async def test_locked_leader_sees_elapsed_time_and_notification_acceptance(compa
         for message in request["messages"] if message["role"] == "tool") for request in requests[1:])
 
 
-@pytest.mark.parametrize("scenario", ["message", "quiet", "notification_denied", "business_failure", "worker", "stale_notice", "string_null"])
+@pytest.mark.parametrize("scenario", ["message", "quiet", "notification_denied", "business_failure", "worker", "stale_notice", "string_null", "streamed_preamble", "unstreamed_preamble"])
 async def test_locked_pi_business_call_keeps_explicit_communication_separate(compaction_session, scenario):
     from elephant.capabilities.types import Action, Capability
 
@@ -731,7 +731,8 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
     gateway.registry.register(Capability("fixture.read", "Read fixture"), read, lambda a, c: Action("fixture.read", ()))
     gateway.revoke()
     gateway.bind({**state.claim, "role": "worker" if scenario == "worker" else "leader", "purpose": "user",
-        "event_json": json.dumps({"reply_context": {"max_replies": 4}})})
+        "event_json": json.dumps({"reply_context": {"max_replies": 4}}),
+        "public_answer_events": scenario == "streamed_preamble"})
     arguments = {"name": "fixture.read", "arguments": {"value": "original"}}
     if scenario != "worker":
         arguments["user_message"] = None if scenario == "quiet" else "收到，我来核实一下～"
@@ -742,10 +743,13 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
         requests.append(json.loads(request.content))
         message = {"role": "assistant", "content": "查询受阻。" if scenario in {"business_failure", "stale_notice"} else "核实好了。"}
         if len(requests) == 1:
-            message = {"role": "assistant", "content": None, "tool_calls": [{"id": "explicit-choice", "type": "function",
+            message = {"role": "assistant", "content": "收到，我来核实一下。" if scenario.endswith("preamble") else None,
+                "tool_calls": [{"id": "explicit-choice", "type": "function",
                 "function": {"name": "capability_invoke", "arguments": json.dumps(arguments)}}]}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
     gateway.provider.transport = httpx.MockTransport(upstream)
+    public = []
+    state.runner.public_event_sink = public.append if scenario == "streamed_preamble" else None
     result = await state.runner.run("核实这个数据", keep_alive=True)
     assert result.summary == ("查询受阻。" if scenario in {"business_failure", "stale_notice"} else "核实好了。")
     schema = next(tool["function"]["parameters"] for tool in requests[0]["tools"] if tool["function"]["name"] == "capability_invoke")
@@ -753,8 +757,11 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
         assert "user_message" not in schema["properties"]
     else:
         assert "user_message" in schema["required"]
-    expected_order = ["read"] if scenario in {"quiet", "worker", "string_null"} else ["notice", "read"]
+    expected_order = ["read"] if scenario in {"quiet", "worker", "string_null", "streamed_preamble"} else ["notice", "read"]
     assert order == (["notice"] if scenario == "stale_notice" else expected_order)
+    if scenario == "streamed_preamble":
+        assert any(event.get("type") == "public_answer_end" and event.get("text") == "收到，我来核实一下。"
+            for event in public)
     messages = (await state.runner.rpc("get_messages"))["messages"]
     tool_result = next(message for message in messages if message.get("role") == "toolResult")
     assert tool_result["isError"] is (scenario in {"business_failure", "stale_notice"})
@@ -762,8 +769,48 @@ async def test_locked_pi_business_call_keeps_explicit_communication_separate(com
         assert '"accepted":true' in "".join(part.get("text", "") for part in tool_result["content"])
     elif scenario not in {"worker", "stale_notice"}:
         feedback = json.loads(tool_result["content"][1]["text"])["host_interaction"]
-        assert feedback["progress_notice_accepted"] is (scenario == "message")
-        assert feedback["reply_messages_remaining"] == (3 if scenario == "message" else 4)
+        assert feedback["progress_notice_accepted"] is (scenario in {"message", "streamed_preamble", "unstreamed_preamble"})
+        assert feedback["reply_messages_remaining"] == (3 if scenario in {"message", "unstreamed_preamble"} else 4)
+        if scenario == "streamed_preamble":
+            assert feedback["user_message_result"] == {"accepted": True, "already_spoken": True}
+
+
+async def test_locked_pi_does_not_send_task_notify_after_streamed_tool_preamble(compaction_session):
+    state = compaction_session
+    gateway = state.gateway
+    original_call = gateway.call
+    notices = []
+
+    async def host(operation, payload):
+        if operation == "notify":
+            notices.append(payload)
+            return {"accepted": True}
+        return await original_call(operation, payload)
+
+    gateway.call = host
+    gateway.revoke()
+    gateway.bind({**state.claim, "role": "leader", "purpose": "user", "public_answer_events": True})
+    requests = []
+
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        message = {"role": "assistant", "content": "处理结果。"}
+        if len(requests) == 1:
+            message = {"role": "assistant", "content": "我开始检查。", "tool_calls": [{
+                "id": "explicit-notice", "type": "function", "function": {"name": "task_notify",
+                    "arguments": json.dumps({"text": "我开始检查～"})}}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=completion_sse(message))
+
+    gateway.provider.transport = httpx.MockTransport(upstream)
+    public = []
+    state.runner.public_event_sink = public.append
+    result = await state.runner.run("检查这个任务", keep_alive=True)
+    assert result.summary == "处理结果。" and not notices
+    assert any(event.get("type") == "public_answer_end" and event.get("text") == "我开始检查。"
+        for event in public)
+    messages = (await state.runner.rpc("get_messages"))["messages"]
+    tool_result = next(message for message in messages if message.get("role") == "toolResult")
+    assert '"already_spoken":true' in tool_result["content"][0]["text"]
 
 
 async def test_locked_leader_requires_new_communication_choice_with_legacy_history(compaction_session):

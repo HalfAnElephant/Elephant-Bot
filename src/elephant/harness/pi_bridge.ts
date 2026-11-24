@@ -281,6 +281,7 @@ export function createBridge(options: {compactor?: ContextCompactor} = {}) {
 return function (pi: ExtensionAPI) {
   const base = process.env.ELEPHANT_GATEWAY_URL!;
   let binding: any = null;
+  const spokenToolCalls = new Set<string>();
   let waiting = false;
   let turnStartedAt = 0;
   let progressNoticeAccepted = false;
@@ -437,6 +438,7 @@ return function (pi: ExtensionAPI) {
       return ids.length ? persistInput(texts.join("\n\n"), ids) : {action: "handled"};
     }
     binding = {...current, binding_id: envelope.binding_id};
+    spokenToolCalls.clear();
     if (binding.context_boundary && !ctx.sessionManager.getBranch().some((entry: any) =>
         entry.type === "custom" && entry.customType === "elephant-context-clear" &&
         entry.data.boundary === binding.context_boundary)) {
@@ -551,7 +553,13 @@ return function (pi: ExtensionAPI) {
   });
   pi.on("message_end", (event) => {
     const message = event.message;
-    if (message.role === "assistant") modelFailed = message.stopReason === "error" || !!message.errorMessage;
+    if (message.role === "assistant") {
+      modelFailed = message.stopReason === "error" || !!message.errorMessage;
+      if (binding?.role === "leader" && binding.public_answer_events && !modelFailed &&
+          (message.content || []).some((part: any) => part.type === "text" && part.text?.trim())) {
+        for (const part of message.content || []) if (part.type === "toolCall") spokenToolCalls.add(part.id);
+      }
+    }
   });
   pi.on("agent_settled", async (event, ctx) => {
     if (!binding?.session_id || (!waiting && (compactionFailed || modelFailed || event.aborted))) return;
@@ -727,13 +735,17 @@ return function (pi: ExtensionAPI) {
       async execute(id, parameters, signal) {
         if (!binding) throw new Error("No active run binding");
         const current = binding;
+        const preambleSpoken = spokenToolCalls.delete(id);
         let argumentsForHost = parameters;
         let messageResult: any = null;
         if (messageTools.has(definition.name)) {
           const {user_message: requestedMessage, ...businessArguments} = parameters;
           const user_message = requestedMessage === "null" ? null : requestedMessage;
           argumentsForHost = businessArguments;
-          if (user_message != null) {
+          if (user_message != null && preambleSpoken) {
+            messageResult = {accepted: true, already_spoken: true};
+            progressNoticeAccepted = true;
+          } else if (user_message != null) {
             if (current.role !== "leader") throw new Error("User-facing messages require the Leader role");
             try {
               const noticeId = createHash("sha256").update("user-message:" + id).digest("hex");
@@ -750,7 +762,9 @@ return function (pi: ExtensionAPI) {
         }
         let result: any;
         try {
-          result = await request("/tools/" + definition.name, {call_id: id, arguments: argumentsForHost}, current.tool_token, signal);
+          result = definition.name === "task_notify" && preambleSpoken
+            ? {accepted: true, already_spoken: true}
+            : await request("/tools/" + definition.name, {call_id: id, arguments: argumentsForHost}, current.tool_token, signal);
         } catch (error) {
           if (messageResult) throw new Error(String(error) + "\n" + JSON.stringify({user_message_result: messageResult}));
           throw error;
