@@ -442,6 +442,8 @@ async def test_missing_root_output_settles_blocked_instead_of_retrying(tmp_path,
             assert result["status"] == "blocked" and result["agent_authored"] is False
             assert result["summary"] == "任务未完成：有1个要求的输出文件未生成或未能核验。"
             assert "missing requested output: outputs/report.md" in result["limitations"]
+            assert json.loads(conn.execute(select(runs.c.result_json).where(
+                runs.c.id == finalizer["run_id"])).scalar_one()) == result
     finally:
         await core.stop()
         core.db.close()

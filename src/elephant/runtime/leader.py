@@ -838,6 +838,7 @@ class LeaderRuntime:
                             result = result.model_copy(update={"status": "blocked", "summary": reason,
                                 "agent_authored": False, "limitations": (*result.limitations,
                                     *("missing requested output: " + path for path in missing))})
+                            submitted_result = result.model_dump_json()
                         else:
                             self.service.graph.verify_final_result(conn, target, result)
                     state = {"completed": "SUCCEEDED", "partial": "PARTIAL", "blocked": "BLOCKED", "failed": "FAILED"}.get(result.status)
