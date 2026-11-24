@@ -440,6 +440,20 @@ def test_explicit_empty_outcome_references_stay_empty(gateway):
     assert result.observation_refs == result.effect_refs == ()
 
 
+@pytest.mark.parametrize(("status", "expected"), [
+    ("waiting_input", "等待用户补充"),
+    ("waiting_children", "等待子任务"),
+    ("waiting_external", "等待外部结果"),
+])
+def test_empty_wait_checkpoint_has_user_facing_fallback(gateway, status, expected):
+    instance, _core, _claim = gateway
+    instance.waiting, instance.wait_kind = True, status
+    result = instance.result("")
+    assert result.status == status
+    assert expected in result.summary
+    assert "Waiting checkpoint persisted" not in result.summary
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_operation_notice_gates_tools_and_resets_on_rebind(gateway, enabled):
     instance, core, claim = gateway

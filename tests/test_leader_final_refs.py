@@ -231,6 +231,9 @@ async def test_incomplete_worker_artifacts_cannot_complete_scheduled_root(runtim
         row = conn.execute(select(tasks).where(tasks.c.id == root["task_id"])).mappings().one()
         result = json.loads(row["result_json"])
         assert row["state"] == ("SUCCEEDED" if takeover == "verified" else "BLOCKED")
+        if takeover != "verified":
+            assert ("1 项受阻" if worker_status == "blocked" else "1 项仅部分完成") in result["summary"]
+            assert "尚无可核验的接管或返工结果" in result["summary"]
         assert result["artifacts"] == ([verified] if takeover == "verified" else [])
         assert result["effect_refs"] == []
         worker_result = conn.scalar(select(tasks.c.result_json).where(tasks.c.id == worker["task_id"]))

@@ -752,7 +752,12 @@ class RunGateway:
         elif status == "completed" and any(
                 value in {"unknown", "partial", "dispatched", "prepared"} for value in self.effects.values()):
             status = "partial"
-        return TaskResult(status=status, summary=summary[:10000] or "Waiting checkpoint persisted.",
+        fallback = {
+            "waiting_input": "已保存等待用户补充的状态。",
+            "waiting_children": "已保存等待子任务的状态。",
+            "waiting_external": "已保存等待外部结果的状态。",
+        }.get(status, "本轮没有可确认的回复。")
+        return TaskResult(status=status, summary=summary[:10000] or fallback,
             observation_refs=tuple(outcome.get("observation_refs", self.observations)),
             effect_refs=tuple(outcome.get("effect_refs", [identity for identity, state in self.effects.items()
                 if state == "verified"])),

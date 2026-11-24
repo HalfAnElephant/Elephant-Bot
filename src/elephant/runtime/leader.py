@@ -918,9 +918,14 @@ class LeaderRuntime:
                     select(operations.c.id).where(operations.c.task_id == root_id, operations.c.run_id == run_id,
                         operations.c.state == "VERIFIED", operations.c.id.in_(result.effect_refs)).limit(1)):
                 return result
+        states = {state: sum(child["state"] == state for child in incomplete)
+                  for state in ("FAILED", "PARTIAL", "BLOCKED", "CANCELLED", "EXPIRED")}
+        labels = {"FAILED": "失败", "PARTIAL": "仅部分完成", "BLOCKED": "受阻",
+                  "CANCELLED": "已取消", "EXPIRED": "已过期"}
+        gaps = "、".join(f"{count} 项{labels[state]}" for state, count in states.items() if count)
         return result.model_copy(update={
             "status": "blocked",
-            "summary": "任务未能确认完成。仍有子任务未完成，且缺少可核验的接管或返工结果。",
+            "summary": f"任务未能确认完成：{gaps or '子任务尚未成功'}；尚无可核验的接管或返工结果。",
         })
 
     def _reconcile_stopped_tools(self, run, claim, process, proof):
