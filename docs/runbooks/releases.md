@@ -7,7 +7,6 @@ Pull request、合并队列和 `main` 推送运行 `CI`，也可从 Actions 手�
 以及 Python/npm 锁文件。检查包含以下范围。
 
 - Python 全量回归，包含锁定 Pi 与本地模拟模型的协议测试。缺少 Pi 或出现跳过用例时检查失败。
-- `DeepSeek dialogue` 使用官方 `deepseek-flash` API 检查真实模型的对话决策、主动确认、持久会话复用与任务派发。
 - 控制台 Node 测试、Ruff 和配置 schema 一致性。
 - wheel、sdist 与完整源码归档构建。
 - 在归档解压目录中安装生产依赖和 wheel，执行配置校验、普通与脱敏诊断、HTTP/静态资源检查。用合成管理员令牌提交任务，重新启动应用后检查任务仍可查询且重复提交不新增任务；这一步不执行模型。
@@ -32,16 +31,14 @@ Dependabot 每周分别检查 uv、npm 和 Actions 更新，更新通过 PR 接�
 | Ubuntu 24.04，systemd | 实际专用账号和服务单元、运行中重装拒绝、停机重装保留原文件、实际 Pi 首任务和重启读回 | `Ubuntu systemd installation`，`installation-systemd-results`。临时配置仅用于空的托管 VM，脚本最后停止服务并恢复原文件。 |
 | macOS 15，Apple Silicon | 私有 Pi 安装及已有 Pi 复用两条入口，实际 Pi 首任务、重启、备份和隔离恢复 | `macOS installation (Apple Silicon)`，`installation-macos-15-results`。使用本机原生依赖。 |
 | macOS 15，Intel | 同上，并从锁定源包构建 Intel 音频依赖 | `macOS installation (Intel)`，`installation-macos-15-intel-results`。 |
-| 官方 DeepSeek API | 合成对话及工具链路、文件/语音 API | `DeepSeek dialogue`，`dialogue-live-results`。QQ 下行和邮箱协议使用受控夹具。 |
 
 `smoke_guided_install.py` 使用向导共享默认配置后启动公开 CLI 与 HTTP 入口。交互菜单由向导测试覆盖，实际扫码和手机端收件由操作者完成。Debian、Fedora、Arch、其他 Linux 及 macOS 登录项的目标环境验收，应记录具体版本、SHA、安装方式和结果。QQ、邮箱与远端 OpenViking 的真实服务状态各自记录。
 
-### 真实模型对话回归
+### 真实模型对话回归（手动）
 
-仓库 Actions Secret `DEEPSEEK_API_KEY` 提供测试凭据，调用地址为
-`https://api.deepseek.com/chat/completions`。同仓 PR、`main` 推送、合并队列、
-手动 CI 和发布验收会运行该检查并使用 API 额度。外部 fork PR 与 Dependabot
-缺少此凭据，继续执行其余检查。
+CI 和发布验收不调用官方 DeepSeek API。需要验证真实模型链路时，操作者自行提供
+`DEEPSEEK_API_KEY` 并手动运行以下脚本；调用地址为
+`https://api.deepseek.com/chat/completions`。这些结果不属于 CI 通过证据。
 
 `uv run python evals/dialogue_live.py` 通过真实 Core、Pi 和 QQ 协议链路运行合成对话。
 测试请求使用 `reasoning_effort=none` 关闭思考模式。
@@ -56,9 +53,9 @@ iCloud 普通参数配置、修改登录名、核对缺少凭据时的连接状�
 真实邮箱服务器兼容性与收发须按服务商单独验收。
 网页样本验收到派发与确认边界。
 
-`dialogue-live-results` 保存 `test-results/dialogue-live.json`，保留 14 天，包含
-首条消息、进度、最终回执的时序和耗时。消息措辞由模型生成，耗时作为观测指标。
-缺少凭据、API 错误、超时或验收断言失败均使检查失败。真实 QQ 客户端收件和
+脚本在本地保存 `test-results/dialogue-live.json`，包含首条消息、进度、最终回执的
+时序和耗时。消息措辞由模型生成，耗时作为观测指标。缺少凭据、API 错误、超时或
+验收断言失败均使手动检查失败。真实 QQ 客户端收件和
 后台网页成果仍需分别验收。
 
 `uv run python evals/deepseek_tools_live.py` 使用同一凭据调用真实 Search、Fetch、Files、OCR 和 ASR API，
