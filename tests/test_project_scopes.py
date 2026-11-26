@@ -11,7 +11,7 @@ from elephant.config import Settings
 from elephant.contracts.memory import MemorySearchResult
 from elephant.domain import ConversationRef, InboundEvent, MediaSegment, PrincipalRef, Surface, TextSegment
 from elephant.storage.agent_schema import dialogue_inputs
-from elephant.storage.memory_sync_schema import memory_owners
+from elephant.storage.memory_sync_schema import memory_barriers, memory_owners
 from elephant.storage.schema import inbox
 from elephant.storage.task_schema import tasks
 
@@ -57,6 +57,34 @@ def test_project_dialogues_are_distinct_and_original_input_stays_frozen(project_
     assert claim['context']['workspace_id'] == 'alpha'
     _event, binding, _turns = core.knowledge._session_context(claim['session_id'])
     assert binding['workspace_id'] == 'alpha'
+
+
+def test_context_checks_original_workspaces_for_mixed_sources(project_core):
+    core = project_core
+    dialogue, _ = core.inbox.accept(host_event(core, 'alpha-dialogue'))
+    core.sessions.enqueue(dialogue, core.access(dialogue), core.context_for(dialogue, workspace_id='alpha'))
+    receipt = core.enqueue_admin_task('检查历史', idempotency_key='alpha-root', workspace_id='alpha')
+    with core.db.transaction() as conn:
+        raw = conn.execute(select(tasks.c.event_json).where(tasks.c.id == receipt['task_id'])).scalar_one()
+        root = InboundEvent.model_validate_json(raw)
+        core.sessions.dialogue(conn, host_event(core, 'beta-focus'), workspace_id='beta')
+    fresh, _ = core.inbox.accept(host_event(core, 'beta-source'))
+    sources = [dialogue, fresh, root]
+    with core.db.engine.connect() as conn:
+        assert core.sessions.workspaces_for_sources(sources, conn) == ['alpha', 'beta', 'alpha']
+        raw_by_id = dict(conn.execute(select(inbox.c.id, inbox.c.event_json)
+            .where(inbox.c.id.in_([event.event_id for event in sources]))).all())
+    context = {'workspace_id': 'beta', 'source_manifest': [
+        {'kind': 'inbox', 'id': event.event_id, 'digest': hashlib.sha256(raw_by_id[event.event_id].encode()).hexdigest()}
+        for event in sources]}
+    access = core.access(fresh)
+    assert core.validate_context(access, context)
+
+    scope = core.knowledge.scope(root, workspace_id='alpha')
+    with core.db.transaction() as conn:
+        conn.execute(memory_barriers.insert().values(id='forget-root', scope_id=scope.key, epoch=1,
+            operation_id='forget', source_id=root.event_id, created_at=core.clock.now().isoformat()))
+    assert not core.validate_context(access, context)
 
 
 def test_project_scope_rejects_unconfigured_or_unbound_identity(project_core):

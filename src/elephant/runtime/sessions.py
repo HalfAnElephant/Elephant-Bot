@@ -83,16 +83,50 @@ class SessionService:
                 raise PermissionError("group project access requires an explicit scoped grant")
         return workspace_id
 
+    @staticmethod
+    def _dialogue_workspaces(conversation, event_ids):
+        return select(dialogue_inputs.c.id, dialogues.c.workspace_id).join_from(dialogue_inputs, dialogues,
+            dialogue_inputs.c.dialogue_id == dialogues.c.id).where(dialogue_inputs.c.id.in_(event_ids),
+            dialogues.c.conversation_id == conversation)
+
+    @staticmethod
+    def _root_workspaces(conversation, principal, event_ids):
+        event_id = func.json_extract(tasks.c.event_json, "$.event_id").label("event_id")
+        return select(event_id, tasks.c.context_json).where(tasks.c.kind == "goal", tasks.c.conversation == conversation,
+            tasks.c.requester == principal, event_id.in_(event_ids))
+
+    def workspaces_for_sources(self, events, conn):
+        groups = {}
+        for index, event in enumerate(events):
+            groups.setdefault((event.conversation.key, event.principal.key), []).append((index, event))
+        workspaces = [None] * len(events)
+        for (conversation, principal), group in groups.items():
+            if len(group) == 1:
+                index, event = group[0]
+                workspaces[index] = self.workspace_for(event, conn)
+                continue
+            event_ids = {event.event_id for _, event in group}
+            stored = dict(conn.execute(self._dialogue_workspaces(conversation, event_ids)).all())
+            missing = event_ids - stored.keys()
+            if missing:
+                roots = self._root_workspaces(conversation, principal, missing)
+                # Multiple roots for one source keep the single-source lookup's precedence.
+                roots = roots.group_by(roots.selected_columns.event_id).having(func.count() == 1)
+                stored.update((event_id, json.loads(context).get("workspace_id", "personal"))
+                    for event_id, context in conn.execute(roots))
+            for index, event in group:
+                workspaces[index] = stored[event.event_id] if event.event_id in stored else self.workspace_for(event, conn)
+        return workspaces
+
     def workspace_for(self, event, conn=None):
         with (nullcontext(conn) if conn is not None else self.db.engine.connect()) as connection:
-            stored = connection.execute(select(dialogues.c.workspace_id).join(dialogue_inputs,
-                dialogue_inputs.c.dialogue_id == dialogues.c.id).where(dialogue_inputs.c.id == event.event_id,
-                dialogues.c.conversation_id == event.conversation.key)).scalar_one_or_none()
+            event_ids = (event.event_id,)
+            stored = connection.execute(self._dialogue_workspaces(event.conversation.key, event_ids)
+                .with_only_columns(dialogues.c.workspace_id)).scalar_one_or_none()
             if stored is not None:
                 return stored
-            root = connection.execute(select(tasks.c.context_json).where(tasks.c.kind == "goal",
-                tasks.c.conversation == event.conversation.key, tasks.c.requester == event.principal.key,
-                func.json_extract(tasks.c.event_json, "$.event_id") == event.event_id).limit(1)).scalar_one_or_none()
+            root = connection.execute(self._root_workspaces(event.conversation.key, event.principal.key, event_ids)
+                .with_only_columns(tasks.c.context_json).limit(1)).scalar_one_or_none()
             if root is not None:
                 return json.loads(root).get("workspace_id", "personal")
             source_task = connection.execute(select(tasks.c.context_json).join(inputs, inputs.c.task_id == tasks.c.id)

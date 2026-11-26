@@ -208,6 +208,28 @@ async def test_stream_utf8_split_and_missing_usage_stay_unknown(body):
     assert fixture.usage[0][1]["input_tokens"] is None
 
 
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_stream_response_has_a_32_mib_byte_limit(body, overflow):
+    frame = b":" + b" " * (64 * 1024 - 3) + b"\n\n"
+    done = b"data: [DONE]\n\n"
+    ending = frame[: -len(done) - 2] + (b" " if overflow else b"") + b"\n\n" + done
+    stream = ChunkStream([frame] * 511 + [ending])
+    fixture = ProviderFixture(lambda request: httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                                             stream=stream))
+    response = await fixture.adapter.complete({**body, "stream": True})
+    iterator = response.body_iterator.__aiter__()
+    for _ in range(511):
+        assert await anext(iterator) == frame
+    if overflow:
+        with pytest.raises(RuntimeError, match="stream response exceeded limit"):
+            await anext(iterator)
+    else:
+        assert await anext(iterator) == ending
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+    assert fixture.adapter.active == 0
+
+
 async def test_source_revalidation_after_waiting_for_model_slot(body):
     fixture = ProviderFixture()
     class DelayedCapacity:

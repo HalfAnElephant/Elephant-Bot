@@ -19,6 +19,8 @@ from fastapi.responses import StreamingResponse
 
 from elephant.observability.timing import record_timing
 
+MAX_STREAM_RESPONSE_BYTES = 32 * 1024 * 1024
+
 COMPLETION_INSTRUCTION = (
     "执行预算已到收尾边界。本次不提供工具，不要输出 DSML 或任何工具调用协议。"
     "仅根据已有工具观察和已核实效果，"
@@ -408,7 +410,7 @@ class ProviderAdapter:
                     await self.authorize("model.request")
                     durations["authorize"] += (time.monotonic_ns() - arrived) / 1_000_000
                     total += len(chunk)
-                    if total > 2 * 1024 * 1024:
+                    if total > MAX_STREAM_RESPONSE_BYTES:
                         raise RuntimeError("stream response exceeded limit")
                     pending += decoder.decode(chunk)
                     normalized = pending.replace("\r\n", "\n")

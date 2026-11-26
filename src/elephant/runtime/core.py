@@ -421,6 +421,7 @@ class Core:
                 inbox.c.id.in_(ids), inbox.c.conversation_id == access.conversation.key)).all())
             by_workspace = {workspace_id: ids}
             message_ids = set()
+            source_events = []
             for source in sources:
                 raw = raw_events.get(source["id"])
                 if not raw or hashlib.sha256(raw.encode()).hexdigest() != source["digest"]:
@@ -428,9 +429,11 @@ class Core:
                 if not self.permissions.check(access, "history.source.read", "event:" + source["id"], snapshot=policy).allowed:
                     return False
                 source_event = InboundEvent.model_validate_json(raw)
-                original_workspace = self.sessions.workspace_for(source_event, conn)
-                by_workspace.setdefault(original_workspace, set()).add(source["id"])
+                source_events.append(source_event)
                 message_ids.add(source_event.platform_message_id)
+            original_workspaces = self.sessions.workspaces_for_sources(source_events, conn)
+            for source, original_workspace in zip(sources, original_workspaces, strict=True):
+                by_workspace.setdefault(original_workspace, set()).add(source["id"])
             if any(not self.knowledge.sources_valid(event, source_ids, workspace_id=workspace, conn=conn)
                    for workspace, source_ids in by_workspace.items()):
                 return False
