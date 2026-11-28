@@ -907,7 +907,8 @@ class TaskService:
             parent_task_id=task["id"], notification_sequence=seq, purpose=purpose,
             defer_reply=defer_reply or streaming,
             defer_to_leader=bool(worker_run and not streaming and self.leader_publication(event)),
-            allow_proactive=purpose in {"result", "question"} or bool(json.loads(task["context_json"]).get("schedule_fire_id")))
+            allow_proactive=(purpose in {"result", "question"} or purpose == "progress" and importance == "important"
+                             or bool(json.loads(task["context_json"]).get("schedule_fire_id"))))
         if streaming:
             c.execute(update(stream_runs).where(stream_runs.c.run_id == run_id).values(
                 result_origin_kind="task", result_origin_id=notification_id))

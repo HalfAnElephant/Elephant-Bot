@@ -223,14 +223,30 @@ class Outbox:
             self._receipt(delivery_id, receipt, connection=conn)
 
     def recover(self):
+        from elephant.storage.task_schema import notifications
+
         with self.db.transaction() as c:
             interrupted = c.execute(select(outbox.c.id).where(outbox.c.state == "SENDING")).scalars().all()
             for delivery_id in interrupted:
                 self._receipt(delivery_id, SendReceipt(state="UNKNOWN", error_code="INTERRUPTED_SEND"), connection=c)
-            candidates = c.execute(select(outbox).where(
-                outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
-                func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
-                outbox.c.created_at > (self.clock.now() - timedelta(days=1)).isoformat())).mappings().all()
+            active = outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"])
+            expirable = or_(active, outbox.c.state == "LEADER_PENDING")
+            for delivery_id in c.scalars(select(outbox.c.id).where(expirable, self._expired_progress())).all():
+                self._receipt(delivery_id, SendReceipt(state="FAILED", error_code="EXPIRED"), connection=c)
+            recent_result = and_(active, func.json_extract(outbox.c.envelope_json, "$.purpose") == "result",
+                outbox.c.created_at > (self.clock.now() - timedelta(days=1)).isoformat())
+            # Legacy progress envelopes lack the intent; the task notification records its importance.
+            legacy_progress = and_(
+                or_(active, outbox.c.state.in_(["LEADER_PENDING", "STREAM_PENDING"])),
+                outbox.c.origin_kind == "task",
+                func.json_extract(outbox.c.envelope_json, "$.purpose") == "progress",
+                func.json_extract(outbox.c.envelope_json, "$.allow_proactive").is_not(1),
+                ~self._expired_progress(),
+                select(notifications.c.id).where(notifications.c.id == outbox.c.origin_id,
+                    notifications.c.task_id == outbox.c.task_id, notifications.c.purpose == "progress",
+                    notifications.c.importance == "important").exists(),
+            )
+            candidates = c.execute(select(outbox).where(or_(recent_result, legacy_progress))).mappings().all()
             for row in candidates:
                 envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
                 if envelope.origin_kind == "chat":
@@ -277,19 +293,29 @@ class Outbox:
             envelope = OutboundEnvelope.model_validate_json(row["envelope_json"])
             if envelope.requester is not None and envelope.requester != event.principal:
                 continue
+            expires_at = envelope.expires_at
+            if envelope.purpose == "progress":
+                if expires_at <= self.clock.now():
+                    self._receipt(row["id"], SendReceipt(state="FAILED", error_code="EXPIRED"), connection=c)
+                    continue
+            else:
+                expires_at = max(expires_at, self.clock.now() + timedelta(seconds=300))
             if row["state"] == "LEADER_PENDING":
                 previous_expiry = envelope.reply_context.expires_at if envelope.reply_context else None
                 if envelope.requester is not None and (previous_expiry is None or previous_expiry < reply.expires_at):
                     renewed_envelope = envelope.model_copy(update={
                         "reply_context": reply.model_copy(update={"msg_seq": None}),
-                        "expires_at": max(envelope.expires_at, self.clock.now() + timedelta(seconds=300)),
+                        "expires_at": expires_at,
                     })
                     c.execute(update(outbox).where(outbox.c.id == row["id"])
                         .values(envelope_json=renewed_envelope.model_dump_json()))
                 continue
             if envelope.origin_kind == "chat":
-                if (envelope.purpose != "result" or not envelope.origin_id.startswith("turn:")
-                        or envelope.requester is None or envelope.expires_at <= self.clock.now()):
+                if envelope.requester is None or envelope.expires_at <= self.clock.now():
+                    continue
+                if not ((envelope.purpose == "result" and envelope.origin_id.startswith("turn:"))
+                        or (envelope.purpose == "progress" and envelope.allow_proactive
+                            and envelope.origin_id.startswith("progress:"))):
                     continue
                 if (not envelope.fixed_publication and not envelope.allow_proactive
                         and not (event.reply_to and event.reply_to == envelope.anchor_message_id)):
@@ -315,7 +341,7 @@ class Outbox:
             envelope = envelope.model_copy(
                 update={
                     "reply_context": reply.model_copy(update={"msg_seq": next_seq}),
-                    "expires_at": max(envelope.expires_at, self.clock.now() + timedelta(seconds=300)),
+                    "expires_at": expires_at,
                 }
             )
             c.execute(
@@ -326,29 +352,36 @@ class Outbox:
             renewed.append(row["id"])
         return renewed
 
-    def pending_rows(self, adapters, *, only_target=None, exclude_targets=(), before_seq=None, through=None,
-                     include_deferred=False):
-        proactive = [name for name, adapter in adapters.items()
-                     if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
-        # A blocked tail must not consume the bounded batch ahead of healthy
-        # conversations. Recheck the dependency below before claiming a send.
+    def _expired_progress(self):
+        return and_(func.json_extract(outbox.c.envelope_json, "$.purpose") == "progress",
+            func.julianday(func.json_extract(outbox.c.envelope_json, "$.expires_at"))
+            <= func.julianday(self.clock.now().isoformat()))
+
+    @staticmethod
+    def _blocked_part():
         earlier = outbox.alias("earlier_part")
-        blocked_part = select(earlier.c.id).where(
+        return select(earlier.c.id).where(
             earlier.c.conversation_id == outbox.c.conversation_id,
             earlier.c.origin_kind == outbox.c.origin_kind,
             earlier.c.origin_id == outbox.c.origin_id,
             earlier.c.part_no < outbox.c.part_no,
             earlier.c.state != "SENT",
         ).correlate(outbox).exists()
+
+    def pending_rows(self, adapters, *, only_target=None, exclude_targets=(), before_seq=None, through=None,
+                     include_deferred=False):
+        proactive = [name for name, adapter in adapters.items()
+                     if getattr(getattr(adapter, "config", None), "proactive_verified", False)]
+        can_dispatch = and_(~self._blocked_part(), or_(outbox.c.state != "WAITING_FOR_TRIGGER",
+            and_(func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
+                 func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))))
         candidates = (
             select(outbox.c.id, func.row_number().over(
                 partition_by=outbox.c.conversation_id, order_by=outbox.c.enqueue_seq,
             ).label("target_rank"))
-            .where(or_(outbox.c.state.in_(["PENDING", "RETRYABLE"]),
-                       and_(outbox.c.state == "WAITING_FOR_TRIGGER",
-                            func.json_extract(outbox.c.envelope_json, "$.allow_proactive") == 1,
-                            func.json_extract(outbox.c.envelope_json, "$.target.adapter_instance_id").in_(proactive))),
-                   ~blocked_part, outbox.c.conversation_id.not_in(exclude_targets))
+            .where(outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]),
+                   or_(self._expired_progress(), can_dispatch),
+                   outbox.c.conversation_id.not_in(exclude_targets))
         )
         if only_target is not None:
             candidates = candidates.where(outbox.c.conversation_id == only_target)
@@ -386,9 +419,12 @@ class Outbox:
 
     async def _dispatch_row(self, row, adapters, budget, pre_send):
         with self.db.transaction() as c:
-            current = c.execute(select(outbox).where(outbox.c.id == row["id"],
+            current = c.execute(select(outbox, self._expired_progress().label("expired_progress")).where(outbox.c.id == row["id"],
                 outbox.c.state.in_(["PENDING", "RETRYABLE", "WAITING_FOR_TRIGGER"]))).mappings().first()
             if not current:
+                return
+            if current["expired_progress"]:
+                self._receipt(row["id"], SendReceipt(state="FAILED", error_code="EXPIRED"), connection=c)
                 return
             if current["state"] == "WAITING_FOR_TRIGGER":
                 c.execute(update(outbox).where(outbox.c.id == row["id"]).values(state="PENDING"))
@@ -400,7 +436,7 @@ class Outbox:
         now = self.clock.now()
         if row["next_attempt_at"] and row["next_attempt_at"] > now.isoformat():
             return
-        if envelope.expires_at <= now and envelope.origin_kind != "task":
+        if envelope.expires_at <= now and (envelope.origin_kind != "task" or envelope.purpose == "progress"):
             self._receipt(envelope.delivery_id, SendReceipt(state="FAILED", error_code="EXPIRED"))
             return
         adapter = adapters.get(envelope.target.adapter_instance_id)
@@ -460,7 +496,7 @@ class Outbox:
             if envelope.parent_task_id and c.execute(select(outbox.c.id).where(
                 outbox.c.task_id == envelope.parent_task_id,
                 outbox.c.notification_sequence < envelope.notification_sequence,
-                outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]))).first():
+                outbox.c.state.in_(["PENDING", "RETRYABLE", "SENDING"]), ~self._blocked_part())).first():
                 return
             config = getattr(adapter, "config", None)
             effective_budget = budget

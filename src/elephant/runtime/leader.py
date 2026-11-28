@@ -1478,7 +1478,8 @@ class LeaderRuntime:
                     deliveries = self.core.outbox.enqueue_text(conn, target=event.conversation, text=text,
                         origin_kind="chat", origin_id="progress:" + notice_id + ":turn:" + claim["session_id"] + ":" + claim["source_ids"][0],
                         reply_context=event.reply_context, requester=event.principal, ttl_seconds=300,
-                        anchor_message_id=event.platform_message_id, purpose="progress")
+                        anchor_message_id=event.platform_message_id, purpose="progress",
+                        allow_proactive=payload.get("importance") == "important")
                     result = {"accepted": bool(deliveries), "notification_id": notice_id}
                 remaining = None
                 if event.reply_context:
